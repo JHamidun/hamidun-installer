@@ -5,11 +5,15 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 echo "Проверяю Node.js..."
 if have node; then echo "Node.js уже установлен: $(node --version)"; exit 0; fi
 
-echo "Определяю последнюю LTS-версию..."
-VER=$(curl -fsSL https://nodejs.org/dist/index.json | /usr/bin/python3 -c 'import sys,json;print(next(x["version"] for x in json.load(sys.stdin) if x["lts"]))')
-PKG="/tmp/node-${VER}.pkg"
-echo "Скачиваю Node.js ${VER}..."
-dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"
+if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/node.pkg" ]; then
+  PKG="$HM_VENDOR/apps/node.pkg"; echo "Node.js из встроенного pkg (офлайн)..."
+else
+  echo "Определяю последнюю LTS-версию..."
+  VER=$(curl -fsSL https://nodejs.org/dist/index.json | /usr/bin/python3 -c 'import sys,json;print(next(x["version"] for x in json.load(sys.stdin) if x["lts"]))')
+  PKG="/tmp/node-${VER}.pkg"
+  echo "Скачиваю Node.js ${VER}..."
+  dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"
+fi
 echo "Устанавливаю (потребуется пароль администратора)..."
 admin_run "installer -pkg '$PKG' -target /"
 

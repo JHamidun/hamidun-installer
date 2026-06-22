@@ -23,10 +23,13 @@ jobs:
       - name: Fetch latest config (bundle into installer)
         run: npm run fetch:config
 
-      - name: Build .dmg (unsigned)
+      - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
+        run: bash tools/fetch-vendor-mac.sh
+
+      - name: Build .dmg (unsigned, arm64 full-offline)
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # без подписи/нотаризации в v1
-        run: npx electron-builder --mac --publish never
+        run: npx electron-builder --mac --arm64 --publish never
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
