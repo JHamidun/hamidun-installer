@@ -1,0 +1,123 @@
+{
+  "_comment": "Наборы скиллов для экрана выбора. core ставится всегда. Скилл, не попавший НИ в один пак, тоже ставится всегда (не пруним неизвестное). Прунятся только скиллы выбранных-но-невыбранных паков.",
+  "core": [
+    "brainstorming", "systematic-debugging", "writing-plans", "writing-skills", "executing-plans",
+    "using-superpowers", "using-git-worktrees", "verification-before-completion",
+    "requesting-code-review", "receiving-code-review", "subagent-driven-development",
+    "dispatching-parallel-agents", "test-driven-development", "testing-anti-patterns",
+    "testing-skills-with-subagents", "condition-based-waiting", "root-cause-tracing",
+    "rollback-changes", "run-quality-gate", "validate-plan-file", "parse-git-status",
+    "finishing-a-development-branch", "skill-creator", "mcp-usage", "mcp-builder",
+    "tool-search-protocol", "thinking-frameworks", "self-reflect", "dream", "away-summary",
+    "btw", "template-skill", "sharing-skills", "agent-tool-design", "context-engineering",
+    "defense-in-depth", "comparison-mode", "critique-mode", "questions-protocol",
+    "scaling-stage", "developer-growth", "kaizen", "prompt-engineering", "senior-prompt-engineer",
+    "claude-cli-runner", "claude-api", "claude-server-auth"
+  ],
+  "packs": [
+    {
+      "id": "dev", "emoji": "💻", "name": "Разработка и код",
+      "desc": "Писать и ревьюить код, базы данных, тесты, безопасность, серверы, автоматизация.",
+      "skills": [
+        "python-fullstack-dev", "javascript-typescript-dev", "senior-architect", "senior-devops",
+        "code-reviewer", "build-fix", "database-design", "api-documentation", "git-workflow",
+        "deepwiki", "github-gem-seeker", "github-import", "gstack", "beads", "security-audit",
+        "threat-hunting", "perf-audit", "webapp-testing", "playwright-automation", "dev-browser",
+        "proto-smoketest", "screenshot-test", "aws-skills", "n8n", "uptime-kuma-ops", "server-health",
+        "pinecone", "telegram-bot-toolkit", "changelog-generator", "artifacts-builder",
+        "bug-health-inline", "cleanup-health-inline", "deps-health-inline", "reuse-health-inline",
+        "security-health-inline"
+      ]
+    },
+    {
+      "id": "design", "emoji": "🎨", "name": "Дизайн и интерфейсы",
+      "desc": "Лендинги, прототипы, дизайн-системы, UI-компоненты, анимации, экспорт макетов.",
+      "skills": [
+        "design-orchestrator", "design-guide", "design-system-create", "design-tokens-w3c",
+        "design-canvas", "color-system-builder", "dark-mode-add", "deck-themes", "frontend-design",
+        "wireframe", "moodboard", "brand-guidelines", "brand-extractor", "canvas-design",
+        "theme-factory", "component-playground", "microinteractions", "animations", "device-frames",
+        "placeholders", "type-scale", "forms-a11y", "a11y-audit", "states-checklist", "onboarding-ux",
+        "comment-injector", "visual-edit", "tweaks-panel", "tweaks-persist", "version-snapshots",
+        "sketch-to-html", "interactive-prototype", "mobile-overlays", "figma-import", "figma-write-back",
+        "storybook-bridge", "project-init", "cookbook", "content-rules", "live-preview", "real-data",
+        "standalone-html", "print-styles", "pwa-shell", "html-email", "web-assets-generator",
+        "website-creation", "excalidraw-flowchart", "algorithmic-art", "canonical-html", "react-pinning",
+        "screen-labels", "slack-gif-creator", "claude-design", "claude-in-html", "open-design",
+        "dev-handoff", "verifier", "license-check", "i18n-stress-test", "fonts-bundle", "d3-visualization"
+      ]
+    },
+    {
+      "id": "images", "emoji": "🖼️", "name": "Картинки и AI-арт",
+      "desc": "Генерация и улучшение изображений, редактирование, распознавание текста.",
+      "skills": ["image-generation", "image-enhancer", "nano-banana-pro", "openai-dalle", "edit-banana", "ocr-restore"]
+    },
+    {
+      "id": "video", "emoji": "🎬", "name": "Видео и аудио",
+      "desc": "Генерация и монтаж видео, аватары, озвучка, музыка, субтитры, стикеры.",
+      "skills": [
+        "video-generation", "video-editor", "video-downloader", "video-export", "void-video",
+        "heygen", "did", "d-id", "runway-api", "ace-step", "submagic", "sticker-pack-generator"
+      ]
+    },
+    {
+      "id": "content", "emoji": "📱", "name": "Контент и соцсети",
+      "desc": "Посты для соцсетей (X, Threads, Instagram, TikTok, Telegram), контент-план, голос бренда.",
+      "skills": [
+        "content-creation", "content-engine", "content-research", "content-policy", "social-post",
+        "x-post", "threads-post", "bluesky-post", "instagram-post", "tiktok-post", "telegram-post",
+        "reddit-hn", "de-ai-ify", "brand-voice"
+      ]
+    },
+    {
+      "id": "linkedin", "emoji": "🔗", "name": "LinkedIn — полный набор",
+      "desc": "Посты, комментарии, профиль, виральные формулы, антидетект, контент-план для LinkedIn.",
+      "skills": [
+        "linkedin", "linkedin-comment-drafter", "linkedin-content-planner", "linkedin-detector-tester",
+        "linkedin-emoji-detector", "linkedin-employee-advocacy", "linkedin-hook-extractor",
+        "linkedin-humanizer", "linkedin-post", "linkedin-post-audit", "linkedin-post-writer",
+        "linkedin-profile-optimizer", "linkedin-reply-handler", "linkedin-rules-explainer",
+        "linkedin-thread-engagement"
+      ]
+    },
+    {
+      "id": "marketing", "emoji": "📈", "name": "Маркетинг и продажи",
+      "desc": "Кампании, конкуренты, лиды, аутрич, SEO, реклама, материалы для инвесторов.",
+      "skills": [
+        "account-research", "ad-spy", "call-prep", "campaign-planning", "competitive-analysis",
+        "competitive-analysis-mktg", "competitive-intelligence", "create-an-asset", "daily-briefing",
+        "draft-outreach", "investor-materials", "lead-research", "meta-ads-analyzer",
+        "performance-analytics", "seo-machine-ru", "domain-brainstormer"
+      ]
+    },
+    {
+      "id": "docs", "emoji": "📊", "name": "Документы, слайды и данные",
+      "desc": "Word, Excel, PowerPoint, PDF, презентации, отчёты, анализ CSV, продуктовые доки.",
+      "skills": [
+        "docx", "word-docx", "xlsx", "excel-xlsx", "pptx", "pptx-import", "pptx-editable-extractor",
+        "pdf", "pdf-generation", "csv-analysis", "manus-slides", "slides", "marp-presentations",
+        "gamma", "document-import", "export-pdf", "export-png", "export-pptx", "generate-report-header",
+        "meeting-analyzer", "internal-comms", "metrics-tracking", "feature-spec", "stakeholder-comms",
+        "roadmap-management", "user-research-synthesis", "invoice-organizer", "file-converter",
+        "file-organizer", "epub-tools", "tapestry"
+      ]
+    },
+    {
+      "id": "research", "emoji": "🔬", "name": "Исследования и аналитика",
+      "desc": "Веб-скрейпинг, рыночная разведка, акции, тренды соцсетей, мониторинг, встречи.",
+      "skills": [
+        "apify-scraping", "serpapi", "similarweb-analytics", "stock-analysis", "last30days",
+        "last30days-scripts", "social-intel", "tiktok-intel", "book-mentions-monitor", "ceo-council",
+        "manus", "year-review", "youtube-transcript", "zoom", "research-docs"
+      ]
+    },
+    {
+      "id": "ai-models", "emoji": "🤖", "name": "AI-модели и переводы",
+      "desc": "Доступ к разным моделям (GPT, Gemini, DeepSeek, Kimi, Perplexity), TTS, транскрипция, перевод.",
+      "skills": [
+        "multi-model-gateway", "gemini-3-pro", "perplexity", "deepseek", "kimi", "replicate",
+        "deepgram", "deepl-pro", "elevenlabs"
+      ]
+    }
+  ]
+}

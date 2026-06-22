@@ -1,0 +1,36 @@
+name: Build macOS (.dmg)
+
+# Собирает Mac-версию установщика на облачном macOS-раннере GitHub.
+# Запуск: вкладка Actions -> "Build macOS (.dmg)" -> Run workflow.
+# Артефакт (.dmg) появится в результатах запуска (Artifacts). Без подписи (v1).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+
+      - name: Fetch latest config (bundle into installer)
+        run: npm run fetch:config
+
+      - name: Build .dmg (unsigned)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # без подписи/нотаризации в v1
+        run: npx electron-builder --mac --publish never
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hamidun-Setup-Mac
+          path: release/*.dmg
+          if-no-files-found: error

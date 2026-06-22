@@ -1,0 +1,57 @@
+{
+  "name": "hamidun-installer",
+  "productName": "Hamidun Setup",
+  "version": "0.1.0",
+  "description": "One-click installer for a fully configured Claude Code + VPN environment (Cursor, Claude Code, Git, Node.js, Hamidun config, AmneziaVPN)",
+  "author": "Zhemal Khamidun <hamidunjemal@gmail.com>",
+  "license": "MIT",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "fetch:config": "node tools/fetch-config.js",
+    "fetch:vendor": "powershell -ExecutionPolicy Bypass -NoProfile -File tools/fetch-vendor.ps1",
+    "dist": "npm run fetch:config && npm run fetch:vendor && electron-builder",
+    "dist:win": "npm run fetch:config && npm run fetch:vendor && electron-builder --win",
+    "dist:win:lite": "npm run fetch:config && electron-builder --win",
+    "dist:mac": "npm run fetch:config && electron-builder --mac",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.hamidun.setup",
+    "productName": "Hamidun Setup",
+    "directories": { "output": "release" },
+    "files": [
+      "src/**/*",
+      "scripts/**/*",
+      "config.json",
+      "components.json",
+      "packs.json",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      { "from": "scripts", "to": "scripts" },
+      { "from": "config.json", "to": "config.json" },
+      { "from": "components.json", "to": "components.json" },
+      { "from": "packs.json", "to": "packs.json" },
+      { "from": "vendor", "to": "vendor" }
+    ],
+    "win": {
+      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "artifactName": "Hamidun-Setup-Windows.${ext}",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "portable": {
+      "requestExecutionLevel": "admin",
+      "artifactName": "Hamidun-Setup-Windows.${ext}"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }],
+      "category": "public.app-category.developer-tools",
+      "artifactName": "Hamidun-Setup-Mac.${ext}"
+    }
+  }
+}

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="ru" class="h-dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>Hamidun Setup</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="h-frame">
+  <!-- ============ STEP 1: SELECT ============ -->
+  <main id="view-select" class="view">
+    <header class="hero">
+      <div class="brand">
+        <div class="hmark">H</div>
+        <div>
+          <h1>Hamidun Setup</h1>
+          <p class="lead">Полностью настроенный Claude Code + VPN в один клик</p>
+        </div>
+      </div>
+    </header>
+
+    <div class="scroll">
+      <section id="groups" class="groups"></section>
+
+      <section id="packs-wrap">
+        <div class="group-title">Наборы скиллов — поверх базы (по умолчанию включены все)</div>
+        <div class="packs-actions">
+          <button type="button" id="packs-all" class="linkbtn">Выбрать все</button>
+          <button type="button" id="packs-none" class="linkbtn">Снять все</button>
+        </div>
+        <div id="packs" class="packs"></div>
+        <div class="packs-note">База (CLAUDE.md, роутинг, правила, агенты, команды + базовые скиллы) ставится всегда вместе с «Конфигом». Наборы лишь добавляют тематические скиллы — снятые просто не ставятся. Действуют только если выбран «Конфиг».</div>
+      </section>
+    </div>
+
+    <section id="vpn-options" class="vpn-options hidden">
+      <label class="field">
+        <span class="field-label">Инвайт-код VPN</span>
+        <input id="invite-code" type="text" placeholder="код от Жемала" autocomplete="off" />
+        <span class="field-hint">Нужен, чтобы создать персональный конфиг на сервере.</span>
+      </label>
+    </section>
+
+    <footer class="actions">
+      <div class="summary" id="summary">Выбрано: 0</div>
+      <button type="button" id="btn-install" class="btn btn-primary">Установить</button>
+    </footer>
+  </main>
+
+  <!-- ============ STEP 2: PROGRESS ============ -->
+  <main id="view-progress" class="view hidden">
+    <header class="hero compact">
+      <div class="brand">
+        <div class="hmark">H</div>
+        <div>
+          <h1 id="progress-title">Устанавливаю…</h1>
+          <p class="lead" id="progress-sub">Не закрывай окно до завершения.</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="progress-layout">
+      <ul id="step-list" class="step-list"></ul>
+      <div class="log-wrap">
+        <div class="log-head">Журнал</div>
+        <pre id="log" class="log"></pre>
+      </div>
+    </section>
+
+    <section id="next-steps" class="next-steps hidden"></section>
+
+    <footer class="actions">
+      <div class="summary" id="progress-summary"></div>
+      <button type="button" id="btn-finish" class="btn btn-primary hidden">Готово</button>
+    </footer>
+  </main>
+
+  <script src="deps.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

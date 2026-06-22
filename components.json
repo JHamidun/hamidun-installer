@@ -1,0 +1,103 @@
+{
+  "groups": [
+    {
+      "id": "editor",
+      "title": "Редактор и Claude Code",
+      "components": [
+        {
+          "id": "git",
+          "name": "Git",
+          "desc": "Система контроля версий. Нужна для загрузки конфига.",
+          "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~60 МБ"
+        },
+        {
+          "id": "node",
+          "name": "Node.js LTS",
+          "desc": "Среда выполнения. Нужна для MCP-серверов и плагинов.",
+          "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~30 МБ"
+        },
+        {
+          "id": "cursor",
+          "name": "Cursor",
+          "desc": "AI-редактор кода (форк VS Code).",
+          "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~150 МБ"
+        },
+        {
+          "id": "claude",
+          "name": "Claude Code CLI",
+          "desc": "Командная строка Claude Code (нативный установщик, без зависимостей).",
+          "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~50 МБ"
+        },
+        {
+          "id": "extension",
+          "name": "Расширение Claude Code",
+          "desc": "Панель Claude Code внутри Cursor и VS Code.",
+          "default": true,
+          "requires": ["cursor"],
+          "needsAdmin": false,
+          "sizeHint": "~10 МБ"
+        }
+      ]
+    },
+    {
+      "id": "config",
+      "title": "Конфиг Жемала",
+      "components": [
+        {
+          "id": "config",
+          "name": "Конфиг Жемала — база (.claude)",
+          "desc": "Ставится всегда целиком: CLAUDE.md, правила (роутинг), 50+ агентов, команды, хуки, tools, плагины + базовые скиллы. Тематические скиллы выбираются ниже в наборах.",
+          "default": true,
+          "requires": ["git", "node"],
+          "needsAdmin": false,
+          "sizeHint": "~16 МБ"
+        },
+        {
+          "id": "pydeps",
+          "name": "Python-пакеты",
+          "desc": "Python + библиотеки для python-скриптов конфига (ставятся в пользователя, вшиты в установщик).",
+          "default": true,
+          "requires": ["config"],
+          "needsAdmin": false,
+          "sizeHint": "~250 МБ"
+        }
+      ]
+    },
+    {
+      "id": "vpn",
+      "title": "VPN (Amnezia)",
+      "components": [
+        {
+          "id": "vpn-wg",
+          "name": "AmneziaWG — авто (рекомендуется)",
+          "desc": "Клиент AmneziaWG, автоматически настроенный на сервер. Подключается без действий.",
+          "default": true,
+          "requires": [],
+          "needsAdmin": true,
+          "sizeHint": "~30 МБ"
+        },
+        {
+          "id": "vpn-full",
+          "name": "AmneziaVPN — продвинутый",
+          "desc": "Полное приложение (XRay/Shadowsocks) для жёсткой цензуры. Конфиг вставляется вручную.",
+          "default": false,
+          "requires": [],
+          "needsAdmin": true,
+          "sizeHint": "~80 МБ"
+        }
+      ]
+    }
+  ]
+}

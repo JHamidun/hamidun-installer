@@ -1,0 +1,21 @@
+{
+  "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
+  "configRepoBranch": "main",
+  "vpn": {
+    "_comment": "Fill enrollEndpoint with your new server once provisioned (e.g. https://vpn.hamidun.com). Leave empty to disable VPN auto-config (the VPN scripts will skip gracefully).",
+    "enrollEndpoint": "",
+    "enrollPath": "/enroll",
+    "requireInviteCode": true
+  },
+  "claudeCodeExtensionId": "anthropic.claude-code",
+  "finish": {
+    "autoOpenCursorDefault": true,
+    "credentialsRelPath": ".claude/.credentials.master.env"
+  },
+  "links": {
+    "support": "https://hamidun.com",
+    "docs": "https://github.com/JHamidun/claude-code-config-pack",
+    "bot": "https://t.me/HamidunAcademyBot",
+    "video": ""
+  }
+}
