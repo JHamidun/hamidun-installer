@@ -24,8 +24,29 @@ const PORT = parseInt(process.env.PORT || '8088', 10);
 const INVITES = new Set((process.env.INVITE_CODES || '').split(',').map(s => s.trim()).filter(Boolean));
 const STATE_FILE = process.env.STATE_FILE || '/var/lib/hamidun-vpn/state.json';
 
+// Validate WG_IFACE before any execSync usage.
+const WG_IFACE_RAW = process.env.WG_IFACE || 'awg0';
+if (!/^[a-zA-Z][a-zA-Z0-9_]{0,14}$/.test(WG_IFACE_RAW)) {
+  console.error(`FATAL: WG_IFACE "${WG_IFACE_RAW}" is invalid (must match ^[a-zA-Z][a-zA-Z0-9_]{0,14}$)`);
+  process.exit(1);
+}
+
+// Per-IP in-memory rate limiter: 5 attempts per 60 seconds.
+const _rateLimitMap = new Map(); // ip -> { count, resetAt }
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const entry = _rateLimitMap.get(ip);
+  if (!entry || now >= entry.resetAt) {
+    _rateLimitMap.set(ip, { count: 1, resetAt: now + 60_000 });
+    return false; // not limited
+  }
+  entry.count += 1;
+  if (entry.count > 5) return true; // limited
+  return false;
+}
+
 const WG = {
-  iface: process.env.WG_IFACE || 'awg0',
+  iface: WG_IFACE_RAW,
   serverPub: process.env.WG_SERVER_PUBKEY || '',
   endpoint: process.env.WG_ENDPOINT || '',          // host:port
   subnet: process.env.WG_SUBNET || '10.8.0',        // /24 base, clients get .2..254
@@ -83,11 +104,25 @@ function createPeer(clientName) {
 
 const server = http.createServer((req, res) => {
   if (req.method !== 'POST') { res.writeHead(405); return res.end('POST only'); }
+
+  // Fail-closed: refuse all enrollments if INVITE_CODES was not configured.
+  if (INVITES.size === 0) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'server not configured: INVITE_CODES empty' }));
+  }
+
+  // Per-IP rate limit: 5 attempts / 60 s.
+  const ip = req.socket.remoteAddress || 'unknown';
+  if (checkRateLimit(ip)) {
+    res.writeHead(429, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'too many requests' }));
+  }
+
   let body = '';
   req.on('data', c => { body += c; if (body.length > 1e4) req.destroy(); });
   req.on('end', () => {
     let data; try { data = JSON.parse(body); } catch { res.writeHead(400); return res.end('bad json'); }
-    if (INVITES.size && !INVITES.has((data.inviteCode || '').trim())) { res.writeHead(403); return res.end('bad invite'); }
+    if (!INVITES.has((data.inviteCode || '').trim())) { res.writeHead(403); return res.end('bad invite'); }
     try {
       if (data.format === 'amnezia') {
         // TODO: build Amnezia vpn:// container (JSON -> zlib -> base64url -> "vpn://").

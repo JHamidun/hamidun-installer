@@ -74,9 +74,28 @@ function scriptFor(id) {
   return path.join(resourceRoot(), 'scripts', dir, `${id}.${ext}`);
 }
 
+// Build allowlist of valid component ids from components.json.
+function loadValidIds() {
+  const data = readJson('components.json', { groups: [] });
+  const ids = new Set();
+  for (const group of (data.groups || [])) {
+    for (const comp of (group.components || [])) {
+      if (comp.id) ids.add(comp.id);
+    }
+  }
+  return ids;
+}
+const VALID_COMPONENT_IDS = loadValidIds();
+
 // Run one component script, streaming output back to the renderer.
 ipcMain.handle('run-component', async (_evt, payload) => {
   const { id, env } = payload || {};
+
+  // Allowlist check: reject unknown/traversal ids before building any path.
+  if (!id || !VALID_COMPONENT_IDS.has(id)) {
+    return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
+  }
+
   const script = scriptFor(id);
   if (!fs.existsSync(script)) {
     return { id, ok: false, code: -1, error: `Script not found: ${script}` };

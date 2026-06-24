@@ -20,15 +20,20 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     if ($repo) {
         $src = Join-Path $env:LOCALAPPDATA 'nomad-src'
         Write-Host "Клонирую Nomad из $repo ..."
-        if (-not $DRY) {
+        if ($DRY) {
+            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (or pull if exists)"
+        } else {
             if (Test-Path (Join-Path $src '.git')) { git -C $src pull --ff-only }
             else { git clone --depth 1 $repo $src }
         }
     }
 }
-if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
+if (-not $DRY -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     Write-Host "Источник Nomad не задан. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
     exit 0
+}
+if ($DRY -and (-not $src)) {
+    Write-Host "  [dry-run] Источник Nomad не задан — продолжаем dry-run preview секций 2/3/4."
 }
 
 # 2. uv — менеджер Python
@@ -56,10 +61,18 @@ if ($DRY) {
 $hh = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
 if (-not $DRY) {
     New-Item -ItemType Directory -Force -Path $hh, (Join-Path $hh 'skins') | Out-Null
-    Copy-Item (Join-Path $src 'branding\SOUL.md')          (Join-Path $hh 'SOUL.md') -Force
-    Copy-Item (Join-Path $src 'branding\skins\nomad.yaml') (Join-Path $hh 'skins\nomad.yaml') -Force
+    $soulSrc = Join-Path $src 'branding\SOUL.md'
+    if (Test-Path $soulSrc) { Copy-Item $soulSrc (Join-Path $hh 'SOUL.md') -Force }
+    else { Write-Host "  [warn] branding\SOUL.md не найден — пропускаю" }
+    $nomadYamlSrc = Join-Path $src 'branding\skins\nomad.yaml'
+    if (Test-Path $nomadYamlSrc) { Copy-Item $nomadYamlSrc (Join-Path $hh 'skins\nomad.yaml') -Force }
+    else { Write-Host "  [warn] branding\skins\nomad.yaml не найден — пропускаю" }
     $cfgY = Join-Path $hh 'config.yaml'
-    if (-not (Test-Path $cfgY)) { Copy-Item (Join-Path $src 'branding\config.yaml.template') $cfgY -Force }
+    if (-not (Test-Path $cfgY)) {
+        $cfgTmpl = Join-Path $src 'branding\config.yaml.template'
+        if (Test-Path $cfgTmpl) { Copy-Item $cfgTmpl $cfgY -Force }
+        else { Write-Host "  [warn] branding\config.yaml.template не найден — пропускаю" }
+    }
 }
 
 Update-Path
