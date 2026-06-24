@@ -7,6 +7,11 @@
     "enrollPath": "/enroll",
     "requireInviteCode": true
   },
+  "nomad": {
+    "_comment": "Fill repoUrl with the Nomad agent repo once pushed (e.g. https://github.com/JHamidun/nomad). Empty => the Nomad component installs from vendor/nomad-src if bundled, else skips gracefully. packageName matches pyproject [project].name.",
+    "repoUrl": "",
+    "packageName": "hermes-agent"
+  },
   "claudeCodeExtensionId": "anthropic.claude-code",
   "finish": {
     "autoOpenCursorDefault": true,

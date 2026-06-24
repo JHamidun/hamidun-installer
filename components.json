@@ -76,6 +76,21 @@
       ]
     },
     {
+      "id": "agent",
+      "title": "Nomad — автономный AI-агент",
+      "components": [
+        {
+          "id": "nomad",
+          "name": "Nomad Agent",
+          "desc": "Автономный AI-агент: форк Hermes + Fugu-оркестрация + память + биллинг. Команда `nomad`. Ставит Python 3.12 (через uv) и наш брендинг. Требует указанный источник (репо/vendor).",
+          "default": false,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~400 МБ"
+        }
+      ]
+    },
+    {
       "id": "vpn",
       "title": "VPN (Amnezia)",
       "components": [
