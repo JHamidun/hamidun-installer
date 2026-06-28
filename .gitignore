@@ -5,3 +5,5 @@ vendor/
 *.log
 *.dmg
 *.exe
+__pycache__/
+*.pyc
