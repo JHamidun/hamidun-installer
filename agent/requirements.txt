@@ -1,0 +1,5 @@
+# Hamidun Bridge agent deps. Туннель = системный ssh -D, SOCKS-handshake — stdlib.
+# Нужны только для трея:
+pystray>=0.19
+pillow>=10.0
+# (на macOS трей требует pyobjc; агент запускается --headless через LaunchAgent, трей опционален)

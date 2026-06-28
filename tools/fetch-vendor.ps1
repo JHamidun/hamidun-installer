@@ -73,7 +73,7 @@ if (Test-Path $wheels) { Remove-Item -Recurse -Force $wheels -ErrorAction Silent
 New-Item -ItemType Directory -Force $wheels | Out-Null
 if ($py -and (Test-Path $req)) {
   & $py -m pip download pip setuptools wheel -d $wheels 2>&1 | Select-Object -Last 1
-  & $py -m pip download -r $req -d $wheels 2>&1 | Select-Object -Last 3
+  & $py -m pip download -r $req pystray pillow -d $wheels 2>&1 | Select-Object -Last 3
   Write-Host "  wheels/sdists: $((Get-ChildItem $wheels -File).Count) шт."
 } else { Write-Host "  (python/requirements не найдены, пропускаю wheels)" }
 

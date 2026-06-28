@@ -180,7 +180,9 @@ function envForRun() {
     HM_CLAUDE_EXT_ID: cfg.claudeCodeExtensionId || 'anthropic.claude-code',
     HM_HOME: STATE.homedir || '',
     HM_KEEP_SKILLS: Array.from(keep).join(','),
-    HM_ALL_PACK_SKILLS: Array.from(allPackSkills).join(',')
+    HM_ALL_PACK_SKILLS: Array.from(allPackSkills).join(','),
+    HM_BRIDGE_ENDPOINT: (cfg.bridge && cfg.bridge.enrollEndpoint) || '',
+    HM_BRIDGE_PACDOMAINS: ((cfg.bridge && cfg.bridge.pacDomains) || []).join(',')
   };
 }
 
@@ -269,7 +271,8 @@ function renderNextSteps(failed) {
     ? `<div class="ns-fail">Не установилось: <b>${failed.map((i) => STATE.byId[i].name).join(', ')}</b>.
          <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button></div>`
     : '';
-  const botBtn = links.bot ? `<button type="button" class="btn-sm" data-ext="${links.bot}">↩ Вернуться в бота</button>` : '';
+  const botUrl = links.bot ? links.bot + (fin.botStartPayload ? '?start=' + encodeURIComponent(fin.botStartPayload) : '') : '';
+  const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
 
   const ns = $('#next-steps');
@@ -282,7 +285,7 @@ function renderNextSteps(failed) {
     </ol>
     ${failHtml}
     <div class="ns-actions">
-      <button type="button" id="ns-cursor" class="btn-sm primary">Открыть Cursor</button>
+      <button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>
       <button type="button" id="ns-keys" class="btn-sm">Открыть файл ключей</button>
       ${botBtn}
       ${videoBtn}

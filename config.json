@@ -12,10 +12,16 @@
     "repoUrl": "",
     "packageName": "hermes-agent"
   },
+  "bridge": {
+    "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер.",
+    "enrollEndpoint": "",
+    "pacDomains": ["claude.ai", "anthropic.com", "openai.com", "chatgpt.com", "oaistatic.com", "higgsfield.ai"]
+  },
   "claudeCodeExtensionId": "anthropic.claude-code",
   "finish": {
     "autoOpenCursorDefault": true,
-    "credentialsRelPath": ".claude/.credentials.master.env"
+    "credentialsRelPath": ".claude/.credentials.master.env",
+    "botStartPayload": "installed"
   },
   "links": {
     "support": "https://hamidun.com",

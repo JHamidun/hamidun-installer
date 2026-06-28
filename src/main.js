@@ -105,6 +105,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // Paths to assets baked into the installer at build time (offline sources).
   childEnv.HM_VENDOR = path.join(resourceRoot(), 'vendor');
   childEnv.HM_BUNDLED_CONFIG = path.join(resourceRoot(), 'vendor', 'config-pack');
+  childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
   childEnv.HM_NOMAD_SRC = path.join(resourceRoot(), 'vendor', 'nomad-src');
 
   let cmd, args;

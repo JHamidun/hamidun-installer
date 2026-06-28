@@ -92,8 +92,17 @@
     },
     {
       "id": "vpn",
-      "title": "VPN (Amnezia)",
+      "title": "Стабильный IP / VPN для ИИ",
       "components": [
+        {
+          "id": "bridge",
+          "name": "AI-мост — стабильный IP для Claude",
+          "desc": "Стабильный зарубежный IP ТОЛЬКО для ИИ-доменов (split-tunnel через SSH). Claude не банит за «прыжки» IP, остальное локально и быстро, работает поверх VPN. Значок в трее. Включается после доступа в боте.",
+          "default": false,
+          "requires": ["pydeps"],
+          "needsAdmin": true,
+          "sizeHint": "~5 МБ"
+        },
         {
           "id": "vpn-wg",
           "name": "AmneziaWG — авто (рекомендуется)",

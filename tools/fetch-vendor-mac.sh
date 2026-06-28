@@ -38,7 +38,7 @@ WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
 REQ="$ROOT/vendor/config-pack/requirements.txt"
 if [ -f "$REQ" ]; then
   "$PY" -m pip download pip setuptools wheel -d "$WH" >/dev/null 2>&1 || true
-  "$PY" -m pip download -r "$REQ" -d "$WH" 2>&1 | tail -2
+  "$PY" -m pip download -r "$REQ" pystray pillow -d "$WH" 2>&1 | tail -2
   echo "  wheels/sdists: $(ls "$WH" 2>/dev/null | wc -l | tr -d ' ')"
 fi
 

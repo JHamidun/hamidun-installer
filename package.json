@@ -27,6 +27,7 @@
     "files": [
       "src/**/*",
       "scripts/**/*",
+      "agent/**/*",
       "config.json",
       "components.json",
       "packs.json",
@@ -34,6 +35,7 @@
     ],
     "extraResources": [
       { "from": "scripts", "to": "scripts" },
+      { "from": "agent", "to": "agent" },
       { "from": "config.json", "to": "config.json" },
       { "from": "components.json", "to": "components.json" },
       { "from": "packs.json", "to": "packs.json" },
