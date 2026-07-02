@@ -38,5 +38,6 @@ Start-Sleep -Seconds 2
 Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 Update-Path
-if (Test-Path $cexe) { Write-Host "Cursor установлен." } else { Write-Host "Cursor: установка запущена (проверьте окно отдельно)." }
-exit 0
+if (Test-Path $cexe) { Write-Host "Cursor установлен."; exit 0 }
+Write-Host "ОШИБКА: Cursor не установился (Cursor.exe не найден). Заверши окно установки и нажми «Повторить неустановленное»."
+exit 1

@@ -211,24 +211,49 @@ function buildSteps(ids) {
   });
 }
 
+// Does any (transitive) requirement of id sit in the failed/skipped sets?
+// Returns the offending dependency id, or null.
+function firstBrokenDep(id, badSet) {
+  const reqs = (STATE.byId[id] && STATE.byId[id].requires) || [];
+  for (const r of reqs) {
+    if (badSet.has(r)) return r;
+    const deeper = firstBrokenDep(r, badSet);
+    if (deeper) return deeper;
+  }
+  return null;
+}
+
 async function runComponents(ids, env) {
   const off = window.installer.onLog(({ line }) => appendLog(line));
   const failed = [];
+  const skipped = [];
+  const bad = new Set();
   let ok = 0;
   for (const id of ids) {
-    setStep(id, 'running');
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
+    // If a dependency failed, skip (don't run) — a cascade of reds would hide the root cause.
+    const broken = firstBrokenDep(id, bad);
+    if (broken) {
+      setStep(id, 'skipped');
+      skipped.push(id);
+      bad.add(id);
+      appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
+      $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+      continue;
+    }
+    setStep(id, 'running');
     const res = await window.installer.runComponent(id, env);
     if (res.ok) { setStep(id, 'done'); ok++; }
     else {
       setStep(id, 'error');
       failed.push(id);
+      bad.add(id);
       appendLog(`[!] ${STATE.byId[id].name}: завершено с кодом ${res.code}${res.error ? ' — ' + res.error : ''}`);
     }
-    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Всего: ${ids.length}`;
+    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
   }
   off && off();
-  return failed;
+  return { failed, skipped };
 }
 
 async function startInstall() {
@@ -238,8 +263,8 @@ async function startInstall() {
   $('#view-progress').classList.remove('hidden');
   buildSteps(order);
   LAST_ENV = envForRun();
-  const failed = await runComponents(order, LAST_ENV);
-  finishInstall(failed);
+  const res = await runComponents(order, LAST_ENV);
+  finishInstall(res);
 }
 
 async function retryFailed(ids) {
@@ -247,21 +272,25 @@ async function retryFailed(ids) {
   $('#btn-finish').classList.add('hidden');
   buildSteps(ids);
   appendLog(`\n— Повторная установка: ${ids.map((i) => STATE.byId[i].name).join(', ')} —`);
-  const failed = await runComponents(ids, LAST_ENV || envForRun());
-  finishInstall(failed);
+  const res = await runComponents(ids, LAST_ENV || envForRun());
+  finishInstall(res);
 }
 
-function finishInstall(failed) {
-  const okAll = failed.length === 0;
+function finishInstall(res) {
+  const failed = res.failed || [];
+  const skipped = res.skipped || [];
+  const okAll = failed.length === 0 && skipped.length === 0;
   $('#progress-title').textContent = okAll ? 'Готово!' : 'Установка завершена с предупреждениями';
   $('#progress-sub').textContent = okAll
     ? 'Осталось войти в Claude Code своей подпиской — шаги ниже.'
     : 'Часть компонентов не установилась — можно повторить ниже.';
-  renderNextSteps(failed);
+  renderNextSteps(failed, skipped);
   $('#btn-finish').classList.remove('hidden');
 }
 
-function renderNextSteps(failed) {
+function renderNextSteps(failed, skipped) {
+  failed = failed || [];
+  skipped = skipped || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const isWin = STATE.platform === 'win32';
@@ -270,9 +299,15 @@ function renderNextSteps(failed) {
   const rel = isWin ? relRaw.replace(/\//g, '\\') : relRaw.replace(/\\/g, '/');
   const credPath = STATE.homedir ? STATE.homedir + sep + rel : rel;
 
-  const failHtml = failed.length
-    ? `<div class="ns-fail">Не установилось: <b>${failed.map((i) => STATE.byId[i].name).join(', ')}</b>.
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button></div>`
+  // Retry both the real failures and anything skipped because a dep failed
+  // (retrying the dep may unblock them).
+  const retryList = failed.concat(skipped);
+  const skipHtml = skipped.length
+    ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${skipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
+    : '';
+  const failHtml = retryList.length
+    ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button></div>` + skipHtml
     : '';
   const botUrl = links.bot ? links.bot + (fin.botStartPayload ? '?start=' + encodeURIComponent(fin.botStartPayload) : '') : '';
   const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
@@ -289,7 +324,7 @@ function renderNextSteps(failed) {
     ${failHtml}
     <div class="ns-actions">
       <button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>
-      <button type="button" id="ns-keys" class="btn-sm">Открыть файл ключей</button>
+      <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
       ${botBtn}
       ${videoBtn}
     </div>
@@ -297,10 +332,11 @@ function renderNextSteps(failed) {
   ns.classList.remove('hidden');
 
   $('#ns-cursor').addEventListener('click', () => window.installer.launchCursor());
-  $('#ns-keys').addEventListener('click', () => window.installer.openPath(credPath));
+  // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
+  $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
   ns.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => window.installer.openExternal(b.dataset.ext)));
   const retry = $('#ns-retry');
-  if (retry) retry.addEventListener('click', () => retryFailed(failed));
+  if (retry) retry.addEventListener('click', () => retryFailed(retryList));
 }
 
 document.addEventListener('DOMContentLoaded', init);

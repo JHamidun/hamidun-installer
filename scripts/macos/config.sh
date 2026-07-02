@@ -26,25 +26,38 @@ fi
 echo "Разворачиваю .claude в домашнюю папку (с бэкапом, без Python-зависимостей)..."
 chmod +x "$CLONE/install.sh" 2>/dev/null || true
 
-# --- защитный снапшот пользовательских данных ПЕРЕД разворачиванием ---
-# При повторной установке install.sh перезаписывает наши свежие базовые файлы
-# поверх пользовательских — теряются API-ключи и накопленная память.
-# Снимаем снапшот ДО, вернём ПОСЛЕ. При первой установке снапшота нет — нечего восстанавливать.
+# --- защита пользовательских данных при ПОВТОРНОЙ установке ---
+# install.sh кладёт свежую базу поверх ~/.claude. Сохраняем пользовательские данные
+# (ключи, накопленную память, историю сессий projects/, локальные настройки) ДО и
+# возвращаем merge-ом ПОСЛЕ. Общий конфиг (skills/agents/commands/rules/settings.json)
+# НЕ сохраняем — он должен обновиться.
 CLAUDE_HOME="$HOME/.claude"
 PRESERVE_DIR="${TMPDIR:-/tmp}/hamidun-preserve"
-SRC_CRED="$CLAUDE_HOME/.credentials.master.env"
-SRC_MEM="$CLAUDE_HOME/memory"
-SNAPSHOT_TAKEN=0
-if [ -f "$SRC_CRED" ] || [ -d "$SRC_MEM" ]; then
-  echo "Сохраняю твои ключи и память перед обновлением..."
-  rm -rf "$PRESERVE_DIR"
-  mkdir -p "$PRESERVE_DIR"
-  [ -f "$SRC_CRED" ] && cp -f "$SRC_CRED" "$PRESERVE_DIR/.credentials.master.env"
-  [ -d "$SRC_MEM" ] && cp -R "$SRC_MEM" "$PRESERVE_DIR/memory"
-  SNAPSHOT_TAKEN=1
+PRESERVE_FILES=".credentials.master.env .credentials.json settings.local.json"
+PRESERVE_DIRS="memory projects todos shell-snapshots"
+
+snapshot_user_data() {
+  mkdir -p "$1"
+  for f in $PRESERVE_FILES; do [ -f "$CLAUDE_HOME/$f" ] && cp -f "$CLAUDE_HOME/$f" "$1/$f"; done
+  for d in $PRESERVE_DIRS; do [ -d "$CLAUDE_HOME/$d" ] && { rm -rf "$1/$d"; cp -R "$CLAUDE_HOME/$d" "$1/$d"; }; done
+}
+restore_user_data() {
+  mkdir -p "$CLAUDE_HOME"
+  for f in $PRESERVE_FILES; do [ -f "$1/$f" ] && cp -f "$1/$f" "$CLAUDE_HOME/$f"; done
+  for d in $PRESERVE_DIRS; do [ -d "$1/$d" ] && { mkdir -p "$CLAUDE_HOME/$d"; cp -R "$1/$d/." "$CLAUDE_HOME/$d/"; }; done
+}
+
+# сперва вернуть данные ПРЕРВАННОГО прошлого прогона — краш между снапшотом и restore
+# мог оставить в снапшоте ЕДИНСТВЕННУЮ копию реальных ключей; не потеряем их.
+if [ -d "$PRESERVE_DIR" ] && [ -n "$(ls -A "$PRESERVE_DIR" 2>/dev/null)" ]; then
+  echo "Обнаружен снапшот прерванной установки — восстанавливаю..."
+  restore_user_data "$PRESERVE_DIR"
 fi
+echo "Сохраняю твои ключи, память и историю сессий перед обновлением..."
+snapshot_user_data "$PRESERVE_DIR"
 
 bash "$CLONE/install.sh" --backup --skip-deps
+RC=$?
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
@@ -62,19 +75,15 @@ if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
   fi
 fi
 
-# --- восстановление пользовательских данных из снапшота ---
-# Возвращаем ключи и память ПОВЕРХ свежих базовых файлов (merge: пользовательские
-# файлы перезаписывают базовые, новые базовые файлы не удаляем).
-if [ "$SNAPSHOT_TAKEN" = "1" ]; then
-  mkdir -p "$CLAUDE_HOME"
-  [ -f "$PRESERVE_DIR/.credentials.master.env" ] && cp -f "$PRESERVE_DIR/.credentials.master.env" "$SRC_CRED"
-  if [ -d "$PRESERVE_DIR/memory" ]; then
-    mkdir -p "$SRC_MEM"
-    cp -R "$PRESERVE_DIR/memory/." "$SRC_MEM/"
-  fi
-  rm -rf "$PRESERVE_DIR"
-  echo "Вернул твои ключи и память."
-fi
+# --- вернуть пользовательские данные поверх свежей базы (merge) ---
+restore_user_data "$PRESERVE_DIR"
+rm -rf "$PRESERVE_DIR"
+echo "Вернул твои ключи, память и историю сессий."
 
-echo "OK: конфиг развёрнут. Заполни ~/.claude/.credentials.master.env"
-exit 0
+# --- честная проверка развёртывания (зеркало config.ps1) ---
+if [ -d "$CLAUDE_HOME/skills" ] || [ -f "$CLAUDE_HOME/settings.json" ]; then
+  echo "OK: конфиг развёрнут. Заполни ~/.claude/.credentials.master.env"
+  exit 0
+fi
+echo "Конфиг не развернулся (~/.claude пуст) — смотри лог выше (install.sh rc=$RC)."
+exit 1

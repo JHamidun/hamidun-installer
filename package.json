@@ -35,7 +35,7 @@
     ],
     "extraResources": [
       { "from": "scripts", "to": "scripts" },
-      { "from": "agent", "to": "agent" },
+      { "from": "agent", "to": "agent", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"] },
       { "from": "config.json", "to": "config.json" },
       { "from": "components.json", "to": "components.json" },
       { "from": "packs.json", "to": "packs.json" },

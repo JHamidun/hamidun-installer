@@ -25,6 +25,16 @@ function readJson(name, fallback) {
 
 let mainWindow = null;
 
+// Track live installer child processes so we can kill orphans if the window
+// closes mid-install (otherwise silent installers keep running invisibly).
+const CHILDREN = new Set();
+function killChildren() {
+  for (const c of CHILDREN) {
+    try { c.kill(); } catch (e) { /* ignore */ }
+  }
+  CHILDREN.clear();
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 920,
@@ -52,8 +62,11 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  killChildren();
   if (!IS_MAC) app.quit();
 });
+
+app.on('before-quit', killChildren);
 
 // ---- IPC -------------------------------------------------------------
 
@@ -116,10 +129,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // script, then invoke it via the call operator so its own `exit N` becomes
     // this process's exit code. Escape single quotes in the path ('  -> '').
     const psScript = script.replace(/'/g, "''");
+    // Trailing exit propagates the script's real code (bare `exit $LASTEXITCODE`
+    // would return 0 when the script fails to load — $LASTEXITCODE is $null then).
     const inline =
       "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
       "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
-      "& '" + psScript + "'";
+      "& '" + psScript + "'; " +
+      "if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }";
     cmd = 'powershell.exe';
     args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
@@ -127,8 +143,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     args = [script];
   }
 
-  const send = (line) =>
-    mainWindow && mainWindow.webContents.send('component-log', { id, line });
+  // Guard against a window closed mid-install (send to a destroyed webContents
+  // crashes the main process on macOS).
+  const send = (line) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('component-log', { id, line });
+    }
+  };
 
   return new Promise((resolve) => {
     let child;
@@ -138,6 +160,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       resolve({ id, ok: false, code: -1, error: String(e) });
       return;
     }
+    CHILDREN.add(child);
 
     const onData = (buf) => {
       buf
@@ -153,6 +176,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       send(`[ERROR] ${e.message}`);
     });
     child.on('close', (code) => {
+      CHILDREN.delete(child);
       resolve({ id, ok: code === 0, code });
     });
   });
@@ -161,6 +185,10 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 ipcMain.handle('open-external', (_e, url) => { if (url) shell.openExternal(url); return true; });
 
 ipcMain.handle('open-path', (_e, p) => { if (p) shell.openPath(p); return true; });
+
+// Reveal a file in Explorer/Finder (openPath on a .env silently fails on macOS
+// where .env has no default app — showItemInFolder always works).
+ipcMain.handle('reveal-path', (_e, p) => { try { if (p) shell.showItemInFolder(p); } catch (e) { /* ignore */ } return true; });
 
 ipcMain.handle('launch-cursor', () => {
   try {

@@ -31,26 +31,34 @@ if (-not (Test-Path $installer)) { Write-Host "В репозитории нет 
 Write-Host "Разворачиваю .claude в домашнюю папку (с бэкапом, без Python-зависимостей)..."
 if ($DRY) { Write-Host "  [dry-run] WOULD: $installer -BackupExisting -SkipDeps (+ фильтр паков по HM_KEEP_SKILLS)"; Write-Host "[dry-run] Конфиг: источник '$clone', без изменений."; exit 0 }
 
-# --- защитный снапшот пользовательских данных ПЕРЕД разворачиванием ---
-# При повторной установке install.ps1 перезаписывает наши свежие базовые файлы
-# поверх пользовательских — теряются API-ключи и накопленная память.
-# Снимаем снапшот ДО, вернём ПОСЛЕ. При первой установке снапшота нет — нечего восстанавливать.
-$claudeHome  = Join-Path $env:USERPROFILE '.claude'
-$preserveDir = Join-Path $env:TEMP 'hamidun-preserve'
-$credName    = '.credentials.master.env'
-$srcCred     = Join-Path $claudeHome $credName
-$srcMem      = Join-Path $claudeHome 'memory'
-$snapCred    = Join-Path $preserveDir $credName
-$snapMem     = Join-Path $preserveDir 'memory'
-$snapshotTaken = $false
-if ((Test-Path $srcCred) -or (Test-Path $srcMem)) {
-    Write-Host "Сохраняю твои ключи и память перед обновлением..."
-    if (Test-Path $preserveDir) { Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue }
-    New-Item -ItemType Directory -Force $preserveDir | Out-Null
-    if (Test-Path $srcCred) { Copy-Item -Force $srcCred $snapCred -ErrorAction SilentlyContinue }
-    if (Test-Path $srcMem)  { Copy-Item -Recurse -Force $srcMem $snapMem -ErrorAction SilentlyContinue }
-    $snapshotTaken = $true
+# --- защита пользовательских данных при ПОВТОРНОЙ установке ---
+# install.ps1 кладёт свежую базу поверх ~/.claude. Сохраняем пользовательские данные
+# (ключи, память, историю сессий projects, локальные настройки) ДО и возвращаем merge-ом ПОСЛЕ.
+# Общий конфиг (skills/agents/commands/rules/settings.json) НЕ сохраняем — он обновляется.
+$claudeHome    = Join-Path $env:USERPROFILE '.claude'
+$preserveDir   = Join-Path $env:TEMP 'hamidun-preserve'
+$preserveFiles = @('.credentials.master.env', '.credentials.json', 'settings.local.json')
+$preserveDirs  = @('memory', 'projects', 'todos', 'shell-snapshots')
+
+function Snapshot-UserData($dst) {
+    New-Item -ItemType Directory -Force $dst | Out-Null
+    foreach ($f in $preserveFiles) { $s = Join-Path $claudeHome $f; if (Test-Path $s) { Copy-Item -Force $s (Join-Path $dst $f) -ErrorAction SilentlyContinue } }
+    foreach ($d in $preserveDirs)  { $s = Join-Path $claudeHome $d; if (Test-Path $s) { $t = Join-Path $dst $d; if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }; Copy-Item -Recurse -Force $s $t -ErrorAction SilentlyContinue } }
 }
+function Restore-UserData($src) {
+    New-Item -ItemType Directory -Force $claudeHome | Out-Null
+    foreach ($f in $preserveFiles) { $s = Join-Path $src $f; if (Test-Path $s) { Copy-Item -Force $s (Join-Path $claudeHome $f) -ErrorAction SilentlyContinue } }
+    foreach ($d in $preserveDirs)  { $s = Join-Path $src $d; if (Test-Path $s) { $t = Join-Path $claudeHome $d; New-Item -ItemType Directory -Force $t | Out-Null; Copy-Item -Recurse -Force (Join-Path $s '*') $t -ErrorAction SilentlyContinue } }
+}
+
+# сперва вернуть данные ПРЕРВАННОГО прошлого прогона — краш между снапшотом и restore
+# мог оставить в снапшоте ЕДИНСТВЕННУЮ копию реальных ключей; не потеряем их.
+if ((Test-Path $preserveDir) -and (Get-ChildItem $preserveDir -Force -ErrorAction SilentlyContinue)) {
+    Write-Host "Обнаружен снапшот прерванной установки — восстанавливаю..."
+    Restore-UserData $preserveDir
+}
+Write-Host "Сохраняю твои ключи, память и историю сессий перед обновлением..."
+Snapshot-UserData $preserveDir
 
 try { & $installer -BackupExisting -SkipDeps } catch { Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
 
@@ -73,19 +81,10 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
     }
 }
 
-# --- восстановление пользовательских данных из снапшота ---
-# Возвращаем ключи и память ПОВЕРХ свежих базовых файлов (merge: пользовательские
-# файлы перезаписывают базовые, новые базовые файлы не удаляем).
-if ($snapshotTaken) {
-    New-Item -ItemType Directory -Force $claudeHome | Out-Null
-    if (Test-Path $snapCred) { Copy-Item -Force $snapCred $srcCred -ErrorAction SilentlyContinue }
-    if (Test-Path $snapMem) {
-        New-Item -ItemType Directory -Force $srcMem | Out-Null
-        Copy-Item -Recurse -Force (Join-Path $snapMem '*') $srcMem -ErrorAction SilentlyContinue
-    }
-    Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
-    Write-Host "Вернул твои ключи и память."
-}
+# --- вернуть пользовательские данные поверх свежей базы (merge) ---
+Restore-UserData $preserveDir
+Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
+Write-Host "Вернул твои ключи, память и историю сессий."
 
 # Честная проверка: конфиг реально развернулся?
 $dst = Join-Path $env:USERPROFILE '.claude'

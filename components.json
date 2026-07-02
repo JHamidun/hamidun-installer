@@ -34,9 +34,9 @@
         {
           "id": "claude",
           "name": "Claude Code CLI",
-          "desc": "Командная строка Claude Code (нативный установщик, без зависимостей).",
+          "desc": "Командная строка Claude Code (офлайн-установка через npm).",
           "default": true,
-          "requires": [],
+          "requires": ["node"],
           "needsAdmin": false,
           "sizeHint": "~50 МБ"
         },

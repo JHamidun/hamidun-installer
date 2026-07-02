@@ -75,10 +75,13 @@ if (-not $DRY) {
     }
 }
 
+if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }
 Update-Path
 if (Get-Command nomad -ErrorAction SilentlyContinue) {
-    Write-Host "OK: nomad установлен ($((nomad --version 2>&1 | Select-Object -First 1)))"
-} else {
-    Write-Host "Nomad установлен — команда появится в PATH после перезапуска терминала."
+    Write-Host "OK: nomad установлен ($((nomad --version 2>&1 | Select-Object -First 1)))"; exit 0
 }
-exit 0
+if (Test-Path (Join-Path $env:USERPROFILE '.local\bin\nomad.exe')) {
+    Write-Host "OK: nomad в ~/.local/bin — появится в PATH после перезапуска терминала."; exit 0
+}
+Write-Host "ОШИБКА: Nomad не установился — смотри лог выше."
+exit 1

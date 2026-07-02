@@ -13,7 +13,7 @@ if [ ! -f "$SRC/pyproject.toml" ]; then
   if [ -f "$CFG" ]; then
     # Парсим nomad.repoUrl без python (иначе bare python3 без CLT дёргает диалог).
     # Берём первую строку вида "repoUrl": "..." и вытаскиваем значение в кавычках.
-    REPO=$(grep -o '"repoUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$CFG" 2>/dev/null | head -n1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
+    REPO=$(grep -o '"repoUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$CFG" 2>/dev/null | head -n1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' || true)
   fi
   if [ -n "$REPO" ]; then
     SRC="$HOME/.nomad-src"
