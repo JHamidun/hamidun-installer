@@ -29,6 +29,7 @@ Content-Type: application/json
 
 ```bash
 sudo INVITE_CODES="код1,код2,код3" \
+  MAX_PEERS_PER_INVITE=5 \
   WG_IFACE=awg0 \
   WG_SERVER_PUBKEY="<серверный публичный ключ>" \
   WG_ENDPOINT="vpn.твой-домен:51820" \
@@ -41,8 +42,42 @@ sudo INVITE_CODES="код1,код2,код3" \
 
 ## Безопасность
 - **Инвайт-коды обязательны** — иначе любой наплодит пиров. Раздавай разные коды разным людям → сможешь отозвать.
+- **Лимит пиров на инвайт-код** — `MAX_PEERS_PER_INVITE` (по умолчанию 5). Утечка одного кода больше не забьёт /24 и не сломает enroll всем; сверх лимита сервер отвечает `403` с внятной ошибкой. Учёт — в `state.json` (`state.invites`); для прода — вынести в БД/Redis.
 - HTTPS только. Сервис слушает 127.0.0.1 — наружу выставляй через reverse-proxy.
-- Отзыв пира: убери из `wg`/wg-easy + `state.json`.
+- **Rate-limit за прокси** — клиентский IP берётся из первого элемента `X-Forwarded-For` (заголовку доверяем, потому что сервис слушает только 127.0.0.1 и запросы приходят исключительно через локальный nginx/caddy). Если выставишь сервис наружу напрямую — убери доверие к XFF в `clientIp()`.
+- Отзыв пира: убери из `wg`/wg-easy + `state.json` (и уменьши счётчик в `state.invites`, если код ещё живой).
+
+## AI-мост (SSH) — `enroll-ssh-server.js`
+
+Второй сервис в этой папке — enroll для «AI-моста» (SSH `-D` SOCKS вместо WireGuard). Контракт (его ждёт `agent/bridge_agent.py`, см. `docs/bridge-bot-spec.md`):
+
+```
+POST /enroll  { "bridgeToken": "...", "client": "hostname" }
+200 -> { "sshHost", "sshPort", "sshUser", "sshKey", "pacDomains" }
+```
+
+Встроенная защита:
+
+- **Токены** регистрирует бот через `POST /admin/token` (`x-admin-secret`). Модель токена: `maxDevices` (по умолчанию 5 — как в спеке «до 5 устройств на ключ», env `MAX_DEVICES_DEFAULT`), `expiresAt` (опционально), `devicesUsed` (учёт по `client`-hostname). Сверх лимита устройств — `403` с внятной ошибкой; повторный enroll с того же hostname лимит не тратит. Учёт — в `tokens.json`; для прода — БД/Redis.
+- **Rate-limit** — по клиентскому IP с учётом `X-Forwarded-For` (та же логика доверия, что и выше: сервис слушает только 127.0.0.1 за reverse-proxy).
+
+### Ограничение SSH-ключа на VPS (ОБЯЗАТЕЛЬНО)
+
+Сервис только **возвращает** приватный ключ клиенту — `authorized_keys` на bridge-VPS настраивается при провижининге (вручную или скриптом). «Голый» ключ = полный шелл + открытый SOCKS куда угодно. Прописывай ключ ТОЛЬКО с опциями:
+
+```
+restrict,port-forwarding,permitopen="*:443",permitopen="*:80",command="/usr/sbin/nologin" ssh-ed25519 AAAA... hamidun-bridge
+```
+
+Что это даёт:
+
+- `restrict` — выключает всё: pty, X11, agent-forwarding, user-rc, forwarding;
+- `port-forwarding` — возвращает только TCP-forwarding (нужен для `ssh -D`);
+- `permitopen="*:443"`/`"*:80"` — direct-tcpip каналы (в т.ч. через SOCKS от `-D`) только на 443/80: это «мост для AI-доменов», а не open proxy;
+- `command="/usr/sbin/nologin"` — блокирует запуск команд/шелла (клиент подключается как `ssh -N`; `bridge_agent.py` шелл не запрашивает).
+
+Плюс сам пользователь (`rele`) — с `shell=/usr/sbin/nologin`, без sudo. Отзыв доступа = удалить строку из `authorized_keys` (+ удалить токен из `tokens.json`).
 
 ## Что ещё не сделано
 - `format=amnezia` (vpn://-код для полного клиента) — заглушка `501`. Дореализовать контейнер Amnezia (JSON → zlib → base64url → `vpn://`), когда понадобится продвинутый режим.
+- Провижининг выделенного VPS под юзера (тариф «Стандарт») через API провайдера — сейчас выдача из `tokens.json`.
