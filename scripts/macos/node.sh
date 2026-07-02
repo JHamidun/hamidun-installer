@@ -9,7 +9,12 @@ if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/node.pkg" ]; then
   PKG="$HM_VENDOR/apps/node.pkg"; echo "Node.js из встроенного pkg (офлайн)..."
 else
   echo "Определяю последнюю LTS-версию..."
-  VER=$(curl -fsSL https://nodejs.org/dist/index.json | /usr/bin/python3 -c 'import sys,json;print(next(x["version"] for x in json.load(sys.stdin) if x["lts"]))')
+  # Без python3 (bare /usr/bin/python3 без CLT дёргает GUI-диалог установки).
+  # Записи в index.json идут от новых к старым; у LTS "lts" — строка (кодовое имя), у остальных false.
+  VER=$(curl -fsSL https://nodejs.org/dist/index.json \
+    | grep -o '{[^{}]*}' | grep '"lts":"' | head -n1 \
+    | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
+  [ -z "$VER" ] && { echo "Не удалось определить LTS-версию Node.js (нет сети или изменился формат index.json)."; exit 1; }
   PKG="/tmp/node-${VER}.pkg"
   echo "Скачиваю Node.js ${VER}..."
   dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"

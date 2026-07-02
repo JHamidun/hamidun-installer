@@ -7,6 +7,10 @@ $extId = if ($env:HM_CLAUDE_EXT_ID) { $env:HM_CLAUDE_EXT_ID } else { 'anthropic.
 $DRY = [bool]$env:HM_DRY_RUN
 $installed = $false
 
+# Вшитый vsix (полный офлайн) — кладёт build-задача в HM_VENDOR/apps/claude-code.vsix.
+$vsix = ''
+if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\claude-code.vsix'; if (Test-Path $cand) { $vsix = $cand } }
+
 # Cursor должен быть ЗАКРЫТ, иначе --install-extension падает с 'aborted' (баг с теста).
 if (-not $DRY) { Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 600 }
 
@@ -17,7 +21,17 @@ function Test-ExtPresent($cli) {
 function Install-Into($cli, $label) {
     if (-not $cli) { return $false }
     Write-Host "Ставлю расширение в $label..."
-    if ($DRY) { Write-Host "  [dry-run] WOULD: $cli --install-extension $extId --force"; return $true }
+    if ($DRY) {
+        if ($vsix) { Write-Host "  [dry-run] WOULD: $cli --install-extension $vsix --force" }
+        else { Write-Host "  [dry-run] WOULD: $cli --install-extension $extId --force" }
+        return $true
+    }
+    if ($vsix) {
+        Write-Host "  из вшитого vsix (офлайн): $vsix"
+        & $cli --install-extension $vsix --force 2>&1 | Out-Host
+        if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте."; return $true }
+        Write-Host "  ${label}: vsix не подтвердился — пробую Marketplace ($extId)..."
+    }
     & $cli --install-extension $extId --force 2>&1 | Out-Host
     if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте."; return $true }
     Write-Host "  ${label}: расширение не подтвердилось."; return $false

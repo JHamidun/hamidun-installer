@@ -14,6 +14,8 @@
  * Set INVITE_CODES, WG_* env vars. State (assigned IPs) persists to STATE_FILE.
  * MAX_PEERS_PER_INVITE (default 5) caps peers per invite code — a leaked code
  * can no longer fill the whole /24 and break enrollment for everyone.
+ * TRUSTED_PROXY_COUNT (default 1) — how many of OUR reverse-proxies append to
+ * X-Forwarded-For (see clientIp trust model below).
  *
  * Alternative: run wg-easy (https://github.com/wg-easy/wg-easy) and make this a thin
  * auth proxy in front of its API instead of shelling to `wg` directly.
@@ -36,18 +38,31 @@ if (!/^[a-zA-Z][a-zA-Z0-9_]{0,14}$/.test(WG_IFACE_RAW)) {
   process.exit(1);
 }
 
+// Сколько НАШИХ reverse-proxy стоит перед сервисом (каждый дописывает ровно одну
+// запись в X-Forwarded-For). Default 1 = одиночный nginx/caddy на этой же машине.
+const TRUSTED_PROXY_COUNT = Math.max(1, parseInt(process.env.TRUSTED_PROXY_COUNT || '1', 10) || 1);
+
 // --- Определение клиентского IP за reverse-proxy ---
-// Сервис слушает ТОЛЬКО 127.0.0.1 и наружу выставляется через nginx/caddy,
-// поэтому X-Forwarded-For мог прийти только через наш локальный прокси —
-// заголовку доверяем и берём ПЕРВЫЙ IP (реальный клиент). Иначе rate-limit
-// ключевался бы по IP прокси = один глобальный лимит на всех юзеров.
+// Сервис слушает ТОЛЬКО 127.0.0.1 и наружу выставляется через nginx/caddy.
+// Без XFF rate-limit ключевался бы по IP прокси = один глобальный лимит на всех.
+// МОДЕЛЬ ДОВЕРИЯ: клиент может прислать СВОЙ X-Forwarded-For — его значения
+// окажутся В НАЧАЛЕ списка, а наши прокси дописывают реальные IP В КОНЕЦ.
+// Поэтому первому элементу верить НЕЛЬЗЯ (атакующий подменяет его на каждый
+// запрос и обходит rate-limit). Доверяем только последним TRUSTED_PROXY_COUNT
+// записям, которые дописали НАШИ прокси: при N доверенных прокси реальный
+// клиент — элемент с индексом (length - N), т.е. запись, добавленная первым
+// (внешним) доверенным прокси. Если записей меньше N — клиент XFF не слал,
+// весь список дописан нашими прокси, берём первый элемент.
 // ВНИМАНИЕ: если сервис выставить наружу напрямую (0.0.0.0) — доверие к XFF
-// убрать: клиент сможет подделывать заголовок и обходить rate-limit.
+// убрать целиком: остаётся только socket.remoteAddress.
 function clientIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (xff) {
-    const first = String(xff).split(',')[0].trim();
-    if (first) return first;
+    const parts = String(xff).split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length > 0) {
+      const idx = parts.length - TRUSTED_PROXY_COUNT;
+      return parts[idx >= 0 ? idx : 0];
+    }
   }
   return req.socket.remoteAddress || 'unknown';
 }

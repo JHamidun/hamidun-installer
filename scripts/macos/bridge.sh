@@ -72,6 +72,19 @@ EOF
 launchctl unload "$LA" 2>/dev/null || true
 launchctl load "$LA" 2>/dev/null || true
 
+# CLI-прокси: агент пишет cli_proxy.env, но сам его никто не подключает —
+# идемпотентно добавляем source-строку в ~/.zshrc и ~/.bash_profile
+# (маркер-комментарий защищает от дублей при повторной установке).
+BRIDGE_RC_MARK="# Hamidun Bridge CLI proxy"
+BRIDGE_RC_LINE='[ -f "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" ] && . "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" # Hamidun Bridge CLI proxy'
+for RC in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+  if [ -f "$RC" ] && grep -qF "$BRIDGE_RC_MARK" "$RC"; then
+    : # уже подключено — не дублируем
+  else
+    printf '\n%s\n' "$BRIDGE_RC_LINE" >> "$RC"
+  fi
+done
+
 if [ "$TRAY_OK" = "1" ]; then TRAY_MSG="значок в меню-баре"; else TRAY_MSG="фоновый режим без значка"; fi
 if [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). Сервер настроен."
 else echo "OK: AI-мост установлен ($TRAY_MSG). Сервер ещё не настроен — включится после доступа в боте."; fi

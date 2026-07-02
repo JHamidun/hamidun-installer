@@ -12,35 +12,52 @@ echo "Запрашиваю персональный VPN-конфиг..."
 RESP=$(curl -fsSL -X POST -H 'Content-Type: application/json' \
   -d "{\"inviteCode\":\"${HM_INVITE_CODE:-}\",\"client\":\"$(hostname)\",\"format\":\"amneziawg\"}" \
   "${HM_VPN_ENROLL_URL%/}${HM_VPN_ENROLL_PATH:-/enroll}")
-# Ожидаемый ответ: {"config":"<текст .conf>","name":"hamidun"}
-CONF=$(printf '%s' "$RESP" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin).get("config",""))')
-NAME=$(printf '%s' "$RESP" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin).get("name","hamidun"))')
+# Ожидаемый ответ: {"config":"<текст .conf с \n-экранированием>","name":"hamidun"}
+# Парсим без python3: bare /usr/bin/python3 на чистом mac без CLT дёргает GUI-диалог установки.
+CONF_RAW=$(printf '%s\n' "$RESP" | sed -n 's/.*"config"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)
+NAME=$(printf '%s\n' "$RESP" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)
+[ -n "$NAME" ] || NAME="hamidun"
+# Разворачиваем \n/\t из JSON-строки в реальные переводы строк
+CONF=$(printf '%b' "$CONF_RAW")
 [ -z "$CONF" ] && { echo "Сервер не вернул конфиг."; exit 1; }
 
-# Установить полный клиент AmneziaVPN (на macOS он включает поддержку AmneziaWG)
+# Установить полный клиент AmneziaVPN (на macOS он включает поддержку AmneziaWG).
+# Amnezia на macOS раздаётся как .pkg; поддерживаем и .pkg, и .dmg.
 if [ ! -d "/Applications/AmneziaVPN.app" ]; then
-  DMG=""
-  if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
-    DMG="$HM_VENDOR/apps/amneziavpn.dmg"
-    echo "AmneziaVPN из встроенного dmg (офлайн)..."
+  SRC=""
+  if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.pkg" ]; then
+    SRC="$HM_VENDOR/apps/amneziavpn.pkg"; echo "AmneziaVPN из встроенного pkg (офлайн)..."
+  elif [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
+    SRC="$HM_VENDOR/apps/amneziavpn.dmg"; echo "AmneziaVPN из встроенного dmg (офлайн)..."
   else
     echo "Скачиваю AmneziaVPN..."
-    DMG="/tmp/amnezia.dmg"
+    # .pkg приоритетнее .dmg; без python3 (не дёргаем CLT-диалог). BSD grep -E для (pkg|dmg).
     URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
-      | /usr/bin/python3 -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")')
+      | grep -ioE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*\.(pkg|dmg)"' \
+      | sed 's/.*"\([^"]*\)"$/\1/' | sort | grep -i '\.pkg$' | head -n1 || true)
+    [ -n "$URL" ] || URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
+      | grep -ioE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*\.dmg"' | head -n1 \
+      | sed 's/.*"\([^"]*\)"$/\1/' || true)
     if [ -n "$URL" ]; then
-      dl "$URL" "$DMG"
+      case "$URL" in *.pkg) SRC="/tmp/amnezia.pkg" ;; *) SRC="/tmp/amnezia.dmg" ;; esac
+      dl "$URL" "$SRC"
     else
-      DMG=""
-      echo "Не нашёл .dmg в релизах — скачайте вручную с amnezia.org."
+      echo "Не нашёл установщик в релизах — скачайте вручную с amnezia.org."
     fi
   fi
-  if [ -n "$DMG" ] && [ -f "$DMG" ]; then
-    MNT="/tmp/hm_amnezia_mnt"; mkdir -p "$MNT"
-    hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null
-    APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
-    admin_run "cp -R '$MNT/$APP' /Applications/"
-    hdiutil detach "$MNT" >/dev/null || true
+  if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+    case "$SRC" in
+      *.pkg)
+        admin_run "installer -pkg '$SRC' -target /"
+        ;;
+      *.dmg)
+        MNT="/tmp/hm_amnezia_mnt"; mkdir -p "$MNT"
+        hdiutil attach "$SRC" -nobrowse -mountpoint "$MNT" >/dev/null
+        APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
+        admin_run "cp -R '$MNT/$APP' /Applications/"
+        hdiutil detach "$MNT" >/dev/null || true
+        ;;
+    esac
   fi
 fi
 

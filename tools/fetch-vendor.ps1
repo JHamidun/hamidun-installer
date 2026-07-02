@@ -65,6 +65,43 @@ New-Item -ItemType Directory -Force $tmp | Out-Null
 & npm install '@anthropic-ai/claude-code' --prefix $tmp --cache $cache --no-audit --no-fund 2>&1 | Out-Null
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
+Write-Host "[vendor] Claude Code VSIX (расширение для VSCode/Cursor, офлайн)..."
+$vsix = Join-Path $apps 'claude-code.vsix'
+if (Test-Path $vsix) {
+  Write-Host "  skip claude-code.vsix"
+} else {
+  # Расширение платформо-специфичное (8 платформ): latest/vspackage БЕЗ targetPlatform отдаёт чужую
+  # платформу (linux-x64). Резолвим последнюю версию под win32-x64 и качаем versioned URL.
+  $vsixVer = $null
+  try {
+    $q = '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":1}'
+    $resp = Invoke-RestMethod 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1' -Method Post -Body $q -ContentType 'application/json' -Headers $UA
+    $vsixVer = ($resp.results[0].extensions[0].versions | Where-Object { $_.targetPlatform -eq 'win32-x64' } | Select-Object -First 1).version
+  } catch { }
+  if ($vsixVer) {
+    Dl "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/$vsixVer/vspackage?targetPlatform=win32-x64" $vsix
+  } else {
+    Write-Host "  ! Marketplace недоступен — VSIX пропущен (расширение поставится онлайн при установке)"
+  }
+}
+if (Test-Path $vsix) {
+  # Marketplace часто отдаёт vspackage с Content-Encoding: gzip, а IWR в PS 5.1 сам не распаковывает.
+  try {
+    $fs = [IO.File]::OpenRead($vsix); $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte(); $fs.Close()
+    if ($b0 -eq 0x1f -and $b1 -eq 0x8b) {
+      Write-Host "  ответ Marketplace в gzip — распаковываю в .vsix"
+      $gzTmp = "$vsix.gz.tmp"
+      Move-Item $vsix $gzTmp -Force
+      $in  = [IO.File]::OpenRead($gzTmp)
+      $gz  = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+      $out = [IO.File]::Create($vsix)
+      $gz.CopyTo($out)
+      $out.Close(); $gz.Close(); $in.Close()
+      Remove-Item $gzTmp -Force
+    }
+  } catch { Write-Host "  ! постобработка vsix не удалась - $($_.Exception.Message)" }
+} else { Write-Host "  ! VSIX недоступен — расширение поставится онлайн при установке" }
+
 Write-Host "[vendor] Python wheels (под локальный Python = bundled Python, без кросс-флагов)..."
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 $req = Join-Path $root 'vendor\config-pack\requirements.txt'
@@ -86,6 +123,33 @@ if ($py) {
     $env:PLAYWRIGHT_BROWSERS_PATH = $pw
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
   } catch { Write-Host "  (playwright browsers пропущены: $($_.Exception.Message))" }
+}
+
+Write-Host "[vendor] Проверка полноты vendor..."
+$missing = @()
+foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','cursor-setup.exe','claude-code.vsix')) {
+  $f = Get-Item (Join-Path $apps $name) -ErrorAction SilentlyContinue
+  if (-not $f -or $f.Length -eq 0) { $missing += "apps/$name" }
+}
+foreach ($pat in @('amneziawg-setup.*','amneziavpn-setup.*')) {
+  $hit = Get-ChildItem $apps -File -Filter $pat -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Select-Object -First 1
+  if (-not $hit) { $missing += "apps/$pat" }
+}
+foreach ($d in @('npm-cache','pywheels','config-pack')) {
+  $dir = Join-Path $root ('vendor\' + $d)
+  $cnt = 0
+  if (Test-Path $dir) {
+    $cnt = (Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Measure-Object).Count
+  }
+  if ($cnt -eq 0) { $missing += ($d + '/ (нет файлов)') }
+}
+if ($missing.Count -gt 0) {
+  Write-Host ''
+  Write-Host "[vendor] WARNING: неполный vendor — отсутствуют/пустые артефакты:"
+  foreach ($m in $missing) { Write-Host "  - $m" }
+  Write-Host "[vendor] Установка на этих компонентах уйдёт в онлайн-фолбэк или упадёт."
+} else {
+  Write-Host "[vendor] OK: все ключевые артефакты на месте."
 }
 
 $total = (Get-ChildItem -Recurse -File (Join-Path $root 'vendor') | Measure-Object Length -Sum).Sum

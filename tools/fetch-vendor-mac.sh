@@ -24,14 +24,38 @@ echo "[vendor-mac] Cursor (arm64 dmg)..."
 CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-arm64&releaseTrack=stable" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("downloadUrl",""))' 2>/dev/null)
 [ -n "$CUR" ] && dl "$CUR" "$APPS/cursor.dmg" || echo "  ! Cursor API недоступен"
 
-echo "[vendor-mac] AmneziaVPN (mac dmg)..."
-AV=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest | "$PY" -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")' 2>/dev/null)
-[ -n "$AV" ] && dl "$AV" "$APPS/amneziavpn.dmg" || echo "  ! AmneziaVPN dmg не найден"
+echo "[vendor-mac] AmneziaVPN (mac pkg/dmg)..."
+# На macOS Amnezia раздаёт .pkg (раньше .dmg) — берём по расширению, .pkg приоритетнее.
+AV=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest | "$PY" -c 'import sys,json;A=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"]];p=[u for u in A if u.lower().endswith(".pkg")];d=[u for u in A if u.lower().endswith(".dmg")];print((p+d)[0] if p+d else "")' 2>/dev/null)
+if [ -n "$AV" ]; then
+  AVEXT=$(echo "${AV##*.}" | tr 'A-Z' 'a-z')
+  dl "$AV" "$APPS/amneziavpn.$AVEXT"
+else
+  echo "  ! AmneziaVPN pkg/dmg не найден"
+fi
 
 echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
 rm -rf "$TMP"
+
+echo "[vendor-mac] Claude Code VSIX (расширение для VSCode/Cursor, офлайн)..."
+VSIX="$APPS/claude-code.vsix"
+if [ -f "$VSIX" ]; then
+  echo "  skip $(basename "$VSIX")"
+else
+  # Расширение платформо-специфичное: latest/vspackage БЕЗ targetPlatform отдаёт чужую платформу (linux-x64).
+  # Резолвим последнюю версию под darwin-arm64 и качаем versioned URL.
+  VSIXVER=$(curl -fsSL -m 60 -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" -H "Content-Type: application/json" -d '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":1}' | "$PY" -c 'import sys,json;vs=json.load(sys.stdin)["results"][0]["extensions"][0]["versions"];m=[v["version"] for v in vs if v.get("targetPlatform")=="darwin-arm64"];print(m[0] if m else "")' 2>/dev/null)
+  if [ -n "$VSIXVER" ]; then
+    VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/$VSIXVER/vspackage?targetPlatform=darwin-arm64"
+    echo "  GET $VSIX_URL"
+    # Marketplace отдаёт vspackage с Content-Encoding: gzip — --compressed распаковывает в валидный .vsix.
+    curl -fsSL --compressed "$VSIX_URL" -o "$VSIX" || { rm -f "$VSIX"; echo "  ! VSIX недоступен — расширение поставится онлайн при установке"; }
+  else
+    echo "  ! Marketplace недоступен — VSIX пропущен (расширение поставится онлайн при установке)"
+  fi
+fi
 
 echo "[vendor-mac] Python wheels (macosx, под bundled python 3.12)..."
 WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
@@ -48,4 +72,27 @@ PW="$ROOT/vendor/playwright-browsers"; mkdir -p "$PW"
 PLAYWRIGHT_BROWSERS_PATH="$PW" "$PY" -m playwright install chromium >/dev/null 2>&1 || true
 
 echo "[vendor-mac] Git: оставлен системный/CLT (офлайн-бандл git на mac — на будущее)."
+
+echo "[vendor-mac] Проверка полноты vendor..."
+MISSING=""
+add_missing() { MISSING="$MISSING
+  - $1"; }
+chk_file() { [ -s "$1" ] || add_missing "$2"; }
+chk_dir() { if [ -z "$(find "$1" -type f -size +0c 2>/dev/null | head -n 1)" ]; then add_missing "$2"; fi; }
+chk_file "$APPS/python.pkg"       "apps/python.pkg"
+chk_file "$APPS/node.pkg"         "apps/node.pkg"
+chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
+chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
+if [ ! -s "$APPS/amneziavpn.pkg" ] && [ ! -s "$APPS/amneziavpn.dmg" ]; then add_missing "apps/amneziavpn.pkg|dmg"; fi
+chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
+chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
+chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
+if [ -n "$MISSING" ]; then
+  echo ""
+  echo "[vendor-mac] WARNING: неполный vendor — отсутствуют/пустые артефакты:$MISSING"
+  echo "[vendor-mac] Установка на этих компонентах уйдёт в онлайн-фолбэк или упадёт."
+else
+  echo "[vendor-mac] OK: все ключевые артефакты на месте."
+fi
+
 echo "[vendor-mac] ГОТОВО: vendor = $(du -sh "$ROOT/vendor" 2>/dev/null | cut -f1)"

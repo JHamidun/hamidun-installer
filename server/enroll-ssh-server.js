@@ -25,6 +25,7 @@
  *     //                maxDevices, expiresAt, devicesUsed: { "<hostname>": firstEnrollTs } } }
  *   ADMIN_SECRET=...   // для POST /admin/token (бот регистрирует выданные токены)
  *   MAX_DEVICES_DEFAULT=5   // лимит устройств на токен (спека: до 5 устройств на ключ)
+ *   TRUSTED_PROXY_COUNT=1   // сколько НАШИХ reverse-proxy дописывают X-Forwarded-For (см. clientIp)
  */
 const http = require('http');
 const fs = require('fs');
@@ -35,20 +36,32 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 const PAC_DOMAINS = (process.env.PAC_DOMAINS ||
   'claude.ai,anthropic.com,openai.com,chatgpt.com,oaistatic.com,higgsfield.ai').split(',').map(s => s.trim()).filter(Boolean);
 const MAX_DEVICES_DEFAULT = Math.max(1, parseInt(process.env.MAX_DEVICES_DEFAULT || '5', 10) || 5);
+// Сколько НАШИХ reverse-proxy стоит перед сервисом (каждый дописывает ровно одну
+// запись в X-Forwarded-For). Default 1 = одиночный nginx/caddy на этой же машине.
+const TRUSTED_PROXY_COUNT = Math.max(1, parseInt(process.env.TRUSTED_PROXY_COUNT || '1', 10) || 1);
 
 // --- Определение клиентского IP за reverse-proxy ---
 // Сервис слушает ТОЛЬКО 127.0.0.1 и наружу выставляется через nginx/caddy.
-// Поэтому запрос с X-Forwarded-For мог прийти только через наш локальный прокси —
-// заголовку ДОВЕРЯЕМ и берём ПЕРВЫЙ IP из списка (реальный клиент; прокси дописывают
-// свои IP в конец). Без этого rl-ключом был бы IP самого nginx (127.0.0.1) и
-// один глобальный лимит делился бы на всех юзеров сразу.
+// Без XFF rl-ключом был бы IP самого nginx (127.0.0.1) и один глобальный лимит
+// делился бы на всех юзеров сразу.
+// МОДЕЛЬ ДОВЕРИЯ: клиент может прислать СВОЙ X-Forwarded-For — его значения
+// окажутся В НАЧАЛЕ списка, а наши прокси дописывают реальные IP В КОНЕЦ.
+// Поэтому первому элементу верить НЕЛЬЗЯ (атакующий подменяет его на каждый
+// запрос и обходит rate-limit). Доверяем только последним TRUSTED_PROXY_COUNT
+// записям, которые дописали НАШИ прокси: при N доверенных прокси реальный
+// клиент — элемент с индексом (length - N), т.е. запись, добавленная первым
+// (внешним) доверенным прокси. Если записей меньше N — клиент XFF не слал,
+// весь список дописан нашими прокси, берём первый элемент.
 // ВНИМАНИЕ: если когда-нибудь сервис будет слушать 0.0.0.0 напрямую (без прокси) —
-// доверие к XFF убрать: клиент сможет подделывать заголовок и обходить rate-limit.
+// доверие к XFF убрать целиком: остаётся только socket.remoteAddress.
 function clientIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (xff) {
-    const first = String(xff).split(',')[0].trim();
-    if (first) return first;
+    const parts = String(xff).split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length > 0) {
+      const idx = parts.length - TRUSTED_PROXY_COUNT;
+      return parts[idx >= 0 ? idx : 0];
+    }
   }
   return req.socket.remoteAddress || 'unknown';
 }
@@ -109,6 +122,21 @@ const server = http.createServer((req, res) => {
       return json(res, 403, { error: 'bridgeToken expired — renew the subscription in the bot (@HamidunAcademyBot)' });
     }
 
+    // Приватный ключ читаем ДО учёта устройства: серверная мисконфигурация
+    // (sshKeyPath не задан / файл нечитаем) — это 500 с внятной ошибкой,
+    // а НЕ 200 с пустым sshKey (клиент получил бы битую конфигурацию и
+    // молча не смог бы подключиться). Слот девайса при этом не тратим.
+    let sshKey = '';
+    if (t.sshKeyPath) {
+      try { sshKey = fs.readFileSync(t.sshKeyPath, 'utf8'); }
+      catch (e) { console.error(`enroll: cannot read sshKeyPath "${t.sshKeyPath}": ${e.message}`); }
+    } else {
+      console.error('enroll: token has no sshKeyPath configured');
+    }
+    if (!sshKey.trim()) {
+      return json(res, 500, { error: 'server misconfiguration: SSH key for this token is missing or unreadable — contact support (@HamidunAcademyBot)' });
+    }
+
     // Привязка устройств: до maxDevices (спека: 5) устройств на один токен.
     // Устройство идентифицируем по client (hostname из тела запроса) — повторный
     // enroll с того же hostname лимит НЕ тратит (переустановка/переподключение ок).
@@ -128,8 +156,6 @@ const server = http.createServer((req, res) => {
       saveTokens(tokens);
     }
 
-    let sshKey = '';
-    if (t.sshKeyPath) { try { sshKey = fs.readFileSync(t.sshKeyPath, 'utf8'); } catch {} }
     // TODO: тут провизионить выделенный VPS под юзера (Standard) через API провайдера,
     //       либо вернуть из пула (Lite). Сейчас — из tokens.json.
     //
