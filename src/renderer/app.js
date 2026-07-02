@@ -264,8 +264,11 @@ function finishInstall(failed) {
 function renderNextSteps(failed) {
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
-  const rel = (fin.credentialsRelPath || '.claude/.credentials.master.env').replace(/\//g, '\\');
-  const credPath = STATE.homedir ? STATE.homedir + '\\' + rel : rel;
+  const isWin = STATE.platform === 'win32';
+  const relRaw = fin.credentialsRelPath || '.claude/.credentials.master.env';
+  const sep = isWin ? '\\' : '/';
+  const rel = isWin ? relRaw.replace(/\//g, '\\') : relRaw.replace(/\\/g, '/');
+  const credPath = STATE.homedir ? STATE.homedir + sep + rel : rel;
 
   const failHtml = failed.length
     ? `<div class="ns-fail">Не установилось: <b>${failed.map((i) => STATE.byId[i].name).join(', ')}</b>.

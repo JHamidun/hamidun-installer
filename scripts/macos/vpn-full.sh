@@ -8,12 +8,22 @@ if [ -z "${HM_VPN_ENROLL_URL:-}" ]; then
 fi
 
 if [ ! -d "/Applications/AmneziaVPN.app" ]; then
-  echo "Скачиваю AmneziaVPN..."
-  DMG="/tmp/amnezia.dmg"
-  URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
-    | /usr/bin/python3 -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")')
-  if [ -n "$URL" ]; then
-    dl "$URL" "$DMG"
+  DMG=""
+  if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
+    DMG="$HM_VENDOR/apps/amneziavpn.dmg"
+    echo "AmneziaVPN из встроенного dmg (офлайн)..."
+  else
+    echo "Скачиваю AmneziaVPN..."
+    DMG="/tmp/amnezia.dmg"
+    URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
+      | /usr/bin/python3 -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")')
+    if [ -n "$URL" ]; then
+      dl "$URL" "$DMG"
+    else
+      DMG=""
+    fi
+  fi
+  if [ -n "$DMG" ] && [ -f "$DMG" ]; then
     MNT="/tmp/hm_amnezia_mnt"; mkdir -p "$MNT"
     hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null
     APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)

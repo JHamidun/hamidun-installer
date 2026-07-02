@@ -11,7 +11,9 @@ if [ ! -f "$SRC/pyproject.toml" ]; then
   REPO=""
   CFG="$DIR/../../config.json"
   if [ -f "$CFG" ]; then
-    REPO=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("nomad",{}).get("repoUrl",""))' -- "$CFG" 2>/dev/null || echo "")
+    # Парсим nomad.repoUrl без python (иначе bare python3 без CLT дёргает диалог).
+    # Берём первую строку вида "repoUrl": "..." и вытаскиваем значение в кавычках.
+    REPO=$(grep -o '"repoUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$CFG" 2>/dev/null | head -n1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
   fi
   if [ -n "$REPO" ]; then
     SRC="$HOME/.nomad-src"

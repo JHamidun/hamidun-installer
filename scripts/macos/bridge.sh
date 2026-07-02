@@ -21,8 +21,18 @@ mkdir -p "$DST"
 cp -f "$AGENT" "$DST/bridge_agent.py"
 
 WH="${HM_VENDOR:-}/pywheels"
-if [ -d "$WH" ]; then "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" pystray pillow >/dev/null 2>&1 || true
-else "$PY" -m pip install --user --break-system-packages pystray pillow >/dev/null 2>&1 || true; fi
+TRAY_OK=1
+if [ -d "$WH" ]; then
+  "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" pystray pillow >/dev/null 2>&1 || TRAY_OK=0
+else
+  "$PY" -m pip install --user --break-system-packages pystray pillow >/dev/null 2>&1 || TRAY_OK=0
+fi
+# честная проверка: реально ли доступны модули трея (pip мог упасть на чужом Python)
+if ! "$PY" -c "import pystray, PIL" >/dev/null 2>&1; then TRAY_OK=0; fi
+if [ "$TRAY_OK" != "1" ]; then
+  echo "  ВНИМАНИЕ: pystray/pillow не установились — значок в трее будет недоступен."
+  echo "  Мост будет работать в фоне (headless) и включаться только по сохранённому состоянию/боту."
+fi
 
 CFG="$DST/config.json"
 if [ ! -f "$CFG" ]; then
@@ -40,13 +50,21 @@ fi
 
 LA="$HOME/Library/LaunchAgents/com.hamidun.bridge.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
+# Если трей доступен — запускаем БЕЗ --headless: значок реально появляется в меню-баре
+# и пользователь может включить мост. Если трея нет — --headless (уважает сохранённое
+# enabled и мягко простаивает, системный прокси не трогает).
+if [ "$TRAY_OK" = "1" ]; then
+  MODE_ARG="<string>$DST/bridge_agent.py</string>"
+else
+  MODE_ARG="<string>$DST/bridge_agent.py</string><string>--headless</string>"
+fi
 cat > "$LA" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.hamidun.bridge</string>
   <key>ProgramArguments</key>
-  <array><string>$PY</string><string>$DST/bridge_agent.py</string><string>--headless</string></array>
+  <array><string>$PY</string>$MODE_ARG</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict></plist>
@@ -54,6 +72,7 @@ EOF
 launchctl unload "$LA" 2>/dev/null || true
 launchctl load "$LA" 2>/dev/null || true
 
-if [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен. Сервер настроен."
-else echo "OK: AI-мост установлен. Сервер ещё не настроен — включится после доступа в боте."; fi
+if [ "$TRAY_OK" = "1" ]; then TRAY_MSG="значок в меню-баре"; else TRAY_MSG="фоновый режим без значка"; fi
+if [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). Сервер настроен."
+else echo "OK: AI-мост установлен ($TRAY_MSG). Сервер ещё не настроен — включится после доступа в боте."; fi
 exit 0

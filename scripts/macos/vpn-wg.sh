@@ -19,19 +19,28 @@ NAME=$(printf '%s' "$RESP" | /usr/bin/python3 -c 'import sys,json;print(json.loa
 
 # Установить полный клиент AmneziaVPN (на macOS он включает поддержку AmneziaWG)
 if [ ! -d "/Applications/AmneziaVPN.app" ]; then
-  echo "Скачиваю AmneziaVPN..."
-  DMG="/tmp/amnezia.dmg"
-  URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
-    | /usr/bin/python3 -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")')
-  if [ -n "$URL" ]; then
-    dl "$URL" "$DMG"
+  DMG=""
+  if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
+    DMG="$HM_VENDOR/apps/amneziavpn.dmg"
+    echo "AmneziaVPN из встроенного dmg (офлайн)..."
+  else
+    echo "Скачиваю AmneziaVPN..."
+    DMG="/tmp/amnezia.dmg"
+    URL=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest \
+      | /usr/bin/python3 -c 'import sys,json;a=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"] if x["name"].lower().endswith(".dmg")];print(a[0] if a else "")')
+    if [ -n "$URL" ]; then
+      dl "$URL" "$DMG"
+    else
+      DMG=""
+      echo "Не нашёл .dmg в релизах — скачайте вручную с amnezia.org."
+    fi
+  fi
+  if [ -n "$DMG" ] && [ -f "$DMG" ]; then
     MNT="/tmp/hm_amnezia_mnt"; mkdir -p "$MNT"
     hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null
     APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
     admin_run "cp -R '$MNT/$APP' /Applications/"
     hdiutil detach "$MNT" >/dev/null || true
-  else
-    echo "Не нашёл .dmg в релизах — скачайте вручную с amnezia.org."
   fi
 fi
 

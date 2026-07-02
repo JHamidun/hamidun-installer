@@ -32,8 +32,17 @@ $pyw = Join-Path (Split-Path $py) 'pythonw.exe'
 New-Item -ItemType Directory -Force $dst | Out-Null
 Copy-Item -Force $agentSrc (Join-Path $dst 'bridge_agent.py')
 $wheels = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'pywheels' } else { '' }
+# stderr от pip — это не фатал (нативная тулза), поэтому Out-Null для потока,
+# но статус берём из $LASTEXITCODE + честной проверки импорта модулей.
 if ($wheels -and (Test-Path $wheels)) { & $py -m pip install --user --no-index --find-links $wheels pystray pillow 2>&1 | Out-Null }
 else { & $py -m pip install --user pystray pillow 2>&1 | Out-Null }
+$pipExit = $LASTEXITCODE
+& $py -c "import pystray, PIL" 2>&1 | Out-Null
+$trayOk = ($LASTEXITCODE -eq 0)
+if (-not $trayOk) {
+    Write-Host "ВНИМАНИЕ: pystray/pillow не установились (pip exit=$pipExit) — значок в трее будет недоступен."
+    Write-Host "Мост сможет работать в фоне, но переключать его из трея не получится, пока не поставите пакеты."
+}
 
 # 4. конфиг агента (если ещё нет)
 $cfgPath = Join-Path $dst 'config.json'
@@ -52,6 +61,7 @@ $agentPath = Join-Path $dst 'bridge_agent.py'
 New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
 Start-Process -FilePath $run -ArgumentList "`"$agentPath`"" -WindowStyle Hidden
 
-if ($env:HM_BRIDGE_ENDPOINT) { Write-Host "OK: AI-мост установлен (значок в трее). Сервер настроен — включай в трее." }
-else { Write-Host "OK: AI-мост установлен (значок в трее). Сервер ещё не настроен — мост включится, когда получишь доступ в боте." }
+$trayMsg = if ($trayOk) { 'значок в трее' } else { 'фоновый режим без значка (pystray/pillow не встали)' }
+if ($env:HM_BRIDGE_ENDPOINT) { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер настроен — включай в трее." }
+else { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер ещё не настроен — мост включится, когда получишь доступ в боте." }
 exit 0

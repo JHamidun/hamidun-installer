@@ -110,8 +110,18 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 
   let cmd, args;
   if (IS_WIN) {
+    // PowerShell 5.1 emits pipe output in the console's OEM code page (CP866 on
+    // ru-RU Windows). Node reads the pipe as UTF-8, so Cyrillic logs turn to
+    // garbage. Force the console output encoding to UTF-8 *before* running the
+    // script, then invoke it via the call operator so its own `exit N` becomes
+    // this process's exit code. Escape single quotes in the path ('  -> '').
+    const psScript = script.replace(/'/g, "''");
+    const inline =
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "& '" + psScript + "'";
     cmd = 'powershell.exe';
-    args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-File', script];
+    args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
     cmd = '/bin/bash';
     args = [script];
