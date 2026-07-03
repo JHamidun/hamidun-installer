@@ -15,7 +15,12 @@ if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\claude-code.vsix'; 
 if (-not $DRY) { Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 600 }
 
 function Test-ExtPresent($cli) {
-    try { $list = & $cli --list-extensions 2>$null; return (("$list") -match [regex]::Escape($extId)) } catch { return $false }
+    # --list-extensions может лагать сразу после установки — ретраим.
+    for ($k = 0; $k -lt 3; $k++) {
+        try { $list = & $cli --list-extensions 2>$null; if (("$list") -match [regex]::Escape($extId)) { return $true } } catch { }
+        Start-Sleep -Milliseconds 1500
+    }
+    return $false
 }
 
 function Install-Into($cli, $label) {
@@ -37,10 +42,16 @@ function Install-Into($cli, $label) {
     Write-Host "  ${label}: расширение не подтвердилось."; return $false
 }
 
-# Cursor CLI (только настоящий cursor.cmd)
+# Cursor CLI — перебор кандидатов (на свежей установке путь варьируется).
 $cursorCli = $null
-$cc = Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'
-if (Test-Path $cc) { $cursorCli = $cc } else { $g = Get-Command cursor -ErrorAction SilentlyContinue; if ($g) { $cursorCli = $g.Source } }
+$cursorCands = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\bin\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\Cursor.exe')
+)
+foreach ($p in $cursorCands) { if (Test-Path $p) { $cursorCli = $p; break } }
+if (-not $cursorCli) { $g = Get-Command cursor -ErrorAction SilentlyContinue; if ($g) { $cursorCli = $g.Source } }
 if (Install-Into $cursorCli 'Cursor') { $installed = $true } elseif (-not $cursorCli) { Write-Host "Cursor CLI не найден — пропускаю Cursor." }
 
 # Настоящий VS Code (НЕ курсоровский code-шим, который отдаёт VS Code 1.67.1)

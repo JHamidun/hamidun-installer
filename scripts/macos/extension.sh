@@ -15,8 +15,16 @@ OK=0
 # Честный статус: расширение реально в списке, а не только exit code инсталлятора.
 # Без grep -iF (падает на GNU grep 3.0): сравнение в lowercase через tr + точный -Fx.
 ext_present() {
-  "$1" --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' \
-    | grep -Fx "$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')" >/dev/null
+  # ретрай: --list-extensions лагает сразу после установки
+  k=0
+  while [ "$k" -lt 3 ]; do
+    if "$1" --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' \
+        | grep -Fx "$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')" >/dev/null; then
+      return 0
+    fi
+    k=$((k + 1)); sleep 1
+  done
+  return 1
 }
 
 install_into() {

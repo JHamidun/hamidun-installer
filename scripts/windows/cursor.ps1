@@ -32,7 +32,10 @@ if ($DRY) { Write-Host "[dry-run] Cursor: ветка выбрана, без из
 # ВАЖНО: установщик Cursor сам запускает Cursor. С -Wait шаг завис бы до закрытия окна (баг с теста).
 # Запускаем БЕЗ -Wait, ждём появления Cursor.exe, затем гасим авто-запущенный Cursor (чтобы не блокировал
 # и чтобы следующий шаг — установка расширения — не падал с 'aborted' при открытом Cursor).
-if ($inst) { Start-Process -FilePath $inst -ArgumentList '/S' }
+if ($inst) {
+    Write-Host "Установщик Cursor может показать окно «This User Installer is not meant to run as Administrator» — нажми OK, это нормально (весь установщик запущен под админом ради VPN)."
+    Start-Process -FilePath $inst -ArgumentList '/S'
+}
 for ($i = 0; $i -lt 180 -and -not (Test-Path $cexe); $i++) { Start-Sleep -Seconds 1 }
 Start-Sleep -Seconds 2
 Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
