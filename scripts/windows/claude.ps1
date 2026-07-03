@@ -69,9 +69,23 @@ function Find-ClaudeBinary {
     return $null
 }
 
+# Прописать каталог в ПОЛЬЗОВАТЕЛЬСКИЙ PATH, чтобы `claude` работал в новом
+# терминале (npm-global-prefix / ~/.local\bin часто не в PATH пользователя).
+function Add-ToUserPath($dir) {
+    if (-not $dir -or -not (Test-Path $dir)) { return }
+    $userPath = [Environment]::GetEnvironmentVariable('Path','User'); if (-not $userPath) { $userPath = '' }
+    $parts = $userPath.Split(';') | Where-Object { $_ -ne '' }
+    if ($parts -notcontains $dir) {
+        [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $dir).TrimStart(';')), 'User')
+        Write-Host "Добавил $dir в PATH пользователя."
+    }
+}
+
 $claudeBin = Find-ClaudeBinary
 if ($claudeBin) {
-    Write-Host "OK: Claude Code CLI установлен ($claudeBin)."
+    Add-ToUserPath (Split-Path $claudeBin)
+    Add-ToUserPath (Join-Path $env:USERPROFILE '.local\bin')
+    Write-Host "OK: Claude Code CLI установлен ($claudeBin). Открой НОВЫЙ терминал, чтобы работала команда claude."
     exit 0
 }
 

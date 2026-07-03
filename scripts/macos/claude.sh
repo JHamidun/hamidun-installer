@@ -26,12 +26,25 @@ if [ "$INSTALLED" -eq 0 ]; then
   fi
 fi
 
+# Прописываем ~/.local/bin в PATH новых терминалов — иначе `claude` в Terminal
+# не находится (native-installer кладёт бинарь туда, а этой папки нет в PATH по умолчанию).
+persist_local_bin_path() {
+  line='export PATH="$HOME/.local/bin:$PATH"'
+  for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+    [ -e "$rc" ] || : > "$rc"
+    if ! grep -qF 'HAMIDUN_LOCAL_BIN' "$rc" 2>/dev/null; then
+      printf '\n# HAMIDUN_LOCAL_BIN — claude в PATH\n%s\n' "$line" >> "$rc"
+    fi
+  done
+}
+
 # Честная проверка: бинарь реально на диске? (иначе — красный статус, а не ложный OK)
 export PATH="$HOME/.local/bin:$PATH"
-if have claude; then
-  echo "OK: $(claude --version 2>&1 | head -n1)"; exit 0
-elif [ -x "$HOME/.local/bin/claude" ]; then
-  echo "OK: claude установлен в ~/.local/bin — появится в PATH после перезапуска терминала."; exit 0
+if have claude || [ -x "$HOME/.local/bin/claude" ]; then
+  persist_local_bin_path
+  if have claude; then echo "OK: $(claude --version 2>&1 | head -n1)"
+  else echo "OK: claude установлен, PATH прописан — открой НОВЫЙ терминал для команды claude."; fi
+  exit 0
 else
   echo "ОШИБКА: Claude Code CLI не установился — смотри лог выше."; exit 1
 fi
