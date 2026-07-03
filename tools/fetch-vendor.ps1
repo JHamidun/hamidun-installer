@@ -157,19 +157,21 @@ if ($py) {
 
 Write-Host "[vendor] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
 try {
-  $sums = [ordered]@{}
+  # Чистый .NET (Get-FileHash недоступен в powershell electron-builder-сборки —
+  # модуль Utility не подхватывается; ConvertTo-Json тоже избегаем).
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $entries = New-Object System.Collections.ArrayList
   Get-ChildItem $apps -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object Name | ForEach-Object {
-    $h = Get-FileHash $_.FullName -Algorithm SHA256
-    $sums[$_.Name] = [ordered]@{ sha256 = $h.Hash.ToLower(); bytes = $_.Length }
+    $fs = [IO.File]::OpenRead($_.FullName)
+    try { $hb = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
+    $hex = ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
+    [void]$entries.Add('    "' + $_.Name + '": { "sha256": "' + $hex + '", "bytes": ' + $_.Length + ' }')
   }
-  $chk = [ordered]@{
-    generatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    algorithm   = 'sha256'
-    files       = $sums
-  }
+  $ts = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $json = "{`r`n  ""generatedAt"": ""$ts"",`r`n  ""algorithm"": ""sha256"",`r`n  ""files"": {`r`n" + ($entries -join ",`r`n") + "`r`n  }`r`n}`r`n"
   $chkPath = Join-Path $root 'vendor\checksums.json'
-  [IO.File]::WriteAllText($chkPath, (ConvertTo-Json $chk -Depth 5))
-  Write-Host ("  файлов захешировано: {0}" -f $sums.Count)
+  [IO.File]::WriteAllText($chkPath, $json)
+  Write-Host ("  файлов захешировано: {0}" -f $entries.Count)
 } catch { Write-Host "  ! checksums.json не сгенерирован - $($_.Exception.Message)" }
 
 Write-Host "[vendor] Проверка полноты vendor..."
