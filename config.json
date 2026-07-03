@@ -21,7 +21,9 @@
   "finish": {
     "autoOpenCursorDefault": true,
     "credentialsRelPath": ".claude/.credentials.master.env",
-    "botStartPayload": "installed"
+    "botStartPayload": "installed",
+    "_comment_startHtml": "Оффлайн-чеклист «Первые 10 минут» (бандлится в resources/assets). Фолбэк, когда links.video пуст.",
+    "startHtmlRelPath": "assets/START-HERE.html"
   },
   "links": {
     "support": "https://hamidun.com",

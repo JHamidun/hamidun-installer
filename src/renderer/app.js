@@ -10,15 +10,26 @@ let STATE = {
   groups: [],
   byId: {},        // id -> component
   selected: {},    // id -> bool
+  logPath: '',     // ~/.hamidun-setup/install.log (из bootstrap)
+  freeGB: null,    // свободное место на диске в ГБ (preflight, из bootstrap)
+  checks: [],      // результаты "CHECK ok/fail <ярлык>" от компонента verify
 };
 
 const $ = (sel) => document.querySelector(sel);
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
 
 async function init() {
   const boot = await window.installer.bootstrap();
   STATE.platform = boot.platform;
   STATE.homedir = boot.homedir;
   STATE.config = boot.config || {};
+  STATE.logPath = boot.logPath || '';
+  STATE.freeGB = (typeof boot.freeGB === 'number') ? boot.freeGB : null;
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -33,6 +44,7 @@ async function init() {
 
   renderGroups();
   renderPacks();
+  renderPreflight();
   refreshDerived();
 
   $('#btn-install').addEventListener('click', startInstall);
@@ -71,16 +83,27 @@ function selectedIds() {
 // Topological order so deps install before dependents (logic in deps.js).
 function installOrder() { return window.HMDeps.installOrder(STATE.selected, STATE.byId); }
 
+// Компонент проверки "verify" (hidden, авто-включён) всегда идёт последним —
+// он проверяет всё, что поставили остальные.
+function ensureVerifyLast(ids) {
+  if (ids.indexOf('verify') === -1) return ids;
+  return ids.filter((id) => id !== 'verify').concat('verify');
+}
+
 // ---- rendering ------------------------------------------------------
 
 function renderGroups() {
   const root = $('#groups');
   root.innerHTML = '';
   STATE.groups.forEach((g) => {
+    // Скрытые (служебные) компоненты вроде "verify" не показываем в выборе,
+    // но они остаются в STATE.byId/STATE.selected и участвуют в установке.
+    const visible = g.components.filter((c) => !c.hidden);
+    if (!visible.length) return;
     const gd = document.createElement('div');
     gd.className = 'group';
     gd.innerHTML = `<div class="group-title">${g.title}</div>`;
-    g.components.forEach((c) => gd.appendChild(renderCard(c)));
+    visible.forEach((c) => gd.appendChild(renderCard(c)));
     root.appendChild(gd);
   });
 }
@@ -136,8 +159,22 @@ function setAllPacks(on) {
   refreshDerived();
 }
 
+// Preflight: жёлтое предупреждение о нехватке места (не блокирует установку).
+function renderPreflight() {
+  if (STATE.freeGB === null || STATE.freeGB >= 4) return;
+  if (document.getElementById('preflight-warn')) return;
+  const el = document.createElement('div');
+  el.id = 'preflight-warn';
+  el.className = 'preflight-warn';
+  el.innerHTML = `⚠️ На диске свободно всего <b>${STATE.freeGB} ГБ</b>, а для полной установки нужно ~4 ГБ. ` +
+    `Установка может прерваться — освободи место или сними тяжёлые компоненты (Python-пакеты, Nomad).`;
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+}
+
 function refreshDerived() {
-  const n = selectedIds().length;
+  // Скрытые компоненты не считаем в сводке — пользователь их не выбирал.
+  const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
   const np = Object.values(STATE.selectedPacks || {}).filter(Boolean).length;
   const total = (STATE.packsData.packs || []).length;
   $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}`;
@@ -224,7 +261,15 @@ function firstBrokenDep(id, badSet) {
 }
 
 async function runComponents(ids, env) {
-  const off = window.installer.onLog(({ line }) => appendLog(line));
+  const off = window.installer.onLog(({ line }) => {
+    // Строки "CHECK ok <ярлык>" / "CHECK fail <ярлык>" от verify-скрипта не
+    // сыпем в общий лог — собираем для чеклиста на финальном экране.
+    if (line.startsWith('CHECK ')) {
+      const m = line.match(/^CHECK (ok|fail)\s+(.*)$/);
+      if (m) { STATE.checks.push({ ok: m[1] === 'ok', label: m[2] }); return; }
+    }
+    appendLog(line);
+  });
   const failed = [];
   const skipped = [];
   const bad = new Set();
@@ -241,6 +286,8 @@ async function runComponents(ids, env) {
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
       continue;
     }
+    // Свежий прогон проверки — старые результаты чеклиста неактуальны.
+    if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
     const res = await window.installer.runComponent(id, env);
     if (res.ok) { setStep(id, 'done'); ok++; }
@@ -257,7 +304,7 @@ async function runComponents(ids, env) {
 }
 
 async function startInstall() {
-  const order = installOrder();
+  const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
   $('#view-select').classList.add('hidden');
   $('#view-progress').classList.remove('hidden');
@@ -268,6 +315,7 @@ async function startInstall() {
 }
 
 async function retryFailed(ids) {
+  ids = ensureVerifyLast(ids);
   $('#next-steps').classList.add('hidden');
   $('#btn-finish').classList.add('hidden');
   buildSteps(ids);
@@ -307,36 +355,102 @@ function renderNextSteps(failed, skipped) {
     : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button></div>` + skipHtml
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
+         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @HamidunAcademyBot.</div></div>` + skipHtml
     : '';
-  const botUrl = links.bot ? links.bot + (fin.botStartPayload ? '?start=' + encodeURIComponent(fin.botStartPayload) : '') : '';
+
+  // Deeplink в бота: payload кодирует результат (_f/_ok) и платформу (w/m), ≤64 символов.
+  const basePayload = fin.botStartPayload || 'installed';
+  const startPayload = (basePayload +
+    ((failed.length || skipped.length) ? '_f' : '_ok') +
+    '_' + (isWin ? 'w' : 'm')).slice(0, 64);
+  const botUrl = links.bot ? links.bot + '?start=' + encodeURIComponent(startPayload) : '';
   const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
+  const logBtn = STATE.logPath ? `<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>` : '';
+
+  // Чеклист из verify-скрипта ("CHECK ok/fail <ярлык>").
+  const checks = STATE.checks || [];
+  const checksHtml = checks.length
+    ? `<div class="ns-checks">
+         <div class="ns-checks-title">Проверка установки</div>
+         <ul class="ns-check-list">${checks.map((c) =>
+           `<li class="${c.ok ? 'ok' : 'fail'}"><span class="mark">${c.ok ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`).join('')}
+         </ul>
+       </div>`
+    : '';
+
+  // Мини-визард ключей: пишутся merge'ем в .credentials.master.env.
+  const keysHtml = `
+    <div class="ns-keys">
+      <div class="ns-keys-title">API-ключи для доп. сервисов (необязательно — можно добавить позже)</div>
+      <div class="ns-keys-grid">
+        <input id="key-GOOGLE_API_KEY" type="text" placeholder="GOOGLE_API_KEY — Gemini: картинки, видео" autocomplete="off" spellcheck="false" />
+        <input id="key-OPENAI_API_KEY" type="text" placeholder="OPENAI_API_KEY — GPT, DALL-E" autocomplete="off" spellcheck="false" />
+        <input id="key-ELEVENLABS_API_KEY" type="text" placeholder="ELEVENLABS_API_KEY — озвучка" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="ns-keys-row">
+        <button type="button" id="ns-save-keys" class="btn-sm">Сохранить ключи</button>
+        <span id="ns-keys-status" class="ns-keys-status"></span>
+      </div>
+    </div>`;
 
   const ns = $('#next-steps');
   ns.innerHTML = `
     <div class="ns-title">Что дальше</div>
     <ol class="ns-steps">
-      <li>Открой <b>Cursor</b> → панель <b>Claude Code</b> → войди своей подпиской (Pro/Max). Или в терминале команда <code>claude</code>.</li>
-      <li>Если нужны доп. сервисы — вставь API-ключи в файл <code>.credentials.master.env</code>.</li>
+      <li>Нажми <b>«Войти в Claude сейчас»</b> — откроется терминал с Claude Code, войди своей подпиской (Pro/Max). Позже это же — панель Claude Code в Cursor или команда <code>claude</code>.</li>
+      <li>Если нужны доп. сервисы — вставь API-ключи ниже или в файл <code>.credentials.master.env</code>.</li>
       <li>Готово — можно работать. Продолжение инструкции — в боте.</li>
     </ol>
+    ${checksHtml}
     ${failHtml}
     <div class="ns-actions">
+      <button type="button" id="ns-claude" class="btn-sm primary">⚡ Войти в Claude сейчас</button>
       <button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>
       <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
+      ${logBtn}
       ${botBtn}
       ${videoBtn}
     </div>
+    ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autocursor" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть Cursor при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');
 
+  $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
   $('#ns-cursor').addEventListener('click', () => window.installer.launchCursor());
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
   $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
+  const logBtnEl = $('#ns-log');
+  if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
+  const saveKeysBtn = $('#ns-save-keys');
+  if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);
   ns.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => window.installer.openExternal(b.dataset.ext)));
   const retry = $('#ns-retry');
   if (retry) retry.addEventListener('click', () => retryFailed(retryList));
+}
+
+const CRED_KEY_NAMES = ['GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
+
+async function saveCredentialKeys() {
+  const status = $('#ns-keys-status');
+  const keys = {};
+  CRED_KEY_NAMES.forEach((k) => {
+    const el = document.getElementById('key-' + k);
+    const v = el ? el.value.trim() : '';
+    if (v) keys[k] = v; // пустые поля игнорируем
+  });
+  if (!Object.keys(keys).length) {
+    if (status) status.textContent = 'Заполни хотя бы одно поле.';
+    return;
+  }
+  if (status) status.textContent = 'Сохраняю…';
+  const res = await window.installer.saveCredentials(keys);
+  if (status) {
+    status.textContent = res && res.ok
+      ? `Сохранено (${(res.saved || []).length}) в .credentials.master.env ✓`
+      : 'Не удалось сохранить: ' + ((res && res.error) || 'неизвестная ошибка');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -57,6 +57,39 @@ else
   fi
 fi
 
+echo "[vendor-mac] JetBrains Mono Regular (шрифт, лицензия OFL)..."
+FONT="$APPS/JetBrainsMono-Regular.ttf"
+if [ -s "$FONT" ]; then
+  echo "  skip $(basename "$FONT")"
+else
+  # Официальный релиз JetBrains/JetBrainsMono — zip с fonts/ttf/*.ttf внутри.
+  JBURL=$(curl -fsSL https://api.github.com/repos/JetBrains/JetBrainsMono/releases/latest | "$PY" -c 'import sys,json;A=[x["browser_download_url"] for x in json.load(sys.stdin).get("assets",[]) if x["name"].startswith("JetBrainsMono-") and x["name"].endswith(".zip")];print(A[0] if A else "")' 2>/dev/null)
+  if [ -n "$JBURL" ]; then
+    JBZIP="$APPS/_jbmono.zip"
+    JBTMP="$APPS/_jbmono_extract"
+    echo "  GET $JBURL"
+    if curl -fsSL "$JBURL" -o "$JBZIP"; then
+      rm -rf "$JBTMP"; mkdir -p "$JBTMP"
+      unzip -q -o "$JBZIP" -d "$JBTMP" 2>/dev/null || echo "  ! zip не распаковался"
+      JBTTF=$(find "$JBTMP" -type f -name 'JetBrainsMono-Regular.ttf' 2>/dev/null | head -n 1)
+      [ -n "$JBTTF" ] && cp -f "$JBTTF" "$FONT"
+      rm -rf "$JBTMP" "$JBZIP"
+    else
+      echo "  ! релиз JetBrains Mono не скачался"
+    fi
+  fi
+  if [ ! -s "$FONT" ]; then
+    # Фолбэк: raw-файл из репозитория (тот же OFL ttf).
+    dl "https://github.com/JetBrains/JetBrainsMono/raw/master/fonts/ttf/JetBrainsMono-Regular.ttf" "$FONT"
+  fi
+  if [ -s "$FONT" ]; then
+    echo "  ok $(basename "$FONT")"
+  else
+    rm -f "$FONT"
+    echo "  ! шрифт не скачался — extension поставится без шрифта (не критично)"
+  fi
+fi
+
 echo "[vendor-mac] Python wheels (macosx, под bundled python 3.12)..."
 WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
 REQ="$ROOT/vendor/config-pack/requirements.txt"
@@ -72,6 +105,26 @@ PW="$ROOT/vendor/playwright-browsers"; mkdir -p "$PW"
 PLAYWRIGHT_BROWSERS_PATH="$PW" "$PY" -m playwright install chromium >/dev/null 2>&1 || true
 
 echo "[vendor-mac] Git: оставлен системный/CLT (офлайн-бандл git на mac — на будущее)."
+
+echo "[vendor-mac] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
+CHK="$ROOT/vendor/checksums.json"
+{
+  printf '{\n'
+  printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '  "algorithm": "sha256",\n'
+  printf '  "files": {\n'
+  CHK_FIRST=1
+  for f in "$APPS"/*; do
+    [ -f "$f" ] || continue
+    [ -s "$f" ] || continue
+    CHK_SUM=$(shasum -a 256 "$f" | awk '{print $1}')
+    CHK_SIZE=$(wc -c < "$f" | tr -d ' ')
+    if [ "$CHK_FIRST" -eq 1 ]; then CHK_FIRST=0; else printf ',\n'; fi
+    printf '    "%s": { "sha256": "%s", "bytes": %s }' "$(basename "$f")" "$CHK_SUM" "$CHK_SIZE"
+  done
+  printf '\n  }\n}\n'
+} > "$CHK"
+echo "  файлов захешировано: $(find "$APPS" -type f -size +0c 2>/dev/null | wc -l | tr -d ' ')"
 
 echo "[vendor-mac] Проверка полноты vendor..."
 MISSING=""

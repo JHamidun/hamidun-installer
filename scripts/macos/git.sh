@@ -2,9 +2,25 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
+# Дружелюбные git-дефолты (идемпотентно; ошибки конфигурации НЕ валят установку).
+set_git_defaults() {
+  git config --global core.longpaths true 2>/dev/null || true
+  git config --global init.defaultBranch main 2>/dev/null || true
+  git config --global core.autocrlf input 2>/dev/null || true
+  if [ -z "$(git config --global user.name 2>/dev/null || true)" ]; then
+    un="${USER:-user}"
+    git config --global user.name "$un" 2>/dev/null || true
+    git config --global user.email "${un}@example.com" 2>/dev/null || true
+    echo "Git: user.name/user.email заданы по умолчанию — поменяй потом: git config --global user.email твоя@почта"
+  fi
+  echo "Git-дефолты применены (longpaths, main, autocrlf=input)."
+}
+
 echo "Проверяю Git..."
 if have git && git --version >/dev/null 2>&1; then
-  echo "Git уже установлен: $(git --version)"; exit 0
+  echo "Git уже установлен: $(git --version)"
+  set_git_defaults
+  exit 0
 fi
 
 echo "Запускаю установку Command Line Tools (включает Git)..."
@@ -24,7 +40,9 @@ git_ready() {
 i=0
 while [ "$i" -lt 90 ]; do
   if git_ready; then
-    echo "OK: Git установлен: $(git --version 2>/dev/null || echo ok)"; exit 0
+    echo "OK: Git установлен: $(git --version 2>/dev/null || echo ok)"
+    set_git_defaults
+    exit 0
   fi
   i=$((i + 1))
   sleep 10

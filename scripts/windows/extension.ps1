@@ -48,6 +48,47 @@ $codeCli = $null
 foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) { if (Test-Path $p) { $codeCli = $p; break } }
 if ($codeCli) { if (Install-Into $codeCli 'VS Code') { $installed = $true } }
 
+# --- вшитый шрифт JetBrains Mono (пер-юзерно, БЕЗ админа) ---
+$fontSrc = ''
+if ($env:HM_VENDOR) { $f = Join-Path $env:HM_VENDOR 'apps\JetBrainsMono-Regular.ttf'; if (Test-Path $f) { $fontSrc = $f } }
+if ($fontSrc) {
+    if ($DRY) { Write-Host "  [dry-run] WOULD: установить шрифт JetBrains Mono (пер-юзерно) из $fontSrc" }
+    else {
+        try {
+            $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
+            New-Item -ItemType Directory -Force $fontDir | Out-Null
+            $fontDst = Join-Path $fontDir 'JetBrainsMono-Regular.ttf'
+            Copy-Item -Force $fontSrc $fontDst
+            $regKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+            if (-not (Test-Path $regKey)) { New-Item -Path $regKey -Force | Out-Null }
+            New-ItemProperty -Path $regKey -Name 'JetBrains Mono Regular (TrueType)' -Value $fontDst -PropertyType String -Force | Out-Null
+            Write-Host "Шрифт JetBrains Mono установлен (пер-юзерно)."
+        } catch { Write-Host "Шрифт не установился: $($_.Exception.Message)" }
+    }
+}
+
+# --- сид settings.json Cursor (ТОЛЬКО если файла нет; существующий НЕ трогаем) ---
+$cursorSettings = Join-Path $env:APPDATA 'Cursor\User\settings.json'
+if (Test-Path $cursorSettings) {
+    Write-Host "settings.json Cursor уже существует — не трогаю."
+} else {
+    if ($DRY) { Write-Host "  [dry-run] WOULD: создать $cursorSettings (autoSave + JetBrains Mono)" }
+    else {
+        try {
+            New-Item -ItemType Directory -Force (Split-Path $cursorSettings) | Out-Null
+            $seed = @'
+{
+  "files.autoSave": "afterDelay",
+  "editor.fontFamily": "JetBrains Mono",
+  "terminal.integrated.fontFamily": "JetBrains Mono"
+}
+'@
+            Set-Content -Path $cursorSettings -Value $seed -Encoding UTF8
+            Write-Host "Создал стартовый settings.json Cursor (autoSave + JetBrains Mono)."
+        } catch { Write-Host "settings.json Cursor не создался: $($_.Exception.Message)" }
+    }
+}
+
 if ($installed) { Write-Host "OK: расширение установлено."; exit 0 }
 Write-Host "Расширение не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
 exit 1

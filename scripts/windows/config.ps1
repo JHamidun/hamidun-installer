@@ -86,6 +86,20 @@ Restore-UserData $preserveDir
 Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
 Write-Host "Вернул твои ключи, память и историю сессий."
 
+# --- стартовый проект из вшитых ассетов (идемпотентно: существующий НЕ перезаписываем) ---
+$starterSrc = ''
+if ($env:HM_ASSETS) { $cand = Join-Path $env:HM_ASSETS 'starter-project'; if (Test-Path $cand) { $starterSrc = $cand } }
+if ($starterSrc) {
+    $starterDst = Join-Path $env:USERPROFILE 'HamidunStart'
+    if (Test-Path $starterDst) {
+        Write-Host "Стартовый проект уже есть: $starterDst — не перезаписываю."
+    } else {
+        Write-Host "Копирую стартовый проект в $starterDst..."
+        try { Copy-Item -Recurse -Force $starterSrc $starterDst -ErrorAction Stop; Write-Host "Стартовый проект создан: $starterDst" }
+        catch { Write-Host "Стартовый проект не скопировался: $($_.Exception.Message)" }
+    }
+}
+
 # Честная проверка: конфиг реально развернулся?
 $dst = Join-Path $env:USERPROFILE '.claude'
 if ((Test-Path (Join-Path $dst 'skills')) -or (Test-Path (Join-Path $dst 'settings.json'))) {

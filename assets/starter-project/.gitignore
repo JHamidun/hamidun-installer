@@ -1,0 +1,22 @@
+# Секреты — никогда не сохраняй в git
+.env
+*.env
+*.key
+*.pem
+credentials*.json
+
+# Зависимости и кеши
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Мусор операционной системы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Логи и временные файлы
+*.log
+*.tmp

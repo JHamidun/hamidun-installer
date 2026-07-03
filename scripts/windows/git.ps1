@@ -3,8 +3,28 @@ $ErrorActionPreference = 'Stop'
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 
 $DRY = [bool]$env:HM_DRY_RUN
+
+# Дружелюбные git-дефолты (идемпотентно; ошибки конфигурации НЕ валят установку).
+function Set-HmGitDefaults {
+    $ErrorActionPreference = 'Continue'
+    try {
+        git config --global core.longpaths true 2>$null
+        git config --global init.defaultBranch main 2>$null
+        git config --global core.autocrlf true 2>$null
+        $un = ''
+        try { $un = ("$(git config --global user.name 2>$null)").Trim() } catch { }
+        if (-not $un) {
+            $name = if ($env:USERNAME) { $env:USERNAME } else { 'user' }
+            git config --global user.name "$name" 2>$null
+            git config --global user.email "$name@example.com" 2>$null
+            Write-Host "Git: user.name/user.email заданы по умолчанию — поменяй потом: git config --global user.email твоя@почта"
+        }
+        Write-Host "Git-дефолты применены (longpaths, main, autocrlf)."
+    } catch { Write-Host "Git-дефолты: предупреждение: $($_.Exception.Message)" }
+}
+
 Write-Host "Проверяю Git..."
-if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "Git уже установлен: $(git --version)"; if (-not $DRY) { exit 0 } }
+if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "Git уже установлен: $(git --version)"; if (-not $DRY) { Set-HmGitDefaults; exit 0 } }
 
 $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\git-setup.exe' } else { '' }
 if ($local -and (Test-Path $local)) {
@@ -25,5 +45,5 @@ if ($local -and (Test-Path $local)) {
 
 if ($DRY) { Write-Host "[dry-run] Git: офлайн-ветка выбрана, без изменений."; exit 0 }
 Update-Path
-if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "OK: $(git --version)"; exit 0 }
+if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "OK: $(git --version)"; Set-HmGitDefaults; exit 0 }
 Write-Host "Git не обнаружен после установки."; exit 1

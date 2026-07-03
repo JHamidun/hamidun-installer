@@ -102,6 +102,36 @@ if (Test-Path $vsix) {
   } catch { Write-Host "  ! постобработка vsix не удалась - $($_.Exception.Message)" }
 } else { Write-Host "  ! VSIX недоступен — расширение поставится онлайн при установке" }
 
+Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
+$font = Join-Path $apps 'JetBrainsMono-Regular.ttf'
+if (Test-Path $font) {
+  Write-Host "  skip JetBrainsMono-Regular.ttf"
+} else {
+  # Официальный релиз JetBrains/JetBrainsMono — zip с fonts/ttf/*.ttf внутри.
+  try {
+    $rel = Invoke-RestMethod "https://api.github.com/repos/JetBrains/JetBrainsMono/releases/latest" -Headers $UA
+    $a = $rel.assets | Where-Object { $_.name -match '^JetBrainsMono-.*\.zip$' } | Select-Object -First 1
+    if ($a) {
+      $jbZip = Join-Path $apps '_jbmono.zip'
+      Write-Host "  GET  $($a.browser_download_url)"
+      Invoke-WebRequest $a.browser_download_url -OutFile $jbZip -MaximumRedirection 6 -UseBasicParsing
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      $za = [IO.Compression.ZipFile]::OpenRead($jbZip)
+      try {
+        $entry = $za.Entries | Where-Object { $_.FullName -match 'ttf[/\\]JetBrainsMono-Regular\.ttf$' } | Select-Object -First 1
+        if ($entry) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $font, $true) }
+      } finally { $za.Dispose() }
+      Remove-Item $jbZip -Force -ErrorAction SilentlyContinue
+    }
+  } catch { Write-Host "  ! релиз JetBrains Mono не скачался - $($_.Exception.Message)" }
+  if (-not (Test-Path $font)) {
+    # Фолбэк: raw-файл из репозитория (тот же OFL ttf).
+    Dl "https://github.com/JetBrains/JetBrainsMono/raw/master/fonts/ttf/JetBrainsMono-Regular.ttf" $font
+  }
+  if (Test-Path $font) { Write-Host "  ok JetBrainsMono-Regular.ttf" }
+  else { Write-Host "  ! шрифт не скачался — extension поставится без шрифта (не критично)" }
+}
+
 Write-Host "[vendor] Python wheels (под локальный Python = bundled Python, без кросс-флагов)..."
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 $req = Join-Path $root 'vendor\config-pack\requirements.txt'
@@ -124,6 +154,23 @@ if ($py) {
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
   } catch { Write-Host "  (playwright browsers пропущены: $($_.Exception.Message))" }
 }
+
+Write-Host "[vendor] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
+try {
+  $sums = [ordered]@{}
+  Get-ChildItem $apps -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object Name | ForEach-Object {
+    $h = Get-FileHash $_.FullName -Algorithm SHA256
+    $sums[$_.Name] = [ordered]@{ sha256 = $h.Hash.ToLower(); bytes = $_.Length }
+  }
+  $chk = [ordered]@{
+    generatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    algorithm   = 'sha256'
+    files       = $sums
+  }
+  $chkPath = Join-Path $root 'vendor\checksums.json'
+  [IO.File]::WriteAllText($chkPath, (ConvertTo-Json $chk -Depth 5))
+  Write-Host ("  файлов захешировано: {0}" -f $sums.Count)
+} catch { Write-Host "  ! checksums.json не сгенерирован - $($_.Exception.Message)" }
 
 Write-Host "[vendor] Проверка полноты vendor..."
 $missing = @()

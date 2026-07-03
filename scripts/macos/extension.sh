@@ -46,5 +46,35 @@ if [ -x "$CODE_CLI" ]; then
   install_into "$CODE_CLI" "VS Code" && OK=1
 fi
 
+# --- вшитый шрифт JetBrains Mono (пер-юзерно, БЕЗ админа) ---
+if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf" ]; then
+  mkdir -p "$HOME/Library/Fonts"
+  if cp -f "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf" "$HOME/Library/Fonts/JetBrainsMono-Regular.ttf" 2>/dev/null; then
+    echo "Шрифт JetBrains Mono установлен (пер-юзерно)."
+  else
+    echo "Шрифт не скопировался — пропускаю."
+  fi
+fi
+
+# --- сид settings.json Cursor (ТОЛЬКО если файла нет; существующий НЕ трогаем) ---
+CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
+if [ -f "$CURSOR_SETTINGS" ]; then
+  echo "settings.json Cursor уже существует — не трогаю."
+else
+  mkdir -p "$(dirname "$CURSOR_SETTINGS")" 2>/dev/null || true
+  if cat > "$CURSOR_SETTINGS" <<'EOF'
+{
+  "files.autoSave": "afterDelay",
+  "editor.fontFamily": "JetBrains Mono",
+  "terminal.integrated.fontFamily": "JetBrains Mono"
+}
+EOF
+  then
+    echo "Создал стартовый settings.json Cursor (autoSave + JetBrains Mono)."
+  else
+    echo "settings.json Cursor не создался — пропускаю."
+  fi
+fi
+
 [ "$OK" -eq 1 ] && { echo "OK: расширение установлено."; exit 0; }
 echo "Не удалось установить расширение через CLI. Установите вручную из Marketplace ($EXT)."; exit 1

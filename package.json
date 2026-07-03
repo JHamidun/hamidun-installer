@@ -39,7 +39,9 @@
       { "from": "config.json", "to": "config.json" },
       { "from": "components.json", "to": "components.json" },
       { "from": "packs.json", "to": "packs.json" },
-      { "from": "vendor", "to": "vendor" }
+      { "from": "vendor", "to": "vendor" },
+      { "from": "assets/starter-project", "to": "assets/starter-project" },
+      { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }
     ],
     "win": {
       "target": [{ "target": "portable", "arch": ["x64"] }],

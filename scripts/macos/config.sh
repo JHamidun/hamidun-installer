@@ -80,6 +80,21 @@ restore_user_data "$PRESERVE_DIR"
 rm -rf "$PRESERVE_DIR"
 echo "Вернул твои ключи, память и историю сессий."
 
+# --- стартовый проект из вшитых ассетов (идемпотентно: существующий НЕ перезаписываем) ---
+if [ -n "${HM_ASSETS:-}" ] && [ -d "$HM_ASSETS/starter-project" ]; then
+  STARTER_DST="$HOME/HamidunStart"
+  if [ -e "$STARTER_DST" ]; then
+    echo "Стартовый проект уже есть: $STARTER_DST — не перезаписываю."
+  else
+    echo "Копирую стартовый проект в $STARTER_DST..."
+    if cp -R "$HM_ASSETS/starter-project" "$STARTER_DST" 2>/dev/null; then
+      echo "Стартовый проект создан: $STARTER_DST"
+    else
+      echo "Стартовый проект не скопировался — пропускаю."
+    fi
+  fi
+fi
+
 # --- честная проверка развёртывания (зеркало config.ps1) ---
 if [ -d "$CLAUDE_HOME/skills" ] || [ -f "$CLAUDE_HOME/settings.json" ]; then
   echo "OK: конфиг развёрнут. Заполни ~/.claude/.credentials.master.env"

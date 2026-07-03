@@ -48,6 +48,16 @@
           "requires": ["cursor"],
           "needsAdmin": false,
           "sizeHint": "~10 МБ"
+        },
+        {
+          "id": "verify",
+          "name": "Проверка установки",
+          "desc": "Служебный шаг: проверяет git/node/claude/конфиг/расширение и печатает чеклист. Выполняется всегда последним, в выборе не показывается.",
+          "hidden": true,
+          "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": ""
         }
       ]
     },
