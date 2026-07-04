@@ -9,27 +9,47 @@ function Update-Path {
 }
 Update-Path
 
+# Список выбранных компонентов (id через запятую, из HM_SELECTED). Снятые компоненты
+# помечаем как "skip", а не "fail", чтобы на экране «Готово» не было ложных крестиков.
+# Переменная не задана => старый вызов установщика: проверяем всё, как раньше.
+$SelectedIds = @()
+if ($env:HM_SELECTED) {
+    $SelectedIds = $env:HM_SELECTED.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+function Test-Selected([string]$id) {
+    if (-not $env:HM_SELECTED) { return $true }
+    return ($SelectedIds -contains $id)
+}
+
 Write-Host "Финальная проверка установки..."
 
 # --- Git ---
-$gitOk = $false
-if (Get-Command git -ErrorAction SilentlyContinue) {
-    try {
-        $v = ("$(git --version 2>$null)").Trim()
-        if ($v) { Write-Host "  git: $v"; $gitOk = $true }
-    } catch { }
+if (-not (Test-Selected 'git')) {
+    Write-Host "CHECK skip Git"
+} else {
+    $gitOk = $false
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        try {
+            $v = ("$(git --version 2>$null)").Trim()
+            if ($v) { Write-Host "  git: $v"; $gitOk = $true }
+        } catch { }
+    }
+    if ($gitOk) { Write-Host "CHECK ok Git" } else { Write-Host "CHECK fail Git" }
 }
-if ($gitOk) { Write-Host "CHECK ok Git" } else { Write-Host "CHECK fail Git" }
 
 # --- Node ---
-$nodeOk = $false
-if (Get-Command node -ErrorAction SilentlyContinue) {
-    try {
-        $v = ("$(node -v 2>$null)").Trim()
-        if ($v) { Write-Host "  node: $v"; $nodeOk = $true }
-    } catch { }
+if (-not (Test-Selected 'node')) {
+    Write-Host "CHECK skip Node"
+} else {
+    $nodeOk = $false
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        try {
+            $v = ("$(node -v 2>$null)").Trim()
+            if ($v) { Write-Host "  node: $v"; $nodeOk = $true }
+        } catch { }
+    }
+    if ($nodeOk) { Write-Host "CHECK ok Node" } else { Write-Host "CHECK fail Node" }
 }
-if ($nodeOk) { Write-Host "CHECK ok Node" } else { Write-Host "CHECK fail Node" }
 
 # --- Claude CLI (тот же поиск бинаря, что в claude.ps1 — не доверяем только PATH) ---
 function Find-ClaudeBinary {
@@ -59,39 +79,51 @@ function Find-ClaudeBinary {
 
     return $null
 }
-$claudeBin = Find-ClaudeBinary
-if ($claudeBin) {
-    Write-Host "  claude: $claudeBin"
-    Write-Host "CHECK ok Claude CLI"
+if (-not (Test-Selected 'claude')) {
+    Write-Host "CHECK skip Claude CLI"
 } else {
-    Write-Host "CHECK fail Claude CLI"
+    $claudeBin = Find-ClaudeBinary
+    if ($claudeBin) {
+        Write-Host "  claude: $claudeBin"
+        Write-Host "CHECK ok Claude CLI"
+    } else {
+        Write-Host "CHECK fail Claude CLI"
+    }
 }
 
 # --- Конфиг (~/.claude развёрнут?) ---
-$claudeHome = Join-Path $env:USERPROFILE '.claude'
-if ((Test-Path (Join-Path $claudeHome 'settings.json')) -or (Test-Path (Join-Path $claudeHome 'skills'))) {
-    Write-Host "CHECK ok Конфиг"
+if (-not (Test-Selected 'config')) {
+    Write-Host "CHECK skip Конфиг"
 } else {
-    Write-Host "CHECK fail Конфиг"
+    $claudeHome = Join-Path $env:USERPROFILE '.claude'
+    if ((Test-Path (Join-Path $claudeHome 'settings.json')) -or (Test-Path (Join-Path $claudeHome 'skills'))) {
+        Write-Host "CHECK ok Конфиг"
+    } else {
+        Write-Host "CHECK fail Конфиг"
+    }
 }
 
 # --- Расширение Claude Code (через НАСТОЯЩИЕ CLI Cursor / VS Code, не code-шим) ---
-$extId = if ($env:HM_CLAUDE_EXT_ID) { $env:HM_CLAUDE_EXT_ID } else { 'anthropic.claude-code' }
-$extOk = $false
-$clis = @()
-$cc = Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'
-if (Test-Path $cc) { $clis += $cc }
-foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) {
-    if (Test-Path $p) { $clis += $p; break }
+if (-not (Test-Selected 'extension')) {
+    Write-Host "CHECK skip Расширение"
+} else {
+    $extId = if ($env:HM_CLAUDE_EXT_ID) { $env:HM_CLAUDE_EXT_ID } else { 'anthropic.claude-code' }
+    $extOk = $false
+    $clis = @()
+    $cc = Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'
+    if (Test-Path $cc) { $clis += $cc }
+    foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) {
+        if (Test-Path $p) { $clis += $p; break }
+    }
+    foreach ($cli in $clis) {
+        if ($extOk) { break }
+        try {
+            $list = & $cli --list-extensions 2>$null
+            if (("$list") -match [regex]::Escape($extId)) { Write-Host "  расширение найдено через: $cli"; $extOk = $true }
+        } catch { }
+    }
+    if ($extOk) { Write-Host "CHECK ok Расширение" } else { Write-Host "CHECK fail Расширение" }
 }
-foreach ($cli in $clis) {
-    if ($extOk) { break }
-    try {
-        $list = & $cli --list-extensions 2>$null
-        if (("$list") -match [regex]::Escape($extId)) { Write-Host "  расширение найдено через: $cli"; $extOk = $true }
-    } catch { }
-}
-if ($extOk) { Write-Host "CHECK ok Расширение" } else { Write-Host "CHECK fail Расширение" }
 
 # Диагностика — не провал: всегда зелёный выход.
 exit 0

@@ -12,7 +12,9 @@ let STATE = {
   selected: {},    // id -> bool
   logPath: '',     // ~/.hamidun-setup/install.log (из bootstrap)
   freeGB: null,    // свободное место на диске в ГБ (preflight, из bootstrap)
-  checks: [],      // результаты "CHECK ok/fail <ярлык>" от компонента verify
+  checks: [],      // результаты "CHECK ok/fail/skip <ярлык>" от компонента verify
+  resourcesRoot: '', // абсолютный путь к ресурсам (для оффлайн START-HERE)
+  userWarning: '',   // предупреждение, если установщик запущен под другим пользователем
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -30,6 +32,8 @@ async function init() {
   STATE.config = boot.config || {};
   STATE.logPath = boot.logPath || '';
   STATE.freeGB = (typeof boot.freeGB === 'number') ? boot.freeGB : null;
+  STATE.resourcesRoot = boot.resourcesRoot || '';
+  STATE.userWarning = boot.userWarning || '';
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -45,6 +49,7 @@ async function init() {
   renderGroups();
   renderPacks();
   renderPreflight();
+  renderUserWarning();
   refreshDerived();
 
   $('#btn-install').addEventListener('click', startInstall);
@@ -172,6 +177,19 @@ function renderPreflight() {
   if (hero) hero.insertAdjacentElement('afterend', el);
 }
 
+// Жёлтый баннер, если установщик запущен под другим пользователем, чем
+// интерактивный (детект в main.js; на Windows пока пусто — см. TODO там).
+function renderUserWarning() {
+  if (!STATE.userWarning) return;
+  if (document.getElementById('userwarn')) return;
+  const el = document.createElement('div');
+  el.id = 'userwarn';
+  el.className = 'preflight-warn'; // переиспользуем жёлтый стиль preflight
+  el.innerHTML = '⚠️ ' + escapeHtml(STATE.userWarning);
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+}
+
 function refreshDerived() {
   // Скрытые компоненты не считаем в сводке — пользователь их не выбирал.
   const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
@@ -219,7 +237,10 @@ function envForRun() {
     HM_KEEP_SKILLS: Array.from(keep).join(','),
     HM_ALL_PACK_SKILLS: Array.from(allPackSkills).join(','),
     HM_BRIDGE_ENDPOINT: (cfg.bridge && cfg.bridge.enrollEndpoint) || '',
-    HM_BRIDGE_PACDOMAINS: ((cfg.bridge && cfg.bridge.pacDomains) || []).join(',')
+    HM_BRIDGE_PACDOMAINS: ((cfg.bridge && cfg.bridge.pacDomains) || []).join(','),
+    // Список выбранных компонентов (id через запятую). verify печатает "skip"
+    // для компонентов, которых тут нет, чтобы снятые не давали ложных крестиков.
+    HM_SELECTED: selectedIds().join(',')
   };
 }
 
@@ -265,8 +286,8 @@ async function runComponents(ids, env) {
     // Строки "CHECK ok <ярлык>" / "CHECK fail <ярлык>" от verify-скрипта не
     // сыпем в общий лог — собираем для чеклиста на финальном экране.
     if (line.startsWith('CHECK ')) {
-      const m = line.match(/^CHECK (ok|fail)\s+(.*)$/);
-      if (m) { STATE.checks.push({ ok: m[1] === 'ok', label: m[2] }); return; }
+      const m = line.match(/^CHECK (ok|fail|skip)\s+(.*)$/);
+      if (m) { STATE.checks.push({ status: m[1], ok: m[1] === 'ok', label: m[2] }); return; }
     }
     appendLog(line);
   });
@@ -315,7 +336,13 @@ async function startInstall() {
 }
 
 async function retryFailed(ids) {
-  ids = ensureVerifyLast(ids);
+  // Всегда доганяем verify последним, даже если его не было в failed/skipped —
+  // иначе чеклист останется со старыми крестиками у уже починенных компонентов
+  // (ensureVerifyLast отфильтрует дубликат и поставит verify в конец).
+  ids = ensureVerifyLast(ids.concat('verify'));
+  // Свежий прогон проверки: сбрасываем накопленный чеклист, чтобы он
+  // перерисовался по свежему запуску verify, а не по старым результатам.
+  STATE.checks = [];
   $('#next-steps').classList.add('hidden');
   $('#btn-finish').classList.add('hidden');
   buildSteps(ids);
@@ -327,11 +354,26 @@ async function retryFailed(ids) {
 function finishInstall(res) {
   const failed = res.failed || [];
   const skipped = res.skipped || [];
-  const okAll = failed.length === 0 && skipped.length === 0;
-  $('#progress-title').textContent = okAll ? 'Готово!' : 'Установка завершена с предупреждениями';
-  $('#progress-sub').textContent = okAll
-    ? 'Осталось войти в Claude Code своей подпиской — шаги ниже.'
-    : 'Часть компонентов не установилась — можно повторить ниже.';
+  // Независимая проверка (verify) может найти проблему, даже когда все шаги
+  // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
+  const checkFailed = (STATE.checks || []).some(
+    (c) => (c.status || (c.ok ? 'ok' : 'fail')) === 'fail'
+  );
+  const okAll = failed.length === 0 && skipped.length === 0 && !checkFailed;
+  let title, sub;
+  if (okAll) {
+    title = 'Готово!';
+    sub = 'Осталось войти в Claude Code своей подпиской — шаги ниже.';
+  } else if (failed.length === 0 && skipped.length === 0) {
+    // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
+    title = 'Установка завершена, но проверка нашла проблемы';
+    sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
+  } else {
+    title = 'Установка завершена с предупреждениями';
+    sub = 'Часть компонентов не установилась — можно повторить ниже.';
+  }
+  $('#progress-title').textContent = title;
+  $('#progress-sub').textContent = sub;
   renderNextSteps(failed, skipped);
   $('#btn-finish').classList.remove('hidden');
 }
@@ -367,16 +409,28 @@ function renderNextSteps(failed, skipped) {
   const botUrl = links.bot ? links.bot + '?start=' + encodeURIComponent(startPayload) : '';
   const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
+  // Оффлайн-фолбэк «Первые 10 минут»: показываем ТОЛЬКО когда видео-ссылки нет и
+  // START-HERE.html вшит (finish.startHtmlRelPath) — открывается локально из ресурсов.
+  const startHtmlRel = fin.startHtmlRelPath || '';
+  const startBtn = (!links.video && startHtmlRel && STATE.resourcesRoot)
+    ? `<button type="button" id="ns-start" class="btn-sm">▶ Первые 10 минут</button>`
+    : '';
   const logBtn = STATE.logPath ? `<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>` : '';
 
-  // Чеклист из verify-скрипта ("CHECK ok/fail <ярлык>").
+  // Чеклист из verify-скрипта ("CHECK ok/fail/skip <ярлык>").
   const checks = STATE.checks || [];
+  const checkLi = (c) => {
+    const st = c.status || (c.ok ? 'ok' : 'fail');
+    // skip = компонент не выбирали: рисуем нейтрально (серым), НЕ как провал.
+    if (st === 'skip') {
+      return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(c.label)} <span style="font-size:11px">(не выбрано)</span></span></li>`;
+    }
+    return `<li class="${st === 'ok' ? 'ok' : 'fail'}"><span class="mark">${st === 'ok' ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`;
+  };
   const checksHtml = checks.length
     ? `<div class="ns-checks">
          <div class="ns-checks-title">Проверка установки</div>
-         <ul class="ns-check-list">${checks.map((c) =>
-           `<li class="${c.ok ? 'ok' : 'fail'}"><span class="mark">${c.ok ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`).join('')}
-         </ul>
+         <ul class="ns-check-list">${checks.map(checkLi).join('')}</ul>
        </div>`
     : '';
 
@@ -412,6 +466,7 @@ function renderNextSteps(failed, skipped) {
       ${logBtn}
       ${botBtn}
       ${videoBtn}
+      ${startBtn}
     </div>
     ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autocursor" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть Cursor при нажатии «Готово»</label>`;
@@ -423,6 +478,12 @@ function renderNextSteps(failed, skipped) {
   $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
   const logBtnEl = $('#ns-log');
   if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
+  const startBtnEl = $('#ns-start');
+  if (startBtnEl) {
+    // openPath(resourcesRoot + разделитель + startHtmlRelPath). Нормализуем слэши под ОС.
+    const startRel = isWin ? startHtmlRel.replace(/\//g, '\\') : startHtmlRel.replace(/\\/g, '/');
+    startBtnEl.addEventListener('click', () => window.installer.openPath(STATE.resourcesRoot + sep + startRel));
+  }
   const saveKeysBtn = $('#ns-save-keys');
   if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);
   ns.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => window.installer.openExternal(b.dataset.ext)));

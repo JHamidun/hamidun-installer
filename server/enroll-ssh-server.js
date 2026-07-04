@@ -29,6 +29,7 @@
  */
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '8090', 10);
 const TOKENS_FILE = process.env.TOKENS_FILE || '/var/lib/hamidun-bridge/tokens.json';
@@ -66,13 +67,27 @@ function clientIp(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
-// In-memory rate-limit (10 запросов/мин на клиентский IP).
-// Для прод — вынести в БД/Redis (несколько инстансов, рестарты).
-const rl = new Map(); // ip -> {count, resetAt}
-function limited(ip) {
-  const now = Date.now(), e = rl.get(ip);
-  if (!e || now >= e.resetAt) { rl.set(ip, { count: 1, resetAt: now + 60000 }); return false; }
-  return (++e.count) > 10;
+// In-memory rate-limit (per клиентский IP). Публичный /enroll и admin /admin/token —
+// РАЗНЫЕ бакеты: флуд по публичному эндпоинту не должен душить регистрацию токенов
+// ботом (и наоборот). Для прод — вынести в БД/Redis (несколько инстансов, рестарты).
+const rl = new Map();       // ip -> {count, resetAt}  — публичный /enroll (10/мин)
+const rlAdmin = new Map();  // ip -> {count, resetAt}  — /admin/token (30/мин)
+function limitedIn(map, ip, max) {
+  const now = Date.now(), e = map.get(ip);
+  if (!e || now >= e.resetAt) { map.set(ip, { count: 1, resetAt: now + 60000 }); return false; }
+  return (++e.count) > max;
+}
+function limited(ip) { return limitedIn(rl, ip, 10); }
+function limitedAdmin(ip) { return limitedIn(rlAdmin, ip, 30); }
+
+// Константное по времени сравнение секрета (защита от timing-атаки). timingSafeEqual
+// требует буферы равной длины — предварительно сверяем длину (её утечка через ранний
+// возврат некритична, важно скрыть посимвольное совпадение самого секрета).
+function secretEqual(provided, expected) {
+  const a = Buffer.from(String(provided == null ? '' : provided), 'utf8');
+  const b = Buffer.from(String(expected == null ? '' : expected), 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 function loadTokens() { try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); } catch { return {}; } }
 function saveTokens(t) { fs.mkdirSync(require('path').dirname(TOKENS_FILE), { recursive: true }); fs.writeFileSync(TOKENS_FILE, JSON.stringify(t, null, 2)); }
@@ -82,11 +97,15 @@ function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'applicati
 const server = http.createServer((req, res) => {
   if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
   const ip = clientIp(req);
-  if (limited(ip)) return json(res, 429, { error: 'too many requests' });
 
   // Бот регистрирует выданный токен -> к какому VPS он привязан.
   if (req.url.startsWith('/admin/token')) {
-    if (!ADMIN_SECRET || req.headers['x-admin-secret'] !== ADMIN_SECRET) return json(res, 403, { error: 'forbidden' });
+    // Admin — ОТДЕЛЬНЫЙ бакет rate-limit: публичный флуд по /enroll не должен
+    // блокировать регистрацию токенов ботом.
+    if (limitedAdmin(ip)) return json(res, 429, { error: 'too many requests' });
+    // Константное по времени сравнение секрета (не утекает через тайминг раннего
+    // несовпадения). Пустой ADMIN_SECRET по-прежнему = 403 (сервис не настроен).
+    if (!ADMIN_SECRET || !secretEqual(req.headers['x-admin-secret'], ADMIN_SECRET)) return json(res, 403, { error: 'forbidden' });
     return readBody(req, body => {
       let d; try { d = JSON.parse(body); } catch { return json(res, 400, { error: 'bad json' }); }
       if (!d.token || !d.sshHost) return json(res, 400, { error: 'token & sshHost required' });
@@ -108,6 +127,9 @@ const server = http.createServer((req, res) => {
       return json(res, 200, { ok: true });
     });
   }
+
+  // Публичный /enroll — публичный per-IP лимит (отдельный от admin-бакета).
+  if (limited(ip)) return json(res, 429, { error: 'too many requests' });
 
   // Приложение получает SSH-доступ по токену.
   return readBody(req, body => {

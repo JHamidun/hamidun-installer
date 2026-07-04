@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
+# Под GUI/Electron PATH урезан — без этого только что установленный node не виден.
+export PATH="/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$PATH"
 
 echo "Проверяю Node.js..."
 if have node; then echo "Node.js уже установлен: $(node --version)"; exit 0; fi
 
+BUNDLED=0
 if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/node.pkg" ]; then
-  PKG="$HM_VENDOR/apps/node.pkg"; echo "Node.js из встроенного pkg (офлайн)..."
+  PKG="$HM_VENDOR/apps/node.pkg"; BUNDLED=1; echo "Node.js из встроенного pkg (офлайн)..."
 else
   echo "Определяю последнюю LTS-версию..."
   # Без python3 (bare /usr/bin/python3 без CLT дёргает GUI-диалог установки).
@@ -19,6 +22,7 @@ else
   echo "Скачиваю Node.js ${VER}..."
   dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"
 fi
+[ "$BUNDLED" = 1 ] && verify_artifact "$PKG"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
 echo "Устанавливаю (потребуется пароль администратора)..."
 admin_run "installer -pkg '$PKG' -target /"
 

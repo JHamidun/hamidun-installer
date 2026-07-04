@@ -1,5 +1,6 @@
 ﻿# Claude Code extension (Cursor + VS Code) — Windows
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 Update-Path
 
@@ -8,11 +9,35 @@ $DRY = [bool]$env:HM_DRY_RUN
 $installed = $false
 
 # Вшитый vsix (полный офлайн) — кладёт build-задача в HM_VENDOR/apps/claude-code.vsix.
+# vsix исполняется как код внутри Cursor/VS Code -> сверяем целостность ДО установки (fail-closed).
 $vsix = ''
 if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\claude-code.vsix'; if (Test-Path $cand) { $vsix = $cand } }
+if ($vsix -and -not $DRY) { Confirm-HmArtifact $vsix }
 
 # Cursor должен быть ЗАКРЫТ, иначе --install-extension падает с 'aborted' (баг с теста).
-if (-not $DRY) { Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 600 }
+# НО не убиваем силой Cursor, открытый ПОЛЬЗОВАТЕЛЕМ — это потеря несохранённой работы.
+# Наш собственный авто-запуск (если такой будет) помечается HM_CURSOR_AUTOSTARTED — его гасить безопасно.
+# В штатном флоу cursor.ps1 уже закрыл свой авто-запуск, поэтому любой живой Cursor здесь = пользовательский.
+$userCursorSpared = $false
+if (-not $DRY) {
+    $cursorProc = Get-Process Cursor -ErrorAction SilentlyContinue
+    if ($cursorProc) {
+        $ourAutoStart = ($env:HM_CURSOR_AUTOSTARTED -and $env:HM_CURSOR_AUTOSTARTED -ne '0')
+        if ($ourAutoStart) {
+            # Мы сами запустили Cursor ради установки — закрыть безопасно.
+            $cursorProc | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 600
+        } else {
+            Write-Host "ВНИМАНИЕ: Cursor сейчас запущен. Закрой Cursor и сохрани работу — установка расширения может прерваться при открытом Cursor."
+            Write-Host "  Жду до 20 секунд, пока ты закроешь Cursor (принудительно НЕ закрываю)..."
+            for ($w = 0; $w -lt 20 -and (Get-Process Cursor -ErrorAction SilentlyContinue); $w++) { Start-Sleep -Seconds 1 }
+            if (Get-Process Cursor -ErrorAction SilentlyContinue) {
+                $userCursorSpared = $true
+                Write-Host "  Cursor всё ещё открыт — пробую установить расширение без принудительного закрытия."
+            }
+        }
+    }
+}
 
 function Test-ExtPresent($cli) {
     # --list-extensions может лагать сразу после установки — ретраим.
@@ -64,6 +89,10 @@ $fontSrc = ''
 if ($env:HM_VENDOR) { $f = Join-Path $env:HM_VENDOR 'apps\JetBrainsMono-Regular.ttf'; if (Test-Path $f) { $fontSrc = $f } }
 if ($fontSrc) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: установить шрифт JetBrains Mono (пер-юзерно) из $fontSrc" }
+    elseif (-not (Test-HmArtifact $fontSrc)) {
+        # Шрифт не критичен — при несовпадении SHA-256 просто НЕ ставим его (парсинг ttf — потенц. вектор).
+        Write-Host "Шрифт JetBrains Mono не прошёл проверку целостности — пропускаю (не критично)."
+    }
     else {
         try {
             $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
@@ -98,6 +127,16 @@ if (Test-Path $cursorSettings) {
             Write-Host "Создал стартовый settings.json Cursor (autoSave + JetBrains Mono)."
         } catch { Write-Host "settings.json Cursor не создался: $($_.Exception.Message)" }
     }
+}
+
+# Крайняя мера: расширение не встало, а пользовательский Cursor так и остался открытым
+# (частая причина 'aborted'). Честно предупреждаем и закрываем — иначе установка не завершится.
+if (-not $installed -and -not $DRY -and $userCursorSpared -and (Get-Process Cursor -ErrorAction SilentlyContinue)) {
+    Write-Host "Расширение не установилось при открытом Cursor. Крайняя мера: закрываю Cursor и пробую ещё раз (сохранённая работа не пострадает; несохранённая — увы)."
+    Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 600
+    if (Install-Into $cursorCli 'Cursor') { $installed = $true }
+    if ($codeCli -and -not $installed) { if (Install-Into $codeCli 'VS Code') { $installed = $true } }
 }
 
 if ($installed) { Write-Host "OK: расширение установлено."; exit 0 }

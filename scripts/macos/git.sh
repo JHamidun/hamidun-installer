@@ -4,9 +4,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
 # Дружелюбные git-дефолты (идемпотентно; ошибки конфигурации НЕ валят установку).
 set_git_defaults() {
-  git config --global core.longpaths true 2>/dev/null || true
-  git config --global init.defaultBranch main 2>/dev/null || true
-  git config --global core.autocrlf input 2>/dev/null || true
+  # Каждый дефолт ставим ТОЛЬКО если пользователь его ещё не задал — не затираем уже настроенное.
+  if [ -z "$(git config --global core.longpaths 2>/dev/null || true)" ]; then
+    git config --global core.longpaths true 2>/dev/null || true
+  fi
+  if [ -z "$(git config --global init.defaultBranch 2>/dev/null || true)" ]; then
+    git config --global init.defaultBranch main 2>/dev/null || true
+  fi
+  if [ -z "$(git config --global core.autocrlf 2>/dev/null || true)" ]; then
+    git config --global core.autocrlf input 2>/dev/null || true
+  fi
   if [ -z "$(git config --global user.name 2>/dev/null || true)" ]; then
     un="${USER:-user}"
     git config --global user.name "$un" 2>/dev/null || true

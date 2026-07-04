@@ -41,9 +41,27 @@ let mainWindow = null;
 // Track live installer child processes so we can kill orphans if the window
 // closes mid-install (otherwise silent installers keep running invisibly).
 const CHILDREN = new Set();
+// Kill the whole process TREE of each tracked child, not just the shell wrapper.
+// The shell (powershell/bash) spawns msiexec, pip, curl, hdiutil… as its own
+// children; killing only the wrapper orphans them and they keep running unseen.
+//   Windows: taskkill /T /F walks and terminates the child tree by pid.
+//   macOS:   each child is spawned detached (its own process-group leader), so
+//            process.kill(-pid) signals the entire group at once.
 function killChildren() {
   for (const c of CHILDREN) {
-    try { c.kill(); } catch (e) { /* ignore */ }
+    try {
+      if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } continue; }
+      if (IS_WIN) {
+        try {
+          execFileSync('taskkill', ['/PID', String(c.pid), '/T', '/F'],
+            { windowsHide: true, stdio: 'ignore' });
+        } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
+      } else {
+        // Negative pid => the child's whole process group (needs detached spawn).
+        try { process.kill(-c.pid, 'SIGKILL'); }
+        catch (e) { try { c.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+      }
+    } catch (e) { /* ignore */ }
   }
   CHILDREN.clear();
 }
@@ -83,6 +101,44 @@ app.on('before-quit', killChildren);
 
 // ---- IPC -------------------------------------------------------------
 
+// Warn when the installer is running under a DIFFERENT user account than the
+// person at the keyboard — its scripts write ~/.claude, PATH, credentials, etc.
+// into whatever HOME the process token has, so a foreign account silently sets
+// up the wrong profile. Returns a human-readable RU string, or '' when there's
+// nothing to warn about / we can't tell reliably.
+function detectForeignUserWarning() {
+  try {
+    if (!IS_WIN) {
+      // macOS/Linux: sudo preserves the original login name in $SUDO_USER. If it
+      // is set and differs from the effective user, the install is heading into
+      // root's (or another user's) home instead of the real user's — reliable.
+      const sudoUser = (process.env.SUDO_USER || '').trim();
+      let me = '';
+      try { me = (os.userInfo().username || '').trim(); } catch (e) { me = ''; }
+      if (sudoUser && me && sudoUser !== me) {
+        return 'Установщик запущен через sudo от имени «' + me + '», но вы вошли в систему ' +
+               'как «' + sudoUser + '». Файлы уедут не в тот профиль. Запустите установщик ' +
+               'обычным двойным кликом, без sudo.';
+      }
+      return '';
+    }
+    // Windows: there is no reliable pure-Node/Electron way to learn the
+    // INTERACTIVE session's user from inside a process launched under a
+    // different account. Ordinary UAC elevation keeps the SAME user (nothing to
+    // warn about); only "Запуск от имени другого пользователя" / runas /user
+    // swaps the token, and that leaves NO trace of the original interactive user
+    // in this process's environment.
+    // TODO(reliability): detecting that case needs a native call — e.g. compare
+    // this process's token SID against the owner of the interactive shell
+    // (explorer.exe) via WTSQuerySessionInformation + OpenProcessToken. Until a
+    // native helper exists we deliberately return '' instead of guessing and
+    // scaring users with a false banner.
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
 ipcMain.handle('bootstrap', () => {
   // Preflight: free space on the home-dir volume (GB, best-effort) + OS version.
   let freeGB = null;
@@ -100,7 +156,13 @@ ipcMain.handle('bootstrap', () => {
     packs: readJson('packs.json', { core: [], packs: [] }),
     logPath: LOG_PATH,
     freeGB,
-    osRelease: os.release()
+    osRelease: os.release(),
+    // Absolute path to the bundled resources dir (vendor/agent/assets live here).
+    // The renderer needs it to open the offline START-HERE fallback locally.
+    resourcesRoot: resourceRoot(),
+    // Non-empty when we can tell the installer runs under a different user than
+    // the interactive one (files would land in the wrong profile).
+    userWarning: detectForeignUserWarning()
   };
 });
 
@@ -181,7 +243,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     let child;
     logToFile(id, '=== start ===');
     try {
-      child = spawn(cmd, args, { env: childEnv, windowsHide: true });
+      // macOS: give the child its own process group so killChildren can reap the
+      // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
+      // we kill the tree via taskkill /T instead, so no detached group is needed.
+      const spawnOpts = { env: childEnv, windowsHide: true };
+      if (!IS_WIN) spawnOpts.detached = true;
+      child = spawn(cmd, args, spawnOpts);
     } catch (e) {
       logToFile(id, '[ERROR] spawn failed: ' + String(e));
       resolve({ id, ok: false, code: -1, error: String(e) });

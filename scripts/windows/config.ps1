@@ -60,7 +60,10 @@ if ((Test-Path $preserveDir) -and (Get-ChildItem $preserveDir -Force -ErrorActio
 Write-Host "Сохраняю твои ключи, память и историю сессий перед обновлением..."
 Snapshot-UserData $preserveDir
 
-try { & $installer -BackupExisting -SkipDeps } catch { Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
+# Существовал ли рабочий конфиг ДО обновления — чтобы не выдать ложный зелёный на СТАРОМ ~/.claude.
+$hadOldConfig = (Test-Path (Join-Path $claudeHome 'skills')) -or (Test-Path (Join-Path $claudeHome 'settings.json'))
+$installFailed = $false
+try { & $installer -BackupExisting -SkipDeps } catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 # Прунятся ТОЛЬКО скиллы, входящие в какой-то пак, но чей пак не выбран.
@@ -102,7 +105,22 @@ if ($starterSrc) {
 
 # Честная проверка: конфиг реально развернулся?
 $dst = Join-Path $env:USERPROFILE '.claude'
-if ((Test-Path (Join-Path $dst 'skills')) -or (Test-Path (Join-Path $dst 'settings.json'))) {
+$dstPresent = (Test-Path (Join-Path $dst 'skills')) -or (Test-Path (Join-Path $dst 'settings.json'))
+
+if ($installFailed) {
+    # install.ps1 упал с исключением. Наличие ~/.claude ещё НЕ значит успех — это может быть
+    # СТАРЫЙ конфиг от прошлой установки. Не выдаём ложный зелёный.
+    if ($hadOldConfig -and $dstPresent) {
+        Write-Host "ВНИМАНИЕ: обновление конфига НЕ применилось — install.ps1 завершился с ошибкой (см. выше)."
+        Write-Host "  В ~/.claude остался ПРЕДЫДУЩИЙ конфиг; твои ключи, память и история сессий сохранены."
+        Write-Host "  Запусти установку повторно после устранения причины ошибки."
+    } else {
+        Write-Host "Конфиг не развернулся — install.ps1 завершился с ошибкой (см. выше)."
+    }
+    exit 1
+}
+
+if ($dstPresent) {
     Write-Host "OK: конфиг развёрнут. Не забудь заполнить ~/.claude/.credentials.master.env"
     exit 0
 }

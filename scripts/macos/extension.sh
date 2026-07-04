@@ -5,9 +5,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 EXT="${HM_CLAUDE_EXT_ID:-anthropic.claude-code}"
 
 # Вшитый vsix (полный офлайн) — кладёт build-задача в HM_VENDOR/apps/claude-code.vsix.
+# vsix исполняется как код внутри Cursor/VS Code -> сверяем целостность ДО установки (fail-closed).
 VSIX=""
 if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/claude-code.vsix" ]; then
   VSIX="$HM_VENDOR/apps/claude-code.vsix"
+  verify_artifact "$VSIX"
 fi
 
 OK=0
@@ -56,11 +58,16 @@ fi
 
 # --- вшитый шрифт JetBrains Mono (пер-юзерно, БЕЗ админа) ---
 if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf" ]; then
-  mkdir -p "$HOME/Library/Fonts"
-  if cp -f "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf" "$HOME/Library/Fonts/JetBrainsMono-Regular.ttf" 2>/dev/null; then
-    echo "Шрифт JetBrains Mono установлен (пер-юзерно)."
+  if ! verify_artifact_soft "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf"; then
+    # Шрифт не критичен — при несовпадении SHA-256 просто НЕ ставим (парсинг ttf — потенц. вектор).
+    echo "Шрифт JetBrains Mono не прошёл проверку целостности — пропускаю (не критично)."
   else
-    echo "Шрифт не скопировался — пропускаю."
+    mkdir -p "$HOME/Library/Fonts"
+    if cp -f "$HM_VENDOR/apps/JetBrainsMono-Regular.ttf" "$HOME/Library/Fonts/JetBrainsMono-Regular.ttf" 2>/dev/null; then
+      echo "Шрифт JetBrains Mono установлен (пер-юзерно)."
+    else
+      echo "Шрифт не скопировался — пропускаю."
+    fi
   fi
 fi
 

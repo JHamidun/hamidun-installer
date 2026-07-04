@@ -1,5 +1,6 @@
 ﻿# AmneziaVPN (полное приложение, продвинутый режим) — Windows
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 
 $endpoint = $env:HM_VPN_ENROLL_URL
 if (-not $endpoint) {
@@ -13,6 +14,7 @@ if (-not (Get-Command AmneziaVPN -ErrorAction SilentlyContinue) -and -not (Test-
     if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\amneziavpn-setup.exe'; if (Test-Path $cand) { $inst = $cand } }
     if ($inst) {
         Write-Host "Ставлю AmneziaVPN из встроенного установщика (офлайн)..."
+        Confirm-HmArtifact $inst  # вшитый артефакт — сверяем SHA-256 (fail-closed)
         Start-Process $inst -ArgumentList '/S' -Wait
     } else {
         Write-Host "Скачиваю AmneziaVPN..."

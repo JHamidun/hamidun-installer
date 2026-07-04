@@ -1,5 +1,6 @@
 ﻿# Cursor — Windows
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 
 $DRY = [bool]$env:HM_DRY_RUN
@@ -12,9 +13,11 @@ if ((Get-Command cursor -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path
 $cexe = Join-Path $env:LOCALAPPDATA 'Programs\cursor\Cursor.exe'
 $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\cursor-setup.exe' } else { '' }
 $inst = $null
+$instBundled = $false
 if ($local -and (Test-Path $local)) {
     Write-Host "Ставлю Cursor из встроенного установщика (офлайн)..."
     $inst = $local
+    $instBundled = $true
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
     Write-Host "Устанавливаю Cursor через winget..."
     if (-not $DRY) { winget install -e --id Anysphere.Cursor --silent --accept-package-agreements --accept-source-agreements }
@@ -33,6 +36,7 @@ if ($DRY) { Write-Host "[dry-run] Cursor: ветка выбрана, без из
 # Запускаем БЕЗ -Wait, ждём появления Cursor.exe, затем гасим авто-запущенный Cursor (чтобы не блокировал
 # и чтобы следующий шаг — установка расширения — не падал с 'aborted' при открытом Cursor).
 if ($inst) {
+    if ($instBundled) { Confirm-HmArtifact $inst }  # вшитый артефакт — сверяем SHA-256 (fail-closed)
     Write-Host "Установщик Cursor может показать окно «This User Installer is not meant to run as Administrator» — нажми OK, это нормально (весь установщик запущен под админом ради VPN)."
     Start-Process -FilePath $inst -ArgumentList '/S'
 }

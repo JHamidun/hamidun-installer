@@ -1,6 +1,7 @@
 ﻿# Python packages for config tools — Windows
 # Continue (не Stop): нативные команды (python/pip) пишут в stderr → под Stop = NativeCommandError и падение.
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
@@ -31,7 +32,7 @@ if (-not $py) {
     if ($pyInst -and (Test-Path $pyInst)) {
         Write-Host "Ставлю Python из встроенного установщика (офлайн)..."
         if ($DRY) { Write-Host "  [dry-run] WOULD: $pyInst /quiet InstallAllUsers=0 PrependPath=1 Include_test=0" }
-        else { Start-Process -FilePath $pyInst -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_test=0' -Wait; Update-Path; $py = Get-Py }
+        else { Confirm-HmArtifact $pyInst; Start-Process -FilePath $pyInst -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_test=0' -Wait; Update-Path; $py = Get-Py }
     } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "Устанавливаю Python 3.12 через winget..."
         winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements

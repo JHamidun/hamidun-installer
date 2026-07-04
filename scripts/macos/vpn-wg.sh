@@ -25,10 +25,11 @@ CONF=$(printf '%b' "$CONF_RAW")
 # Amnezia на macOS раздаётся как .pkg; поддерживаем и .pkg, и .dmg.
 if [ ! -d "/Applications/AmneziaVPN.app" ]; then
   SRC=""
+  BUNDLED=0
   if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.pkg" ]; then
-    SRC="$HM_VENDOR/apps/amneziavpn.pkg"; echo "AmneziaVPN из встроенного pkg (офлайн)..."
+    SRC="$HM_VENDOR/apps/amneziavpn.pkg"; BUNDLED=1; echo "AmneziaVPN из встроенного pkg (офлайн)..."
   elif [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
-    SRC="$HM_VENDOR/apps/amneziavpn.dmg"; echo "AmneziaVPN из встроенного dmg (офлайн)..."
+    SRC="$HM_VENDOR/apps/amneziavpn.dmg"; BUNDLED=1; echo "AmneziaVPN из встроенного dmg (офлайн)..."
   else
     echo "Скачиваю AmneziaVPN..."
     # .pkg приоритетнее .dmg; без python3 (не дёргаем CLT-диалог). BSD grep -E для (pkg|dmg).
@@ -46,6 +47,7 @@ if [ ! -d "/Applications/AmneziaVPN.app" ]; then
     fi
   fi
   if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+    [ "$BUNDLED" = 1 ] && verify_artifact "$SRC"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
     case "$SRC" in
       *.pkg)
         admin_run "installer -pkg '$SRC' -target /"

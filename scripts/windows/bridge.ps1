@@ -48,11 +48,15 @@ if (-not $trayOk) {
 $cfgPath = Join-Path $dst 'config.json'
 if (-not (Test-Path $cfgPath)) {
     $domains = if ($env:HM_BRIDGE_PACDOMAINS) { $env:HM_BRIDGE_PACDOMAINS.Split(',') } else { @('claude.ai', 'anthropic.com', 'openai.com', 'chatgpt.com', 'oaistatic.com', 'higgsfield.ai') }
-    ([ordered]@{
+    $cfgJson = ([ordered]@{
         enrollEndpoint = "$($env:HM_BRIDGE_ENDPOINT)"; bridgeToken = "$($env:HM_BRIDGE_TOKEN)"
         ssh = [ordered]@{ host = ''; port = 22; user = ''; keyPath = ''; password = '' }
         socksPort = 1080; httpPort = 1081; pacPort = 1082; pacDomains = $domains; enabled = $false
-    } | ConvertTo-Json -Depth 5) | Set-Content -Path $cfgPath -Encoding utf8
+    } | ConvertTo-Json -Depth 5)
+    # Windows PowerShell 5.1 «Set-Content -Encoding utf8» пишет UTF-8 С BOM, а
+    # bridge_agent.py json.load на BOM падал → конфиг молча терялся. Пишем БЕЗ BOM
+    # через .NET UTF8Encoding с флагом «не эмитить BOM» ($false).
+    [System.IO.File]::WriteAllText($cfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
 }
 
 # 5. автозапуск (Run) + запуск сейчас (трей)

@@ -9,8 +9,14 @@ const HMDeps = require(path.join(ROOT, 'src', 'renderer', 'deps.js'));
 const components = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
 const packs = JSON.parse(fs.readFileSync(path.join(ROOT, 'packs.json'), 'utf8'));
 
-// Real skills dir from the cloned config repo (best-effort).
-const SKILLS_DIR = 'C:\\Vibecode\\hamidun-installer-assets\\config-repo\\.claude\\skills';
+// Real skills dir from the bundled/cloned config repo (best-effort). Try the
+// build-time clone first (works in CI and any machine), then a dev fallback.
+const SKILLS_CANDS = [
+  path.join(ROOT, 'vendor', 'config-pack', '.claude', 'skills'),
+  path.join(ROOT, 'vendor', 'config-pack', 'skills'),
+  'C:\\Vibecode\\hamidun-installer-assets\\config-repo\\.claude\\skills'
+];
+const SKILLS_DIR = SKILLS_CANDS.find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } }) || SKILLS_CANDS[0];
 
 let pass = 0, fail = 0;
 function ok(name, fn) {

@@ -1,5 +1,6 @@
 ﻿# Git — Windows
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 
 $DRY = [bool]$env:HM_DRY_RUN
@@ -8,9 +9,16 @@ $DRY = [bool]$env:HM_DRY_RUN
 function Set-HmGitDefaults {
     $ErrorActionPreference = 'Continue'
     try {
-        git config --global core.longpaths true 2>$null
-        git config --global init.defaultBranch main 2>$null
-        git config --global core.autocrlf true 2>$null
+        # Каждый дефолт ставим ТОЛЬКО если пользователь его ещё не задал — не затираем уже настроенное.
+        $lp = ''
+        try { $lp = ("$(git config --global core.longpaths 2>$null)").Trim() } catch { }
+        if (-not $lp) { git config --global core.longpaths true 2>$null }
+        $db = ''
+        try { $db = ("$(git config --global init.defaultBranch 2>$null)").Trim() } catch { }
+        if (-not $db) { git config --global init.defaultBranch main 2>$null }
+        $ac = ''
+        try { $ac = ("$(git config --global core.autocrlf 2>$null)").Trim() } catch { }
+        if (-not $ac) { git config --global core.autocrlf true 2>$null }
         $un = ''
         try { $un = ("$(git config --global user.name 2>$null)").Trim() } catch { }
         if (-not $un) {
@@ -30,7 +38,7 @@ $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\git-setup.exe' } e
 if ($local -and (Test-Path $local)) {
     Write-Host "Ставлю Git из встроенного установщика (офлайн)..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: $local /VERYSILENT /NORESTART /SP- /SUPPRESSMSGBOXES" }
-    else { Start-Process -FilePath $local -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait }
+    else { Confirm-HmArtifact $local; Start-Process -FilePath $local -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait }
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
     Write-Host "Устанавливаю Git через winget..."
     winget install -e --id Git.Git --silent --accept-package-agreements --accept-source-agreements

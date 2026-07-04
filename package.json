@@ -14,7 +14,8 @@
     "dist:win": "npm run fetch:config && npm run fetch:vendor && electron-builder --win",
     "dist:win:lite": "npm run fetch:config && electron-builder --win",
     "dist:mac": "npm run fetch:config && electron-builder --mac",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "test": "node test/run-tests.js"
   },
   "devDependencies": {
     "electron": "^32.0.0",
@@ -25,13 +26,7 @@
     "productName": "Hamidun Setup",
     "directories": { "output": "release" },
     "files": [
-      "src/**/*",
-      "scripts/**/*",
-      "agent/**/*",
-      "config.json",
-      "components.json",
-      "packs.json",
-      "assets/**/*"
+      "src/**/*"
     ],
     "extraResources": [
       { "from": "scripts", "to": "scripts" },

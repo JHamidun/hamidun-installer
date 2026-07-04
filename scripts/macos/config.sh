@@ -96,7 +96,22 @@ if [ -n "${HM_ASSETS:-}" ] && [ -d "$HM_ASSETS/starter-project" ]; then
 fi
 
 # --- честная проверка развёртывания (зеркало config.ps1) ---
-if [ -d "$CLAUDE_HOME/skills" ] || [ -f "$CLAUDE_HOME/settings.json" ]; then
+DEPLOYED=0
+if [ -d "$CLAUDE_HOME/skills" ] || [ -f "$CLAUDE_HOME/settings.json" ]; then DEPLOYED=1; fi
+
+# Ненулевой код install.sh — не выдаём ложный зелёный: существующий ~/.claude мог
+# остаться от ПРОШЛОЙ установки, а обновление на самом деле упало.
+if [ "$RC" -ne 0 ]; then
+  echo "ВНИМАНИЕ: install.sh завершился с ошибкой (rc=$RC) — конфиг мог НЕ обновиться."
+  if [ "$DEPLOYED" -eq 1 ]; then
+    echo "~/.claude присутствует, но, возможно, от ПРОШЛОЙ установки — не считаю это успехом. Смотри лог выше."
+  else
+    echo "~/.claude пуст — конфиг не развернулся. Смотри лог выше."
+  fi
+  exit 1
+fi
+
+if [ "$DEPLOYED" -eq 1 ]; then
   echo "OK: конфиг развёрнут. Заполни ~/.claude/.credentials.master.env"
   exit 0
 fi

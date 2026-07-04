@@ -11,7 +11,7 @@ Hamidun Bridge agent — стабильный зарубежный IP тольк
   {
     "enrollEndpoint": "",            # https://bridge.hamidun.../enroll (пусто => idle)
     "bridgeToken": "",               # выдаёт бот после оплаты/trial
-    "ssh": {"host":"","port":22,"user":"","keyPath":"","password":""},  # "База": свой VPS напрямую
+    "ssh": {"host":"","port":22,"user":"","keyPath":"","password":""},  # "База": свой VPS напрямую (нужен keyPath — SSH-ключ; парольная авторизация НЕ поддерживается, ssh -D неинтерактивен)
     "socksPort": 1080, "httpPort": 1081, "pacPort": 1082,
     "pacDomains": ["claude.ai","anthropic.com","openai.com","chatgpt.com","oaistatic.com","higgsfield.ai"],
     "enabled": false
@@ -44,7 +44,10 @@ def log(msg):
 
 def load_cfg():
     try:
-        with open(CFG_PATH, "r", encoding="utf-8") as f:
+        # utf-8-sig снимает BOM: Windows PowerShell 5.1 «Set-Content -Encoding utf8»
+        # писал config.json С BOM, и json.load на нём падал → конфиг молча терялся
+        # (endpoint/token/enabled). Без BOM utf-8-sig читает как обычный utf-8.
+        with open(CFG_PATH, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -227,7 +230,13 @@ def serve_http_bridge(socks_port, http_port, pac_domains):
             try:
                 while True:
                     r, _, x = select.select([a, b], [], [a, b], 60)
-                    if x or not r: break
+                    # Голый таймаут (тишина 60с, готовых нет и ошибок нет) — это НЕ
+                    # мёртвое соединение: длинный Claude-запрос может «думать» дольше
+                    # минуты без байтов. Раньше «not r» рвал туннель и убивал запрос —
+                    # теперь просто ждём дальше. Рвём только при ошибочном множестве fd
+                    # (x) или реальном закрытии пира (recv вернул пусто, ниже).
+                    if x: break
+                    if not r: continue
                     for s in r:
                         d = s.recv(65536)
                         if not d: return
@@ -503,6 +512,14 @@ class Bridge:
         ssh, domains = resolve_ssh(cfg)
         if not (ssh.get("host") and ssh.get("user")):
             log("мост не настроен (нет сервера/токена) — включить нельзя"); return False
+        # Парольная SSH-авторизация не поддерживается: системный `ssh -D` не может
+        # принять пароль неинтерактивно (sshpass в сборку не входит). Если задан
+        # только password без ключа — Tunnel строил бы команду без -i и ssh уходил
+        # в вечный тихий реконнект, а трей рапортовал бы ВКЛ. Честно отказываем.
+        if ssh.get("password") and not ssh.get("keyPath"):
+            log("SSH-пароль задан, но ключа нет: парольная авторизация не "
+                "поддерживается (нужен SSH-ключ через keyPath). Мост НЕ включён.")
+            return False
         sp, hp, pp = cfg.get("socksPort", 1080), cfg.get("httpPort", 1081), cfg.get("pacPort", 1082)
         # порты могут быть заняты (чужой софт/недобитый инстанс) — не даём процессу
         # умереть (иначе atexit-очистка), просто не включаем мост.

@@ -1,5 +1,6 @@
 ﻿# Node.js LTS — Windows
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
 
 $DRY = [bool]$env:HM_DRY_RUN
@@ -10,7 +11,7 @@ $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\node-lts.msi' } el
 if ($local -and (Test-Path $local)) {
     Write-Host "Ставлю Node.js из встроенного MSI (офлайн)..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: msiexec /i $local /qn /norestart" }
-    else { Start-Process msiexec.exe -ArgumentList '/i', "`"$local`"", '/qn', '/norestart' -Wait }
+    else { Confirm-HmArtifact $local; Start-Process msiexec.exe -ArgumentList '/i', "`"$local`"", '/qn', '/norestart' -Wait }
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
     Write-Host "Устанавливаю Node.js LTS через winget..."
     winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements

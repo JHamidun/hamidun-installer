@@ -10,10 +10,11 @@ fi
 # AmneziaVPN на macOS раздаётся как .pkg; поддерживаем и .pkg, и .dmg.
 if [ ! -d "/Applications/AmneziaVPN.app" ]; then
   SRC=""
+  BUNDLED=0
   if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.pkg" ]; then
-    SRC="$HM_VENDOR/apps/amneziavpn.pkg"; echo "AmneziaVPN из встроенного pkg (офлайн)..."
+    SRC="$HM_VENDOR/apps/amneziavpn.pkg"; BUNDLED=1; echo "AmneziaVPN из встроенного pkg (офлайн)..."
   elif [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/amneziavpn.dmg" ]; then
-    SRC="$HM_VENDOR/apps/amneziavpn.dmg"; echo "AmneziaVPN из встроенного dmg (офлайн)..."
+    SRC="$HM_VENDOR/apps/amneziavpn.dmg"; BUNDLED=1; echo "AmneziaVPN из встроенного dmg (офлайн)..."
   else
     echo "Скачиваю AmneziaVPN..."
     # .pkg приоритетнее .dmg; без python3 (не дёргаем CLT-диалог).
@@ -29,6 +30,7 @@ if [ ! -d "/Applications/AmneziaVPN.app" ]; then
     fi
   fi
   if [ -n "$SRC" ] && [ -f "$SRC" ]; then
+    [ "$BUNDLED" = 1 ] && verify_artifact "$SRC"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
     case "$SRC" in
       *.pkg)
         admin_run "installer -pkg '$SRC' -target /"
@@ -55,5 +57,11 @@ if [ -n "$CODE" ]; then
   printf '%s' "$CODE" > "$OUT"
   echo "Код сохранён: $OUT"
   echo "Открой AmneziaVPN → '+' → 'Вставить из буфера' и вставь код."
+  exit 0
 fi
-exit 0
+# enrollEndpoint был задан (иначе вышли бы выше с кодом 0), но сервер не вернул vpnCode —
+# это реальный провал, а не осознанный skip. Не выдаём ложный зелёный.
+echo "ОШИБКА: сервер не вернул код подключения vpnCode."
+echo "  enroll: ${HM_VPN_ENROLL_URL%/}${HM_VPN_ENROLL_PATH:-/enroll}"
+echo "  Проверь inviteCode и доступность VPN-сервера. Код подключения НЕ получен."
+exit 1

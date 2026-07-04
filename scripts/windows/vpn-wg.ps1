@@ -1,5 +1,16 @@
 ﻿# AmneziaWG (авто-конфиг) — Windows
+param([string]$HmEnvFile)   # элевированный (RunAs) прогон получает сюда путь к env-файлу с HM_*
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+
+# RunAs стартует НОВЫЙ процесс с чистым окружением — переменные HM_* теряются. Элевированный
+# прогон восстанавливает их из переданного файла (формат KEY=VALUE, без исполнения кода).
+if ($HmEnvFile -and (Test-Path $HmEnvFile)) {
+    foreach ($line in (Get-Content -LiteralPath $HmEnvFile -Encoding UTF8)) {
+        $eq = $line.IndexOf('=')
+        if ($eq -gt 0) { Set-Item -Path ("Env:" + $line.Substring(0, $eq)) -Value $line.Substring($eq + 1) }
+    }
+}
 
 $endpoint = $env:HM_VPN_ENROLL_URL
 if (-not $endpoint) {
@@ -12,10 +23,19 @@ if (-not $endpoint) {
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "Запрашиваю права администратора (UAC) для установки VPN..."
-    $p = Start-Process powershell -Verb RunAs -PassThru -Wait -ArgumentList @(
-        '-ExecutionPolicy','Bypass','-NoProfile','-File', $PSCommandPath
-    )
-    exit $p.ExitCode
+    # Прокидываем HM_* в элевированный процесс через временный файл — иначе они теряются при RunAs,
+    # и элевированный прогон молча пропустит VPN (enrollEndpoint окажется пуст) с выходом 0.
+    $envFile = Join-Path ([System.IO.Path]::GetTempPath()) ("hamidun-vpn-env-" + [guid]::NewGuid().ToString('N') + ".txt")
+    try {
+        $envLines = Get-ChildItem Env: | Where-Object { $_.Name -like 'HM_*' } | ForEach-Object { $_.Name + '=' + $_.Value }
+        Set-Content -LiteralPath $envFile -Value $envLines -Encoding UTF8
+        $p = Start-Process powershell -Verb RunAs -PassThru -Wait -ArgumentList @(
+            '-ExecutionPolicy','Bypass','-NoProfile','-File', $PSCommandPath, '-HmEnvFile', $envFile
+        )
+        exit $p.ExitCode
+    } finally {
+        Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # --- 1. получить персональный конфиг с сервера (enrollment) ---
@@ -31,9 +51,11 @@ if (-not $conf) { Write-Host "Сервер не вернул конфиг."; exi
 # --- 2. установить клиент AmneziaWG ---
 if (-not (Test-Path (Join-Path $env:ProgramFiles 'AmneziaWG'))) {
     $inst = $null
+    $instBundled = $false
     if ($env:HM_VENDOR) { $inst = Get-ChildItem (Join-Path $env:HM_VENDOR 'apps') -Filter 'amneziawg-setup.*' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }
     if ($inst) {
         Write-Host "Ставлю AmneziaWG из встроенного установщика (офлайн)..."
+        $instBundled = $true
     } else {
         Write-Host "Скачиваю клиент AmneziaWG..."
         $rel = Invoke-RestMethod "https://api.github.com/repos/amnezia-vpn/amneziawg-windows-client/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' }
@@ -41,6 +63,7 @@ if (-not (Test-Path (Join-Path $env:ProgramFiles 'AmneziaWG'))) {
         $inst = Join-Path $env:TEMP $asset.name
         Invoke-WebRequest $asset.browser_download_url -OutFile $inst
     }
+    if ($instBundled) { Confirm-HmArtifact $inst }  # вшитый артефакт — сверяем SHA-256 (fail-closed)
     if ($inst -match '\.msi$') { Start-Process msiexec.exe -ArgumentList '/i', "`"$inst`"", '/qn' -Wait }
     else { Start-Process $inst -ArgumentList '/S' -Wait }
 }

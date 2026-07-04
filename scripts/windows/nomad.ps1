@@ -1,6 +1,8 @@
 ﻿# Nomad Agent — Windows (Python CLI via uv)
 # Continue (не Stop): нативные команды (git/uv/python) пишут в stderr → под Stop = NativeCommandError и падение.
 $ErrorActionPreference = 'Continue'
+# irm|iex ниже тянет ОФИЦИАЛЬНЫЙ установщик uv (astral.sh) по HTTPS (доверие = TLS). Форсим TLS 1.2.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 function Update-Path {
     $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
                 [Environment]::GetEnvironmentVariable('Path','User') + ';' +
@@ -11,6 +13,7 @@ $DRY = [bool]$env:HM_DRY_RUN
 
 # 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
 $src = $env:HM_NOMAD_SRC
+$repoConfigured = $false   # был ли реально задан repoUrl (тогда clone обязан был сработать)
 if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     $repo = ''
     $cfg = Join-Path $PSScriptRoot '..\..\config.json'
@@ -18,6 +21,7 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
         try { $repo = (Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json).nomad.repoUrl } catch {}
     }
     if ($repo) {
+        $repoConfigured = $true
         $src = Join-Path $env:LOCALAPPDATA 'nomad-src'
         Write-Host "Клонирую Nomad из $repo ..."
         if ($DRY) {
@@ -27,6 +31,12 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
             else { git clone --depth 1 $repo $src }
         }
     }
+}
+# repoUrl был задан, но источник так и не появился (clone/pull упал или нет pyproject.toml) —
+# это НАСТОЯЩИЙ провал, а не осознанный skip: честный выход 1.
+if (-not $DRY -and $repoConfigured -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
+    Write-Host "ОШИБКА: источник Nomad не склонировался (git clone/pull упал или pyproject.toml не появился) — смотри лог выше."
+    exit 1
 }
 if (-not $DRY -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     Write-Host "Источник Nomad не задан. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
