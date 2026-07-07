@@ -27,6 +27,7 @@ if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyCo
         }
     }
 } else {
+    if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://claude.ai/install.ps1 | iex (или npm install -g @anthropic-ai/claude-code)"; exit 0 }
     Write-Host "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
     try {
         Invoke-RestMethod "https://claude.ai/install.ps1" | Invoke-Expression
@@ -76,12 +77,23 @@ function Find-ClaudeBinary {
 # терминале (npm-global-prefix / ~/.local\bin часто не в PATH пользователя).
 function Add-ToUserPath($dir) {
     if (-not $dir -or -not (Test-Path $dir)) { return }
-    $userPath = [Environment]::GetEnvironmentVariable('Path','User'); if (-not $userPath) { $userPath = '' }
-    $parts = $userPath.Split(';') | Where-Object { $_ -ne '' }
-    if ($parts -notcontains $dir) {
-        [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $dir).TrimStart(';')), 'User')
-        Write-Host "Добавил $dir в PATH пользователя."
-    }
+    # Читаем СЫРОЕ значение (DoNotExpand) и пишем как ExpandString — сохраняем тип
+    # REG_EXPAND_SZ и записи пользователя с %USERPROFILE%/%VAR%. [Environment]::Get/Set
+    # разворачивали %VAR% в литералы и меняли тип на REG_SZ — тихая порча User PATH.
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
+    try {
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        # сверяем по РАЗВЁРНУТОЙ копии, чтобы не задвоить уже присутствующий каталог
+        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+        if (($expanded.Split(';') | Where-Object { $_ -ne '' }) -notcontains $dir) {
+            $new = ($raw.TrimEnd(';') + ';' + $dir).TrimStart(';')
+            $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            Write-Host "Добавил $dir в PATH пользователя."
+        }
+    } finally { $key.Close() }
+    # PATH текущего процесса — чтобы дальнейшие шаги увидели каталог сразу.
+    if ($env:Path.Split(';') -notcontains $dir) { $env:Path = $env:Path.TrimEnd(';') + ';' + $dir }
 }
 
 $claudeBin = Find-ClaudeBinary

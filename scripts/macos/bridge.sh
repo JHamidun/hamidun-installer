@@ -46,6 +46,14 @@ if [ ! -f "$CFG" ]; then
   "enabled": false
 }
 EOF
+elif [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then
+  # config.json уже есть, но издатель пересобрал установщик с адресом сервера — доставляем
+  # новый endpoint/token в существующий конфиг, сохраняя ssh/enabled ученика. Иначе агент
+  # простаивал бы с пустым endpoint, хотя сообщение говорило бы «сервер настроен». perl всегда есть.
+  EP="$HM_BRIDGE_ENDPOINT" TK="${HM_BRIDGE_TOKEN:-}" /usr/bin/perl -pi -e '
+    s/("enrollEndpoint"\s*:\s*")[^"]*(")/$1.$ENV{EP}.$2/e;
+    s/("bridgeToken"\s*:\s*")[^"]*(")/$1.$ENV{TK}.$2/e;
+  ' "$CFG" 2>/dev/null || true
 fi
 
 LA="$HOME/Library/LaunchAgents/com.hamidun.bridge.plist"

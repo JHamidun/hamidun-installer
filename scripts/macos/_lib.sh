@@ -3,7 +3,15 @@
 have() { command -v "$1" >/dev/null 2>&1; }
 dl()   { curl -fsSL "$1" -o "$2"; }
 # Run a shell command with a native macOS admin (GUI password) prompt.
-admin_run() { /usr/bin/osascript -e "do shell script \"$*\" with administrator privileges"; }
+# Экранируем \ и " для строки AppleScript: путь к приложению может лежать в папке
+# с апострофом/кавычкой (напр. "Zhemal's USB"), иначе команда root'а ломается или
+# в неё инъецируются лишние токены. bash 3.2-safe.
+admin_run() {
+  local c="$*"
+  c=${c//\\/\\\\}
+  c=${c//\"/\\\"}
+  /usr/bin/osascript -e "do shell script \"$c\" with administrator privileges"
+}
 arch_tag() { case "$(uname -m)" in arm64) echo arm64 ;; *) echo x64 ;; esac; }
 
 # ---- Целостность вшитых артефактов (SHA-256 против vendor/checksums.json) ----

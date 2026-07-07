@@ -34,11 +34,11 @@ if (-not $py) {
         if ($DRY) { Write-Host "  [dry-run] WOULD: $pyInst /quiet InstallAllUsers=0 PrependPath=1 Include_test=0" }
         else { Confirm-HmArtifact $pyInst; Start-Process -FilePath $pyInst -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_test=0' -Wait; Update-Path; $py = Get-Py }
     } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host "Устанавливаю Python 3.12 через winget..."
-        winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
-        Update-Path; $py = Get-Py
+        if ($DRY) { Write-Host "  [dry-run] WOULD: winget install -e --id Python.Python.3.12 --silent" }
+        else { Write-Host "Устанавливаю Python 3.12 через winget..."; winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements; Update-Path; $py = Get-Py }
     }
 }
+if ($DRY -and -not $py) { Write-Host "[dry-run] Python: install-ветка выбрана, без изменений."; exit 0 }
 if (-not $py) { Write-Host "Python не найден и не установился — пропускаю зависимости."; exit 1 }
 
 if ($env:HM_BUNDLED_CONFIG -and (Test-Path (Join-Path $env:HM_BUNDLED_CONFIG 'requirements.txt'))) {

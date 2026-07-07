@@ -80,6 +80,12 @@ function checkRateLimit(ip) {
   if (entry.count > 5) return true; // limited
   return false;
 }
+// Периодически чистим истёкшие окна — без этого Map на публичном pre-auth эндпоинте
+// растёт неограниченно (каждый новый IP = запись навсегда → OOM при флуде с /64).
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, e] of _rateLimitMap) { if (now >= e.resetAt) _rateLimitMap.delete(ip); }
+}, 5 * 60_000).unref();
 
 const WG = {
   iface: WG_IFACE_RAW,
@@ -95,8 +101,24 @@ const WG = {
   }
 };
 
-function loadState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return { peers: {} }; } }
-function saveState(s) { fs.mkdirSync(require('path').dirname(STATE_FILE), { recursive: true }); fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); }
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return { peers: {} };
+    // Битый файл — это НЕ «пустое состояние»: молчаливый сброс переиздал бы уже
+    // занятые живыми пирами адреса и обнулил бы лимиты инвайтов. Падаем громко.
+    throw Object.assign(new Error(`state.json повреждён (${e.message}) — почини/удали ${STATE_FILE}`), { statusCode: 500 });
+  }
+}
+function saveState(s) {
+  const path = require('path');
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  // Атомарно: пишем во временный файл и переименовываем — краш посреди записи не
+  // оставит полу-файла (JSON.parse которого сбросил бы весь учёт пиров/инвайтов).
+  const tmp = STATE_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2));
+  fs.renameSync(tmp, STATE_FILE);
+}
 function nextIp(state) {
   const used = new Set(Object.values(state.peers).map(p => p.ip));
   for (let i = 2; i < 255; i++) { const ip = `${WG.subnet}.${i}`; if (!used.has(ip)) return ip; }
@@ -111,7 +133,19 @@ function createPeer(clientName, inviteCode) {
   // Простой файловый учёт; для прод — вынести в БД/Redis.
   if (!state.invites) state.invites = {};
   const inv = state.invites[inviteCode] || (state.invites[inviteCode] = { peers: 0, clients: {} });
-  if (inv.peers >= MAX_PEERS_PER_INVITE) {
+
+  // Дедуп по (inviteCode + clientName): та же машина при переустановке/повторе (а установщик
+  // POST'ит /enroll в НАЧАЛЕ каждого прогона + кнопка «Повторить») должна ПЕРЕИСПОЛЬЗОВАТЬ
+  // свой пир, а не жечь квоту — иначе 5 переустановок → 403 «лимит» навсегда, плюс осиротевшие
+  // пиры в /24. Зеркалит дедуп по hostname в enroll-ssh-server.js.
+  const existingPub = Object.keys(state.peers).find(
+    p => state.peers[p].invite === inviteCode && state.peers[p].client === clientName);
+  let reuseIp = null;
+  if (existingPub) {
+    try { execSync(`wg set ${WG.iface} peer ${existingPub} remove`); } catch {}
+    reuseIp = state.peers[existingPub].ip;
+    delete state.peers[existingPub];
+  } else if (inv.peers >= MAX_PEERS_PER_INVITE) {
     const err = new Error(
       `invite code peer limit reached (${MAX_PEERS_PER_INVITE} peers per code); ` +
       'ask for a new invite code or have an old peer revoked');
@@ -121,14 +155,15 @@ function createPeer(clientName, inviteCode) {
 
   const priv = execSync('wg genkey').toString().trim();
   const pub = execSync(`echo ${priv} | wg pubkey`, { shell: '/bin/bash' }).toString().trim();
-  const ip = nextIp(state);
+  const ip = reuseIp || nextIp(state);
 
   // register peer on the live interface
   execSync(`wg set ${WG.iface} peer ${pub} allowed-ips ${ip}/32`);
   try { execSync(`wg-quick save ${WG.iface}`); } catch {}
 
   state.peers[pub] = { ip, client: clientName, invite: inviteCode, ts: Date.now() };
-  inv.peers += 1;
+  // Счётчик квоты растёт только для НОВОЙ машины; переиспользование слота его не трогает.
+  if (!existingPub) inv.peers += 1;
   inv.clients[clientName] = (inv.clients[clientName] || 0) + 1;
   saveState(state);
 

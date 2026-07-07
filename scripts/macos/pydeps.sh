@@ -49,7 +49,11 @@ if [ -n "${HM_VENDOR:-}" ] && [ -d "$PWB" ]; then
   mkdir -p "$HOME/Library/Caches/ms-playwright"
   cp -R "$PWB/"* "$HOME/Library/Caches/ms-playwright/" 2>/dev/null || true
 else
-  "$PY" -m playwright install chromium >/dev/null 2>&1 || true
+  # Онлайн-докачка браузеров (~150 МБ, самый хрупкий по сети шаг). Сбой раньше
+  # молча глотался, а скрипт печатал OK — потом браузерные скиллы падали без следа.
+  if ! "$PY" -m playwright install chromium >/dev/null 2>&1; then
+    echo "  ВНИМАНИЕ: браузеры Playwright не скачались (проверь сеть и повтори установку этого компонента). Остальные Python-зависимости на месте."
+  fi
 fi
 echo "OK: Python-зависимости установлены."
 exit 0

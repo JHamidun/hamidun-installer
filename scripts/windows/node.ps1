@@ -5,7 +5,7 @@ function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path',
 
 $DRY = [bool]$env:HM_DRY_RUN
 Write-Host "Проверяю Node.js..."
-if (Get-Command node -ErrorAction SilentlyContinue) { Write-Host "Node.js уже установлен: $(node --version)"; if (-not $DRY) { exit 0 } }
+if (Get-Command node -ErrorAction SilentlyContinue) { Write-Host "Node.js уже установлен: $(node --version)"; if ($DRY) { Write-Host "[dry-run] Node.js уже установлен — без изменений."; exit 0 } else { exit 0 } }
 
 $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\node-lts.msi' } else { '' }
 if ($local -and (Test-Path $local)) {
@@ -13,16 +13,19 @@ if ($local -and (Test-Path $local)) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: msiexec /i $local /qn /norestart" }
     else { Confirm-HmArtifact $local; Start-Process msiexec.exe -ArgumentList '/i', "`"$local`"", '/qn', '/norestart' -Wait }
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-    Write-Host "Устанавливаю Node.js LTS через winget..."
-    winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+    if ($DRY) { Write-Host "  [dry-run] WOULD: winget install -e --id OpenJS.NodeJS.LTS --silent" }
+    else { Write-Host "Устанавливаю Node.js LTS через winget..."; winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements }
 } else {
-    Write-Host "winget не найден — качаю MSI Node.js LTS..."
-    $idx = Invoke-RestMethod "https://nodejs.org/dist/index.json"
-    $lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
-    $url = "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-x64.msi"
-    $msi = Join-Path $env:TEMP "node-lts.msi"
-    Invoke-WebRequest $url -OutFile $msi
-    Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
+    if ($DRY) { Write-Host "  [dry-run] WOULD: скачать MSI Node.js LTS с nodejs.org и msiexec /i /qn" }
+    else {
+        Write-Host "winget не найден — качаю MSI Node.js LTS..."
+        $idx = Invoke-RestMethod "https://nodejs.org/dist/index.json"
+        $lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
+        $url = "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-x64.msi"
+        $msi = Join-Path $env:TEMP "node-lts.msi"
+        Invoke-WebRequest $url -OutFile $msi
+        Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
+    }
 }
 
 if ($DRY) { Write-Host "[dry-run] Node.js: офлайн-ветка выбрана, без изменений."; exit 0 }

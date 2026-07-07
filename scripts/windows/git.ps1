@@ -32,7 +32,9 @@ function Set-HmGitDefaults {
 }
 
 Write-Host "Проверяю Git..."
-if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "Git уже установлен: $(git --version)"; if (-not $DRY) { Set-HmGitDefaults; exit 0 } }
+# В DRY выходим и когда git уже есть — иначе холостой прогон проваливался бы в
+# install-ветку и winget переустанавливал бы Git.
+if (Get-Command git -ErrorAction SilentlyContinue) { Write-Host "Git уже установлен: $(git --version)"; if ($DRY) { Write-Host "[dry-run] Git уже установлен — без изменений."; exit 0 } else { Set-HmGitDefaults; exit 0 } }
 
 $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\git-setup.exe' } else { '' }
 if ($local -and (Test-Path $local)) {
@@ -40,15 +42,18 @@ if ($local -and (Test-Path $local)) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: $local /VERYSILENT /NORESTART /SP- /SUPPRESSMSGBOXES" }
     else { Confirm-HmArtifact $local; Start-Process -FilePath $local -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait }
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
-    Write-Host "Устанавливаю Git через winget..."
-    winget install -e --id Git.Git --silent --accept-package-agreements --accept-source-agreements
+    if ($DRY) { Write-Host "  [dry-run] WOULD: winget install -e --id Git.Git --silent" }
+    else { Write-Host "Устанавливаю Git через winget..."; winget install -e --id Git.Git --silent --accept-package-agreements --accept-source-agreements }
 } else {
-    Write-Host "winget не найден — качаю Git for Windows напрямую..."
-    $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' }
-    $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
-    $exe = Join-Path $env:TEMP $asset.name
-    Invoke-WebRequest $asset.browser_download_url -OutFile $exe
-    Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait
+    if ($DRY) { Write-Host "  [dry-run] WOULD: скачать Git for Windows с github.com и запустить /VERYSILENT" }
+    else {
+        Write-Host "winget не найден — качаю Git for Windows напрямую..."
+        $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' }
+        $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
+        $exe = Join-Path $env:TEMP $asset.name
+        Invoke-WebRequest $asset.browser_download_url -OutFile $exe
+        Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait
+    }
 }
 
 if ($DRY) { Write-Host "[dry-run] Git: офлайн-ветка выбрана, без изменений."; exit 0 }

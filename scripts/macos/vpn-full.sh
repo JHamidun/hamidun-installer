@@ -56,6 +56,12 @@ if [ -n "$CODE" ]; then
   OUT="$HOME/Desktop/amnezia-vpn-код.txt"
   printf '%s' "$CODE" > "$OUT"
   echo "Код сохранён: $OUT"
+  # Клиент реально установился? Если пользователь отменил пароль администратора при
+  # установке выше — приложения нет, и совет «открой AmneziaVPN» вёл бы в никуда.
+  if [ ! -d "/Applications/AmneziaVPN.app" ]; then
+    echo "Клиент AmneziaVPN НЕ установился — повтори установку этого компонента, затем вставь код из $OUT."
+    exit 1
+  fi
   echo "Открой AmneziaVPN → '+' → 'Вставить из буфера' и вставь код."
   exit 0
 fi

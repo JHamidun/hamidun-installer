@@ -29,8 +29,11 @@ if (-not $isAdmin) {
     try {
         $envLines = Get-ChildItem Env: | Where-Object { $_.Name -like 'HM_*' } | ForEach-Object { $_.Name + '=' + $_.Value }
         Set-Content -LiteralPath $envFile -Value $envLines -Encoding UTF8
-        $p = Start-Process powershell -Verb RunAs -PassThru -Wait -ArgumentList @(
-            '-ExecutionPolicy','Bypass','-NoProfile','-File', $PSCommandPath, '-HmEnvFile', $envFile
+        # ОДНОЙ строкой с ручными кавычками: -ArgumentList @(...) в PS 5.1 склеивает
+        # элементы пробелом БЕЗ квотирования, и путь с пробелом ('Hamidun Setup',
+        # профиль 'Иван Иванов') обрубает -File. Пути Windows не содержат '"' — инъекции нет.
+        $p = Start-Process powershell -Verb RunAs -PassThru -Wait -ArgumentList (
+            '-ExecutionPolicy Bypass -NoProfile -File "{0}" -HmEnvFile "{1}"' -f $PSCommandPath, $envFile
         )
         exit $p.ExitCode
     } finally {
@@ -48,8 +51,12 @@ $conf = $resp.config
 $name = if ($resp.name) { $resp.name } else { 'hamidun' }
 if (-not $conf) { Write-Host "Сервер не вернул конфиг."; exit 1 }
 
-# --- 2. установить клиент AmneziaWG ---
-if (-not (Test-Path (Join-Path $env:ProgramFiles 'AmneziaWG'))) {
+# --- 2. установить клиент AmneziaWG (гейтим по РЕАЛЬНОМУ бинарю, а не по папке —
+# ниже мы сами создаём ProgramFiles\AmneziaWG\Data\Configurations, и проверка по
+# папке навсегда пропускала бы установку после первого же провала) ---
+$agwRoot = Join-Path $env:ProgramFiles 'AmneziaWG'
+function Test-AwgInstalled { $null -ne (Get-ChildItem $agwRoot -Filter '*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1) }
+if (-not (Test-AwgInstalled)) {
     $inst = $null
     $instBundled = $false
     if ($env:HM_VENDOR) { $inst = Get-ChildItem (Join-Path $env:HM_VENDOR 'apps') -Filter 'amneziawg-setup.*' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }
@@ -59,13 +66,19 @@ if (-not (Test-Path (Join-Path $env:ProgramFiles 'AmneziaWG'))) {
     } else {
         Write-Host "Скачиваю клиент AmneziaWG..."
         $rel = Invoke-RestMethod "https://api.github.com/repos/amnezia-vpn/amneziawg-windows-client/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' }
-        $asset = $rel.assets | Where-Object { $_.name -match '\.(exe|msi)$' } | Select-Object -First 1
+        # Не берём arm64-ассет на x64-машину (и наоборот).
+        $asset = $rel.assets | Where-Object { $_.name -match '\.(exe|msi)$' -and $_.name -notmatch 'arm64' } | Select-Object -First 1
+        if (-not $asset) { Write-Host "Не нашёл подходящий установщик AmneziaWG."; exit 1 }
         $inst = Join-Path $env:TEMP $asset.name
         Invoke-WebRequest $asset.browser_download_url -OutFile $inst
     }
     if ($instBundled) { Confirm-HmArtifact $inst }  # вшитый артефакт — сверяем SHA-256 (fail-closed)
-    if ($inst -match '\.msi$') { Start-Process msiexec.exe -ArgumentList '/i', "`"$inst`"", '/qn' -Wait }
-    else { Start-Process $inst -ArgumentList '/S' -Wait }
+    if ($inst -match '\.msi$') { $ip = Start-Process msiexec.exe -ArgumentList '/i', "`"$inst`"", '/qn' -Wait -PassThru }
+    else { $ip = Start-Process $inst -ArgumentList '/S' -Wait -PassThru }
+    # Код msiexec/установщика: 0 = ок, 3010 = ок, нужна перезагрузка. Иначе — честный провал,
+    # а не тихий зелёный с конфигом в папку несуществующего клиента.
+    if ($ip.ExitCode -notin 0, 3010) { Write-Host "Установка клиента AmneziaWG не удалась (код $($ip.ExitCode)). Повтори при стабильной сети или поставь клиент вручную с amnezia.org и импортируй конфиг."; exit 1 }
+    if (-not (Test-AwgInstalled)) { Write-Host "Клиент AmneziaWG не появился после установки — конфиг не записываю."; exit 1 }
 }
 
 # --- 3. положить .conf в watched-папку (служба сама подхватит) ---

@@ -16,15 +16,29 @@ else
     | grep -o '"downloadUrl"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 \
     | sed -e 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' -e 's#\\/#/#g' || true)
   DMG="/tmp/cursor.dmg"
+  # Сносим протухший /tmp/cursor.dmg от прерванного прежнего запуска — иначе при
+  # неудачном парсинге URL (CUR пуст, dl пропущен) старый битый файл прошёл бы проверку ниже.
+  rm -f "$DMG"
   [ -n "$CUR" ] && dl "$CUR" "$DMG"
 fi
 [ -f "$DMG" ] || { echo "Cursor: установщик недоступен."; exit 1; }
 [ "$BUNDLED" = 1 ] && verify_artifact "$DMG"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
 
 MNT="/tmp/hm_cursor_mnt"
+# Отцепляем возможный примонтированный образ от прерванного прогона, иначе attach
+# упадёт или мы скопируем содержимое старого образа.
+hdiutil detach "$MNT" 2>/dev/null || true
 mkdir -p "$MNT"
-hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null
+if ! hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null; then
+  echo "Не смог открыть образ Cursor (dmg повреждён?)."; exit 1
+fi
 APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
+# Пустой APP → admin_run скопировал бы мусор и зря спросил пароль администратора.
+if [ -z "$APP" ]; then
+  echo "В образе Cursor не найдено приложение (.app)."
+  hdiutil detach "$MNT" >/dev/null 2>&1 || true
+  exit 1
+fi
 echo "Копирую $APP в /Applications (потребуется пароль администратора)..."
 admin_run "cp -R '$MNT/$APP' /Applications/"
 hdiutil detach "$MNT" >/dev/null || true

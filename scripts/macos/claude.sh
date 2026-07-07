@@ -31,7 +31,16 @@ fi
 persist_local_bin_path() {
   line='export PATH="$HOME/.local/bin:$PATH"'
   for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
-    [ -e "$rc" ] || : > "$rc"
+    # Создавать ~/.bash_profile «с нуля» опасно: bash-login читает ПЕРВЫЙ из
+    # .bash_profile/.bash_login/.profile — новый .bash_profile замаскирует
+    # существующий ~/.profile с пользовательским PATH/env. Если создаём —
+    # сначала подключаем .profile.
+    if [ ! -e "$rc" ]; then
+      : > "$rc"
+      if [ "$rc" = "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
+        printf '[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> "$rc"
+      fi
+    fi
     if ! grep -qF 'HAMIDUN_LOCAL_BIN' "$rc" 2>/dev/null; then
       printf '\n# HAMIDUN_LOCAL_BIN — claude в PATH\n%s\n' "$line" >> "$rc"
     fi

@@ -45,10 +45,31 @@ function Snapshot-UserData($dst) {
     foreach ($f in $preserveFiles) { $s = Join-Path $claudeHome $f; if (Test-Path $s) { Copy-Item -Force $s (Join-Path $dst $f) -ErrorAction SilentlyContinue } }
     foreach ($d in $preserveDirs)  { $s = Join-Path $claudeHome $d; if (Test-Path $s) { $t = Join-Path $dst $d; if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }; Copy-Item -Recurse -Force $s $t -ErrorAction SilentlyContinue } }
 }
+# Возвращает $true, только если ВСЁ из снапшота реально восстановилось. Тихий провал
+# (диск полон, залоченный файл) больше не маскируется под успех — снапшот не удаляем.
 function Restore-UserData($src) {
     New-Item -ItemType Directory -Force $claudeHome | Out-Null
-    foreach ($f in $preserveFiles) { $s = Join-Path $src $f; if (Test-Path $s) { Copy-Item -Force $s (Join-Path $claudeHome $f) -ErrorAction SilentlyContinue } }
-    foreach ($d in $preserveDirs)  { $s = Join-Path $src $d; if (Test-Path $s) { $t = Join-Path $claudeHome $d; New-Item -ItemType Directory -Force $t | Out-Null; Copy-Item -Recurse -Force (Join-Path $s '*') $t -ErrorAction SilentlyContinue } }
+    $ok = $true
+    foreach ($f in $preserveFiles) {
+        $s = Join-Path $src $f
+        if (Test-Path $s) {
+            Copy-Item -Force $s (Join-Path $claudeHome $f) -ErrorAction SilentlyContinue
+            if (-not (Test-Path (Join-Path $claudeHome $f))) { $ok = $false }
+        }
+    }
+    foreach ($d in $preserveDirs) {
+        $s = Join-Path $src $d
+        if (Test-Path $s) {
+            $t = Join-Path $claudeHome $d
+            New-Item -ItemType Directory -Force $t | Out-Null
+            Copy-Item -Recurse -Force (Join-Path $s '*') $t -ErrorAction SilentlyContinue
+            # грубая сверка: в цели не меньше элементов, чем в снапшоте
+            $srcN = (Get-ChildItem $s -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+            $dstN = (Get-ChildItem $t -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+            if ($dstN -lt $srcN) { $ok = $false }
+        }
+    }
+    return $ok
 }
 
 # сперва вернуть данные ПРЕРВАННОГО прошлого прогона — краш между снапшотом и restore
@@ -63,7 +84,17 @@ Snapshot-UserData $preserveDir
 # Существовал ли рабочий конфиг ДО обновления — чтобы не выдать ложный зелёный на СТАРОМ ~/.claude.
 $hadOldConfig = (Test-Path (Join-Path $claudeHome 'skills')) -or (Test-Path (Join-Path $claudeHome 'settings.json'))
 $installFailed = $false
-try { & $installer -BackupExisting -SkipDeps } catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
+# Ловим ОБА класса сбоя: терминирующие исключения (catch) И код возврата install.ps1.
+# install.ps1 заканчивается на robocopy, чей $LASTEXITCODE >= 8 означает реальный провал
+# копирования (0-7 — успех с разными состояниями); exit 1 внутри скрипта — отсутствие
+# исходника. Без этой проверки провалившийся robocopy (диск полон) давал ложный зелёный.
+$global:LASTEXITCODE = 0
+try {
+    & $installer -BackupExisting -SkipDeps
+    if ($LASTEXITCODE -ge 8 -or $LASTEXITCODE -eq 1) {
+        $installFailed = $true; Write-Host "install.ps1 завершился с кодом $LASTEXITCODE — раскладка конфига не удалась."
+    }
+} catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 # Прунятся ТОЛЬКО скиллы, входящие в какой-то пак, но чей пак не выбран.
@@ -85,9 +116,17 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
 }
 
 # --- вернуть пользовательские данные поверх свежей базы (merge) ---
-Restore-UserData $preserveDir
-Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
-Write-Host "Вернул твои ключи, память и историю сессий."
+# Снапшот удаляем ТОЛЬКО при успешном restore — иначе в нём может лежать единственная
+# копия ключей/памяти, и молчаливая потеря (диск полон) была бы невосстановимой.
+$restoreOk = Restore-UserData $preserveDir
+if ($restoreOk) {
+    Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
+    Write-Host "Вернул твои ключи, память и историю сессий."
+} else {
+    Write-Host "ВНИМАНИЕ: не удалось полностью вернуть твои данные (возможно, кончилось место на диске)."
+    Write-Host "  Резервная копия НЕ удалена и лежит здесь: $preserveDir"
+    Write-Host "  Освободи место и запусти установку ещё раз, либо скопируй файлы оттуда в ~/.claude вручную."
+}
 
 # --- стартовый проект из вшитых ассетов (идемпотентно: существующий НЕ перезаписываем) ---
 $starterSrc = ''

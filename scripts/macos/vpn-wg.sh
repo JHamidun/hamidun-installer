@@ -16,6 +16,11 @@ RESP=$(curl -fsSL -X POST -H 'Content-Type: application/json' \
 # Парсим без python3: bare /usr/bin/python3 на чистом mac без CLT дёргает GUI-диалог установки.
 CONF_RAW=$(printf '%s\n' "$RESP" | sed -n 's/.*"config"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)
 NAME=$(printf '%s\n' "$RESP" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)
+# Санитизируем: "name" из ответа сервера идёт в путь $HOME/Downloads/${NAME}.conf;
+# без чистки '../' или '/' в нём дал бы запись за пределы Downloads (скомпрометированный
+# сервер/MITM). Оставляем только безопасные символы, срезаем ведущие точки.
+NAME=$(printf '%s' "$NAME" | tr -cd 'A-Za-z0-9._-')
+NAME=${NAME#"${NAME%%[!.]*}"}
 [ -n "$NAME" ] || NAME="hamidun"
 # Разворачиваем \n/\t из JSON-строки в реальные переводы строк
 CONF=$(printf '%b' "$CONF_RAW")
@@ -53,19 +58,29 @@ if [ ! -d "/Applications/AmneziaVPN.app" ]; then
         admin_run "installer -pkg '$SRC' -target /"
         ;;
       *.dmg)
-        MNT="/tmp/hm_amnezia_mnt"; mkdir -p "$MNT"
-        hdiutil attach "$SRC" -nobrowse -mountpoint "$MNT" >/dev/null
-        APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
-        admin_run "cp -R '$MNT/$APP' /Applications/"
-        hdiutil detach "$MNT" >/dev/null || true
+        MNT="/tmp/hm_amnezia_mnt"
+        hdiutil detach "$MNT" 2>/dev/null || true
+        mkdir -p "$MNT"
+        if hdiutil attach "$SRC" -nobrowse -mountpoint "$MNT" >/dev/null; then
+          APP=$(/bin/ls "$MNT" | grep -i '\.app$' | head -1)
+          [ -n "$APP" ] && admin_run "cp -R '$MNT/$APP' /Applications/"
+          hdiutil detach "$MNT" >/dev/null 2>&1 || true
+        fi
         ;;
     esac
   fi
 fi
 
 # На macOS авто-подхвата watched-папки нет — сохраняем конфиг и подсказываем импорт.
+# Сохраняем СНАЧАЛА (enrollment не пропадает), потом честно проверяем, что клиент реально
+# установился — иначе зелёная галка и совет «открой AmneziaVPN» указывали бы на несуществующее
+# приложение (напр. если пользователь отменил ввод пароля администратора).
 OUT="$HOME/Downloads/${NAME}.conf"
 printf '%s' "$CONF" > "$OUT"
 echo "Конфиг сохранён: $OUT"
+if [ ! -d "/Applications/AmneziaVPN.app" ]; then
+  echo "Клиент AmneziaVPN НЕ установился — повтори установку этого компонента или скачай приложение с amnezia.org, затем импортируй конфиг $OUT вручную."
+  exit 1
+fi
 echo "Открой AmneziaVPN → '+' → 'Импорт из файла' и выбери $OUT"
 exit 0

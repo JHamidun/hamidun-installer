@@ -19,6 +19,13 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     try { Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'OpenSSH.Client*' -and $_.State -ne 'Installed' } | ForEach-Object { Add-WindowsCapability -Online -Name $_.Name | Out-Null } } catch {}
     Update-Path
 }
+# ssh критичен для туннеля — если Features-on-Demand недоступен (корпоративный WSUS,
+# офлайн), молча объявить мост «установленным» нельзя.
+$sshOk = [bool](Get-Command ssh -ErrorAction SilentlyContinue)
+if (-not $sshOk) {
+    Write-Host "ВНИМАНИЕ: OpenSSH Client не установился — мост не сможет построить туннель."
+    Write-Host "  Установи вручную: Параметры → Приложения → Дополнительные компоненты → Клиент OpenSSH."
+}
 
 # 2. реальный Python (не Store-заглушка)
 $py = ''
@@ -57,6 +64,17 @@ if (-not (Test-Path $cfgPath)) {
     # bridge_agent.py json.load на BOM падал → конфиг молча терялся. Пишем БЕЗ BOM
     # через .NET UTF8Encoding с флагом «не эмитить BOM» ($false).
     [System.IO.File]::WriteAllText($cfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+} elseif ($env:HM_BRIDGE_ENDPOINT) {
+    # config.json уже есть, но издатель пересобрал установщик с адресом сервера —
+    # доставляем новый endpoint/token в существующий конфиг, сохраняя ssh/enabled ученика.
+    # Иначе «Сервер настроен» печаталось бы, а агент по-прежнему простаивал бы с пустым endpoint.
+    try {
+        $cfg = Get-Content -Raw $cfgPath | ConvertFrom-Json
+        $cfg.enrollEndpoint = "$($env:HM_BRIDGE_ENDPOINT)"
+        if ($null -ne $cfg.PSObject.Properties['bridgeToken']) { $cfg.bridgeToken = "$($env:HM_BRIDGE_TOKEN)" }
+        else { $cfg | Add-Member -NotePropertyName bridgeToken -NotePropertyValue "$($env:HM_BRIDGE_TOKEN)" -Force }
+        [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    } catch { Write-Host "Не удалось обновить адрес сервера в существующем config.json: $($_.Exception.Message)" }
 }
 
 # 5. автозапуск (Run) + запуск сейчас (трей)

@@ -14,12 +14,17 @@ set_git_defaults() {
   if [ -z "$(git config --global core.autocrlf 2>/dev/null || true)" ]; then
     git config --global core.autocrlf input 2>/dev/null || true
   fi
+  # user.name и user.email — каждый независимо: у пользователя может быть настроен
+  # только email (или только имя), затирать уже заданное нельзя.
+  un="${USER:-user}"
+  local set_any=0
   if [ -z "$(git config --global user.name 2>/dev/null || true)" ]; then
-    un="${USER:-user}"
-    git config --global user.name "$un" 2>/dev/null || true
-    git config --global user.email "${un}@example.com" 2>/dev/null || true
-    echo "Git: user.name/user.email заданы по умолчанию — поменяй потом: git config --global user.email твоя@почта"
+    git config --global user.name "$un" 2>/dev/null || true; set_any=1
   fi
+  if [ -z "$(git config --global user.email 2>/dev/null || true)" ]; then
+    git config --global user.email "${un}@example.com" 2>/dev/null || true; set_any=1
+  fi
+  [ "$set_any" -eq 1 ] && echo "Git: user.name/user.email заданы по умолчанию — поменяй потом: git config --global user.email твоя@почта"
   echo "Git-дефолты применены (longpaths, main, autocrlf=input)."
 }
 

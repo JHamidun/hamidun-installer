@@ -155,7 +155,9 @@ class Tunnel:
 
 # ---- PAC: только ИИ-домены через SOCKS, остальное DIRECT ----
 def pac_text(domains, socks_port):
-    conds = " || ".join('shExpMatch(host, "*%s")' % d for d in domains)
+    # Граница домена (host==d ИЛИ *.d), а не "*d": иначе notopenai.com матчил бы
+    # openai.com — то же правило, что и в host_in_pac.
+    conds = " || ".join('(host == "%s" || shExpMatch(host, "*.%s"))' % (d, d) for d in domains)
     # fail-open: "; DIRECT" в конце — если туннель упал, браузер идёт напрямую,
     # а не получает "сайт полностью недоступен".
     return ("function FindProxyForURL(url, host) {\n"
@@ -178,11 +180,13 @@ def serve_pac(domains, socks_port, pac_port):
 
 # ---- HTTP→SOCKS мост для CLI (Claude Code/Codex через HTTPS_PROXY=http://127.0.0.1:httpPort) ----
 def host_in_pac(host, domains):
-    # тот же матч, что и в PAC: суффиксное совпадение по домену.
+    # Совпадение по ГРАНИЦЕ домена: сам домен или его поддомен. Без этого голый
+    # h.endswith(d) гнал look-alike-хосты (notopenai.com при домене openai.com)
+    # через платный VPS-мост вместо DIRECT.
     h = (host or "").lower()
     for d in domains or []:
         d = str(d).lower().strip()
-        if d and (h == d or h.endswith("." + d) or h.endswith(d)):
+        if d and (h == d or h.endswith("." + d)):
             return True
     return False
 
@@ -226,7 +230,12 @@ def serve_http_bridge(socks_port, http_port, pac_domains):
             self.send_response(200, "Connection Established"); self.end_headers()
             self._pump(self.connection, up)
         def _pump(self, a, b):
-            a.setblocking(False); b.setblocking(False)
+            # Сокеты ОСТАВЛЯЕМ блокирующими. На non-blocking сокете sendall() при
+            # заполненном буфере отправки (большой Claude-запрос через медленный SSH-канал)
+            # бросает BlockingIOError вместо ожидания — except его глотал и туннель рвался
+            # на середине передачи. select() читаемости работает и на блокирующих сокетах,
+            # recv() после «готов к чтению» не блокирует, а блокирующий sendall() даёт
+            # правильный backpressure. Каждый CONNECT — в своём потоке, блокировка безопасна.
             try:
                 while True:
                     r, _, x = select.select([a, b], [], [a, b], 60)

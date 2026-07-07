@@ -79,6 +79,12 @@ function limitedIn(map, ip, max) {
 }
 function limited(ip) { return limitedIn(rl, ip, 10); }
 function limitedAdmin(ip) { return limitedIn(rlAdmin, ip, 30); }
+// Периодически чистим истёкшие окна в обеих картах — иначе на публичном pre-auth
+// эндпоинте Map растёт неограниченно (каждый новый IP навсегда → OOM при флуде).
+setInterval(() => {
+  const now = Date.now();
+  for (const map of [rl, rlAdmin]) { for (const [ip, e] of map) { if (now >= e.resetAt) map.delete(ip); } }
+}, 5 * 60000).unref();
 
 // Константное по времени сравнение секрета (защита от timing-атаки). timingSafeEqual
 // требует буферы равной длины — предварительно сверяем длину (её утечка через ранний
@@ -89,8 +95,23 @@ function secretEqual(provided, expected) {
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
-function loadTokens() { try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); } catch { return {}; } }
-function saveTokens(t) { fs.mkdirSync(require('path').dirname(TOKENS_FILE), { recursive: true }); fs.writeFileSync(TOKENS_FILE, JSON.stringify(t, null, 2)); }
+function loadTokens() {
+  try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); }
+  catch (e) {
+    if (e.code === 'ENOENT') return {};
+    // Битый файл != пустой: молчаливый сброс сделал бы ВСЕ bridgeToken невалидными
+    // (403), пока бот не перерегистрирует их. Падаем громко, не сбрасываем учёт.
+    throw Object.assign(new Error(`tokens.json повреждён (${e.message}) — почини/удали ${TOKENS_FILE}`), { statusCode: 500 });
+  }
+}
+function saveTokens(t) {
+  const path = require('path');
+  fs.mkdirSync(path.dirname(TOKENS_FILE), { recursive: true });
+  // Атомарно (tmp + rename) — краш посреди записи не оставит полу-файла.
+  const tmp = TOKENS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(t, null, 2));
+  fs.renameSync(tmp, TOKENS_FILE);
+}
 function readBody(req, cb) { let b = ''; req.on('data', c => { b += c; if (b.length > 1e4) req.destroy(); }); req.on('end', () => cb(b)); }
 function json(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
 
