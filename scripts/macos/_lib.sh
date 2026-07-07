@@ -14,6 +14,27 @@ admin_run() {
 }
 arch_tag() { case "$(uname -m)" in arm64) echo arm64 ;; *) echo x64 ;; esac; }
 
+# Прописывает ~/.local/bin в PATH новых терминалов (claude и вшитый git кладутся туда).
+# Вынесено сюда из claude.sh: git.sh исполняется раньше и тоже это использует.
+persist_local_bin_path() {
+  line='export PATH="$HOME/.local/bin:$PATH"'
+  for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+    # Создавать ~/.bash_profile «с нуля» опасно: bash-login читает ПЕРВЫЙ из
+    # .bash_profile/.bash_login/.profile — новый .bash_profile замаскирует
+    # существующий ~/.profile с пользовательским PATH/env. Если создаём —
+    # сначала подключаем .profile.
+    if [ ! -e "$rc" ]; then
+      : > "$rc"
+      if [ "$rc" = "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
+        printf '[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> "$rc"
+      fi
+    fi
+    if ! grep -qF 'HAMIDUN_LOCAL_BIN' "$rc" 2>/dev/null; then
+      printf '\n# HAMIDUN_LOCAL_BIN — claude/git в PATH\n%s\n' "$line" >> "$rc"
+    fi
+  done
+}
+
 # ---- Целостность вшитых артефактов (SHA-256 против vendor/checksums.json) ----
 # Fail-closed: перед запуском ЛЮБОГО вшитого установщика (vendor/apps/*) сверяем
 # его SHA-256 с манифестом. При несовпадении/отсутствии манифеста — стоп (exit 1),

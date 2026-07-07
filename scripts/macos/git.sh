@@ -29,16 +29,65 @@ set_git_defaults() {
 }
 
 echo "Проверяю Git..."
-if have git && git --version >/dev/null 2>&1; then
+# Не дёргаем голый /usr/bin/git-шим на чистом маке (его вызов сам может открыть
+# CLT-диалог): доверяем `git --version` только если git НЕ шим ИЛИ CLT уже стоит.
+if have git && { [ "$(command -v git)" != "/usr/bin/git" ] || xcode-select -p >/dev/null 2>&1; } && git --version >/dev/null 2>&1; then
   echo "Git уже установлен: $(git --version)"
   set_git_defaults
   exit 0
 fi
 
+# --- Вшитый портативный Git (dugite-native от GitHub Desktop) — офлайн, БЕЗ окон Apple ---
+# Основной путь на чистом маке: не триггерит установку Command Line Tools (и её баг
+# «осталось 130 часов»). CLT-ветка ниже остаётся фолбэком, если пакета нет/не завёлся.
+GIT_TGZ="${HM_VENDOR:-}/apps/git-macos-$(arch_tag).tar.gz"
+if [ -n "${HM_VENDOR:-}" ] && [ -f "$GIT_TGZ" ]; then
+  echo "Ставлю Git из встроенного пакета (офлайн, без системных окон Apple)..."
+  verify_artifact "$GIT_TGZ"                       # fail-closed SHA-256
+  GROOT="$HOME/.local/hamidun-git"
+  rm -rf "$GROOT"; mkdir -p "$GROOT" "$HOME/.local/bin"
+  if tar -xzf "$GIT_TGZ" -C "$GROOT" 2>/dev/null && [ -x "$GROOT/bin/git" ]; then
+    # Снимаем quarantine (если vendor копировался через Finder/.dmg) — иначе Gatekeeper.
+    xattr -dr com.apple.quarantine "$GROOT" 2>/dev/null || true
+    # Wrapper: dugite собран без RUNTIME_PREFIX, бинарю нужны GIT_EXEC_PATH и шаблоны.
+    cat > "$HOME/.local/bin/git" <<EOF
+#!/bin/sh
+export GIT_EXEC_PATH="$GROOT/libexec/git-core"
+export GIT_TEMPLATE_DIR="$GROOT/share/git-core/templates"
+[ -z "\${GIT_CONFIG_SYSTEM:-}" ] && export GIT_CONFIG_SYSTEM="$GROOT/etc/gitconfig"
+exec "$GROOT/bin/git" "\$@"
+EOF
+    chmod +x "$HOME/.local/bin/git"
+    export PATH="$HOME/.local/bin:$PATH"
+    if "$HOME/.local/bin/git" --version >/dev/null 2>&1; then
+      persist_local_bin_path
+      echo "OK: Git установлен из встроенного пакета: $("$HOME/.local/bin/git" --version)"
+      set_git_defaults
+      exit 0
+    fi
+    echo "Встроенный Git не запустился — перехожу к установке через Apple Command Line Tools."
+    rm -f "$HOME/.local/bin/git"
+  else
+    echo "Встроенный пакет Git не распаковался — перехожу к Apple Command Line Tools."
+  fi
+fi
+
 echo "Запускаю установку Command Line Tools (включает Git)..."
 xcode-select --install 2>/dev/null || true
-echo "Открылось системное окно установки Command Line Tools — подтверди установку в нём."
-echo "Установка CLT обычно занимает 5–15 минут (скачивает ~700 МБ). Жду..."
+echo "Открылось системное окно Apple «Установка ПО» — нажми «Установить»."
+echo ""
+echo "  ВНИМАНИЕ: если Apple показывает оценку в десятки или сотни часов"
+echo "  (\"осталось 130 часов\") — это ИЗВЕСТНЫЙ БАГ macOS, а не реальное время."
+echo "  Реальный размер ~1 ГБ, обычно 5-15 минут. Если оценка абсурдная или"
+echo "  прогресс завис — сделай так:"
+echo "    1. Нажми «Остановить» в окне Apple."
+echo "    2. Скачай Command Line Tools вручную (качается за минуты на полной скорости):"
+echo "       https://developer.apple.com/download/all/"
+echo "       (в поиске набери «Command Line Tools», нужен бесплатный Apple ID)"
+echo "    3. Установи скачанный .dmg и нажми в установщике «Повторить неустановленное» —"
+echo "       Git подхватится сам."
+echo ""
+echo "Жду завершения установки Command Line Tools..."
 
 # Проверяем готовность БЕЗ дёргания xcode-select-шима (иначе повторно всплывает диалог):
 # сперва прямой путь бинаря CLT, затем — git только если CLT уже стоит (xcode-select -p).

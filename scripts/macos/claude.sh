@@ -26,26 +26,7 @@ if [ "$INSTALLED" -eq 0 ]; then
   fi
 fi
 
-# Прописываем ~/.local/bin в PATH новых терминалов — иначе `claude` в Terminal
-# не находится (native-installer кладёт бинарь туда, а этой папки нет в PATH по умолчанию).
-persist_local_bin_path() {
-  line='export PATH="$HOME/.local/bin:$PATH"'
-  for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
-    # Создавать ~/.bash_profile «с нуля» опасно: bash-login читает ПЕРВЫЙ из
-    # .bash_profile/.bash_login/.profile — новый .bash_profile замаскирует
-    # существующий ~/.profile с пользовательским PATH/env. Если создаём —
-    # сначала подключаем .profile.
-    if [ ! -e "$rc" ]; then
-      : > "$rc"
-      if [ "$rc" = "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
-        printf '[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> "$rc"
-      fi
-    fi
-    if ! grep -qF 'HAMIDUN_LOCAL_BIN' "$rc" 2>/dev/null; then
-      printf '\n# HAMIDUN_LOCAL_BIN — claude в PATH\n%s\n' "$line" >> "$rc"
-    fi
-  done
-}
+# persist_local_bin_path вынесена в _lib.sh (её использует и git.sh для вшитого git).
 
 # Честная проверка: бинарь реально на диске? (иначе — красный статус, а не ложный OK)
 export PATH="$HOME/.local/bin:$PATH"

@@ -104,7 +104,32 @@ PW="$ROOT/vendor/playwright-browsers"; mkdir -p "$PW"
 "$PY" -m pip install --quiet playwright >/dev/null 2>&1 || true
 PLAYWRIGHT_BROWSERS_PATH="$PW" "$PY" -m playwright install chromium >/dev/null 2>&1 || true
 
-echo "[vendor-mac] Git: оставлен системный/CLT (офлайн-бандл git на mac — на будущее)."
+echo "[vendor-mac] Git: вшитый портативный dugite-native (офлайн, без Apple CLT-диалога)..."
+# Пинним версию и SHA-256 (не 'latest' — иначе checksum поплывёт). dugite-native от
+# GitHub Desktop: самодостаточный git, TLS через системный libcurl. arm64 + x64.
+DUGITE_BASE="https://github.com/desktop/dugite-native/releases/download/v2.53.0-3"
+dugite_get() {
+  local arch="$1" want="$2" out="$APPS/git-macos-$arch.tar.gz"
+  if [ -s "$out" ]; then echo "  skip git-macos-$arch.tar.gz"; return; fi
+  echo "  GET dugite-native macOS-$arch"
+  if curl -fsSL "$DUGITE_BASE/dugite-native-v2.53.0-f49d009-macOS-$arch.tar.gz" -o "$out"; then
+    local got; got=$(shasum -a 256 "$out" | awk '{print $1}')
+    if [ "$got" != "$want" ]; then
+      echo "  ! SHA-256 git-macos-$arch НЕ совпал (ожидалось $want, получено $got) — удаляю."
+      rm -f "$out"
+    fi
+  else
+    echo "  ! dugite-native macOS-$arch не скачался — git на этой арх уйдёт в CLT-фолбэк."
+  fi
+}
+dugite_get arm64 "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437"
+dugite_get x64   "caf27c36b8834969550535bcd5e58186f970e080d1e175e76d9c1de3aac409ed"
+mkdir -p "$ROOT/vendor/licenses"
+cat > "$ROOT/vendor/licenses/git-dugite-NOTICE.txt" <<'NOTICE'
+Вшитый Git — сборка dugite-native (GitHub Desktop), git под лицензией GNU GPL v2.0.
+Исходники: https://github.com/desktop/dugite-native  и  https://git-scm.com
+Полный текст GPL-2.0: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+NOTICE
 
 echo "[vendor-mac] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
 CHK="$ROOT/vendor/checksums.json"
@@ -137,6 +162,7 @@ chk_file "$APPS/node.pkg"         "apps/node.pkg"
 chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
 chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
 if [ ! -s "$APPS/amneziavpn.pkg" ] && [ ! -s "$APPS/amneziavpn.dmg" ]; then add_missing "apps/amneziavpn.pkg|dmg"; fi
+chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшитый git — иначе CLT-диалог)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
