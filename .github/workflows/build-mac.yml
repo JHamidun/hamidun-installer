@@ -10,6 +10,8 @@ on:
 jobs:
   build-mac:
     runs-on: macos-latest
+    permissions:
+      contents: write   # публикация dmg в Release (не artifact — квота)
     steps:
       - uses: actions/checkout@v4
 
@@ -31,9 +33,16 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # без подписи/нотаризации в v1
         run: npx electron-builder --mac --arm64 --publish never
 
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Hamidun-Setup-Mac
-          path: release/*.dmg
-          if-no-files-found: error
+      # Публикуем в Release, НЕ в artifacts: гиговые dmg выбивают квоту хранилища
+      # Actions (пересчёт раз в 6-12ч). Release-ассеты квоту не тратят.
+      - name: Upload installer to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ls -la release/*.dmg
+          TAG="mac-build-${{ github.run_number }}"
+          gh release create "$TAG" release/*.dmg \
+            --title "Hamidun-Setup-Mac (run ${{ github.run_number }})" \
+            --notes "Автосборка dmg из workflow run ${{ github.run_id }}" \
+            || gh release upload "$TAG" release/*.dmg --clobber
