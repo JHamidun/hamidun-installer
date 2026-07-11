@@ -66,7 +66,24 @@ async function init() {
     window.installer.quit();
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
-  $('#packs-none').addEventListener('click', () => setAllPacks(false));
+  setupMascots();
+}
+
+// Омлетон-«пасхалка»: клик по маскоту → прыжок + смена позы. Чисто визуально,
+// на установку не влияет (finish/retry потом всё равно ставят свою позу).
+function setupMascots() {
+  const poses = ['watching', 'thinking', 'success', 'loading'];
+  document.querySelectorAll('.mascot, .tips-mascot').forEach((img) => {
+    img.style.cursor = 'pointer';
+    if (!img.title) img.title = 'Омлетон';
+    let i = poses.indexOf((img.getAttribute('src') || '').replace(/.*\/(\w+)\.webp/, '$1'));
+    img.addEventListener('click', () => {
+      img.classList.remove('jump'); void img.offsetWidth; img.classList.add('jump');
+      i = (i + 1) % poses.length;
+      img.src = 'mascot/' + poses[i] + '.webp';
+    });
+    img.addEventListener('animationend', () => img.classList.remove('jump'));
+  });
 }
 
 // ---- selection / dependency logic ----------------------------------

@@ -416,3 +416,14 @@ h1 {
 }
 .tips-in { animation: tipsIn .45s ease; }
 @keyframes tipsIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* Омлетон интерактивный: клик → прыжок + смена позы */
+.mascot, .tips-mascot { cursor: pointer; }
+.mascot.jump, .tips-mascot.jump { animation: mascotJump .5s ease; }
+@keyframes mascotJump {
+  0% { transform: translateY(0); }
+  30% { transform: translateY(-14px) rotate(-6deg); }
+  55% { transform: translateY(0) rotate(3deg); }
+  78% { transform: translateY(-5px); }
+  100% { transform: translateY(0); }
+}
