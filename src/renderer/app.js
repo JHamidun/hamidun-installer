@@ -143,6 +143,14 @@ function renderCard(c) {
   if (info) {
     info.addEventListener('pointerdown', (e) => e.stopPropagation());
     info.addEventListener('click', (e) => e.stopPropagation());
+    // У нижней кромки скролл-зоны пузырь снизу обрезается — переворачиваем вверх.
+    const flip = () => {
+      const sc = document.querySelector('#view-select .scroll');
+      const bounds = sc ? sc.getBoundingClientRect() : { bottom: window.innerHeight };
+      info.classList.toggle('tip-up', info.getBoundingClientRect().bottom + 150 > bounds.bottom);
+    };
+    info.addEventListener('mouseenter', flip);
+    info.addEventListener('focus', flip);
   }
   return el;
 }
@@ -291,12 +299,15 @@ function refreshDerived() {
   const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
   const np = Object.values(STATE.selectedPacks || {}).filter(Boolean).length;
   const total = (STATE.packsData.packs || []).length;
-  // Сколько скиллов реально поедет в установку (по выбранным пакам).
+  // Тематические скиллы из выбранных паков. База (core + некатегоризированные)
+  // ставится всегда вместе с «Конфигом» — её в счётчик не мешаем, а без
+  // «Конфига» скиллы не ставятся вовсе, поэтому хвост гасим.
   let nSkills = 0;
   (STATE.packsData.packs || []).forEach((p) => {
     if (STATE.selectedPacks[p.id]) nSkills += packSelectedCount(p);
   });
-  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total} · скиллов: ${nSkills}`;
+  const skillsPart = STATE.selected['config'] ? ` · тематических скиллов: ${nSkills}` : '';
+  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}`;
   $('#btn-install').disabled = n === 0;
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
@@ -447,6 +458,9 @@ async function retryFailed(ids) {
   STATE.checks = [];
   $('#next-steps').classList.add('hidden');
   $('#btn-finish').classList.add('hidden');
+  // Маскот обратно в «готовит» — иначе на весь повтор останется грустный/праздничный.
+  const m = document.querySelector('#view-progress .mascot');
+  if (m) { m.src = 'mascot/loading.webp'; m.alt = 'Шкворчик готовит окружение'; }
   buildSteps(ids);
   appendLog(`\n— Повторная установка: ${ids.map((i) => STATE.byId[i].name).join(', ')} —`);
   const res = await runComponents(ids, LAST_ENV || envForRun());

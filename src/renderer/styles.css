@@ -393,3 +393,6 @@ h1 {
 
 /* ---- подсказка в блоке ошибок ---- */
 .ns-fail-hint { margin-top: 6px; font-size: 12px; color: var(--text-muted); }
+
+/* Флип подсказки вверх у нижней кромки скролл-зоны (ставится из JS). */
+.info.tip-up .tip { top: auto; bottom: calc(100% + 7px); }
