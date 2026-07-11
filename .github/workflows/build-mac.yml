@@ -28,6 +28,26 @@ jobs:
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
         run: bash tools/fetch-vendor-mac.sh
 
+      - name: Validate bundled git (dugite)
+        run: |
+          set -e
+          TGZ="vendor/apps/git-macos-arm64.tar.gz"
+          [ -s "$TGZ" ] || { echo "нет $TGZ"; exit 1; }
+          G="$RUNNER_TEMP/hm-git"; rm -rf "$G"; mkdir -p "$G"
+          tar -xzf "$TGZ" -C "$G"
+          xattr -dr com.apple.quarantine "$G" 2>/dev/null || true
+          export GIT_EXEC_PATH="$G/libexec/git-core"
+          export GIT_TEMPLATE_DIR="$G/share/git-core/templates"
+          export GIT_CONFIG_SYSTEM="$G/etc/gitconfig"
+          echo "arch раннера: $(uname -m)"
+          "$G/bin/git" --version
+          # реальный сценарий: init + commit + clone по https (TLS через системный libcurl)
+          T="$RUNNER_TEMP/gt"; rm -rf "$T"; mkdir -p "$T"; cd "$T"
+          "$G/bin/git" init -q . && echo "x" > a.txt && "$G/bin/git" add a.txt
+          "$G/bin/git" -c user.email=t@t -c user.name=t commit -qm t
+          "$G/bin/git" clone -q --depth 1 https://github.com/desktop/dugite-native.git d && echo "https-clone OK"
+          echo "ВШИТЫЙ GIT РАБОТАЕТ на $(uname -m)"
+
       # Записываем App Store Connect API-ключ (.p8) из secret в файл для notarytool.
       - name: Prepare notarization API key
         run: |
