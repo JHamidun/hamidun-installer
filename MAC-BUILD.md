@@ -46,13 +46,13 @@ npm run dist:mac          # -> release/Hamidun-Setup-Mac.dmg
 ## Что входит в Mac-версию (v1, гибрид)
 
 - **Конфиг (.claude) — офлайн**, вшит в установщик (как на Windows).
-- **Приложения** (Git, Node, Cursor, Python, Claude CLI, AmneziaVPN) — ставятся при установке
+- **Приложения** (Git, Node, Cursor, Python, Claude CLI) — ставятся при установке
   через Homebrew / прямые `.pkg`/`.dmg` (нужен интернет). Скрипты: `scripts/macos/*.sh`.
-- Финальный экран «Что дальше», выбор паков, VPN-логика — те же, что на Windows.
+- Финальный экран «Что дальше», выбор паков — те же, что на Windows.
 
 ## Полный офлайн на Mac (на будущее)
 
-Нужен Mac, чтобы скачать Mac-бинари: `.pkg` Node/Python, `.dmg` Cursor/AmneziaVPN,
+Нужен Mac, чтобы скачать Mac-бинари: `.pkg` Node/Python, `.dmg` Cursor,
 Python-wheels (`macosx`), Playwright-браузеры (mac). Делается скриптом `fetch-vendor-mac.sh`
 (аналог Windows `fetch-vendor.ps1`) — добавим, когда дойдут руки до полного офлайн-Mac.
 

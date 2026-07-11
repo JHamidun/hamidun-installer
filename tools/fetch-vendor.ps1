@@ -197,5 +197,18 @@ if ($missing.Count -gt 0) {
   Write-Host "[vendor] OK: все ключевые артефакты на месте."
 }
 
+# Скрепка: exe попадает в vendor только с машины с локальной сборкой маскота. Если компонент
+# «mascot» объявлен в components.json, а exe нет — чистая сборка спакует СЛОМАННЫЙ компонент.
+# Валим сборку сразу с понятным сообщением, а не молча.
+$componentsRawM = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
+if ($componentsRawM -and $componentsRawM -match '"mascot"') {
+  $mascotExe = Get-Item (Join-Path $apps 'claude-mascot\claude-mascot.exe') -ErrorAction SilentlyContinue
+  if (-not $mascotExe -or $mascotExe.Length -eq 0) {
+    Write-Host "[vendor] FATAL: Скрепка: нет vendor\apps\claude-mascot\claude-mascot.exe — запусти fetch-vendor на машине со сборкой маскота, или убери компонент mascot из components.json."
+    exit 1
+  }
+  Write-Host "[vendor] OK: скрепка на месте (vendor\apps\claude-mascot\claude-mascot.exe)."
+}
+
 $total = (Get-ChildItem -Recurse -File (Join-Path $root 'vendor') | Measure-Object Length -Sum).Sum
 Write-Host ("[vendor] ГОТОВО — vendor\ весит {0:N0} МБ" -f ($total/1MB))

@@ -70,7 +70,7 @@
 
 ## Bridge enroll-контракт (бэкенд моста)
 
-Аналог `installer/server/enroll-server.js`, но выдаёт SSH-доступ вместо WireGuard-конфига:
+Реализация — `installer/server/enroll-ssh-server.js` (выдаёт SSH-доступ):
 
 ```
 POST https://bridge.hamidun.../enroll
@@ -81,7 +81,7 @@ POST https://bridge.hamidun.../enroll
 
 Приложение поднимает SSH `-D` (paramiko, локальный SOCKS5), пишет PAC с `pacDomains` в системный прокси,
 для Claude Code CLI ставит `HTTPS_PROXY`. 1 платящий = 1 выделенный VPS (Стандарт) либо общий пул (Лайт).
-Инвайт/токен-авторизация обязательна (иначе любой наплодит пиров). Rate-limit + fail-closed (см. enroll-server.js).
+Инвайт/токен-авторизация обязательна (иначе любой наплодит пиров). Rate-limit + fail-closed (см. enroll-ssh-server.js).
 
 ## Биллинг/БД (минимум)
 
