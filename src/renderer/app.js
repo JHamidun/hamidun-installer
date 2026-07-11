@@ -38,7 +38,12 @@ async function init() {
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
-  STATE.packsData.packs.forEach((p) => (STATE.selectedPacks[p.id] = true));
+  STATE.selectedSkills = {};  // имя скилла -> bool; по умолчанию включены все
+  STATE.expandedPack = null;  // id пака с раскрытой панелью выбора скиллов
+  STATE.packsData.packs.forEach((p) => {
+    STATE.selectedPacks[p.id] = true;
+    (p.skills || []).forEach((s) => (STATE.selectedSkills[s] = true));
+  });
 
   STATE.groups.forEach((g) =>
     g.components.forEach((c) => {
@@ -125,6 +130,7 @@ function renderCard(c) {
     <div class="card-body">
       <div class="card-name">
         ${c.name}
+        ${c.why ? `<span class="info" tabindex="0" role="button" aria-label="Что это?">?<span class="tip">${c.why || c.desc}</span></span>` : ''}
         ${c.sizeHint ? `<span class="badge">${c.sizeHint}</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
         ${reqNames.length ? `<span class="badge dep">требует: ${reqNames.join(', ')}</span>` : ''}
@@ -132,7 +138,24 @@ function renderCard(c) {
       <div class="card-desc">${c.desc}</div>
     </div>`;
   el.addEventListener('click', () => toggle(c.id));
+  // Клик по «?» показывает подсказку и НЕ должен переключать карточку.
+  const info = el.querySelector('.info');
+  if (info) {
+    info.addEventListener('pointerdown', (e) => e.stopPropagation());
+    info.addEventListener('click', (e) => e.stopPropagation());
+  }
   return el;
+}
+
+// Сколько скиллов пака сейчас выбрано (по умолчанию все включены).
+function packSelectedCount(p) {
+  return (p.skills || []).filter((s) => STATE.selectedSkills[s] !== false).length;
+}
+
+function packBadgeText(p) {
+  const total = (p.skills || []).length;
+  const n = packSelectedCount(p);
+  return n === total ? `${total} скиллов` : `${n} из ${total} скиллов`;
 }
 
 function renderPacks() {
@@ -146,12 +169,66 @@ function renderPacks() {
       <div class="checkbox">${CHECK_SVG}</div>
       <div class="pack-emoji">${p.emoji || '📦'}</div>
       <div class="pack-body">
-        <div class="pack-name">${p.name} <span class="badge">${(p.skills || []).length} скиллов</span></div>
+        <div class="pack-name">${p.name} <span class="badge">${packBadgeText(p)}</span></div>
         <div class="pack-desc">${p.desc || ''}</div>
+        <button type="button" class="linkbtn pack-skills-toggle">⚙ Выбрать скиллы</button>
       </div>`;
     el.addEventListener('click', () => togglePack(p.id));
+    // Раскрытие панели скиллов не должно переключать сам пак.
+    const tg = el.querySelector('.pack-skills-toggle');
+    tg.addEventListener('pointerdown', (e) => e.stopPropagation());
+    tg.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Одновременно раскрыт только один пак: открытие другого закрывает прежний.
+      STATE.expandedPack = STATE.expandedPack === p.id ? null : p.id;
+      renderPacks();
+    });
     root.appendChild(el);
+    if (STATE.expandedPack === p.id) root.appendChild(renderPackSkills(p, el));
   });
+}
+
+// Панель drill-down по скиллам пака — сосед карточки на всю ширину грида.
+function renderPackSkills(p, cardEl) {
+  const skills = p.skills || [];
+  const panel = document.createElement('div');
+  panel.className = 'pack-skills';
+  panel.innerHTML = `
+    <div class="pack-skills-head">
+      <span class="pack-skills-count">${packSelectedCount(p)} из ${skills.length} выбрано</span>
+      <button type="button" class="linkbtn" data-act="all">Все</button>
+      <button type="button" class="linkbtn" data-act="none">Ничего</button>
+    </div>
+    <div class="pack-skills-grid">
+      ${skills.map((s) => `
+        <label class="skill-chip">
+          <input type="checkbox" data-skill="${s}" ${STATE.selectedSkills[s] !== false ? 'checked' : ''} />
+          <span>${s}</span>
+        </label>`).join('')}
+    </div>`;
+  // Обновляем счётчики без полного перерендера — чтобы чекбокс не терял фокус.
+  const syncCounts = () => {
+    const badge = cardEl.querySelector('.pack-name .badge');
+    if (badge) badge.textContent = packBadgeText(p);
+    const head = panel.querySelector('.pack-skills-count');
+    if (head) head.textContent = `${packSelectedCount(p)} из ${skills.length} выбрано`;
+    refreshDerived();
+  };
+  panel.querySelectorAll('[data-act]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const on = b.dataset.act === 'all';
+      skills.forEach((s) => (STATE.selectedSkills[s] = on));
+      panel.querySelectorAll('input[data-skill]').forEach((cb) => (cb.checked = on));
+      syncCounts();
+    })
+  );
+  panel.querySelectorAll('input[data-skill]').forEach((cb) =>
+    cb.addEventListener('change', () => {
+      STATE.selectedSkills[cb.dataset.skill] = cb.checked;
+      syncCounts();
+    })
+  );
+  return panel;
 }
 
 function togglePack(id) {
@@ -214,7 +291,12 @@ function refreshDerived() {
   const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
   const np = Object.values(STATE.selectedPacks || {}).filter(Boolean).length;
   const total = (STATE.packsData.packs || []).length;
-  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}`;
+  // Сколько скиллов реально поедет в установку (по выбранным пакам).
+  let nSkills = 0;
+  (STATE.packsData.packs || []).forEach((p) => {
+    if (STATE.selectedPacks[p.id]) nSkills += packSelectedCount(p);
+  });
+  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total} · скиллов: ${nSkills}`;
   $('#btn-install').disabled = n === 0;
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
@@ -241,7 +323,8 @@ function envForRun() {
   allPacks.forEach((p) =>
     (p.skills || []).forEach((s) => {
       allPackSkills.add(s);
-      if (STATE.selectedPacks[p.id]) keep.add(s);
+      // Ставим скилл, только если выбран и пак, и сам скилл внутри пака.
+      if (STATE.selectedPacks[p.id] && STATE.selectedSkills[s] !== false) keep.add(s);
     })
   );
 
@@ -393,6 +476,12 @@ function finishInstall(res) {
   }
   $('#progress-title').textContent = title;
   $('#progress-sub').textContent = sub;
+  // Шкворчик реагирует на исход: всё встало — радуется, есть проблемы — задумался.
+  const mascot = document.querySelector('#view-progress .mascot');
+  if (mascot) {
+    mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
+    mascot.alt = okAll ? 'Шкворчик доволен — всё установилось' : 'Шкворчик задумался — есть проблемы';
+  }
   renderNextSteps(failed, skipped);
   $('#btn-finish').classList.remove('hidden');
 }
