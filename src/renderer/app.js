@@ -34,6 +34,7 @@ async function init() {
   STATE.freeGB = (typeof boot.freeGB === 'number') ? boot.freeGB : null;
   STATE.resourcesRoot = boot.resourcesRoot || '';
   STATE.userWarning = boot.userWarning || '';
+  STATE.vendorAvailable = boot.vendorAvailable !== false;
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -50,6 +51,7 @@ async function init() {
   renderPacks();
   renderPreflight();
   renderUserWarning();
+  renderVendorWarning();
   refreshDerived();
 
   $('#btn-install').addEventListener('click', startInstall);
@@ -186,6 +188,23 @@ function renderUserWarning() {
   el.id = 'userwarn';
   el.className = 'preflight-warn'; // переиспользуем жёлтый стиль preflight
   el.innerHTML = '⚠️ ' + escapeHtml(STATE.userWarning);
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+}
+
+// На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
+// перетащили в /Applications и запустили без dmg — vendor не найден: жёсткое
+// предупреждение запускать из окна установщика (иначе офлайн-установка не сработает).
+function renderVendorWarning() {
+  if (STATE.vendorAvailable) return;
+  if (STATE.platform !== 'darwin') return;
+  if (document.getElementById('vendorwarn')) return;
+  const el = document.createElement('div');
+  el.id = 'vendorwarn';
+  el.className = 'preflight-warn';
+  el.innerHTML = '⚠️ Запусти установщик из окна, которое открылось при монтировании DMG ' +
+    '(двойным кликом по «Hamidun Setup» там), а не из «Программы». Иначе офлайн-файлы ' +
+    'не подхватятся и установка может не пройти.';
   const hero = document.querySelector('#view-select .hero');
   if (hero) hero.insertAdjacentElement('afterend', el);
 }
@@ -409,11 +428,12 @@ function renderNextSteps(failed, skipped) {
   const botUrl = links.bot ? links.bot + '?start=' + encodeURIComponent(startPayload) : '';
   const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
-  // Оффлайн-фолбэк «Первые 10 минут»: показываем ТОЛЬКО когда видео-ссылки нет и
-  // START-HERE.html вшит (finish.startHtmlRelPath) — открывается локально из ресурсов.
+  // Памятка «Что дальше»: START-HERE.html вшит (finish.startHtmlRelPath). На финише
+  // копируем её на рабочий стол (постоянная, всегда доступна) и открываем один раз.
+  // Кнопка ниже переоткрывает памятку в любой момент.
   const startHtmlRel = fin.startHtmlRelPath || '';
-  const startBtn = (!links.video && startHtmlRel && STATE.resourcesRoot)
-    ? `<button type="button" id="ns-start" class="btn-sm">▶ Первые 10 минут</button>`
+  const startBtn = startHtmlRel
+    ? `<button type="button" id="ns-start" class="btn-sm">📌 Открыть памятку «Что дальше»</button>`
     : '';
   const logBtn = STATE.logPath ? `<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>` : '';
 
@@ -479,10 +499,49 @@ function renderNextSteps(failed, skipped) {
   const logBtnEl = $('#ns-log');
   if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
   const startBtnEl = $('#ns-start');
-  if (startBtnEl) {
-    // openPath(resourcesRoot + разделитель + startHtmlRelPath). Нормализуем слэши под ОС.
+  if (startBtnEl && startHtmlRel) {
+    // Фолбэк-путь к вшитой памятке в ресурсах (если копия на стол не удалась).
     const startRel = isWin ? startHtmlRel.replace(/\//g, '\\') : startHtmlRel.replace(/\\/g, '/');
-    startBtnEl.addEventListener('click', () => window.installer.openPath(STATE.resourcesRoot + sep + startRel));
+    const resPath = STATE.resourcesRoot ? STATE.resourcesRoot + sep + startRel : '';
+    // Кэшируем путь копии ТОЛЬКО при успехе — иначе следующий клик повторит
+    // попытку копирования (OneDrive/антивирус могли отпустить файл).
+    const ensureSaved = async () => {
+      if (STATE.startHerePath) return STATE.startHerePath;
+      try {
+        const r = await window.installer.saveStartHere();
+        if (r && r.ok && r.dest) STATE.startHerePath = r.dest;
+        return STATE.startHerePath || '';
+      } catch (e) { return ''; }
+    };
+    // Открываем копию на столе; если не вышло (файл удалили, сломана
+    // ассоциация .html) — открываем вшитую из ресурсов. Пропавшую копию
+    // забываем: следующий клик пересоздаст её через ensureSaved.
+    const openMemo = async (target) => {
+      if (target) {
+        const r = await window.installer.openPath(target);
+        if (r && r.ok) return true;
+        if (target === STATE.startHerePath) STATE.startHerePath = '';
+      }
+      if (resPath && target !== resPath) {
+        const r2 = await window.installer.openPath(resPath);
+        return !!(r2 && r2.ok);
+      }
+      return false;
+    };
+    // Один общий вход для авто-открытия и клика: пока операция в полёте,
+    // повторный клик игнорируем — иначе память откроется двумя вкладками.
+    let memoBusy = false;
+    const saveAndOpen = async () => {
+      if (memoBusy) return;
+      memoBusy = true;
+      try { await openMemo((await ensureSaved()) || resPath); }
+      finally { memoBusy = false; }
+    };
+    if (!STATE.startHereOpened) {
+      STATE.startHereOpened = true;
+      saveAndOpen(); // авто-открытие после установки + копия на рабочий стол
+    }
+    startBtnEl.addEventListener('click', saveAndOpen);
   }
   const saveKeysBtn = $('#ns-save-keys');
   if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);

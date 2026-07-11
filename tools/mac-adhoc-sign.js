@@ -8,6 +8,12 @@ const path = require('path');
 
 exports.default = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return;
+  // Если настроена НАСТОЯЩАЯ подпись Developer ID (CSC_LINK в env) — ad-hoc НЕ трогаем:
+  // electron-builder подпишет бандл сам после afterPack, а ad-hoc только помешал бы.
+  if (process.env.CSC_LINK) {
+    console.log('[adhoc-sign] CSC_LINK задан — пропускаю ad-hoc, будет реальная Developer ID подпись');
+    return;
+  }
   const appName = context.packager.appInfo.productFilename;
   const appPath = path.join(context.appOutDir, `${appName}.app`);
   console.log(`[adhoc-sign] codesign --force --deep -s - "${appPath}"`);

@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('installer', {
   },
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
+  saveStartHere: () => ipcRenderer.invoke('save-start-here'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
   openClaudeTerminal: () => ipcRenderer.invoke('open-claude-terminal'),

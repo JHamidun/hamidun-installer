@@ -34,14 +34,16 @@
       { "from": "config.json", "to": "config.json" },
       { "from": "components.json", "to": "components.json" },
       { "from": "packs.json", "to": "packs.json" },
-      { "from": "vendor", "to": "vendor" },
       { "from": "assets/starter-project", "to": "assets/starter-project" },
       { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }
     ],
     "win": {
       "target": [{ "target": "portable", "arch": ["x64"] }],
       "artifactName": "Hamidun-Setup-Windows.${ext}",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "requireAdministrator",
+      "extraResources": [
+        { "from": "vendor", "to": "vendor" }
+      ]
     },
     "portable": {
       "requestExecutionLevel": "admin",
@@ -51,7 +53,12 @@
     "mac": {
       "target": [{ "target": "dmg", "arch": ["arm64"] }],
       "category": "public.app-category.developer-tools",
-      "artifactName": "Hamidun-Setup-Mac.${ext}"
+      "artifactName": "Hamidun-Setup-Mac.${ext}",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
     },
     "dmg": {
       "contents": [

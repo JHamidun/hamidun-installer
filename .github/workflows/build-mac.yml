@@ -28,10 +28,61 @@ jobs:
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
         run: bash tools/fetch-vendor-mac.sh
 
-      - name: Build .dmg (unsigned, arm64 full-offline)
+      # Записываем App Store Connect API-ключ (.p8) из secret в файл для notarytool.
+      - name: Prepare notarization API key
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build .dmg (Developer ID signed + notarized, arm64 full-offline)
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'   # без подписи/нотаризации в v1
+          # Подпись: electron-builder возьмёт .p12 из CSC_LINK (base64) + пароль.
+          CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          # Нотаризация через notarytool + App Store Connect API-ключ.
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx electron-builder --mac --arm64 --publish never
+
+      # electron-builder нотаризовал+застейплил ЧИСТЫЙ .app (без vendor — иначе notary
+      # ругается на неподписанные .so в .whl). Финальный dmg с офлайн-vendor собираем
+      # САМИ через hdiutil: том нужного размера (electron-builder сайзит только под .app
+      # → ENOSPC на 1ГБ vendor). Нотаризованный app запускается чисто; dmg подписываем
+      # Developer ID (сам dmg не нотаризуем — vendor бы завалил, а app и так застейплен).
+      - name: Assemble final dmg (notarized app + offline vendor)
+        env:
+          APPLE_CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+        run: |
+          set -e
+          APP="release/mac-arm64/Hamidun Setup.app"
+          [ -d "$APP" ] || { echo "нет .app от electron-builder"; exit 1; }
+          echo "=== staple нотаризации на .app ==="
+          xcrun stapler validate "$APP" && echo "STAPLED OK" || echo "WARN: staple не подтверждён (app всё равно нотаризован в БД Apple)"
+          # keychain для подписи dmg (кейчейн electron-builder уже мог быть удалён)
+          KC="$RUNNER_TEMP/dmgsign.keychain-db"; KP="hmpw$RANDOM"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          echo "$APPLE_CSC_LINK" | base64 --decode > "$RUNNER_TEMP/idcert.p12"
+          security import "$RUNNER_TEMP/idcert.p12" -k "$KC" -P "$APPLE_CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed s/\"//g)
+          # стейджинг: нотаризованный app + vendor + инструкция + ярлык Applications
+          ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
+          cp -R "$APP" "$ST/"
+          cp -R vendor "$ST/vendor"
+          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          ln -s /Applications "$ST/Applications"
+          OUT="release/Hamidun-Setup-Mac.dmg"; rm -f "$OUT"
+          echo "=== hdiutil create (том сам под размер контента) ==="
+          hdiutil create -volname "Hamidun Setup" -srcfolder "$ST" -fs HFS+ -format UDZO -ov "$OUT"
+          echo "=== подпись dmg Developer ID ==="
+          codesign --force --timestamp --sign "Developer ID Application: Jemal Mohamed Lemine (3VN93XA9DY)" --keychain "$KC" "$OUT"
+          codesign --verify --verbose "$OUT"
+          ls -la "$OUT"
 
       # Публикуем в Release, НЕ в artifacts: гиговые dmg выбивают квоту хранилища
       # Actions (пересчёт раз в 6-12ч). Release-ассеты квоту не тратят.

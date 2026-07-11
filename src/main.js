@@ -15,6 +15,27 @@ function resourceRoot() {
   return path.join(__dirname, '..');
 }
 
+// Где лежит vendor (офлайн-ресурсы: apps, wheels, config-pack, nomad-src).
+// На macOS vendor вынесен ИЗ .app (иначе нотаризация ломается о неподписанные
+// .so внутри вшитых .whl) и едет в dmg РЯДОМ с .app. Ищем sibling-папку
+// (корень смонтированного dmg), иначе — внутри Resources (Windows / dev / если
+// vendor всё-таки вложен). Возвращаем путь + признак «найден».
+function vendorRoot() {
+  const inside = path.join(resourceRoot(), 'vendor');
+  if (app.isPackaged && process.platform === 'darwin') {
+    // process.resourcesPath = .../Hamidun Setup.app/Contents/Resources
+    // → на 3 уровня выше = папка рядом с .app (корень dmg-мнимого тома)
+    const sibling = path.resolve(process.resourcesPath, '..', '..', '..', 'vendor');
+    try { if (fs.existsSync(sibling)) return sibling; } catch (e) {}
+  }
+  return inside;
+}
+
+// vendor доступен? (на mac при запуске .app из /Applications без dmg — нет)
+function vendorAvailable() {
+  try { return fs.existsSync(path.join(vendorRoot(), 'config-pack')); } catch (e) { return false; }
+}
+
 function readJson(name, fallback) {
   try {
     return JSON.parse(fs.readFileSync(path.join(resourceRoot(), name), 'utf8'));
@@ -160,6 +181,10 @@ ipcMain.handle('bootstrap', () => {
     // Absolute path to the bundled resources dir (vendor/agent/assets live here).
     // The renderer needs it to open the offline START-HERE fallback locally.
     resourcesRoot: resourceRoot(),
+    // vendor доступен? На mac vendor лежит в dmg РЯДОМ с .app. Если приложение
+    // перетащили в /Applications без dmg — vendor не найдётся: офлайн-установка
+    // невозможна, компоненты уйдут в онлайн-фолбэк или упадут. UI это подсветит.
+    vendorAvailable: vendorAvailable(),
     // Non-empty when we can tell the installer runs under a different user than
     // the interactive one (files would land in the wrong profile).
     userWarning: detectForeignUserWarning()
@@ -202,10 +227,11 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 
   const childEnv = Object.assign({}, process.env, env || {});
   // Paths to assets baked into the installer at build time (offline sources).
-  childEnv.HM_VENDOR = path.join(resourceRoot(), 'vendor');
-  childEnv.HM_BUNDLED_CONFIG = path.join(resourceRoot(), 'vendor', 'config-pack');
+  const vroot = vendorRoot();
+  childEnv.HM_VENDOR = vroot;
+  childEnv.HM_BUNDLED_CONFIG = path.join(vroot, 'config-pack');
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
-  childEnv.HM_NOMAD_SRC = path.join(resourceRoot(), 'vendor', 'nomad-src');
+  childEnv.HM_NOMAD_SRC = path.join(vroot, 'nomad-src');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
 
   let cmd, args;
@@ -283,7 +309,42 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 
 ipcMain.handle('open-external', (_e, url) => { if (url) shell.openExternal(url); return true; });
 
-ipcMain.handle('open-path', (_e, p) => { if (p) shell.openPath(p); return true; });
+// shell.openPath резолвится СТРОКОЙ: пустая = успех, непустая = текст ошибки.
+// Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
+ipcMain.handle('open-path', async (_e, p) => {
+  if (!p) return { ok: false, error: 'empty-path' };
+  try {
+    const err = await shell.openPath(p);
+    return { ok: !err, error: err || '' };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Копируем памятку START-HERE.html на рабочий стол — чтобы к ней можно было
+// вернуться в любой момент (не зависит от того, где лежит установщик/ресурсы).
+// Путь берём ТОЛЬКО из вшитого config.json (не из renderer'а — иначе IPC даёт
+// произвольное чтение файлов) и проверяем, что он не вышел из ресурсов.
+// Идемпотентно: перезаписываем при каждом запуске (памятка могла обновиться).
+// Известное ограничение (как у всей установки, см. TODO про cross-user
+// elevation выше): если UAC-креды дал ДРУГОЙ пользователь, Desktop будет его.
+ipcMain.handle('save-start-here', () => {
+  let src = '';
+  try {
+    const cfg = readJson('config.json', {});
+    const rel = String((cfg.finish && cfg.finish.startHtmlRelPath) || 'assets/START-HERE.html');
+    const root = path.resolve(resourceRoot());
+    src = path.resolve(root, rel);
+    if (!src.startsWith(root + path.sep)) return { ok: false, dest: '', src: '', error: 'bad-path' };
+    if (!fs.existsSync(src)) return { ok: false, dest: '', src, error: 'source-missing' };
+    const dest = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    fs.copyFileSync(src, dest);
+    return { ok: true, dest, src };
+  } catch (e) {
+    // src отдаём и при ошибке — renderer откроет вшитую копию как фолбэк.
+    return { ok: false, dest: '', src, error: e.message };
+  }
+});
 
 // Reveal a file in Explorer/Finder (openPath on a .env silently fails on macOS
 // where .env has no default app — showItemInFolder always works).
