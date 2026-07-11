@@ -163,8 +163,9 @@ print(u)' 2>/dev/null)
     echo "  ! не нашёл .app.zip в релизах claude-mascot-macos-ci (задай HM_MASCOT_MAC_URL)"
   fi
   if [ -n "${MASCOT_APP:-}" ] && [ -d "$MASCOT_APP" ]; then
+    # Ранний сигнал (только подпись; полный fail-closed гейт с TeamID и нотаризацией — ниже).
     if codesign --verify --deep --strict "$MASCOT_APP" >/dev/null 2>&1; then
-      echo "  ok $(basename "$MASCOT_APP") (подпись Developer ID валидна)"
+      echo "  ok $(basename "$MASCOT_APP") (подпись цела — codesign --verify)"
     else
       echo "  ! ВНИМАНИЕ: codesign --verify не подтвердил подпись скрепки"
     fi
@@ -210,14 +211,6 @@ chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшиты
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
-# Скрепка — опциональный компонент. Если объявлена в components.json, но .app не
-# скачалась — предупреждаем (в отличие от Windows-FATAL: mac-.app тянется из сети,
-# транзиентный сбой не должен валить всю сборку — компонент просто пропустится).
-if grep -q '"mascot"' "$ROOT/components.json" 2>/dev/null; then
-  if [ -z "$(find "$APPS/claude-mascot" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -n1)" ]; then
-    add_missing "apps/claude-mascot/*.app (скрепка macOS не скачалась — компонент mascot будет пропущен при установке)"
-  fi
-fi
 if [ -n "$MISSING" ]; then
   echo ""
   echo "[vendor-mac] WARNING: неполный vendor — отсутствуют/пустые артефакты:$MISSING"
@@ -235,6 +228,47 @@ if grep -q '"course"' "$ROOT/components.json" 2>/dev/null; then
     exit 1
   fi
   echo "[vendor-mac] OK: курс-симулятор на месте (vendor/course/vibecoding-course.zip)."
+fi
+
+# Скрепка: если компонент «mascot» объявлен в components.json — .app ОБЯЗАНА лежать в
+# vendor целой, подписанной нашим Team ID и нотаризованной (FATAL, как в Windows
+# fetch-vendor.ps1). Транзиентный сетевой сбой честно валит mac-сборку, а не отгружает
+# dmg с нерабочим компонентом: mascot.sh у пользователя всё равно делает hard exit 1
+# без валидной .app — «пропуска компонента» при установке НЕ существует.
+MASCOT_TEAM_ID="3VN93XA9DY"
+mascot_fatal() {
+  echo "[vendor-mac] FATAL: Скрепка: $1 — задай HM_MASCOT_MAC_URL или убери компонент mascot из components.json."
+  exit 1
+}
+if grep -q '"mascot"' "$ROOT/components.json" 2>/dev/null; then
+  GATE_APP="$(find "$APPS/claude-mascot" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -n1)"
+  if [ -z "$GATE_APP" ] || [ ! -d "$GATE_APP" ]; then
+    mascot_fatal "нет vendor/apps/claude-mascot/*.app (не скачалась)"
+  fi
+  GATE_BIN="$(ls "$GATE_APP/Contents/MacOS" 2>/dev/null | head -n1)"
+  if [ -z "$GATE_BIN" ] || [ ! -f "$GATE_APP/Contents/MacOS/$GATE_BIN" ]; then
+    mascot_fatal "в .app нет исполняемого файла (Contents/MacOS пуст)"
+  fi
+  # Подпись цела (codesign проверяет ТОЛЬКО подпись — нотаризацию подтверждаем отдельно ниже).
+  if ! codesign --verify --deep --strict "$GATE_APP" >/dev/null 2>&1; then
+    mascot_fatal "подпись .app не прошла codesign --verify --deep --strict"
+  fi
+  # Пин издателя: подписано именно нашим Developer ID.
+  if ! codesign -dv --verbose=4 "$GATE_APP" 2>&1 | grep -q "TeamIdentifier=$MASCOT_TEAM_ID"; then
+    mascot_fatal "TeamIdentifier не равен $MASCOT_TEAM_ID (подписано чужим Developer ID)"
+  fi
+  # Нотаризация: staple-тикет (офлайн) или вердикт Gatekeeper (spctl). На раннере есть оба.
+  MASCOT_NOTAR_OK=0
+  if command -v xcrun >/dev/null 2>&1 && xcrun stapler validate "$GATE_APP" >/dev/null 2>&1; then MASCOT_NOTAR_OK=1; fi
+  if [ "$MASCOT_NOTAR_OK" = "0" ] && command -v spctl >/dev/null 2>&1 && spctl --assess --type execute -vv "$GATE_APP" >/dev/null 2>&1; then MASCOT_NOTAR_OK=1; fi
+  if [ "$MASCOT_NOTAR_OK" != "1" ]; then
+    mascot_fatal "нотаризация не подтверждена (stapler validate и spctl --assess оба не прошли)"
+  fi
+  # Целостность на установке: главный бинарь обязан быть в манифесте checksums.json.
+  if ! grep -Fq "\"$GATE_BIN\":" "$CHK" 2>/dev/null; then
+    mascot_fatal "в checksums.json нет записи для '$GATE_BIN'"
+  fi
+  echo "[vendor-mac] OK: скрепка на месте ($(basename "$GATE_APP") — подпись Developer ID $MASCOT_TEAM_ID + нотаризация подтверждены)."
 fi
 
 echo "[vendor-mac] ГОТОВО: vendor = $(du -sh "$ROOT/vendor" 2>/dev/null | cut -f1)"
