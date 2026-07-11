@@ -44,7 +44,8 @@
         "standalone-html", "print-styles", "pwa-shell", "html-email", "web-assets-generator",
         "website-creation", "excalidraw-flowchart", "algorithmic-art", "canonical-html", "react-pinning",
         "screen-labels", "slack-gif-creator", "claude-design", "claude-in-html", "open-design",
-        "dev-handoff", "verifier", "license-check", "i18n-stress-test", "fonts-bundle", "d3-visualization"
+        "dev-handoff", "verifier", "license-check", "i18n-stress-test", "fonts-bundle", "d3-visualization",
+        "emil-design-eng", "review-animations", "text-to-lottie"
       ]
     },
     {
@@ -57,7 +58,8 @@
       "desc": "Генерация и монтаж видео, аватары, озвучка, музыка, субтитры, стикеры.",
       "skills": [
         "video-generation", "video-editor", "video-downloader", "video-export", "void-video",
-        "heygen", "did", "d-id", "runway-api", "ace-step", "submagic", "sticker-pack-generator"
+        "heygen", "did", "d-id", "runway-api", "ace-step", "submagic", "sticker-pack-generator",
+        "youtube-publisher"
       ]
     },
     {
@@ -66,7 +68,7 @@
       "skills": [
         "content-creation", "content-engine", "content-research", "content-policy", "social-post",
         "x-post", "threads-post", "bluesky-post", "instagram-post", "tiktok-post", "telegram-post",
-        "reddit-hn", "de-ai-ify", "brand-voice"
+        "reddit-hn", "de-ai-ify", "brand-voice", "crosspost"
       ]
     },
     {
@@ -87,7 +89,15 @@
         "account-research", "ad-spy", "call-prep", "campaign-planning", "competitive-analysis",
         "competitive-analysis-mktg", "competitive-intelligence", "create-an-asset", "daily-briefing",
         "draft-outreach", "investor-materials", "lead-research", "meta-ads-analyzer",
-        "performance-analytics", "seo-machine-ru", "domain-brainstormer"
+        "performance-analytics", "seo-machine-ru", "domain-brainstormer", "kwork-freelance"
+      ]
+    },
+    {
+      "id": "marketing-ru", "emoji": "🇷🇺", "name": "Маркетинг РФ (Ninja)",
+      "desc": "Реклама и воронки под Россию: Директ, VK Ads, Meta, ManyChat, креативы, бенчмарки.",
+      "skills": [
+        "yandex-direct-pro-ru", "vk-ads-pro-ru", "meta-ads-launch-ru", "manychat-funnel-ru",
+        "ai-creative-factory-ru", "ad-benchmarks-ru", "marketing-masterminds-ru"
       ]
     },
     {
