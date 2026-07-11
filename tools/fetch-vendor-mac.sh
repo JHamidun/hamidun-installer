@@ -240,22 +240,57 @@ mascot_fatal() {
   echo "[vendor-mac] FATAL: Скрепка: $1 — задай HM_MASCOT_MAC_URL или убери компонент mascot из components.json."
   exit 1
 }
-if grep -q '"mascot"' "$ROOT/components.json" 2>/dev/null; then
+# Гейт по СТРУКТУРЕ components.json (как его читает renderer), не по подстроке:
+# случайная строка "mascot" в описании не должна валить билд, а реально объявленный
+# компонент — обязан ловиться.
+if "$PY" -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(1)
+ok = any(c.get("id") == "mascot"
+         for g in d.get("groups", [])
+         for c in g.get("components", []))
+sys.exit(0 if ok else 1)
+' "$ROOT/components.json" 2>/dev/null; then
   GATE_APP="$(find "$APPS/claude-mascot" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -n1)"
   if [ -z "$GATE_APP" ] || [ ! -d "$GATE_APP" ]; then
     mascot_fatal "нет vendor/apps/claude-mascot/*.app (не скачалась)"
   fi
-  GATE_BIN="$(ls "$GATE_APP/Contents/MacOS" 2>/dev/null | head -n1)"
-  if [ -z "$GATE_BIN" ] || [ ! -f "$GATE_APP/Contents/MacOS/$GATE_BIN" ]; then
-    mascot_fatal "в .app нет исполняемого файла (Contents/MacOS пуст)"
+  # Главный бинарь — ИМЕННО CFBundleExecutable из Info.plist, не «первый файл в
+  # Contents/MacOS»: sha256-пин обязан указывать на реально запускаемый бинарь.
+  GATE_PLIST="$GATE_APP/Contents/Info.plist"
+  if [ ! -f "$GATE_PLIST" ]; then
+    mascot_fatal "в .app нет Contents/Info.plist"
+  fi
+  GATE_BIN=""
+  if [ -x /usr/libexec/PlistBuddy ]; then
+    GATE_BIN="$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$GATE_PLIST" 2>/dev/null || true)"
+  fi
+  if [ -z "$GATE_BIN" ]; then
+    GATE_BIN="$(defaults read "$GATE_APP/Contents/Info" CFBundleExecutable 2>/dev/null || true)"
+  fi
+  if [ -z "$GATE_BIN" ]; then
+    mascot_fatal "в Info.plist нет ключа CFBundleExecutable"
+  fi
+  GATE_BIN_PATH="$GATE_APP/Contents/MacOS/$GATE_BIN"
+  if [ ! -f "$GATE_BIN_PATH" ] || [ ! -x "$GATE_BIN_PATH" ]; then
+    mascot_fatal "главный бинарь из CFBundleExecutable не найден или не исполняем (Contents/MacOS/$GATE_BIN)"
+  fi
+  if ! file "$GATE_BIN_PATH" 2>/dev/null | grep -q "Mach-O"; then
+    mascot_fatal "главный бинарь не является Mach-O (Contents/MacOS/$GATE_BIN)"
   fi
   # Подпись цела (codesign проверяет ТОЛЬКО подпись — нотаризацию подтверждаем отдельно ниже).
   if ! codesign --verify --deep --strict "$GATE_APP" >/dev/null 2>&1; then
     mascot_fatal "подпись .app не прошла codesign --verify --deep --strict"
   fi
-  # Пин издателя: подписано именно нашим Developer ID.
-  if ! codesign -dv --verbose=4 "$GATE_APP" 2>&1 | grep -q "TeamIdentifier=$MASCOT_TEAM_ID"; then
-    mascot_fatal "TeamIdentifier не равен $MASCOT_TEAM_ID (подписано чужим Developer ID)"
+  # Пин издателя: TeamID сравниваем ТОЧНО (извлекаем значение), не подстрокой —
+  # grep -q поймал бы и TeamIdentifier=${MASCOT_TEAM_ID}EVIL.
+  GATE_TEAM="$(codesign -dv --verbose=4 "$GATE_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -n1)"
+  if [ "$GATE_TEAM" != "$MASCOT_TEAM_ID" ]; then
+    mascot_fatal "TeamIdentifier='${GATE_TEAM:-нет}' не равен $MASCOT_TEAM_ID (подписано чужим Developer ID)"
   fi
   # Нотаризация: staple-тикет (офлайн) или вердикт Gatekeeper (spctl). На раннере есть оба.
   MASCOT_NOTAR_OK=0
