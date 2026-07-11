@@ -43,21 +43,6 @@ if (Test-Path $pyInstaller) { Remove-Item $pyInstaller -Force -ErrorAction Silen
 Write-Host "  версия: $pyver"
 Dl "https://www.python.org/ftp/python/$pyver/python-$pyver-amd64.exe" $pyInstaller
 
-Write-Host "[vendor] AmneziaWG client..."
-try {
-  $rel = Invoke-RestMethod "https://api.github.com/repos/amnezia-vpn/amneziawg-windows-client/releases/latest" -Headers $UA
-  $a = $rel.assets | Where-Object { $_.name -match '\.(exe|msi)$' } | Select-Object -First 1
-  if ($a) { Dl $a.browser_download_url (Join-Path $apps ('amneziawg-setup' + [IO.Path]::GetExtension($a.name))) }
-} catch { Write-Host "  (AmneziaWG релиз не найден, пропускаю)" }
-
-Write-Host "[vendor] AmneziaVPN (full)..."
-try {
-  $rel = Invoke-RestMethod "https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest" -Headers $UA
-  $a = $rel.assets | Where-Object { $_.name -match 'windows' -and $_.name -match '\.exe$' } | Select-Object -First 1
-  if (-not $a) { $a = $rel.assets | Where-Object { $_.name -match '\.exe$' } | Select-Object -First 1 }
-  if ($a) { Dl $a.browser_download_url (Join-Path $apps 'amneziavpn-setup.exe') }
-} catch { Write-Host "  (AmneziaVPN релиз не найден, пропускаю)" }
-
 Write-Host "[vendor] Claude Code CLI -> npm cache (для офлайн -g установки)..."
 $cache = Join-Path $root 'vendor\npm-cache'
 $tmp   = Join-Path $root 'vendor\_claudetmp'
@@ -155,13 +140,28 @@ if ($py) {
   } catch { Write-Host "  (playwright browsers пропущены: $($_.Exception.Message))" }
 }
 
+Write-Host "[vendor] Скрепка Claude (маскот, локальная Windows-сборка)..."
+$mascotSrc = 'C:\Users\hamid\claude-mascot\src-tauri\target\release\claude-mascot.exe'
+$mascotDir = Join-Path $apps 'claude-mascot'
+if (Test-Path $mascotSrc) {
+  New-Item -ItemType Directory -Force $mascotDir | Out-Null
+  Copy-Item -Force $mascotSrc (Join-Path $mascotDir 'claude-mascot.exe')
+  Write-Host "  ok claude-mascot.exe (из локальной сборки)"
+} elseif (Test-Path (Join-Path $mascotDir 'claude-mascot.exe')) {
+  Write-Host "  skip claude-mascot.exe (уже в vendor)"
+} else {
+  Write-Host "  ! исходник скрепки не найден ($mascotSrc) — компонент «Скрепка» не попадёт в сборку."
+}
+
 Write-Host "[vendor] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
 try {
   # Чистый .NET (Get-FileHash недоступен в powershell electron-builder-сборки —
   # модуль Utility не подхватывается; ConvertTo-Json тоже избегаем).
   $sha = [System.Security.Cryptography.SHA256]::Create()
   $entries = New-Object System.Collections.ArrayList
-  Get-ChildItem $apps -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object Name | ForEach-Object {
+  # -Recurse: артефакты в подпапках (apps\claude-mascot\claude-mascot.exe) тоже в манифест —
+  # Confirm-HmArtifact ищет запись по ИМЕНИ файла, путь не важен.
+  Get-ChildItem $apps -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object Name | ForEach-Object {
     $fs = [IO.File]::OpenRead($_.FullName)
     try { $hb = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
     $hex = ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
@@ -179,10 +179,6 @@ $missing = @()
 foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','cursor-setup.exe','claude-code.vsix')) {
   $f = Get-Item (Join-Path $apps $name) -ErrorAction SilentlyContinue
   if (-not $f -or $f.Length -eq 0) { $missing += "apps/$name" }
-}
-foreach ($pat in @('amneziawg-setup.*','amneziavpn-setup.*')) {
-  $hit = Get-ChildItem $apps -File -Filter $pat -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Select-Object -First 1
-  if (-not $hit) { $missing += "apps/$pat" }
 }
 foreach ($d in @('npm-cache','pywheels','config-pack')) {
   $dir = Join-Path $root ('vendor\' + $d)

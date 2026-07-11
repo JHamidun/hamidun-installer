@@ -37,7 +37,7 @@ if ($DRY) { Write-Host "[dry-run] Cursor: ветка выбрана, без из
 # и чтобы следующий шаг — установка расширения — не падал с 'aborted' при открытом Cursor).
 if ($inst) {
     if ($instBundled) { Confirm-HmArtifact $inst }  # вшитый артефакт — сверяем SHA-256 (fail-closed)
-    Write-Host "Установщик Cursor может показать окно «This User Installer is not meant to run as Administrator» — нажми OK, это нормально (весь установщик запущен под админом ради VPN)."
+    Write-Host "Установщик Cursor может показать окно «This User Installer is not meant to run as Administrator» — нажми OK, это нормально (весь установщик запущен с правами администратора)."
     Start-Process -FilePath $inst -ArgumentList '/S'
 }
 for ($i = 0; $i -lt 180 -and -not (Test-Path $cexe); $i++) { Start-Sleep -Seconds 1 }

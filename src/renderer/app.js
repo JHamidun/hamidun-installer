@@ -88,12 +88,6 @@ function setupMascots() {
 
 // ---- selection / dependency logic ----------------------------------
 
-function isVpnSelected() {
-  return Object.keys(STATE.selected).some(
-    (id) => STATE.selected[id] && (id === 'vpn-wg' || id === 'vpn-full')
-  );
-}
-
 // Dependency resolution lives in deps.js (window.HMDeps) — shared with tests.
 function enableWithDeps(id) { window.HMDeps.enableWithDeps(STATE.selected, STATE.byId, id); }
 function disableDependents(id) { window.HMDeps.disableDependents(STATE.selected, STATE.byId, id); }
@@ -331,17 +325,12 @@ function refreshDerived() {
   const configOn = !!STATE.selected['config'];
   const pw = $('#packs-wrap');
   if (pw) pw.classList.toggle('disabled', !configOn);
-
-  const needInvite =
-    isVpnSelected() && STATE.config.vpn && STATE.config.vpn.requireInviteCode;
-  $('#vpn-options').classList.toggle('hidden', !needInvite);
 }
 
 // ---- install flow ---------------------------------------------------
 
 function envForRun() {
   const cfg = STATE.config || {};
-  const vpn = cfg.vpn || {};
 
   // Skill packs -> which skill dirs to keep / which belong to any pack.
   const core = (STATE.packsData && STATE.packsData.core) || [];
@@ -359,9 +348,6 @@ function envForRun() {
   return {
     HM_CONFIG_REPO_URL: cfg.configRepoUrl || '',
     HM_CONFIG_REPO_BRANCH: cfg.configRepoBranch || 'main',
-    HM_VPN_ENROLL_URL: vpn.enrollEndpoint || '',
-    HM_VPN_ENROLL_PATH: vpn.enrollPath || '/enroll',
-    HM_INVITE_CODE: ($('#invite-code') && $('#invite-code').value.trim()) || '',
     HM_CLAUDE_EXT_ID: cfg.claudeCodeExtensionId || 'anthropic.claude-code',
     HM_HOME: STATE.homedir || '',
     HM_KEEP_SKILLS: Array.from(keep).join(','),

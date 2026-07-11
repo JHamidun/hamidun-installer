@@ -24,16 +24,6 @@ echo "[vendor-mac] Cursor (arm64 dmg)..."
 CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-arm64&releaseTrack=stable" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("downloadUrl",""))' 2>/dev/null)
 [ -n "$CUR" ] && dl "$CUR" "$APPS/cursor.dmg" || echo "  ! Cursor API недоступен"
 
-echo "[vendor-mac] AmneziaVPN (mac pkg/dmg)..."
-# На macOS Amnezia раздаёт .pkg (раньше .dmg) — берём по расширению, .pkg приоритетнее.
-AV=$(curl -fsSL https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/latest | "$PY" -c 'import sys,json;A=[x["browser_download_url"] for x in json.load(sys.stdin)["assets"]];p=[u for u in A if u.lower().endswith(".pkg")];d=[u for u in A if u.lower().endswith(".dmg")];print((p+d)[0] if p+d else "")' 2>/dev/null)
-if [ -n "$AV" ]; then
-  AVEXT=$(echo "${AV##*.}" | tr 'A-Z' 'a-z')
-  dl "$AV" "$APPS/amneziavpn.$AVEXT"
-else
-  echo "  ! AmneziaVPN pkg/dmg не найден"
-fi
-
 echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
@@ -163,7 +153,6 @@ chk_file "$APPS/python.pkg"       "apps/python.pkg"
 chk_file "$APPS/node.pkg"         "apps/node.pkg"
 chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
 chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
-if [ ! -s "$APPS/amneziavpn.pkg" ] && [ ! -s "$APPS/amneziavpn.dmg" ]; then add_missing "apps/amneziavpn.pkg|dmg"; fi
 chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшитый git — иначе CLT-диалог)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"

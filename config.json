@@ -1,12 +1,6 @@
 {
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
   "configRepoBranch": "main",
-  "vpn": {
-    "_comment": "Fill enrollEndpoint with your new server once provisioned (e.g. https://vpn.hamidun.com). Leave empty to disable VPN auto-config (the VPN scripts will skip gracefully).",
-    "enrollEndpoint": "",
-    "enrollPath": "/enroll",
-    "requireInviteCode": true
-  },
   "nomad": {
     "_comment": "Fill repoUrl with the Nomad agent repo once pushed (e.g. https://github.com/JHamidun/nomad). Empty => the Nomad component installs from vendor/nomad-src if bundled, else skips gracefully. packageName matches pyproject [project].name.",
     "repoUrl": "",
