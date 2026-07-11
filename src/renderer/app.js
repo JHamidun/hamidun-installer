@@ -437,12 +437,56 @@ async function runComponents(ids, env) {
   return { failed, skipped };
 }
 
+// Карусель советов на время установки: то, что спасает новичка в первый день
+// (сжато из памятки «Что дальше»). Общие для обоих установщиков — без курса.
+const TIPS = [
+  '<kbd>Esc</kbd> мгновенно останавливает Claude. Писать «стой» в чат бесполезно — сообщение просто встанет в очередь.',
+  'Испортил файл? <code>/rewind</code> откатит правки: Claude сам делает точку сохранения перед каждым изменением.',
+  'Открывая папку, Cursor спросит «Do you trust the authors?» — жми <b>Yes</b>, иначе панель Claude молча не заработает.',
+  'В Cursor два ИИ-чата. Встроенный (<kbd>Ctrl</kbd>+<kbd>L</kbd>) — отдельный платный продукт Cursor. Твой — панель со значком <b>✳</b>.',
+  '<kbd>Ctrl</kbd>+<kbd>Esc</kbd> открывает панель Claude из любого места Cursor.',
+  'Квота подписки общая: переписка на claude.ai и работа в Claude Code тратят один лимит. Остаток покажет <code>/usage</code>.',
+  '«Limit reached» — не поломка. Время сброса написано прямо в сообщении, ничего не теряется.',
+  'Скриншот в чат: Windows — <kbd>Alt</kbd>+<kbd>V</kbd>, Mac — <kbd>Ctrl</kbd>+<kbd>V</kbd>. Или перетащи файл, зажав <kbd>Shift</kbd>.',
+  'Одна задача — один разговор. Закончил — <code>/clear</code>, и следующая задача пойдёт быстрее и точнее.',
+  'Правый клик по файлу → <b>Open Timeline</b>: Cursor хранит прошлые версии каждого файла, даже без git.',
+  'Claude спрашивает разрешение перед каждой правкой. Это твоя страховка — не отключай её.',
+  'Claude «только рассказывает», но не делает? Ты случайно включил режим плана — нажми <kbd>Shift</kbd>+<kbd>Tab</kbd>.',
+  'Что-то сломалось — набери <code>/doctor</code>: он сам проверит установку и предложит починить.',
+  'Говори целями, а не шагами: «сделай сайт-визитку с прайсом и формой» работает лучше пошаговых команд.',
+  'Попроси Claude вести файл <code>NOTES.md</code> — и новый разговор продолжит ровно с того места.',
+  'После установки на рабочем столе появится памятка «Что дальше» — в ней ответы на весь первый день.',
+];
+let TIPS_TIMER = null;
+function startTips() {
+  const box = $('#tips'), txt = $('#tips-text');
+  if (!box || !txt) return;
+  let i = Math.floor(Math.random() * TIPS.length);
+  const show = () => {
+    txt.classList.remove('tips-in');
+    txt.innerHTML = TIPS[i % TIPS.length];
+    // reflow, чтобы анимация появления срабатывала на каждом совете
+    void txt.offsetWidth;
+    txt.classList.add('tips-in');
+    i++;
+  };
+  show();
+  box.classList.remove('hidden');
+  TIPS_TIMER = setInterval(show, 12000);
+}
+function stopTips() {
+  if (TIPS_TIMER) { clearInterval(TIPS_TIMER); TIPS_TIMER = null; }
+  const box = $('#tips');
+  if (box) box.classList.add('hidden');
+}
+
 async function startInstall() {
   const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
   $('#view-select').classList.add('hidden');
   $('#view-progress').classList.remove('hidden');
   buildSteps(order);
+  startTips();
   LAST_ENV = envForRun();
   const res = await runComponents(order, LAST_ENV);
   finishInstall(res);
@@ -460,14 +504,16 @@ async function retryFailed(ids) {
   $('#btn-finish').classList.add('hidden');
   // Маскот обратно в «готовит» — иначе на весь повтор останется грустный/праздничный.
   const m = document.querySelector('#view-progress .mascot');
-  if (m) { m.src = 'mascot/loading.webp'; m.alt = 'Шкворчик готовит окружение'; }
+  if (m) { m.src = 'mascot/loading.webp'; m.alt = 'Омлетон готовит окружение'; }
   buildSteps(ids);
+  startTips();
   appendLog(`\n— Повторная установка: ${ids.map((i) => STATE.byId[i].name).join(', ')} —`);
   const res = await runComponents(ids, LAST_ENV || envForRun());
   finishInstall(res);
 }
 
 function finishInstall(res) {
+  stopTips();
   const failed = res.failed || [];
   const skipped = res.skipped || [];
   // Независимая проверка (verify) может найти проблему, даже когда все шаги
@@ -490,11 +536,11 @@ function finishInstall(res) {
   }
   $('#progress-title').textContent = title;
   $('#progress-sub').textContent = sub;
-  // Шкворчик реагирует на исход: всё встало — радуется, есть проблемы — задумался.
+  // Омлетон реагирует на исход: всё встало — радуется, есть проблемы — задумался.
   const mascot = document.querySelector('#view-progress .mascot');
   if (mascot) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
-    mascot.alt = okAll ? 'Шкворчик доволен — всё установилось' : 'Шкворчик задумался — есть проблемы';
+    mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
   renderNextSteps(failed, skipped);
   $('#btn-finish').classList.remove('hidden');
