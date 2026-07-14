@@ -28,4 +28,33 @@ function filterRendererEnv(rendererEnv) {
   return out;
 }
 
-module.exports = { isAllowedRendererEnvKey, filterRendererEnv };
+// #4 (finalize round-2) — АВТОРИТЕТНЫЕ системные path-переменные из ВАЛИДИРОВАННОГО
+// диска, а НЕ из launch-env. Update-Path в install-скриптах выводит каталоги git/node
+// из $env:ProgramFiles/$env:SystemRoot; если установщик запущен с crafted env
+// (ProgramFiles=C:\Users\...\evil), то без этой перезаписи в elevated PATH попал бы
+// evil\Git\cmd\git.exe. Диск/корень берём из validated winSystemRoot (reparse-safe).
+// Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят — они
+// по природе user-writable (abs-path fallback в user-профиль — принятый остаток).
+function authoritativeWinSystemEnv(winRoot, drive) {
+  const path = require('path');
+  const root = String(winRoot);
+  const drv = String(drive);
+  const pf = path.join(drv, 'Program Files');
+  const pf86 = path.join(drv, 'Program Files (x86)');
+  const programData = path.join(drv, 'ProgramData');
+  return {
+    SystemRoot: root,
+    windir: root,
+    SystemDrive: drv.replace(/[\\/]+$/, ''),        // "C:" без хвостового слэша
+    ProgramFiles: pf,
+    'ProgramFiles(x86)': pf86,
+    ProgramW6432: pf,
+    ProgramData: programData,
+    ALLUSERSPROFILE: programData,
+    CommonProgramFiles: path.join(pf, 'Common Files'),
+    'CommonProgramFiles(x86)': path.join(pf86, 'Common Files'),
+    CommonProgramW6432: path.join(pf, 'Common Files')
+  };
+}
+
+module.exports = { isAllowedRendererEnvKey, filterRendererEnv, authoritativeWinSystemEnv };

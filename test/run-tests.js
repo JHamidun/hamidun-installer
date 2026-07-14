@@ -357,6 +357,36 @@ ok('#4 allowlist: регистр-варианты отброшены (nodE_optio
   assert(out.Hm_Selected === 'git', 'регистр-вариант HM_* (Hm_Selected) распознан как allowed');
 });
 
+// #4 (finalize round-2): системные path-переменные берутся из ВАЛИДИРОВАННОГО диска,
+// а не из launch-env — иначе crafted ProgramFiles=…\evil → evil\Git\cmd под админом.
+ok('#4 anti-spoof: authoritativeWinSystemEnv(C:\\Windows, C:\\) даёт валидные ProgramFiles/SystemRoot/SystemDrive', () => {
+  const e = installEnv.authoritativeWinSystemEnv('C:\\Windows', 'C:\\');
+  assert(e.ProgramFiles === 'C:\\Program Files', 'ProgramFiles из диска, не из env');
+  assert(e['ProgramFiles(x86)'] === 'C:\\Program Files (x86)', 'ProgramFiles(x86) из диска');
+  assert(e.ProgramW6432 === 'C:\\Program Files', 'ProgramW6432 из диска');
+  assert(e.SystemRoot === 'C:\\Windows' && e.windir === 'C:\\Windows', 'SystemRoot/windir = validated winRoot');
+  assert(e.SystemDrive === 'C:', 'SystemDrive без хвостового слэша');
+  assert(e.ProgramData === 'C:\\ProgramData' && e.ALLUSERSPROFILE === 'C:\\ProgramData', 'ProgramData/ALLUSERSPROFILE из диска');
+});
+
+// Другой системный диск (D:) — всё выводится из него, не хардкод C:.
+ok('#4 anti-spoof: другой диск (D:) корректно проброшен в ProgramFiles/SystemDrive', () => {
+  const e = installEnv.authoritativeWinSystemEnv('D:\\Windows', 'D:\\');
+  assert(e.ProgramFiles === 'D:\\Program Files', 'ProgramFiles на D:');
+  assert(e.SystemDrive === 'D:', 'SystemDrive = D:');
+  assert(e.SystemRoot === 'D:\\Windows', 'SystemRoot = D:\\Windows');
+});
+
+// Провязка в main.js: authoritative override вызывается ПОСЛЕ renderer-allowlist
+// (иначе copied-from-process.env ProgramFiles/SystemRoot остались бы spoofable).
+ok('#4 main.js: authoritativeWinSystemEnv провязан после filterRendererEnv', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert(/installEnv\.authoritativeWinSystemEnv\(winRoot,\s*drive\)/.test(s), 'authoritativeWinSystemEnv(winRoot, drive) вызван в main.js');
+  const iFilter = s.indexOf('installEnv.filterRendererEnv(rendererEnv)');
+  const iAuth = s.indexOf('installEnv.authoritativeWinSystemEnv(');
+  assert(iFilter !== -1 && iAuth !== -1 && iAuth > iFilter, 'authoritative override идёт ПОСЛЕ renderer-allowlist');
+});
+
 console.log('== Remote security: content-addressed URLs + script fail-closed guards ==');
 
 // Content-addressed immutability: неплейсхолдерный mirror-URL должен содержать

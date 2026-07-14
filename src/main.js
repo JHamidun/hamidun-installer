@@ -337,6 +337,10 @@ function buildInstallEnv(rendererEnv) {
     // renderer-env: ИСТИННЫЙ allowlist — только HM_* установщика (кроме HM_REMOTE_CACHE),
     // регистронезависимо. Ключи резолвинга/инъекции (PATH, NODE_OPTIONS, npm_config_* …) не проходят.
     Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
+    // Анти-spoof: системные path-переменные (ProgramFiles/SystemRoot/…, из которых
+    // Update-Path в скриптах выводит каталоги git/node) перезаписываем ВАЛИДИРОВАННЫМИ
+    // значениями — иначе crafted launch-env (ProgramFiles=…\evil) → evil\Git\cmd под админом.
+    Object.assign(out, installEnv.authoritativeWinSystemEnv(winRoot, drive));
     // Авторитетно (main, ПОСЛЕ renderer-env): PATH только из admin-owned каталогов.
     const dirs = [
       s32, winRoot,
