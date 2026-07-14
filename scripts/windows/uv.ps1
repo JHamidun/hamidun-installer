@@ -55,6 +55,24 @@ if ($LASTEXITCODE -ne 0 -or ("$ver" -notmatch '^uv\s+\d')) {
 
 # 2) Копируем ПРОВЕРЕННЫЙ бинарь в пользовательский каталог (для PATH). Копию
 #    под elevated-токеном НЕ запускаем.
+# #7 (best-effort): $dest под user-controlled %LOCALAPPDATA% — junction/symlink там
+#    может увести New-Item/Copy-Item в чужой каталог. Родитель (Programs) — reparse
+#    → отказ (не пишем в перенаправленный путь). leaf (uv) — reparse → убираем ССЫЛКУ
+#    (.Delete(), НЕ Remove-Item -Recurse, чтобы не стереть содержимое цели) и создаём
+#    каталог заново. Цель всё равно не исполняется elevated — это доп. защита.
+function Test-HmReparse([string]$p) {
+    try { $it = Get-Item -LiteralPath $p -Force -ErrorAction Stop; return [bool]($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
+    catch { return $false }
+}
+$destParent = Split-Path -Parent $dest
+if ((Test-Path -LiteralPath $destParent) -and (Test-HmReparse $destParent)) {
+    Write-Host "ОШИБКА: родитель $destParent — reparse-point (junction/symlink); отказ копировать uv в перенаправленный путь."
+    exit 1
+}
+if ((Test-Path -LiteralPath $dest) -and (Test-HmReparse $dest)) {
+    try { (Get-Item -LiteralPath $dest -Force).Delete() } catch { }
+    if (Test-Path -LiteralPath $dest) { Write-Host "ОШИБКА: $dest — reparse-point, не удалось убрать (best-effort)."; exit 1 }
+}
 $target = Join-Path $dest 'uv.exe'
 try {
     New-Item -ItemType Directory -Force $dest -ErrorAction Stop | Out-Null

@@ -74,13 +74,19 @@ function killChildren() {
     try {
       if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } continue; }
       if (IS_WIN) {
-        try {
-          // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
-          // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
-          const tk = remoteFetch.sysBin('taskkill.exe') || 'taskkill.exe';
-          execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
-            { windowsHide: true, stdio: 'ignore' });
-        } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
+        // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
+        // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
+        // #6: НИКАКОГО fallback в короткое имя 'taskkill.exe' (это вернуло бы
+        // PATH-резолв). System32 не валиден → fail-closed: рвём только сам child.
+        const tk = remoteFetch.sysBin('taskkill.exe');
+        if (tk) {
+          try {
+            execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
+              { windowsHide: true, stdio: 'ignore' });
+          } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
+        } else {
+          try { c.kill(); } catch (e2) { /* ignore */ }
+        }
       } else {
         // Negative pid => the child's whole process group (needs detached spawn).
         try { process.kill(-c.pid, 'SIGKILL'); }
@@ -177,7 +183,8 @@ ipcMain.handle('bootstrap', () => {
     platform: process.platform,
     homedir: os.homedir(),
     config: readJson('config.json', {}),
-    components: readJson('components.json', { groups: [] }),
+    // BUG #11: платформо-гейтнутые компоненты (uv=win32-only) на чужой ОС не отдаём.
+    components: componentsForPlatform(),
     packs: readJson('packs.json', { core: [], packs: [] }),
     logPath: LOG_PATH,
     freeGB,
@@ -214,6 +221,38 @@ function loadValidIds() {
   return ids;
 }
 const VALID_COMPONENT_IDS = loadValidIds();
+
+// Карта id → компонент (для платформенного гейта, BUG #11).
+function loadComponentMeta() {
+  const data = readJson('components.json', { groups: [] });
+  const m = new Map();
+  for (const g of (data.groups || [])) {
+    for (const c of (g.components || [])) { if (c && c.id) m.set(c.id, c); }
+  }
+  return m;
+}
+const COMPONENT_META = loadComponentMeta();
+
+// BUG #11: показывать компонент на этой платформе? Гейт — необязательное поле
+// components.json `platforms:["win32",…]`. Нет поля/пустой массив → показывать везде.
+function componentShownOnPlatform(comp, platform) {
+  const gate = comp && Array.isArray(comp.platforms) ? comp.platforms : null;
+  return !gate || gate.length === 0 || gate.indexOf(platform || process.platform) !== -1;
+}
+
+// Компоненты для текущей платформы: платформо-гейтнутые (напр. uv=win32-only) на
+// чужой ОС в UI НЕ отдаём — иначе юзер выбрал бы uv на macOS и упёрся бы в отказ
+// pickEntry (в реестре докачки нет darwin-сборки). Пустые группы отбрасываем.
+function componentsForPlatform() {
+  const data = readJson('components.json', { groups: [] });
+  const plat = process.platform;
+  const groups = (data.groups || [])
+    .map((g) => Object.assign({}, g, {
+      components: (g.components || []).filter((c) => componentShownOnPlatform(c, plat))
+    }))
+    .filter((g) => (g.components || []).length);
+  return { groups };
+}
 
 // ---- remote (CDN on-demand) components -------------------------------
 // Реестр докачки (remote-components.json) вшивается через extraResources.
@@ -257,6 +296,82 @@ function remoteCacheDir(remoteId) {
   return path.join(base, remoteId);
 }
 
+// #4: env для elevated install-скриптов НЕЛЬЗЯ строить как весь process.env +
+// renderer-env — иначе medium-integrity процесс ТОГО ЖЕ юзера подсунул бы свой
+// git/node/npm/winget/msiexec (через пользовательский PATH или подмену
+// command-resolution переменных) под наш elevated-токен = эскалация. Строим
+// childEnv из строгого allowlist: PATH ТОЛЬКО из admin-owned каталогов (System32 +
+// стандартные Program Files install-таргеты + наш vendor), без пользовательского
+// PATH; PSModulePath/ComSpec — валидированные системные (не из env); renderer-env
+// вливаем БЕЗ ключей резолвинга бинарей. Пользовательские install-таргеты
+// (LOCALAPPDATA\Programs, Roaming\npm) намеренно НЕ в PATH — скрипты находят их по
+// абсолютным путям как фолбэк, поэтому установка не ломается.
+const ENV_RESOLUTION_DENY = new Set(
+  ['PATH', 'Path', 'PSModulePath', 'ComSpec', 'PATHEXT',
+   'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH']
+    .map((k) => k.toLowerCase()));
+
+// Системные env-переменные (реальные значения ОС), которые скрипты законно читают
+// ($env:USERPROFILE, LOCALAPPDATA, TEMP…). PATH/PSModulePath/ComSpec сюда НЕ входят —
+// их задаём авторитетно ниже.
+const WIN_SYS_ENV_KEYS = [
+  'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA', 'PUBLIC',
+  'ALLUSERSPROFILE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
+  'CommonProgramFiles', 'CommonProgramFiles(x86)', 'CommonProgramW6432', 'SystemDrive',
+  'SystemRoot', 'windir', 'TEMP', 'TMP', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME',
+  'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432',
+  'PROCESSOR_IDENTIFIER', 'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'OS', 'PATHEXT',
+  'SESSIONNAME', 'LOGONSERVER', 'USERDNSDOMAIN'
+];
+
+function buildInstallEnv(rendererEnv) {
+  rendererEnv = rendererEnv || {};
+  if (IS_WIN) {
+    const winRoot = remoteFetch.winSystemRoot() || 'C:\\Windows';   // валидирован, reparse-safe
+    const drive = path.parse(winRoot).root || 'C:\\';
+    const s32 = path.join(winRoot, 'System32');
+    const pf = path.join(drive, 'Program Files');                   // из ВАЛИДИРОВАННОГО диска, не из env
+    const pf86 = path.join(drive, 'Program Files (x86)');
+    const out = {};
+    for (const k of WIN_SYS_ENV_KEYS) { if (process.env[k] !== undefined) out[k] = process.env[k]; }
+    // renderer-env (HM_* из визарда и т.п.) — но БЕЗ ключей резолвинга бинарей.
+    for (const k of Object.keys(rendererEnv)) {
+      if (ENV_RESOLUTION_DENY.has(k.toLowerCase())) continue;
+      out[k] = rendererEnv[k];
+    }
+    // Авторитетно (main, ПОСЛЕ renderer-env): PATH только из admin-owned каталогов.
+    const dirs = [
+      s32, winRoot,
+      path.join(s32, 'WindowsPowerShell', 'v1.0'),
+      path.join(s32, 'OpenSSH'),
+      path.join(pf, 'Git', 'cmd'), path.join(pf, 'Git', 'bin'),
+      path.join(pf, 'nodejs'),
+      path.join(pf86, 'Git', 'cmd')
+    ];
+    const vroot = vendorRoot();
+    if (vroot) dirs.push(path.join(vroot, 'apps'));
+    const seen = new Set(); const uniq = [];
+    for (const d of dirs) { const key = String(d).toLowerCase(); if (d && !seen.has(key)) { seen.add(key); uniq.push(d); } }
+    const trustedPath = uniq.join(';');
+    out.PATH = trustedPath; out.Path = trustedPath;
+    out.ComSpec = path.join(s32, 'cmd.exe');                        // валидированный, не из env
+    out.PSModulePath = [
+      path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'),
+      path.join(pf, 'WindowsPowerShell', 'Modules')
+    ].join(';');                                                    // только системные модули (анти-module-hijack)
+    if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC;.PS1';
+    return out;
+  }
+  // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
+  // но renderer-env не даём переопределить резолвинг бинарей (PATH/DYLD/LD…).
+  const out = Object.assign({}, process.env);
+  for (const k of Object.keys(rendererEnv)) {
+    if (ENV_RESOLUTION_DENY.has(k.toLowerCase())) continue;
+    out[k] = rendererEnv[k];
+  }
+  return out;
+}
+
 // Run one component script, streaming output back to the renderer.
 //
 // БЕЗОПАСНОСТЬ (remote-компоненты): докачка+проверка+распаковка+запуск идут
@@ -269,6 +384,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // Allowlist check: reject unknown/traversal ids before building any path.
   if (!id || !VALID_COMPONENT_IDS.has(id)) {
     return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
+  }
+
+  // BUG #11 (defense-in-depth): компонент, не предназначенный для этой платформы,
+  // не запускаем — даже если renderer его как-то прислал (в UI он отфильтрован).
+  const meta = COMPONENT_META.get(id);
+  if (meta && !componentShownOnPlatform(meta, process.platform)) {
+    return { id, ok: false, code: -1, error: `Компонент «${id}» недоступен на платформе ${process.platform}.` };
   }
 
   const script = scriptFor(id);
@@ -328,7 +450,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
   }
 
-  const childEnv = Object.assign({}, process.env, rendererEnv);
+  // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
+  // подменяемых command-resolution переменных). rendererEnv уже без HM_REMOTE_CACHE.
+  const childEnv = buildInstallEnv(rendererEnv);
   // Paths to assets baked into the installer at build time (offline sources).
   const vroot = vendorRoot();
   childEnv.HM_VENDOR = vroot;
@@ -490,8 +614,20 @@ function regQueryValue(keyPath, valueName) {
 function npmPrefixFromRc() {
   try {
     const rc = fs.readFileSync(path.join(os.homedir(), '.npmrc'), 'utf8');
-    const m = rc.match(/^\s*prefix\s*=\s*(.+?)\s*$/m);
-    if (m) return expandWinEnv(m[1].replace(/^["']|["']$/g, '').trim());
+    // BUG #12: npm применяет ПОСЛЕДНИЙ совпавший ключ, не первый — итерируем все
+    // `prefix=` и берём последнее значение. И раскрываем ${VAR} (семантика npmrc),
+    // а НЕ %VAR% (это не синтаксис npm — npm его не раскрывает; best-effort).
+    let val = '';
+    const re = /^[ \t]*prefix[ \t]*=[ \t]*(.+?)[ \t]*$/gim;
+    let mm;
+    while ((mm = re.exec(rc)) !== null) { val = mm[1]; }
+    if (!val) return '';
+    val = val.replace(/^["']|["']$/g, '').trim();
+    val = val.replace(/\$\{([^}]+)\}/g, (whole, name) => {
+      const v = process.env[name];
+      return v !== undefined ? v : whole;
+    });
+    return val;
   } catch (e) { /* нет .npmrc — дефолты покрывают */ }
   return '';
 }
@@ -536,9 +672,13 @@ ipcMain.handle('open-claude-terminal', () => {
       const freshPath = freshWindowsPath();
       const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
       // cmd.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
+      // #6: fail-closed — БЕЗ fallback в короткое имя 'cmd.exe' (иначе PATH-резолв
+      // короткого имени под нашим токеном воскрешает hijack). System32 не валиден →
+      // не открываем терминал (return false), не резолвим короткое имя по PATH.
+      const cmdExe = remoteFetch.sysBin('cmd.exe');
+      if (!cmdExe) return false;
       // `start "Claude Code" cmd /k claude` — a new console window that stays
       // open; it inherits the fresh PATH from this spawn's env.
-      const cmdExe = remoteFetch.sysBin('cmd.exe') || 'cmd.exe';
       const child = spawn(cmdExe, ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
         { env, detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();

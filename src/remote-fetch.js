@@ -21,7 +21,16 @@
  * «запустил». Поэтому НИЧЕГО, что elevated-процесс проверяет и запускает, не
  * должно жить в каталоге, куда способен писать обычный процесс пользователя.
  *
- * Архитектурные гарантии:
+ * ГЛАВНЫЙ ГЕЙТ ЦЕЛОСТНОСТИ — sha256-пиннинг (обязателен, безусловен): скачанное
+ * сверяется с зашитым в реестр sha; не совпало → не публикуется и не запускается.
+ * Именно он закрывает РЕАЛЬНЫЕ угрозы (компрометация CDN, MITM, повреждение). Всё
+ * остальное ниже — DEFENSE-IN-DEPTH ПОВЕРХ пиннинга, а НЕ единственная защита.
+ * ADMIN-OWNED STAGING (Win) — best-effort сужение остаточного TOCTOU-окна поверх
+ * sha-гейта; на POSIX изоляция от процессов ТОГО ЖЕ юзера без root недостижима
+ * (best-effort). Остаточный вектор (portable-exe с админ-правами, распакованный в
+ * %TEMP% и запускаемый оттуда) владелец принял осознанно — см. THREAT-MODEL.md.
+ *
+ * Архитектурные гарантии (defense-in-depth поверх sha-пиннинга):
  *   • ADMIN-OWNED STAGING (Win): кэш/распаковка/запуск живут в
  *     %ProgramData%\HamidunSetup\cache с DACL ТОЛЬКО SYSTEM (*S-1-5-18) +
  *     Administrators (*S-1-5-32-544), /inheritance:r, владелец = Administrators,
@@ -151,14 +160,27 @@ function ensureSafeDir(dir) {
 
 // Валидированный корень Windows: НЕ доверяем %SystemRoot%/%windir% env вслепую
 // (crafted launch env может их подменить). Берём известный дефолт C:\Windows, а
-// env-значение — только если пройдёт ту же проверку (существует System32\kernel32.dll,
-// а System32 недоступен обычному юзеру на запись → подделать нельзя без админа).
+// env-значение — только если пройдёт ту же проверку.
+// #6: existsSync() проходит и для КАТАЛОГА/reparse-point с именем kernel32.dll, и
+// junction на месте System32 увёл бы нас в чужой каталог. Поэтому проверяем КАЖДЫЙ
+// сегмент (root, System32) как НАСТОЯЩИЙ каталог (не symlink/junction/reparse — на
+// Windows Node помечает reparse как isSymbolicLink()), а kernel32.dll — как ОБЫЧНЫЙ
+// ФАЙЛ (не dir, не symlink). Любой reparse-компонент → кандидат отвергается.
 function winSystemRoot() {
   const cands = ['C:\\Windows'];
   const envr = process.env.SystemRoot || process.env.windir;
   if (envr && cands.indexOf(envr) === -1) cands.push(envr);
   for (const r of cands) {
-    try { if (fs.existsSync(path.join(r, 'System32', 'kernel32.dll'))) return r; } catch (e) { /* ignore */ }
+    try {
+      const rst = fs.lstatSync(r);
+      if (!rst.isDirectory() || rst.isSymbolicLink()) continue;      // root — не reparse
+      const s32 = path.join(r, 'System32');
+      const sst = fs.lstatSync(s32);
+      if (!sst.isDirectory() || sst.isSymbolicLink()) continue;      // System32 — не reparse
+      const k = path.join(s32, 'kernel32.dll');
+      const kst = fs.lstatSync(k);
+      if (kst.isFile() && !kst.isSymbolicLink()) return r;           // обычный ФАЙЛ, не symlink
+    } catch (e) { /* ignore — кандидат недоступен/некорректен */ }
   }
   return null;
 }
@@ -283,14 +305,31 @@ function hardenAndVerifyCache(cacheDir, log) {
   if (process.platform === 'win32') {
     const pd = winProgramData();
     const top = path.join(pd, 'HamidunSetup');
-    try { fs.mkdirSync(top, { recursive: true }); }
-    catch (e) { return { ok: false, error: 'не удалось создать ' + top + ': ' + e.message }; }
-    // ВАЖНО: защищаем И ПРОВЕРЯЕМ корень (owner+DACL) — иначе user-owner корня
-    // сохраняет WRITE_DAC/DELETE_CHILD и может разлочить/подменить leaf.
-    if (!secureAndVerifyDirWin(top, log)) return { ok: false, error: 'не удалось защитить/проверить корень staging ' + top + ' (нужны права администратора: владелец должен стать Administrators, посторонних ACE быть не должно)' };
-    try { fs.mkdirSync(cacheDir, { recursive: true }); }
-    catch (e) { return { ok: false, error: 'не удалось создать кэш ' + cacheDir + ': ' + e.message }; }
-    if (!secureAndVerifyDirWin(cacheDir, log)) return { ok: false, error: 'кэш не прошёл защиту/проверку ACL (посторонние права/владелец) — установка заблокирована' };
+    // #2: защищаем И ПРОВЕРЯЕМ КАЖДЫЙ сегмент от top до cacheDir ВКЛЮЧАЯ промежуточный
+    // …\HamidunSetup\cache. Раньше запирались только корень и leaf — незащищённый
+    // промежуточный каталог (user-owner) сохранял бы DELETE_CHILD/WRITE_DAC и мог
+    // разлочить/подменить leaf. Строим цепочку top → … → cacheDir, но ТОЛЬКО сегменты
+    // РЕАЛЬНО под top (в проде cacheDir = top\cache\<id>). Если cacheDir не под top
+    // (произвольный путь, напр. в тестах) — защищаем top и leaf независимо, БЕЗ ухода
+    // вверх к корню диска.
+    const topR = path.resolve(top);
+    const leaf = path.resolve(cacheDir);
+    const rel = path.relative(topR, leaf);
+    const underTop = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+    const chain = [topR];
+    if (underTop) {
+      let acc = topR;
+      for (const seg of rel.split(path.sep)) { if (!seg) continue; acc = path.join(acc, seg); chain.push(acc); }
+    } else if (leaf.toLowerCase() !== topR.toLowerCase()) {
+      chain.push(leaf);
+    }
+    for (const dir of chain) {
+      try { fs.mkdirSync(dir, { recursive: true }); }
+      catch (e) { return { ok: false, error: 'не удалось создать staging-сегмент ' + dir + ': ' + e.message }; }
+      // ВАЖНО: защищаем И ПРОВЕРЯЕМ (owner+DACL) — иначе user-owner любого сегмента
+      // сохраняет WRITE_DAC/DELETE_CHILD и может разлочить/подменить вложенный кэш.
+      if (!secureAndVerifyDirWin(dir, log)) return { ok: false, error: 'не удалось защитить/проверить staging-сегмент ' + dir + ' (нужны права администратора: владелец=Administrators, посторонних ACE быть не должно)' };
+    }
     const st = safeLstat(cacheDir);
     if (!st || st.isSymbolicLink() || !st.isDirectory()) return { ok: false, error: 'кэш небезопасен (симлинк/не каталог): ' + cacheDir };
     return { ok: true };
@@ -391,7 +430,11 @@ function ipv6IsPrivate(addr) {
   if (b[0] === 0xff) return true;                                             // ff00::/8 multicast
   if (b.slice(0, 10).every((x) => x === 0) && b[10] === 0xff && b[11] === 0xff) return ipv4IsPrivate(v4tail()); // ::ffff:0:0/96
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
-      b.slice(4, 12).every((x) => x === 0)) return ipv4IsPrivate(v4tail());   // 64:ff9b::/96 NAT64
+      b.slice(4, 12).every((x) => x === 0)) return ipv4IsPrivate(v4tail());   // 64:ff9b::/96 NAT64 (well-known)
+  // #10: 64:ff9b:1::/48 — NAT64 LOCAL-USE prefix (IANA), НЕ global-reachable. Весь
+  // /48 (первые 6 байт = 00 64 ff 9b 00 01) отвергаем безусловно (fail-closed).
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
+      b[4] === 0x00 && b[5] === 0x01) return true;                            // 64:ff9b:1::/48 NAT64 local-use
   if (b.slice(0, 12).every((x) => x === 0)) return ipv4IsPrivate(v4tail());   // ::a.b.c.d (deprecated)
   return false;
 }
@@ -438,10 +481,27 @@ function openStream(url, opts, cb) {
   if (openStreamImpl) { openStreamImpl(url, opts, cb); return; }
   let redirects = 0;
   const maxRedirects = opts.maxRedirects || MAX_REDIRECTS;
-  const onReq = (req) => { try { opts.onRequest && opts.onRequest(req); } catch (e) { /* ignore */ } };
+  // #8: цепочку редиректов надо разруливать герметично, иначе (а) каждый 302 просто
+  // сливал тело и переходил дальше, перезаписывая activeReq — старый redirect-сокет
+  // жил вечно (watchdog видит только новейший req); (б) поздняя ошибка старого хопа
+  // могла выиграть общий колбэк. Держим ВСЮ цепочку req'ов, глушим её при
+  // завершении, а cb вызываем РОВНО один раз (settled-гейт). Ошибка учитывается
+  // только от ТЕКУЩЕГО хопа (currentReq) — обрыв старого (destroy при переходе) молчит.
+  let settled = false;
+  let currentReq = null;
+  const chain = [];
+  const finishOne = (err, res) => {
+    if (settled) { if (res) { try { res.destroy(); } catch (e) { /* ignore */ } } return; }
+    settled = true;
+    const keep = res && res.req;                 // сокет, который отдаём наружу, не рвём
+    for (const r of chain) { if (r !== keep) { try { r.destroy(); } catch (e) { /* ignore */ } } }
+    cb(err, res);
+  };
   const go = (u) => {
+    if (settled) return;
     guardUrl(u, (gerr, parsed, pinned) => {
-      if (gerr) { cb(gerr); return; }
+      if (settled) return;
+      if (gerr) { finishOne(gerr); return; }
       const reqOpts = { method: 'GET', headers: opts.headers || {} };
       if (pinned && pinned.length) {
         // Соединяемся строго по проверенным адресам; SNI/Host = домен из URL.
@@ -455,24 +515,29 @@ function openStream(url, opts, cb) {
       let req;
       try {
         req = https.request(parsed, reqOpts, (res) => {
+          if (settled) { try { res.destroy(); } catch (e) { /* ignore */ } return; }
           const sc = res.statusCode;
           if (sc >= 300 && sc < 400 && res.headers.location) {
-            res.resume(); // сливаем тело редиректа, чтобы освободить сокет
-            if (++redirects > maxRedirects) { cb(new Error('слишком много редиректов')); return; }
+            try { res.destroy(); } catch (e) { /* ignore */ } // #8: рвём тело редиректа (не держим сокет; прежде тут был resume-слив)
+            if (++redirects > maxRedirects) { finishOne(new Error('слишком много редиректов')); return; }
             let next;
             try { next = new URL(res.headers.location, parsed).toString(); }
-            catch (e) { cb(new Error('битый Location: ' + res.headers.location)); return; }
+            catch (e) { finishOne(new Error('битый Location: ' + res.headers.location)); return; }
+            const prev = currentReq; currentReq = null; // ошибки старого хопа больше не в счёт
+            try { prev && prev.destroy(); } catch (e) { /* ignore */ }
             go(next);
             return;
           }
-          cb(null, res);
+          finishOne(null, res);
         });
-      } catch (e) { cb(e); return; }
-      onReq(req);
+      } catch (e) { finishOne(e); return; }
+      currentReq = req;
+      chain.push(req);
+      try { opts.onRequest && opts.onRequest(req); } catch (e) { /* ignore */ }
       req.setTimeout(opts.timeoutMs || CONNECT_TIMEOUT, () => {
         req.destroy(new Error('таймаут соединения (' + parsed.host + ')'));
       });
-      req.on('error', (e) => cb(e));
+      req.on('error', (e) => { if (req === currentReq) finishOne(e); }); // только текущий хоп
       req.end();
     });
   };
@@ -590,10 +655,21 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
 
         res.on('data', (chunk) => {
           if (done || localErr) return;
-          try { fs.writeSync(fd, chunk, 0, chunk.length, written); }
-          catch (e) { localErr = true; try { res.destroy(); } catch (x) { /* ignore */ } finish({ ok: false, error: 'запись на диск: ' + String(e.message || e) }); return; }
-          hash.update(chunk);
-          written += chunk.length;
+          // #9 (held-fd short-write): fs.writeSync возвращает ЧИСЛО реально записанных
+          // байт. При коротком записи хешировать весь чанк нельзя — файл окажется
+          // КОРОЧЕ проверенного, а sha/size «совпадут» → публикуется обрезанный. Пишем
+          // в цикле по возвращаемому счётчику; фейлим при нулевом прогрессе; хешируем
+          // ТОЛЬКО реально записанные байты; written растёт строго на записанное.
+          let off = 0;
+          while (off < chunk.length) {
+            let n;
+            try { n = fs.writeSync(fd, chunk, off, chunk.length - off, written + off); }
+            catch (e) { localErr = true; try { res.destroy(); } catch (x) { /* ignore */ } finish({ ok: false, error: 'запись на диск: ' + String(e.message || e) }); return; }
+            if (!(n > 0)) { localErr = true; try { res.destroy(); } catch (x) { /* ignore */ } finish({ ok: false, error: 'нулевой прогресс записи на диск (short-write)' }); return; }
+            hash.update(chunk.subarray(off, off + n)); // хешируем РОВНО записанный сегмент
+            off += n;
+          }
+          written += off; // off === chunk.length после полной записи
           if (cap && written > cap) { localErr = true; try { res.destroy(); } catch (x) { /* ignore */ } finish({ ok: false, error: 'превышен ожидаемый размер (' + written + ' > ' + cap + ')' }); return; }
           if (cap) {
             const pct = Math.min(100, Math.floor((written / cap) * 100));
@@ -609,6 +685,14 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
           if (done || localErr) return;
           activeRes = null;
           if (cap && written < cap) { nextAttempt(); return; } // короткий ответ → докачиваем
+          // #9: перед публикацией — РЕАЛЬНЫЙ размер файла на диске == хешированному
+          // (written) == ожидаемому (cap, если известен). Закрывает случай, когда
+          // held-fd короче, чем то, что мы «посчитали» записанным/захешированным.
+          let fsize = -1;
+          try { fsize = fs.fstatSync(fd).size; }
+          catch (e) { finish({ ok: false, error: 'fstat перед публикацией не удался: ' + String(e.message || e) }); return; }
+          if (fsize !== written) { finish({ ok: false, error: 'размер на диске (' + fsize + ') не совпал с записанным (' + written + ')' }); return; }
+          if (cap && (written !== cap || fsize !== cap)) { finish({ ok: false, error: 'итоговый размер ' + written + ' не равен ожидаемому ' + cap }); return; }
           finish({ ok: true, bytes: written, sha: hash.digest('hex').toLowerCase() });
         });
       });
