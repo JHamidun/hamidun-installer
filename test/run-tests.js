@@ -113,5 +113,60 @@ if (fs.existsSync(SKILLS_DIR)) {
   console.log('  ⚠️  репо скиллов не найден (' + SKILLS_DIR + ') — пропускаю проверку существования.');
 }
 
+console.log('== Remote (CDN) components integrity ==');
+
+// Реестр докачки (remote-components.json). Remote-компоненты не имеют vendor-
+// артефакта и не являются скиллами — их не должны считать «потеряшками».
+let remoteReg = null;
+try { remoteReg = JSON.parse(fs.readFileSync(path.join(ROOT, 'remote-components.json'), 'utf8')); }
+catch (e) { remoteReg = null; }
+
+ok('remote-components.json парсится и содержит массив components', () => {
+  assert(remoteReg, 'remote-components.json должен парситься');
+  assert(Array.isArray(remoteReg.components), 'components должен быть массивом');
+});
+
+ok('каждый remote-компонент из components.json имеет запись в реестре', () => {
+  const remoteComps = Object.values(byId).filter((c) => c.remote);
+  remoteComps.forEach((c) => {
+    assert(c.remoteId, `remote-компонент ${c.id} обязан указывать remoteId`);
+    const has = (remoteReg.components || []).some((e) => e.remoteId === c.remoteId);
+    assert(has, `в реестре нет записи для remoteId "${c.remoteId}" (компонент ${c.id})`);
+  });
+});
+
+ok('каждая запись реестра докачки корректна (sha256/size/mirrors)', () => {
+  (remoteReg.components || []).forEach((e) => {
+    assert(e.remoteId, 'у записи должен быть remoteId');
+    assert(typeof e.sizeBytes === 'number' && e.sizeBytes > 0, `у ${e.remoteId} нужен sizeBytes>0`);
+    assert(/^[0-9a-f]{64}$/.test(String(e.sha256 || '')), `у ${e.remoteId} нужен 64-hex sha256`);
+    assert(Array.isArray(e.mirrors) && e.mirrors.length > 0, `у ${e.remoteId} нужны mirrors`);
+    e.mirrors.forEach((m) => assert(m && typeof m.url === 'string' && m.url, `у ${e.remoteId} mirror без url`));
+  });
+});
+
+ok('remote-компоненты не ломают граф зависимостей', () => {
+  // remote-компоненты умышленно без vendor-файла — это НЕ «потеряшка».
+  const remoteComps = Object.values(byId).filter((c) => c.remote);
+  remoteComps.forEach((c) =>
+    (c.requires || []).forEach((r) => assert(byId[r], `remote ${c.id} требует неизвестный ${r}`))
+  );
+});
+
+// remote-fetch.js — чистый модуль без electron: проверяем, что грузится и
+// экспортирует ядро (pickEntry/isFetchableUrl) и что фильтр URL работает.
+ok('remote-fetch.js загружается и фильтрует URL/зеркала', () => {
+  const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+  assert(typeof rf.fetchRemote === 'function', 'fetchRemote экспортируется');
+  assert(typeof rf.pickEntry === 'function', 'pickEntry экспортируется');
+  assert(rf.isFetchableUrl('https://s3.regru.cloud/b/vibecoding-installer/uv-win32.zip'), 'валидный https url');
+  assert(!rf.isFetchableUrl('https://R2-PLACEHOLDER-NOT-CONFIGURED/x.zip'), 'плейсхолдер отсекается');
+  assert(!rf.isFetchableUrl('https://<r2>/x.zip'), '<> отсекается');
+  const reg = { components: [{ remoteId: 'uv', platform: 'win32' }, { remoteId: 'x' }] };
+  assert(rf.pickEntry(reg, 'uv', 'win32'), 'pickEntry: точная платформа');
+  assert(rf.pickEntry(reg, 'x', 'darwin'), 'pickEntry: платформо-независимая запись');
+  assert(!rf.pickEntry(reg, 'uv', 'darwin'), 'pickEntry: нет darwin-сборки uv → null');
+});
+
 console.log(`\nИТОГ: ${pass} прошло, ${fail} упало`);
 process.exit(fail ? 1 : 0);

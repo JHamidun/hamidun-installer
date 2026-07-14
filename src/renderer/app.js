@@ -371,6 +371,15 @@ function setStep(id, status) {
   if (step) step.className = 'step ' + status;
 }
 
+// Подменяет текст шага (последний <span>) — для прогресса докачки
+// remote-компонента («Скачиваю uv… 45%»), не трогая класс/статус.
+function setStepLabel(id, text) {
+  const step = document.querySelector(`.step[data-id="${id}"]`);
+  if (!step) return;
+  const spans = step.querySelectorAll('span');
+  if (spans.length) spans[spans.length - 1].textContent = text;
+}
+
 let LAST_ENV = null;
 
 function buildSteps(ids) {
@@ -426,7 +435,39 @@ async function runComponents(ids, env) {
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
-    const res = await window.installer.runComponent(id, env);
+
+    // Remote-компонент: сначала докачиваем архив из CDN (прогресс в step-list),
+    // и только при успехе запускаем install-скрипт с env HM_REMOTE_CACHE.
+    // Провал докачки = честный fail компонента (как exit≠0), скрипт не запускаем.
+    let runEnv = env;
+    const comp = STATE.byId[id];
+    if (comp && comp.remote) {
+      setStepLabel(id, `${comp.name} — Скачиваю…`);
+      appendLog(`[↓] Докачка ${comp.name} из облака…`);
+      const offP = window.installer.onRemoteProgress((p) => {
+        if (!p || p.id !== id) return;
+        setStepLabel(id, (p.pct != null)
+          ? `${comp.name} — Скачиваю ${p.pct}%`
+          : `${comp.name} — Скачиваю…`);
+      });
+      let fr;
+      try { fr = await window.installer.fetchRemote(id, comp.remoteId); }
+      catch (e) { fr = { ok: false, error: String(e) }; }
+      offP && offP();
+      setStepLabel(id, comp.name); // вернуть обычную подпись
+      if (!fr || !fr.ok) {
+        setStep(id, 'error');
+        failed.push(id);
+        bad.add(id);
+        appendLog(`[!] ${comp.name}: докачка не удалась — ${(fr && fr.error) || 'нет соединения'}`);
+        $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+        continue;
+      }
+      appendLog(`[✓] Скачано и проверено (SHA-256): ${comp.name}`);
+      runEnv = Object.assign({}, env, { HM_REMOTE_CACHE: fr.path });
+    }
+
+    const res = await window.installer.runComponent(id, runEnv);
     if (res.ok) { setStep(id, 'done'); ok++; }
     else {
       setStep(id, 'error');

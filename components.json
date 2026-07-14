@@ -109,6 +109,25 @@
       ]
     },
     {
+      "id": "dev-tools",
+      "title": "Инструменты разработчика",
+      "components": [
+        {
+          "id": "uv",
+          "name": "uv — быстрый менеджер Python",
+          "desc": "Сверхбыстрый установщик Python-пакетов и версий (от Astral). Не вшит в установщик — докачивается из облака при установке (~15 МБ).",
+          "why": "uv в разы быстрее pip и сам ставит нужную версию Python. Нужен продвинутым скиллам (ace-step, huggingface) и современным Python-проектам. Качается из облака, только если ты его выбрал.",
+          "default": false,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~15 МБ",
+          "category": "DEV",
+          "remote": true,
+          "remoteId": "uv"
+        }
+      ]
+    },
+    {
       "id": "vpn",
       "title": "Доступ к ИИ из России",
       "components": [

@@ -4,6 +4,7 @@ const { spawn, execFileSync, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const remoteFetch = require('./remote-fetch');
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -210,6 +211,90 @@ function loadValidIds() {
   return ids;
 }
 const VALID_COMPONENT_IDS = loadValidIds();
+
+// ---- remote (CDN on-demand) components -------------------------------
+// Реестр докачки (remote-components.json) вшивается через extraResources.
+// remoteId → S3/CDN-архив, который качается ТОЛЬКО если компонент выбран.
+function loadRemoteRegistry() {
+  return readJson('remote-components.json', { components: [] });
+}
+// Allowlist валидных remoteId — только из вшитого реестра (не из renderer'а).
+// Плюс карта id компонента → его remoteId (сверяем, что renderer не подменил).
+function loadRemoteMaps() {
+  const reg = loadRemoteRegistry();
+  const ids = new Set();
+  for (const e of (reg.components || [])) { if (e && e.remoteId) ids.add(e.remoteId); }
+  const compRemote = new Map(); // component id → remoteId (из components.json)
+  const data = readJson('components.json', { groups: [] });
+  for (const g of (data.groups || [])) {
+    for (const c of (g.components || [])) {
+      if (c && c.remote && c.remoteId) compRemote.set(c.id, c.remoteId);
+    }
+  }
+  return { reg, ids, compRemote };
+}
+
+// Куда докачивать: %LOCALAPPDATA%\HamidunSetup\cache\<remoteId> (Windows),
+// ~/Library/Caches/HamidunSetup/<remoteId> (macOS), иначе ~/.cache/... (linux).
+function remoteCacheDir(remoteId) {
+  let base;
+  if (IS_WIN) {
+    base = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+      'HamidunSetup', 'cache');
+  } else if (IS_MAC) {
+    base = path.join(os.homedir(), 'Library', 'Caches', 'HamidunSetup');
+  } else {
+    base = path.join(os.homedir(), '.cache', 'HamidunSetup');
+  }
+  return path.join(base, remoteId);
+}
+
+// IPC: докачать remote-компонент. Renderer вызывает ПЕРЕД его install-скриптом.
+// Возвращает { ok:true, path } (распакованный кэш → env HM_REMOTE_CACHE) либо
+// { ok:false, error } — тогда renderer честно валит компонент (как exit≠0).
+ipcMain.handle('fetch-remote', async (_evt, payload) => {
+  const { id, remoteId } = payload || {};
+  // Валидация: id известен, и remoteId соответствует объявленному в components.json
+  // (никакого произвольного remoteId/URL из renderer — только вшитый реестр).
+  if (!id || !VALID_COMPONENT_IDS.has(id)) {
+    return { ok: false, error: `Unknown component id: ${id}` };
+  }
+  const { reg, compRemote } = loadRemoteMaps();
+  const declared = compRemote.get(id);
+  if (!declared) return { ok: false, error: `Component ${id} is not remote` };
+  if (remoteId && remoteId !== declared) {
+    return { ok: false, error: `remoteId mismatch for ${id}` };
+  }
+  const entry = remoteFetch.pickEntry(reg, declared, process.platform);
+  if (!entry) {
+    return { ok: false, error: `Нет сборки «${declared}» для платформы ${process.platform} в реестре докачки.` };
+  }
+  const cacheDir = remoteCacheDir(declared);
+
+  const send = (channel, data) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send(channel, data);
+    }
+  };
+  logToFile(id, '=== fetch-remote start (' + declared + ') ===');
+  try {
+    const res = await remoteFetch.fetchRemote({
+      entry,
+      cacheDir,
+      timeoutMs: 20000,
+      onProgress: (p) => send('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
+      // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
+      // общий лог естественно, атрибутируется по id, ничего не ломает.
+      onLog: (line) => { logToFile(id, line); send('component-log', { id, line }); }
+    });
+    logToFile(id, '=== fetch-remote result: ' + (res.ok ? ('ok ' + res.path) : ('FAIL ' + res.error)) + ' ===');
+    return res;
+  } catch (e) {
+    logToFile(id, '[ERROR] fetch-remote: ' + String(e));
+    return { ok: false, error: String(e.message || e) };
+  }
+});
 
 // Run one component script, streaming output back to the renderer.
 ipcMain.handle('run-component', async (_evt, payload) => {

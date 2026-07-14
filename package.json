@@ -33,6 +33,7 @@
       { "from": "agent", "to": "agent", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"] },
       { "from": "config.json", "to": "config.json" },
       { "from": "components.json", "to": "components.json" },
+      { "from": "remote-components.json", "to": "remote-components.json" },
       { "from": "packs.json", "to": "packs.json" },
       { "from": "assets/starter-project", "to": "assets/starter-project" },
       { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }

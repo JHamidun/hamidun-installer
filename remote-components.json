@@ -1,0 +1,37 @@
+{
+  "_schema": {
+    "purpose": "Реестр докачки (CDN on-demand) для установщика вайбкодера. Крупные рантаймы НЕ вшиваются в exe/dmg — они лежат в облаке (Reg.ru S3, позже + Cloudflare R2) и докачиваются установщиком ТОЛЬКО если пользователь выбрал соответствующий remote-компонент (components.json: remote:true, remoteId:<key>). Модель Ninite.",
+    "bundledVia": "extraResources (package.json build.extraResources -> remote-components.json). Файл читается main.js (loadRemoteRegistry).",
+    "entry": {
+      "remoteId": "строка-ключ, совпадает с components.json.remoteId (напр. \"uv\")",
+      "platform": "опц.: \"win32\" | \"darwin\" | \"linux\". Если задана — запись используется ТОЛЬКО на этой ОС (позволяет держать разные сборки одного remoteId). Если отсутствует — запись платформо-независима. main.js/remote-fetch pickEntry() берёт сперва точное совпадение платформы, потом платформо-независимую.",
+      "name": "человекочитаемое имя (для логов)",
+      "sizeBytes": "точный размер архива в байтах (для прогресса и resume)",
+      "sha256": "SHA-256 архива (hex, lower) — проверяется ПОСЛЕ докачки; не совпал -> архив удаляется, пробуется след. зеркало",
+      "mirrors": "[{host, url}] по приоритету. url ДОЛЖЕН быть http(s) без плейсхолдеров. Зеркало с 'PLACEHOLDER' в url молча игнорируется (R2 — заглушка до включения).",
+      "installRelPath": "относит. путь install-скрипта, который запускается ПОСЛЕ докачки (напр. scripts/windows/uv.ps1). Скрипт получает env HM_REMOTE_CACHE=<распакованный кэш>. Информативно — фактический скрипт main.js берёт по id (scripts/<os>/<id>.<ext>)."
+    },
+    "objectKeyConvention": "vibecoding-installer/<remoteId>.zip  либо  vibecoding-installer/<remoteId>-<platform>.zip (когда запись платформо-специфична — чтобы разные ОС-сборки не перетирали друг друга в бакете).",
+    "howToPublish": "python tools/push-component.py <remoteId> <файл-или-папка> [--platform win32|darwin] — упакует в zip, посчитает sha256+size, зальёт в Reg.ru S3 (ACL public-read) и обновит этот файл (upsert по remoteId+platform)."
+  },
+  "components": [
+    {
+      "remoteId": "uv",
+      "name": "uv (Astral, Windows x64)",
+      "sizeBytes": 25568726,
+      "sha256": "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/uv-win32.zip"
+        },
+        {
+          "host": "r2",
+          "url": "https://R2-PLACEHOLDER-NOT-CONFIGURED/vibecoding-installer/uv-win32.zip"
+        }
+      ],
+      "installRelPath": "scripts/windows/uv.ps1",
+      "platform": "win32"
+    }
+  ]
+}
