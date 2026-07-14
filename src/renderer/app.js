@@ -23,7 +23,10 @@ let STATE = {
 
 // Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
 // артефакты вне ~/.claude). Для остального «Удалить» в UI не показываем.
-const REMOVABLE = new Set(['course', 'nomad', 'uv', 'mascot', 'bridge']);
+// v1: Nomad ИСКЛЮЧЁН из авто-удаления (TOCTOU/data-loss риск в сносе venv/шимов —
+// Codex P0). Nomad по-прежнему СТАВИТСЯ, но кнопку «Удалить» для него не показываем
+// и удаление не выполняем. Полноценный Nomad-uninstall вернём позже отдельной фазой.
+const REMOVABLE = new Set(['course', 'uv', 'mascot', 'bridge']);
 
 const $ = (sel) => document.querySelector(sel);
 

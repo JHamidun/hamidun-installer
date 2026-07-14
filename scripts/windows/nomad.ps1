@@ -42,8 +42,9 @@ $DRY = [bool]$env:HM_DRY_RUN
 
 # 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
 $src = $env:HM_NOMAD_SRC
-$repoConfigured = $false   # был ли реально задан repoUrl (тогда clone обязан был сработать)
-$weClonedSrc = $false      # P0-4: клонировали ли МЫ исходники в LOCALAPPDATA\nomad-src
+$repoConfigured = $false   # был ли реально задан repoUrl
+$weClonedSrc = $false      # клонировали ли МЫ исходники в LOCALAPPDATA\nomad-src этим запуском
+$cloneAttempted = $false   # реально ли запускали git clone (отличаем «clone упал» от «намеренно пропущен»)
 if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     $repo = ''
     $cfg = Join-Path $PSScriptRoot '..\..\config.json'
@@ -53,48 +54,37 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     if ($repo) {
         $repoConfigured = $true
         $src = Join-Path $env:LOCALAPPDATA 'nomad-src'
-        $weClonedSrc = $true
-        Write-Host "Клонирую Nomad из $repo ..."
         if ($DRY) {
-            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (fresh only; existing unmarked → отказ)"
+            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (только в отсутствующий/пустой путь; чужой каталог не трогаем)"
         } else {
-            # P0-2: НЕ усыновляем существующий ЧУЖОЙ каталог. Существует БЕЗ нашего
-            # маркера → НЕМЕДЛЕННЫЙ отказ (не pull, не mark, не трогаем). Маркер пишем
-            # ТОЛЬКО после FRESH clone в РАНЕЕ ОТСУТСТВОВАВШИЙ каталог. git pull разрешён
-            # ТОЛЬКО для уже отмеченного каталога И с проверкой remote.origin.url == $repo.
-            if (Test-Path -LiteralPath $src) {
-                if (-not (Test-Path -LiteralPath (Join-Path $src '.hamidun-nomad'))) {
-                    Write-Host "ОШИБКА: $src уже существует и не помечен нашим маркером (.hamidun-nomad отсутствует) — не трогаю чужой каталог."
-                    exit 1
-                }
-                $origin = (& git -C $src config --get remote.origin.url 2>$null | Select-Object -First 1)
-                if ("$origin".Trim() -ne "$repo") {
-                    Write-Host "ОШИБКА: $src помечен нашим, но remote.origin.url ($origin) != ожидаемому ($repo) — отказ обновлять."
-                    exit 1
-                }
-                git -C $src pull --ff-only
+            # INSTALL-ГИГИЕНА (без ownership-маркеров): НИКОГДА не усыновляем, не затираем
+            # и не удаляем существующий каталог. Клонируем ТОЛЬКО в отсутствующий/пустой
+            # путь (наш свежий clone). Уже есть pyproject.toml → используем как есть (не
+            # клонируем, не обновляем). Непустой посторонний каталог → НЕ трогаем, пропуск.
+            if (Test-Path -LiteralPath (Join-Path $src 'pyproject.toml')) {
+                Write-Host "Каталог $src уже содержит исходники Nomad — использую как есть (не клонирую, не обновляю)."
+            } elseif ((Test-Path -LiteralPath $src) -and (Get-ChildItem -LiteralPath $src -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                Write-Host "Каталог $src существует и не пуст, но без исходников Nomad — не трогаю чужой каталог, клон пропускаю."
             } else {
+                Write-Host "Клонирую Nomad из $repo ..."
+                $cloneAttempted = $true
                 git clone --depth 1 $repo $src
-                # P0-2/P0-3: маркер владения — ТОЛЬКО после успешного FRESH clone.
-                # pyproject.toml есть у миллионов чужих проектов → он НЕ гейт удаления;
-                # гейт = наш уникальный .hamidun-nomad.
-                if (Test-Path (Join-Path $src 'pyproject.toml')) {
-                    Set-Content -Path (Join-Path $src '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII
-                }
+                if (Test-Path (Join-Path $src 'pyproject.toml')) { $weClonedSrc = $true }
             }
         }
     }
 }
-# repoUrl был задан, но источник так и не появился (clone/pull упал или нет pyproject.toml) —
-# это НАСТОЯЩИЙ провал, а не осознанный skip: честный выход 1.
-if (-not $DRY -and $repoConfigured -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
-    Write-Host "ОШИБКА: источник Nomad не склонировался (git clone/pull упал или pyproject.toml не появился) — смотри лог выше."
+# repoUrl задан и МЫ пытались клонировать, но источник так и не появился (git clone упал
+# / нет pyproject.toml) — НАСТОЯЩИЙ провал: честный выход 1. Намеренный пропуск клона
+# (чужой каталог) сюда НЕ попадает ($cloneAttempted=$false) → уходит в graceful skip.
+if (-not $DRY -and $cloneAttempted -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
+    Write-Host "ОШИБКА: источник Nomad не склонировался (git clone упал или pyproject.toml не появился) — смотри лог выше."
     exit 1
 }
 if (-not $DRY -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
-    Write-Host "Источник Nomad не задан. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
+    Write-Host "Источник Nomad не задан или недоступен. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
     # P0-1: осознанный skip (нечего ставить) — distinct-код «не установлено», чтобы main
-    # НЕ писал маркер установки (иначе uninstall снёс бы чужие venv/шимы).
+    # НЕ писал маркер установки.
     exit 120
 }
 if ($DRY -and (-not $src)) {
@@ -128,15 +118,9 @@ if ($DRY) {
     & $uv tool install --python 3.12 --force "$src"
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
-    # P0-1: ownership-маркер ВНУТРЬ ФАКТИЧЕСКИ созданного venv uv-тула. Деинсталлятор
-    # удаляет venv/шимы ТОЛЬКО при этом маркере — не «оба возможных venv + 4 шима»
-    # (иначе снёс бы собственный uv-tool пользователя с тем же именем пакета).
-    foreach ($v in @((Join-Path $env:APPDATA 'uv\tools\hermes-agent'),
-                     (Join-Path $env:USERPROFILE '.local\share\uv\tools\hermes-agent'))) {
-        if (Test-Path -LiteralPath $v -PathType Container) {
-            try { Set-Content -Path (Join-Path $v '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII } catch {}
-        }
-    }
+    # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
+    # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в
+    # пользовательские candidate-venv была install-side P0 (портила чужой uv-tool).
 }
 
 # 4. Брендинг → HERMES_HOME (по умолчанию %LOCALAPPDATA%\hermes)

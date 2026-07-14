@@ -1320,6 +1320,12 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   if (meta && !componentShownOnPlatform(meta, process.platform)) {
     return { id, ok: false, code: -1, error: `Компонент «${id}» недоступен на платформе ${process.platform} — деинсталляция отклонена.` };
   }
+  // v1: ранний гейт на компоненты с ОТКЛЮЧЁННЫМ авто-удалением (Nomad — TOCTOU/data-loss
+  // риск, Codex P0). Отбиваем ДО построения/исполнения плана и ДО деактивации маркера,
+  // даже если у компонента есть валидная квитанция установки. Nomad остаётся установленным.
+  if (uninstallTargets.UNINSTALL_DISABLED && uninstallTargets.UNINSTALL_DISABLED.has(id)) {
+    return { id, ok: false, code: -1, error: `Авто-удаление компонента «${id}» в этой версии отключено — он остаётся установленным. Удали вручную при необходимости.` };
+  }
 
   const home = os.homedir();
   const rendererEnv = Object.assign({}, (payload && payload.env) || {});

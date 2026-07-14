@@ -36,6 +36,12 @@
 
 const path = require('path');
 
+// v1: компоненты, у которых АВТО-УДАЛЕНИЕ ВРЕМЕННО ОТКЛЮЧЕНО (устанавливаются, но не
+// удаляются установщиком). Nomad — из-за TOCTOU/data-loss риска в сносе venv/шимов
+// (Codex P0). Гейт применяется и в UI (кнопка «Удалить» скрыта), и в main (ранний
+// отказ уже на входе в uninstall-обработчик), и здесь (case возвращает пустой план).
+const UNINSTALL_DISABLED = new Set(['nomad']);
+
 // Пин издателя маскота (Apple Team ID) — как в scripts/macos/mascot.sh.
 const MASCOT_TEAM_ID = '3VN93XA9DY';
 
@@ -197,47 +203,17 @@ function uninstallTargets(id, ctx) {
     }
 
     case 'nomad': {
-      const hermesHome = isWin ? path.join(winLocalAppData(home), 'hermes') : path.join(home, '.hermes');
-      // P0-2: НИКАКОГО запуска user-writable uv.exe из деинсталлятора (на Windows
-      // main работает elevated → подменённый ~/.local/bin/uv.exe исполнился бы под
-      // админом = RCE). Инвентарь uv-тула (venv + шимы) удаляем НАПРЯМУЮ точными
-      // file/dirtree-целями — uv-метаданные тула живут внутри его же venv-каталога.
-      // P1-4: имя пакета uv-тула — доверенное (вшитый config.json nomad.packageName,
-      // pyproject [project].name = hermes-agent), после гигиены; НЕ «nomad»: тула с
-      // таким именем uv не создаёт, а чужой каталог tools/nomad сносить нельзя.
-      const rawTool = ctx.nomadTool;
-      const tool = (typeof rawTool === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(rawTool))
-        ? rawTool : 'hermes-agent';
-      // P0-1: ownership-маркер, который install пишет ВНУТРЬ ФАКТИЧЕСКИ созданного venv
-      // после успешного `uv tool install`. Удаляем ТОЛЬКО отмеченный venv и подтверждённые
-      // (нами созданные) шимы — НЕ «оба возможных venv + 4 шима» (иначе снесли бы
-      // собственный uv-tool пользователя с тем же именем пакета).
-      const OWN_MARK = '.hamidun-nomad';
-      // Кандидаты venv-каталогов uv-тула (uv-owned дерево).
-      const venvDirs = [];
-      if (isWin) venvDirs.push(path.join(winRoamingAppData(home), 'uv', 'tools', tool));
-      venvDirs.push(path.join(home, '.local', 'share', 'uv', 'tools', tool));
-      const ownerMarkers = venvDirs.map((d) => path.join(d, OWN_MARK));
-      // Шимы: удаляем ТОЛЬКО при подтверждённом ownership-маркере нашего venv
-      // (шимы идут ДО venv-целей — на момент их обработки маркер ещё существует).
-      const shims = isWin ? ['nomad.exe', 'nomad', 'hermes.exe', 'hermes'] : ['nomad', 'hermes'];
-      for (const s of shims) targets.push({ type: 'file', path: path.join(home, '.local', 'bin', s), onlyIfOwnerMarker: ownerMarkers });
-      // venv uv-тула — gated НАШИМ маркером (quarantine-then-guard), НЕ безусловный снос.
-      for (const d of venvDirs) targets.push({ type: 'dirtree', path: d, onlyIfContains: OWN_MARK, why: 'venv uv-тула ' + tool + ' (наш маркер)' });
-      // P0-3: клон исходников — ТОЛЬКО стандартное место клона установщика и ТОЛЬКО
-      // при НАШЕМ маркере .hamidun-nomad (его пишет ТОЛЬКО наш install-скрипт после
-      // clone). pyproject.toml есть у миллионов чужих Python-проектов — он НЕ гейт.
-      // Нет маркера → каталог не трогаем (fail-closed).
-      const srcClone = isWin ? path.join(winLocalAppData(home), 'nomad-src') : path.join(home, '.nomad-src');
-      targets.push({ type: 'dirtree', path: srcClone, onlyIfContains: '.hamidun-nomad', why: 'клон исходников nomad (наш маркер)' });
-      // Брендинг: точные файлы; config.yaml (ключи/настройки юзера) СОХРАНЯЕТСЯ.
-      targets.push({ type: 'file', path: path.join(hermesHome, 'SOUL.md') });
-      targets.push({ type: 'file', path: path.join(hermesHome, 'skins', 'nomad.yaml') });
-      targets.push({ type: 'emptydir', path: path.join(hermesHome, 'skins') });
-      targets.push({ type: 'emptydir', path: hermesHome });
-      preserve.push(path.join(hermesHome, 'config.yaml'));
-      notes.push('uv и Python НЕ удаляю (могут быть нужны другим инструментам); config.yaml hermes НЕ удаляется.');
-      break;
+      // v1: АВТО-УДАЛЕНИЕ NOMAD ОТКЛЮЧЕНО (уровень целей). Codex нашёл 4 P0 + 2 P1,
+      // ВСЕ — в удалении Nomad (TOCTOU-нора при сносе venv/шимов + клона исходников,
+      // риск затереть чужой uv-tool/venv пользователя с тем же именем пакета). Решение
+      // владельца: в v1 Nomad ПО-ПРЕЖНЕМУ СТАВИТСЯ, но НЕ авто-удаляется — так разом
+      // снимается весь data-loss риск. Возвращаем ПУСТОЙ план + явный флаг
+      // uninstallSupported:false: доверенный код НЕ вычисляет НИ ОДНОЙ цели удаления
+      // Nomad; исполнять нечего. main дополнительно отбивает Nomad-uninstall ранним
+      // гейтом (UNINSTALL_DISABLED), а UI не показывает кнопку «Удалить» для Nomad.
+      // Полноценный Nomad-uninstall вернём позже отдельной фазой, когда TOCTOU закроем.
+      notes.push('Авто-удаление Nomad в этой версии отключено — Nomad остаётся установленным (при необходимости удали вручную). uv, Python и твой config.yaml не трогаются.');
+      return { targets: [], preserve: [], notes, uninstallSupported: false };
     }
 
     default:
@@ -247,4 +223,4 @@ function uninstallTargets(id, ctx) {
   return { targets, preserve, notes };
 }
 
-module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, BRIDGE_RC_LINE };
+module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, BRIDGE_RC_LINE, UNINSTALL_DISABLED };
