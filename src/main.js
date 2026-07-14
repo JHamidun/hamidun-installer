@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const remoteFetch = require('./remote-fetch');
+const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -302,14 +303,13 @@ function remoteCacheDir(remoteId) {
 // command-resolution переменных) под наш elevated-токен = эскалация. Строим
 // childEnv из строгого allowlist: PATH ТОЛЬКО из admin-owned каталогов (System32 +
 // стандартные Program Files install-таргеты + наш vendor), без пользовательского
-// PATH; PSModulePath/ComSpec — валидированные системные (не из env); renderer-env
-// вливаем БЕЗ ключей резолвинга бинарей. Пользовательские install-таргеты
-// (LOCALAPPDATA\Programs, Roaming\npm) намеренно НЕ в PATH — скрипты находят их по
-// абсолютным путям как фолбэк, поэтому установка не ломается.
-const ENV_RESOLUTION_DENY = new Set(
-  ['PATH', 'Path', 'PSModulePath', 'ComSpec', 'PATHEXT',
-   'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'LD_PRELOAD', 'LD_LIBRARY_PATH']
-    .map((k) => k.toLowerCase()));
+// PATH; PSModulePath/ComSpec — валидированные системные (не из env). Из renderer-env
+// пропускаем ТОЛЬКО ключи установщика (HM_*, кроме HM_REMOTE_CACHE) — истинный
+// allowlist (см. install-env.js). Всё прочее — NODE_OPTIONS, npm_config_*,
+// GIT_EXEC_PATH, NODE_PATH, PATH/PSModulePath/ComSpec и любые не-HM_ переменные —
+// отбрасывается. Пользовательские install-таргеты (LOCALAPPDATA\Programs, Roaming\npm)
+// намеренно НЕ в PATH — скрипты находят их по абсолютным путям как фолбэк, поэтому
+// установка не ломается.
 
 // Системные env-переменные (реальные значения ОС), которые скрипты законно читают
 // ($env:USERPROFILE, LOCALAPPDATA, TEMP…). PATH/PSModulePath/ComSpec сюда НЕ входят —
@@ -334,11 +334,9 @@ function buildInstallEnv(rendererEnv) {
     const pf86 = path.join(drive, 'Program Files (x86)');
     const out = {};
     for (const k of WIN_SYS_ENV_KEYS) { if (process.env[k] !== undefined) out[k] = process.env[k]; }
-    // renderer-env (HM_* из визарда и т.п.) — но БЕЗ ключей резолвинга бинарей.
-    for (const k of Object.keys(rendererEnv)) {
-      if (ENV_RESOLUTION_DENY.has(k.toLowerCase())) continue;
-      out[k] = rendererEnv[k];
-    }
+    // renderer-env: ИСТИННЫЙ allowlist — только HM_* установщика (кроме HM_REMOTE_CACHE),
+    // регистронезависимо. Ключи резолвинга/инъекции (PATH, NODE_OPTIONS, npm_config_* …) не проходят.
+    Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
     // Авторитетно (main, ПОСЛЕ renderer-env): PATH только из admin-owned каталогов.
     const dirs = [
       s32, winRoot,
@@ -363,12 +361,10 @@ function buildInstallEnv(rendererEnv) {
     return out;
   }
   // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
-  // но renderer-env не даём переопределить резолвинг бинарей (PATH/DYLD/LD…).
+  // но из renderer-env берём тот же allowlist (только HM_*, кроме HM_REMOTE_CACHE) —
+  // никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
   const out = Object.assign({}, process.env);
-  for (const k of Object.keys(rendererEnv)) {
-    if (ENV_RESOLUTION_DENY.has(k.toLowerCase())) continue;
-    out[k] = rendererEnv[k];
-  }
+  Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
   return out;
 }
 

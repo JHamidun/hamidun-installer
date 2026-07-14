@@ -1,7 +1,27 @@
 ﻿# Node.js LTS — Windows
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
-function Update-Path { $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User') }
+function Update-Path {
+    # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
+    # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
+    # машине medium-integrity процесс того же юзера может дописать туда каталог с
+    # подложенным git/node/python/winget и исполнить его под нашим elevated-токеном.
+    # Инструменты в user-профиле (python/cursor/claude/uv) находим по абсолютным путям.
+    $sr  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $s32 = Join-Path $sr 'System32'
+    $parts = @([Environment]::GetEnvironmentVariable('Path', 'Machine'),
+               $s32, $sr,
+               (Join-Path $s32 'WindowsPowerShell\v1.0'),
+               (Join-Path $s32 'OpenSSH'))
+    if ($env:ProgramFiles) {
+        $parts += (Join-Path $env:ProgramFiles 'Git\cmd')
+        $parts += (Join-Path $env:ProgramFiles 'Git\bin')
+        $parts += (Join-Path $env:ProgramFiles 'nodejs')
+    }
+    if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
+    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
+    $env:Path = ($parts | Where-Object { $_ }) -join ';'
+}
 
 $DRY = [bool]$env:HM_DRY_RUN
 Write-Host "Проверяю Node.js..."

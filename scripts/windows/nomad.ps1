@@ -4,9 +4,38 @@ $ErrorActionPreference = 'Continue'
 # irm|iex ниже тянет ОФИЦИАЛЬНЫЙ установщик uv (astral.sh) по HTTPS (доверие = TLS). Форсим TLS 1.2.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 function Update-Path {
-    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                [Environment]::GetEnvironmentVariable('Path','User') + ';' +
-                (Join-Path $env:USERPROFILE '.local\bin')
+    # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
+    # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
+    # машине medium-integrity процесс того же юзера может дописать туда каталог с
+    # подложенным git/node/python/winget и исполнить его под нашим elevated-токеном.
+    # uv/nomad ставятся в user-профиль (~/.local\bin) — резолвим их по АБСОЛЮТНОМУ пути
+    # (Resolve-UvExe / abs-fallback ниже), а НЕ через user-writable каталог в PATH.
+    $sr  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $s32 = Join-Path $sr 'System32'
+    $parts = @([Environment]::GetEnvironmentVariable('Path', 'Machine'),
+               $s32, $sr,
+               (Join-Path $s32 'WindowsPowerShell\v1.0'),
+               (Join-Path $s32 'OpenSSH'))
+    if ($env:ProgramFiles) {
+        $parts += (Join-Path $env:ProgramFiles 'Git\cmd')
+        $parts += (Join-Path $env:ProgramFiles 'Git\bin')
+        $parts += (Join-Path $env:ProgramFiles 'nodejs')
+    }
+    if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
+    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
+    $env:Path = ($parts | Where-Object { $_ }) -join ';'
+}
+
+# uv/nomad живут в user-профиле (~/.local\bin) и НЕ в elevated-PATH (см. Update-Path #4).
+# Резолвим uv по абсолютному пути: Get-Command (если вдруг в Machine-PATH) → ~/.local\bin.
+function Resolve-UvExe {
+    $c = Get-Command uv -ErrorAction SilentlyContinue
+    if ($c -and $c.Source) { return $c.Source }
+    foreach ($p in @((Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
+                     (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\uv.exe'))) {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
 }
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
@@ -46,8 +75,9 @@ if ($DRY -and (-not $src)) {
     Write-Host "  [dry-run] Источник Nomad не задан — продолжаем dry-run preview секций 2/3/4."
 }
 
-# 2. uv — менеджер Python
-if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+# 2. uv — менеджер Python (в user-профиле; резолвим по abs-пути, не через PATH)
+$uv = Resolve-UvExe
+if (-not $uv) {
     Write-Host "Устанавливаю uv..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://astral.sh/uv/install.ps1 | iex" }
     else {
@@ -55,15 +85,17 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
         catch { Write-Host "uv не установился: $($_.Exception.Message)"; exit 1 }
     }
     Update-Path
+    $uv = Resolve-UvExe
 }
 
 # 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nomad/hermes)
 if ($DRY) {
     Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 --force `"$src`""
 } else {
-    uv python install 3.12
+    if (-not $uv) { Write-Host "uv не найден после установки — прерываю."; exit 1 }
+    & $uv python install 3.12
     Write-Host "Устанавливаю Nomad (команды nomad/hermes)..."
-    uv tool install --python 3.12 --force "$src"
+    & $uv tool install --python 3.12 --force "$src"
     Update-Path
 }
 

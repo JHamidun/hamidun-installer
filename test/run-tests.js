@@ -297,17 +297,64 @@ ok('#8 openStream: redirect res.destroy + single-settle + kill whole chain', () 
   assert(/for \(const r of chain\)/.test(fn), 'при завершении глушим ВСЮ цепочку req');
 });
 
-// #4 main.js: install-env из строгого allowlist — PATH только из admin-owned
-// каталогов, renderer-env не переопределяет PATH/PSModulePath/ComSpec/PATHEXT.
-ok('#4 main.js: install-env allowlist (admin PATH, deny renderer PATH/PSModulePath/ComSpec)', () => {
+// #4 (finalize) main.js: install-env строит childEnv через ИСТИННЫЙ allowlist
+// (src/install-env.js filterRendererEnv) — PATH только из admin-owned каталогов;
+// старый denylist ENV_RESOLUTION_DENY удалён.
+ok('#4 main.js: install-env allowlist wired (buildInstallEnv + filterRendererEnv + admin PATH)', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   assert(/function buildInstallEnv/.test(s), 'должна быть buildInstallEnv');
   assert(/const childEnv = buildInstallEnv\(rendererEnv\)/.test(s), 'run-component использует buildInstallEnv');
   assert(/out\.PATH = trustedPath/.test(s), 'PATH задаётся из trustedPath (admin-каталоги), не из process.env.PATH');
-  const deny = s.slice(s.indexOf('ENV_RESOLUTION_DENY'), s.indexOf('WIN_SYS_ENV_KEYS'));
-  ['PATH', 'PSModulePath', 'ComSpec', 'PATHEXT'].forEach((k) =>
-    assert(new RegExp("'" + k + "'").test(deny), 'denylist резолвинга должен содержать ' + k));
+  assert(/installEnv\.filterRendererEnv\(rendererEnv\)/.test(s), 'renderer-env фильтруется через install-env.filterRendererEnv (allowlist)');
+  assert(!/ENV_RESOLUTION_DENY/.test(s), 'старый denylist ENV_RESOLUTION_DENY должен быть удалён (заменён allowlist)');
   assert(!/const childEnv = Object\.assign\(\{\}, process\.env, rendererEnv\)/.test(s), 'старое небезопасное построение env убрано');
+});
+
+// #4 (finalize) — поведение фильтра renderer-env (истинный allowlist, чистый модуль).
+console.log('== #4 finalize: renderer-env allowlist (только HM_*, без HM_REMOTE_CACHE, регистронезависимо) ==');
+const installEnv = require(path.join(ROOT, 'src', 'install-env'));
+
+// (1) не-HM_ ключи резолвинга/инъекции отбрасываются целиком.
+ok('#4 allowlist: NODE_OPTIONS/npm_config_*/GIT_EXEC_PATH/NODE_PATH/произвольный не-HM_ ключ отброшены', () => {
+  const out = installEnv.filterRendererEnv({
+    NODE_OPTIONS: '--require=C:\\Users\\x\\evil.js',
+    npm_config_foo: 'bar',
+    GIT_EXEC_PATH: 'C:\\evil',
+    NODE_PATH: 'C:\\evil\\node_modules',
+    PATH: 'C:\\evil',
+    EVILVAR: '1'
+  });
+  ['NODE_OPTIONS', 'npm_config_foo', 'GIT_EXEC_PATH', 'NODE_PATH', 'PATH', 'EVILVAR']
+    .forEach((k) => assert(!(k in out), k + ' должен быть отброшен, остался: ' + JSON.stringify(out)));
+  assert(Object.keys(out).length === 0, 'ни один не-HM_ ключ не должен пройти: ' + JSON.stringify(out));
+});
+
+// (2) легитимные HM_* сохраняются (happy-path не теряет нужные переменные).
+ok('#4 allowlist: HM_SELECTED и прочие HM_* сохраняются', () => {
+  const out = installEnv.filterRendererEnv({
+    HM_SELECTED: 'git,node,claude',
+    HM_COURSE_TARGET: 'C:\\Users\\x\\HamidunCourse',
+    HM_KEEP_SKILLS: 'a,b,c',
+    HM_HOME: 'C:\\Users\\x'
+  });
+  assert(out.HM_SELECTED === 'git,node,claude', 'HM_SELECTED должен сохраниться');
+  assert(out.HM_COURSE_TARGET && out.HM_KEEP_SKILLS && out.HM_HOME, 'все HM_* должны сохраниться');
+  assert(Object.keys(out).length === 4, 'ровно 4 HM_* ключа: ' + JSON.stringify(out));
+});
+
+// (3) HM_REMOTE_CACHE из renderer отбрасывается — его ставит ТОЛЬКО main из проверенного пути.
+ok('#4 allowlist: HM_REMOTE_CACHE из renderer отброшен, main ставит свой', () => {
+  const out = installEnv.filterRendererEnv({ HM_REMOTE_CACHE: 'C:\\attacker\\cache', HM_SELECTED: 'git' });
+  assert(!('HM_REMOTE_CACHE' in out), 'HM_REMOTE_CACHE НЕ должен пройти из renderer');
+  assert(out.HM_SELECTED === 'git', 'легитимный HM_SELECTED рядом сохраняется');
+});
+
+// (4) сравнение имён РЕГИСТРОНЕЗАВИСИМО (Windows env: 'Path'/'PATH' — одно имя).
+ok('#4 allowlist: регистр-варианты отброшены (nodE_optionS, HM_remote_CACHE), Hm_* распознан', () => {
+  const out = installEnv.filterRendererEnv({ nodE_optionS: '--require=evil', HM_remote_CACHE: 'C:\\x', Hm_Selected: 'git' });
+  assert(!('nodE_optionS' in out), 'регистр-вариант NODE_OPTIONS отброшен');
+  assert(!('HM_remote_CACHE' in out), 'регистр-вариант HM_REMOTE_CACHE отброшен');
+  assert(out.Hm_Selected === 'git', 'регистр-вариант HM_* (Hm_Selected) распознан как allowed');
 });
 
 console.log('== Remote security: content-addressed URLs + script fail-closed guards ==');

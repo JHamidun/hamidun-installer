@@ -4,9 +4,25 @@ $ErrorActionPreference = 'Continue'
 # Своего SHA-256 для него нет (плавающая версия). Форсим TLS 1.2, чтобы PS5.1 не откатился на TLS1.0.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 function Update-Path {
-    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                [Environment]::GetEnvironmentVariable('Path','User') + ';' +
-                (Join-Path $env:USERPROFILE '.local\bin')
+    # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
+    # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
+    # машине medium-integrity процесс того же юзера может дописать туда каталог с
+    # подложенным git/node/python/winget и исполнить его под нашим elevated-токеном.
+    # claude (npm-prefix / ~/.local\bin) находим ниже по абсолютному пути (Find-ClaudeBinary).
+    $sr  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $s32 = Join-Path $sr 'System32'
+    $parts = @([Environment]::GetEnvironmentVariable('Path', 'Machine'),
+               $s32, $sr,
+               (Join-Path $s32 'WindowsPowerShell\v1.0'),
+               (Join-Path $s32 'OpenSSH'))
+    if ($env:ProgramFiles) {
+        $parts += (Join-Path $env:ProgramFiles 'Git\cmd')
+        $parts += (Join-Path $env:ProgramFiles 'Git\bin')
+        $parts += (Join-Path $env:ProgramFiles 'nodejs')
+    }
+    if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
+    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
+    $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 
 Update-Path
