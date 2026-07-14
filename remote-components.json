@@ -7,12 +7,12 @@
       "platform": "опц.: \"win32\" | \"darwin\" | \"linux\". Если задана — запись используется ТОЛЬКО на этой ОС (позволяет держать разные сборки одного remoteId). Если отсутствует — запись платформо-независима. main.js/remote-fetch pickEntry() берёт сперва точное совпадение платформы, потом платформо-независимую.",
       "name": "человекочитаемое имя (для логов)",
       "sizeBytes": "точный размер архива в байтах (для прогресса и resume)",
-      "sha256": "SHA-256 архива (hex, lower) — проверяется ПОСЛЕ докачки; не совпал -> архив удаляется, пробуется след. зеркало",
-      "mirrors": "[{host, url}] по приоритету. url ДОЛЖЕН быть http(s) без плейсхолдеров. Зеркало с 'PLACEHOLDER' в url молча игнорируется (R2 — заглушка до включения).",
-      "installRelPath": "относит. путь install-скрипта, который запускается ПОСЛЕ докачки (напр. scripts/windows/uv.ps1). Скрипт получает env HM_REMOTE_CACHE=<распакованный кэш>. Информативно — фактический скрипт main.js берёт по id (scripts/<os>/<id>.<ext>)."
+      "sha256": "SHA-256 архива (hex, lower) — ОБЯЗАТЕЛЕН и валиден (64-hex). Проверяется БЕЗУСЛОВНО ПОСЛЕ докачки И на cache-hit; не совпал -> архив удаляется, пробуется след. зеркало. Нет валидного sha -> компонент НЕ ставится (fail-closed). Единственный гейт целостности для elevated-запуска.",
+      "mirrors": "[{host, url}] по приоритету. url ДОЛЖЕН быть https (без http-downgrade) и без плейсхолдеров. Зеркало с 'PLACEHOLDER' в url молча игнорируется (R2 — заглушка до включения). Имя объекта content-addressed (sha в имени) — см. objectKeyConvention.",
+      "installRelPath": "относит. путь install-скрипта, который запускается ПОСЛЕ докачки (напр. scripts/windows/uv.ps1). Скрипт получает env HM_REMOTE_CACHE=<распакованный кэш> — путь вычисляет ТОЛЬКО main из проверенного sha-каталога (renderer его задать не может). Информативно — фактический скрипт main.js берёт по id (scripts/<os>/<id>.<ext>)."
     },
-    "objectKeyConvention": "vibecoding-installer/<remoteId>.zip  либо  vibecoding-installer/<remoteId>-<platform>.zip (когда запись платформо-специфична — чтобы разные ОС-сборки не перетирали друг друга в бакете).",
-    "howToPublish": "python tools/push-component.py <remoteId> <файл-или-папка> [--platform win32|darwin] — упакует в zip, посчитает sha256+size, зальёт в Reg.ru S3 (ACL public-read) и обновит этот файл (upsert по remoteId+platform)."
+    "objectKeyConvention": "CONTENT-ADDRESSED / IMMUTABLE: vibecoding-installer/<remoteId>-<sha256>.zip  либо  vibecoding-installer/<remoteId>-<platform>-<sha256>.zip. sha в имени => перезалив того же контента идемпотентен, новый контент = новый ключ, выпущенные установщики (ждущие конкретный sha) не ломаются от перезаливки.",
+    "howToPublish": "python tools/push-component.py <remoteId> <файл-или-папка> [--platform win32|darwin] — упакует в zip, снимет байты ОДИН раз, посчитает по ним sha256+size, зальёт ИМЕННО эти байты в Reg.ru S3 (ACL public-read) под content-addressed ключом, проверит анонимную публичную загрузку (200+sha+size) и только потом обновит этот файл (upsert по remoteId+platform)."
   },
   "components": [
     {
@@ -23,11 +23,11 @@
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/uv-win32.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/uv-win32-0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b.zip"
         },
         {
           "host": "r2",
-          "url": "https://R2-PLACEHOLDER-NOT-CONFIGURED/vibecoding-installer/uv-win32.zip"
+          "url": "https://R2-PLACEHOLDER-NOT-CONFIGURED/vibecoding-installer/uv-win32-0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b.zip"
         }
       ],
       "installRelPath": "scripts/windows/uv.ps1",

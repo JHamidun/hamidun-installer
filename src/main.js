@@ -249,56 +249,23 @@ function remoteCacheDir(remoteId) {
   return path.join(base, remoteId);
 }
 
-// IPC: докачать remote-компонент. Renderer вызывает ПЕРЕД его install-скриптом.
-// Возвращает { ok:true, path } (распакованный кэш → env HM_REMOTE_CACHE) либо
-// { ok:false, error } — тогда renderer честно валит компонент (как exit≠0).
-ipcMain.handle('fetch-remote', async (_evt, payload) => {
-  const { id, remoteId } = payload || {};
-  // Валидация: id известен, и remoteId соответствует объявленному в components.json
-  // (никакого произвольного remoteId/URL из renderer — только вшитый реестр).
-  if (!id || !VALID_COMPONENT_IDS.has(id)) {
-    return { ok: false, error: `Unknown component id: ${id}` };
-  }
-  const { reg, compRemote } = loadRemoteMaps();
-  const declared = compRemote.get(id);
-  if (!declared) return { ok: false, error: `Component ${id} is not remote` };
-  if (remoteId && remoteId !== declared) {
-    return { ok: false, error: `remoteId mismatch for ${id}` };
-  }
-  const entry = remoteFetch.pickEntry(reg, declared, process.platform);
-  if (!entry) {
-    return { ok: false, error: `Нет сборки «${declared}» для платформы ${process.platform} в реестре докачки.` };
-  }
-  const cacheDir = remoteCacheDir(declared);
-
-  const send = (channel, data) => {
-    if (mainWindow && !mainWindow.isDestroyed() &&
-        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send(channel, data);
-    }
-  };
-  logToFile(id, '=== fetch-remote start (' + declared + ') ===');
-  try {
-    const res = await remoteFetch.fetchRemote({
-      entry,
-      cacheDir,
-      timeoutMs: 20000,
-      onProgress: (p) => send('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
-      // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
-      // общий лог естественно, атрибутируется по id, ничего не ломает.
-      onLog: (line) => { logToFile(id, line); send('component-log', { id, line }); }
-    });
-    logToFile(id, '=== fetch-remote result: ' + (res.ok ? ('ok ' + res.path) : ('FAIL ' + res.error)) + ' ===');
-    return res;
-  } catch (e) {
-    logToFile(id, '[ERROR] fetch-remote: ' + String(e));
-    return { ok: false, error: String(e.message || e) };
-  }
-});
+// Абсолютный путь к системному powershell.exe (анти-PATH-hijack): даже если PATH
+// подменён, запускается настоящий бинарь, а не подложенный.
+function winPowershellPath() {
+  const sysroot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const p = path.join(sysroot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  try { if (fs.existsSync(p)) return p; } catch (e) { /* ignore */ }
+  return 'powershell.exe';
+}
 
 // Run one component script, streaming output back to the renderer.
+//
+// БЕЗОПАСНОСТЬ (remote-компоненты): докачка+проверка+распаковка+запуск идут
+// ОДНОЙ атомарной операцией здесь, в main. Renderer НЕ может: (а) задать путь
+// кэша — HM_REMOTE_CACHE из renderer безусловно вырезается и вычисляется тут из
+// проверенного пути; (б) вклиниться между verify и run — второго IPC нет.
 ipcMain.handle('run-component', async (_evt, payload) => {
-  const { id, env } = payload || {};
+  const { id } = payload || {};
 
   // Allowlist check: reject unknown/traversal ids before building any path.
   if (!id || !VALID_COMPONENT_IDS.has(id)) {
@@ -310,7 +277,59 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     return { id, ok: false, code: -1, error: `Script not found: ${script}` };
   }
 
-  const childEnv = Object.assign({}, process.env, env || {});
+  // env из renderer НЕ доверяем для чувствительных путей: HM_REMOTE_CACHE всегда
+  // вырезаем — его задаёт ТОЛЬКО main из проверенного пути ниже (P0-2/P0-4).
+  const rendererEnv = Object.assign({}, (payload && payload.env) || {});
+  delete rendererEnv.HM_REMOTE_CACHE;
+
+  const send = (line) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('component-log', { id, line });
+    }
+  };
+  const sendChannel = (channel, data) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send(channel, data);
+    }
+  };
+
+  // Remote-компонент: сначала атомарно докачиваем+проверяем+распаковываем в main.
+  // remoteId берётся ТОЛЬКО из вшитого реестра (compRemote), не из renderer.
+  let remoteCache = '';
+  const { reg, compRemote } = loadRemoteMaps();
+  const declared = compRemote.get(id);
+  if (declared) {
+    const entry = remoteFetch.pickEntry(reg, declared, process.platform);
+    if (!entry) {
+      return { id, ok: false, code: -1, stage: 'fetch', error: `Нет сборки «${declared}» для платформы ${process.platform} в реестре докачки.` };
+    }
+    const cacheDir = remoteCacheDir(declared);
+    logToFile(id, '=== fetch-remote start (' + declared + ') ===');
+    let fr;
+    try {
+      fr = await remoteFetch.fetchRemote({
+        entry,
+        cacheDir,
+        timeoutMs: 20000,
+        onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
+        // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
+        // общий лог естественно, атрибутируется по id, ничего не ломает.
+        onLog: (line) => { logToFile(id, line); send(line); }
+      });
+    } catch (e) {
+      logToFile(id, '[ERROR] fetch-remote: ' + String(e));
+      return { id, ok: false, code: -1, stage: 'fetch', error: String(e.message || e) };
+    }
+    logToFile(id, '=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
+    if (!fr || !fr.ok) {
+      return { id, ok: false, code: -1, stage: 'fetch', error: (fr && fr.error) || 'докачка не удалась' };
+    }
+    remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
+  }
+
+  const childEnv = Object.assign({}, process.env, rendererEnv);
   // Paths to assets baked into the installer at build time (offline sources).
   const vroot = vendorRoot();
   childEnv.HM_VENDOR = vroot;
@@ -318,6 +337,8 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
   childEnv.HM_NOMAD_SRC = path.join(vroot, 'nomad-src');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
+  // HM_REMOTE_CACHE ставим ТОЛЬКО из проверенного пути (или не ставим вовсе).
+  if (remoteCache) childEnv.HM_REMOTE_CACHE = remoteCache;
 
   let cmd, args;
   if (IS_WIN) {
@@ -334,22 +355,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
       "& '" + psScript + "'; " +
       "if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }";
-    cmd = 'powershell.exe';
+    cmd = winPowershellPath(); // абсолютный путь — анти-PATH-hijack
     args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
     cmd = '/bin/bash';
     args = [script];
   }
 
-  // Guard against a window closed mid-install (send to a destroyed webContents
-  // crashes the main process on macOS).
-  const send = (line) => {
-    if (mainWindow && !mainWindow.isDestroyed() &&
-        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('component-log', { id, line });
-    }
-  };
-
+  // send/sendChannel уже объявлены выше (используются и для докачки, и для лога).
   return new Promise((resolve) => {
     let child;
     logToFile(id, '=== start ===');

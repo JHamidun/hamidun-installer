@@ -27,6 +27,9 @@ fi
 mkdir -p "$DEST"
 cp -f "$UV" "$DEST/uv"; chmod +x "$DEST/uv"
 if [ -n "$UVX" ]; then cp -f "$UVX" "$DEST/uvx"; chmod +x "$DEST/uvx"; fi
+# Провал копии под set -e уже прервёт скрипт; дополнительно убеждаемся, что
+# бинарь реально на месте (не ложный успех перед проверкой запуска).
+if [ ! -x "$DEST/uv" ]; then echo "ОШИБКА: uv не скопирован в $DEST."; exit 1; fi
 persist_local_bin_path
 export PATH="$DEST:$PATH"
 

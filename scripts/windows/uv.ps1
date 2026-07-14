@@ -2,7 +2,9 @@
 # а докачан установщиком из CDN и распакован в $env:HM_REMOTE_CACHE (см. main.js
 # fetch-remote / remote-fetch.js). Здесь только: скопировать в %LOCALAPPDATA%\Programs\uv,
 # добавить в PATH, проверить запуск. Honor HM_DRY_RUN. Честный статус (exit 0/1).
-$ErrorActionPreference = 'Continue'
+# Stop, чтобы провал Copy-Item/New-Item НЕ был проглочен (иначе можно запустить
+# старый exe и отрапортовать ложный успех). Ошибки ловим явно try/catch → exit 1.
+$ErrorActionPreference = 'Stop'
 $DRY = [bool]$env:HM_DRY_RUN
 
 $cache = $env:HM_REMOTE_CACHE
@@ -25,9 +27,20 @@ if ($DRY) {
     exit 0
 }
 
-New-Item -ItemType Directory -Force $dest | Out-Null
-Copy-Item -Force $uvExe.FullName (Join-Path $dest 'uv.exe')
-if ($uvxExe) { Copy-Item -Force $uvxExe.FullName (Join-Path $dest 'uvx.exe') }
+$target = Join-Path $dest 'uv.exe'
+try {
+    New-Item -ItemType Directory -Force $dest -ErrorAction Stop | Out-Null
+    Copy-Item -Force $uvExe.FullName $target -ErrorAction Stop
+    if ($uvxExe) { Copy-Item -Force $uvxExe.FullName (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
+} catch {
+    Write-Host "ОШИБКА: не удалось скопировать uv в $dest — $($_.Exception.Message)"
+    exit 1
+}
+# Проверяем, что целевой файл реально появился (а не «успех» на непройденной копии).
+if (-not (Test-Path -LiteralPath $target)) {
+    Write-Host "ОШИБКА: uv.exe не оказался в $dest после копирования."
+    exit 1
+}
 
 # Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH (без админа), если его там ещё нет.
 try {
@@ -44,7 +57,11 @@ try {
 } catch { Write-Host "  [warn] не удалось прописать PATH: $($_.Exception.Message)" }
 $env:Path = $dest + ';' + $env:Path
 
-$ver = (& (Join-Path $dest 'uv.exe') --version 2>&1 | Select-Object -First 1)
-if ($ver -match 'uv') { Write-Host "OK: uv установлен ($ver)"; exit 0 }
+# Под $ErrorActionPreference='Stop' stderr нативного exe при 2>&1 может кинуть —
+# запускаем в try/catch, чтобы диагностика не превратилась в необработанное падение.
+$ver = ''
+try { $ver = (& $target --version 2>&1 | Select-Object -First 1) }
+catch { $ver = $_.Exception.Message }
+if ("$ver" -match 'uv') { Write-Host "OK: uv установлен ($ver)"; exit 0 }
 Write-Host "ОШИБКА: uv.exe скопирован, но не запустился корректно ($ver)."
 exit 1

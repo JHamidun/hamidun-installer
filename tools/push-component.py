@@ -21,18 +21,25 @@ upsert записи в remote-components.json (идемпотентно, overwri
 R2 (опционально, если появятся):
     R2_S3_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY, R2_BUCKET, R2_PUBLIC_BASE
 
-Ключ объекта в бакете:
-    vibecoding-installer/<remoteId>.zip                  (без --platform)
-    vibecoding-installer/<remoteId>-<platform>.zip       (с --platform)
+Ключ объекта в бакете (CONTENT-ADDRESSED / IMMUTABLE — sha256 в имени):
+    vibecoding-installer/<remoteId>-<sha256>.zip                 (без --platform)
+    vibecoding-installer/<remoteId>-<platform>-<sha256>.zip      (с --platform)
+
+Почему immutable: выпущенный установщик ждёт КОНКРЕТНЫЙ sha256. Перезалив под
+mutable-именем (uv-win32.zip) перетёр бы объект, и старые установщики получили бы
+вечный sha-mismatch. При content-addressed имени перезалив того же контента
+идемпотентен (тот же ключ), а новый контент = новый ключ. Реестр всегда указывает
+на объект с sha в имени.
 """
 import argparse
 import hashlib
-import io
 import json
 import os
 import sys
 import tarfile
 import tempfile
+import urllib.request
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -63,14 +70,13 @@ def platform_to_script(remote_id, platform):
     return f"scripts/windows/{remote_id}.ps1"
 
 
-def sha256_and_size(path: Path):
-    h = hashlib.sha256()
-    n = 0
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-            n += len(chunk)
-    return h.hexdigest().lower(), n
+def snapshot_bytes(path: Path):
+    """Снимок байтов архива ОДИН раз (в память) + его sha256/size. Дальше во ВСЕ
+    зеркала и в реестр идут ИМЕННО эти байты — sha не может «разъехаться» с тем,
+    что реально залито (P1-3: никаких повторных чтений файла с диска)."""
+    data = path.read_bytes()
+    sha = hashlib.sha256(data).hexdigest().lower()
+    return data, sha, len(data)
 
 
 def make_zip(src: Path) -> Path:
@@ -99,13 +105,34 @@ def make_zip(src: Path) -> Path:
     if name.endswith(".tar.gz") or name.endswith(".tgz"):
         print(f"  распаковываю tar.gz и перепаковываю в zip: {src.name}")
         exdir = Path(tempfile.mkdtemp(prefix="pushcomp_ex_"))
+        exroot = exdir.resolve()
         with tarfile.open(src, "r:gz") as t:
-            # безопасная распаковка (без выхода за пределы каталога)
+            # БЕЗОПАСНАЯ распаковка: проверяем не только имена (traversal через
+            # commonpath, не .startswith — тот ловится на exdir vs exdir-evil), но и
+            # ТИПЫ членов. Symlink/hardlink/устройства/FIFO — отвергаем (link-target
+            # мог указывать за пределы каталога). Распаковываем ТОЛЬКО обычные
+            # файлы и каталоги (P1-5).
+            safe = []
             for m in t.getmembers():
                 mp = (exdir / m.name).resolve()
-                if not str(mp).startswith(str(exdir.resolve())):
-                    raise RuntimeError(f"tar path traversal: {m.name}")
-            t.extractall(exdir)
+                try:
+                    if os.path.commonpath([str(mp), str(exroot)]) != str(exroot):
+                        raise RuntimeError(f"tar path traversal: {m.name}")
+                except ValueError:
+                    # разные диски/корни (Windows) → точно выход за пределы
+                    raise RuntimeError(f"tar path traversal (diff root): {m.name}")
+                if m.issym() or m.islnk():
+                    raise RuntimeError(f"tar содержит ссылку (отклонено): {m.name}")
+                if m.ischr() or m.isblk() or m.isfifo() or m.isdev():
+                    raise RuntimeError(f"tar содержит спец-файл (отклонено): {m.name}")
+                if m.isreg() or m.isdir():
+                    safe.append(m)
+            try:
+                # Py3.12+: filter="data" дополнительно блокирует абсолютные пути,
+                # '..', links и опасные биты прав.
+                t.extractall(exdir, members=safe, filter="data")
+            except TypeError:
+                t.extractall(exdir, members=safe)  # Py<3.12 — ручные проверки выше
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             for p in sorted(exdir.rglob("*")):
                 if p.is_file():
@@ -119,8 +146,10 @@ def make_zip(src: Path) -> Path:
     return tmp
 
 
-def s3_upload(creds, prefix, key, body_path: Path):
-    """Загрузка в S3-совместимое хранилище (path-style, SigV4). Возвращает public url или None."""
+def s3_upload(creds, prefix, key, data: bytes):
+    """Загрузка ГОТОВЫХ байтов в S3-совместимое хранилище (path-style, SigV4).
+    Принимает именно те байты, по которым посчитан sha (P1-3) — никаких повторных
+    чтений файла с диска. Возвращает public url или None."""
     import boto3
     from botocore.config import Config
     from botocore.exceptions import ClientError
@@ -141,7 +170,6 @@ def s3_upload(creds, prefix, key, body_path: Path):
         region_name=region,
         config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
     )
-    data = body_path.read_bytes()
     put_kwargs = dict(Bucket=bucket, Key=key, Body=data, ContentType="application/zip")
     try:
         client.put_object(ACL="public-read", **put_kwargs)
@@ -151,6 +179,29 @@ def s3_upload(creds, prefix, key, body_path: Path):
         client.put_object(**put_kwargs)
     public_url = f"{endpoint.rstrip('/')}/{bucket}/{key}"
     return public_url
+
+
+def verify_public_get(url, expected_sha, expected_size):
+    """Анонимный (без кредов) GET публичного URL. Установщик качает объект БЕЗ
+    авторизации — если бакет/объект приватный, он получит 403 и docker-mismatch.
+    Поэтому ПЕРЕД записью в реестр убеждаемся: объект реально скачивается
+    анонимно, ровно того размера и sha (P2). Возвращает (ok, detail)."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "hamidun-setup-verify"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if resp.status != 200:
+                return False, f"HTTP {resp.status}"
+            body = resp.read()
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code} (объект недоступен анонимно — бакет приватный?)"
+    except Exception as e:  # noqa: BLE001 — сеть/TLS/таймаут
+        return False, str(e)
+    got_sha = hashlib.sha256(body).hexdigest().lower()
+    if len(body) != expected_size:
+        return False, f"размер {len(body)} != ожидаемого {expected_size}"
+    if got_sha != expected_sha:
+        return False, f"sha {got_sha[:12]}… != ожидаемого {expected_sha[:12]}…"
+    return True, "ok"
 
 
 def load_registry():
@@ -196,27 +247,29 @@ def main():
         sys.exit(2)
 
     # 1. Упаковка в zip
-    print(f"[1/4] Готовлю архив для «{args.remoteId}»…")
+    print(f"[1/5] Готовлю архив для «{args.remoteId}»…")
     zip_path = make_zip(src)
 
-    # 2. sha256 + size
-    print("[2/4] Считаю SHA-256 и размер…")
-    sha, size = sha256_and_size(zip_path)
+    # 2. Снимок байтов ОДИН раз → sha256+size из НИХ (P1-3). Эти же байты уходят
+    #    во все зеркала и в реестр — рассинхрон sha/контента исключён.
+    print("[2/5] Снимаю байты, считаю SHA-256 и размер…")
+    data, sha, size = snapshot_bytes(zip_path)
     print(f"  sha256={sha}")
     print(f"  size={size} байт ({size/1024/1024:.2f} МБ)")
 
-    # ключ объекта: суффикс платформы, чтобы разные ОС-сборки не перетирались
+    # Ключ объекта CONTENT-ADDRESSED / IMMUTABLE: sha в имени (P1-2). Перезалив
+    # того же контента идемпотентен; выпущенные установщики не ломаются.
     suffix = f"-{args.platform}" if args.platform else ""
-    key = f"{S3_PREFIX}/{args.remoteId}{suffix}.zip"
+    key = f"{S3_PREFIX}/{args.remoteId}{suffix}-{sha}.zip"
 
     if args.dry_run:
         print(f"[dry-run] WOULD upload -> Reg.ru S3 key: {key}")
         print(f"[dry-run] WOULD upsert entry remoteId={args.remoteId} platform={args.platform}")
         return
 
-    # 3. Заливка Reg.ru S3 (+ R2 если есть)
-    print("[3/4] Заливаю в Reg.ru S3…")
-    regru_url = s3_upload(creds, "REGRU_S3", key, zip_path)
+    # 3. Заливка Reg.ru S3 (+ R2 если есть) — ИМЕННО снятыми байтами.
+    print("[3/5] Заливаю в Reg.ru S3…")
+    regru_url = s3_upload(creds, "REGRU_S3", key, data)
     if not regru_url:
         print("ОШИБКА: заливка в Reg.ru S3 не удалась.", file=sys.stderr)
         sys.exit(3)
@@ -226,7 +279,7 @@ def main():
 
     mirrors = [{"host": "regru", "url": regru_url}]
 
-    r2_up = s3_upload(creds, "R2", key, zip_path) if (creds.get("R2_ACCESS_KEY") or creds.get("R2_S3_ACCESS_KEY")) else None
+    r2_up = s3_upload(creds, "R2", key, data) if (creds.get("R2_ACCESS_KEY") or creds.get("R2_S3_ACCESS_KEY")) else None
     if r2_up:
         r2_base = creds.get("R2_PUBLIC_BASE", "").rstrip("/")
         r2_url = f"{r2_base}/{key}" if r2_base else r2_up
@@ -237,8 +290,19 @@ def main():
         mirrors.append({"host": "r2", "url": f"https://R2-PLACEHOLDER-NOT-CONFIGURED/{key}"})
         print("  R2: не настроен — записан плейсхолдер (докачка его игнорирует).")
 
-    # 4. upsert реестра
-    print("[4/4] Обновляю remote-components.json…")
+    # 4. Проверка публичной анонимной доступности ПЕРЕД записью реестра (P2):
+    #    установщик качает без кредов — приватный объект дал бы ему 403/mismatch.
+    print("[4/5] Проверяю анонимную загрузку объекта (как это сделает установщик)…")
+    ok_pub, detail = verify_public_get(regru_url, sha, size)
+    if not ok_pub:
+        print(f"ОШИБКА: объект недоступен/несовпадает анонимно: {detail}\n"
+              f"  Реестр НЕ обновлён (иначе установщик получил бы битую ссылку).\n"
+              f"  Проверь public-read ACL бакета/объекта: {regru_url}", file=sys.stderr)
+        sys.exit(4)
+    print("  Публичная загрузка OK (200, размер и sha совпали).")
+
+    # 5. upsert реестра
+    print("[5/5] Обновляю remote-components.json…")
     reg = load_registry()
     entry = {
         "remoteId": args.remoteId,

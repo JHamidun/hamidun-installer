@@ -436,44 +436,41 @@ async function runComponents(ids, env) {
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
 
-    // Remote-компонент: сначала докачиваем архив из CDN (прогресс в step-list),
-    // и только при успехе запускаем install-скрипт с env HM_REMOTE_CACHE.
-    // Провал докачки = честный fail компонента (как exit≠0), скрипт не запускаем.
-    let runEnv = env;
+    // Remote-компонент: докачку+проверку+распаковку+запуск делает АТОМАРНО main
+    // внутри runComponent (renderer не задаёт путь кэша и не вклинивается между
+    // шагами — см. main.js). Здесь только показываем прогресс докачки в step-list;
+    // логи докачки и «целостность подтверждена (SHA-256)» приходят из main по
+    // тому же каналу component-log. Провал докачки → res.stage==='fetch'.
     const comp = STATE.byId[id];
+    let offP = null;
     if (comp && comp.remote) {
       setStepLabel(id, `${comp.name} — Скачиваю…`);
       appendLog(`[↓] Докачка ${comp.name} из облака…`);
-      const offP = window.installer.onRemoteProgress((p) => {
+      offP = window.installer.onRemoteProgress((p) => {
         if (!p || p.id !== id) return;
         setStepLabel(id, (p.pct != null)
           ? `${comp.name} — Скачиваю ${p.pct}%`
           : `${comp.name} — Скачиваю…`);
       });
-      let fr;
-      try { fr = await window.installer.fetchRemote(id, comp.remoteId); }
-      catch (e) { fr = { ok: false, error: String(e) }; }
-      offP && offP();
-      setStepLabel(id, comp.name); // вернуть обычную подпись
-      if (!fr || !fr.ok) {
-        setStep(id, 'error');
-        failed.push(id);
-        bad.add(id);
-        appendLog(`[!] ${comp.name}: докачка не удалась — ${(fr && fr.error) || 'нет соединения'}`);
-        $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
-        continue;
-      }
-      appendLog(`[✓] Скачано и проверено (SHA-256): ${comp.name}`);
-      runEnv = Object.assign({}, env, { HM_REMOTE_CACHE: fr.path });
     }
 
-    const res = await window.installer.runComponent(id, runEnv);
-    if (res.ok) { setStep(id, 'done'); ok++; }
+    let res;
+    try { res = await window.installer.runComponent(id, env); }
+    catch (e) { res = { id, ok: false, code: -1, error: String(e) }; }
+
+    if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
+
+    if (res && res.ok) { setStep(id, 'done'); ok++; }
     else {
       setStep(id, 'error');
       failed.push(id);
       bad.add(id);
-      appendLog(`[!] ${STATE.byId[id].name}: завершено с кодом ${res.code}${res.error ? ' — ' + res.error : ''}`);
+      const name = STATE.byId[id].name;
+      if (res && res.stage === 'fetch') {
+        appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}`);
+      } else {
+        appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
+      }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
   }

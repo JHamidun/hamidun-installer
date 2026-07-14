@@ -3,9 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('installer', {
   bootstrap: () => ipcRenderer.invoke('bootstrap'),
+  // Для remote-компонентов main сам докачивает+проверяет+распаковывает АТОМАРНО
+  // внутри run-component (renderer не задаёт путь кэша и не вклинивается) — см. main.js.
   runComponent: (id, env) => ipcRenderer.invoke('run-component', { id, env }),
-  // Докачка remote-компонента (CDN) — вызывается перед его install-скриптом.
-  fetchRemote: (id, remoteId) => ipcRenderer.invoke('fetch-remote', { id, remoteId }),
   onLog: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('component-log', handler);
