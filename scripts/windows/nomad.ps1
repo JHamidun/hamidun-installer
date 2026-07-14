@@ -43,6 +43,7 @@ $DRY = [bool]$env:HM_DRY_RUN
 # 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
 $src = $env:HM_NOMAD_SRC
 $repoConfigured = $false   # был ли реально задан repoUrl (тогда clone обязан был сработать)
+$weClonedSrc = $false      # P0-4: клонировали ли МЫ исходники в LOCALAPPDATA\nomad-src
 if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     $repo = ''
     $cfg = Join-Path $PSScriptRoot '..\..\config.json'
@@ -52,6 +53,7 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     if ($repo) {
         $repoConfigured = $true
         $src = Join-Path $env:LOCALAPPDATA 'nomad-src'
+        $weClonedSrc = $true
         Write-Host "Клонирую Nomad из $repo ..."
         if ($DRY) {
             Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (or pull if exists)"
@@ -119,10 +121,32 @@ if (-not $DRY) {
 
 if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }
 Update-Path
+
+# P0-4: квитанция владения — ТОЧНЫЕ пути созданных артефактов (main соберёт в receipt).
+# ВАЖНО: HERMES_HOME\config.yaml НЕ записываем в квитанцию — после установки это
+# пользовательский конфиг (ключи/настройки), деинсталлятор его трогать не должен.
+function Write-NomadReceipt {
+    if ($weClonedSrc -and (Test-Path $src)) { Write-Host "HM-RECEIPT path $src" }
+    foreach ($shim in @('nomad.exe', 'nomad', 'hermes.exe', 'hermes')) {
+        $p = Join-Path $env:USERPROFILE ".local\bin\$shim"
+        if (Test-Path -LiteralPath $p) { Write-Host "HM-RECEIPT path $p" }
+    }
+    foreach ($toolDir in @((Join-Path $env:APPDATA 'uv\tools\nomad'),
+                           (Join-Path $env:USERPROFILE '.local\share\uv\tools\nomad'))) {
+        if (Test-Path -LiteralPath $toolDir) { Write-Host "HM-RECEIPT path $toolDir" }
+    }
+    $soul = Join-Path $hh 'SOUL.md'
+    if (Test-Path -LiteralPath $soul) { Write-Host "HM-RECEIPT path $soul" }
+    $skin = Join-Path $hh 'skins\nomad.yaml'
+    if (Test-Path -LiteralPath $skin) { Write-Host "HM-RECEIPT path $skin" }
+}
+
 if (Get-Command nomad -ErrorAction SilentlyContinue) {
+    Write-NomadReceipt
     Write-Host "OK: nomad установлен ($((nomad --version 2>&1 | Select-Object -First 1)))"; exit 0
 }
 if (Test-Path (Join-Path $env:USERPROFILE '.local\bin\nomad.exe')) {
+    Write-NomadReceipt
     Write-Host "OK: nomad в ~/.local/bin — появится в PATH после перезапуска терминала."; exit 0
 }
 Write-Host "ОШИБКА: Nomad не установился — смотри лог выше."

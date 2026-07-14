@@ -103,6 +103,10 @@ $agentPath = Join-Path $dst 'bridge_agent.py'
 New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
 Start-Process -FilePath $run -ArgumentList "`"$agentPath`"" -WindowStyle Hidden
 
+# P0-4: квитанция владения — ТОЧНЫЕ пути/реестр созданных артефактов (main соберёт в receipt).
+Write-Host "HM-RECEIPT path $dst"
+Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|HamidunBridge"
+
 $trayMsg = if ($trayOk) { 'значок в трее' } else { 'фоновый режим без значка (pystray/pillow не встали)' }
 if ($env:HM_BRIDGE_ENDPOINT) { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер настроен — включай в трее." }
 else { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер ещё не настроен — мост включится, когда получишь доступ в боте." }

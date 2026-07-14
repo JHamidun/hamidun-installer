@@ -15,8 +15,10 @@ let STATE = {
   checks: [],      // результаты "CHECK ok/fail/skip <ярлык>" от компонента verify
   resourcesRoot: '', // абсолютный путь к ресурсам (для оффлайн START-HERE)
   userWarning: '',   // предупреждение, если установщик запущен под другим пользователем
-  detected: {},      // id -> {installed, detectedVersion, installedVersion, currentVersion, updateAvailable}
+  detected: {},      // id -> {installed, detectedVersion, installedVersion, currentVersion, updateAvailable, receipted}
   repair: {},        // id -> bool: переустановить начисто (форс — отключает аддитивность)
+  repairConfirmed: {}, // id -> bool: перезапись ~/.claude ОТДЕЛЬНО подтверждена диалогом (P0-1)
+  detectDone: false,   // P0-1: кнопка установки выключена, пока детекция не завершилась
 };
 
 // Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
@@ -82,21 +84,28 @@ async function init() {
 // по умолчанию СНИМАЕМ галку: аддитивно ставим только НЕДОСТАЮЩЕЕ. Пользователь может
 // вручную включить компонент для доустановки/обновления, или «Переустановить начисто».
 async function detectAndApply() {
-  let r;
-  try { r = await window.installer.detectState(); }
-  catch (e) { return; } // детекция best-effort — не ломаем установку
-  if (!r || !r.ok) return;
-  STATE.detected = r.state || {};
-  STATE.manifestPath = r.manifestPath || '';
-  Object.keys(STATE.detected).forEach((id) => {
-    const c = STATE.byId[id];
-    if (STATE.detected[id].installed && c && !c.hidden && !STATE.repair[id]) {
-      STATE.selected[id] = false; // установленное по умолчанию не переустанавливаем
-    }
-  });
-  renderGroups();
-  renderInstalledBanner();
-  refreshDerived();
+  // P0-1: до завершения детекции кнопка установки выключена (refreshDerived смотрит
+  // на detectDone). При сбое детекции кнопку всё равно включаем: режим конфига
+  // авторитетно решает MAIN живой детекцией (fail-safe → additive), а не renderer.
+  try {
+    let r;
+    try { r = await window.installer.detectState(); }
+    catch (e) { return; } // детекция best-effort — не ломаем установку
+    if (!r || !r.ok) return;
+    STATE.detected = r.state || {};
+    STATE.manifestPath = r.manifestPath || '';
+    Object.keys(STATE.detected).forEach((id) => {
+      const c = STATE.byId[id];
+      if (STATE.detected[id].installed && c && !c.hidden && !STATE.repair[id]) {
+        STATE.selected[id] = false; // установленное по умолчанию не переустанавливаем
+      }
+    });
+    renderGroups();
+    renderInstalledBanner();
+  } finally {
+    STATE.detectDone = true;
+    refreshDerived();
+  }
 }
 
 // Жёлтый баннер: обнаружены установленные компоненты — аддитивная доустановка.
@@ -230,7 +239,10 @@ function renderCard(c) {
 // «Переустановить начисто» (форс) и «Удалить» (для самодостаточных артефактов).
 function renderInstalledActions(c) {
   const isConfig = c.id === 'config';
-  const removable = REMOVABLE.has(c.id);
+  // P0-4: «Удалить» — ТОЛЬКО для компонентов с квитанцией установки (installer-owned),
+  // а не для всего, что просто «обнаружено на диске» (могло быть поставлено не нами).
+  const det = (STATE.detected && STATE.detected[c.id]) || null;
+  const removable = REMOVABLE.has(c.id) && !!(det && det.receipted);
   const repairOn = !!STATE.repair[c.id];
   const note = isConfig
     ? `<div class="card-note">Доустановка добавит только НЕДОСТАЮЩЕЕ — твои скиллы и настройки в ~/.claude не тронет.</div>`
@@ -251,7 +263,21 @@ function wireInstalledActions(el, c) {
   const rep = row.querySelector('.act-repair');
   if (rep) rep.addEventListener('click', (e) => {
     e.stopPropagation();
-    STATE.repair[c.id] = !STATE.repair[c.id];
+    const turningOn = !STATE.repair[c.id];
+    // P0-1: перезапись ~/.claude свежей базой требует ЯВНОГО отдельного подтверждения.
+    // Без него main всё равно не даст clean-install (авторитетная детекция + флаг).
+    if (turningOn && c.id === 'config') {
+      const yes = window.confirm(
+        'Переустановить конфиг начисто?\n\n' +
+        'Общая база ~/.claude будет перезаписана свежей версией. Перед началом будет сделана ' +
+        'полная резервная копия ~/.claude, а ключи, память и история сессий будут сохранены ' +
+        'и возвращены. Твои собственные скиллы и правки общих файлов при этом будут заменены ' +
+        'свежей базой.\n\nПродолжить?');
+      if (!yes) return;
+      STATE.repairConfirmed[c.id] = true;
+    }
+    STATE.repair[c.id] = turningOn;
+    if (!turningOn) STATE.repairConfirmed[c.id] = false;
     // «Переустановить начисто» = форс: выбираем компонент (и его зависимости) на установку.
     if (STATE.repair[c.id]) enableWithDeps(c.id);
     renderGroups();
@@ -271,7 +297,10 @@ async function uninstallComponent(id, row) {
   let res;
   try { res = await window.installer.uninstallComponent(id, envForRun()); }
   catch (e) { res = { ok: false, error: String(e) }; }
-  if (status) status.textContent = (res && res.ok) ? ' Удалено ✓' : ' Не удалось удалить';
+  if (status) {
+    if (res && res.ok) { status.textContent = ' Удалено ✓'; }
+    else { status.textContent = ' Не удалось удалить' + ((res && res.error) ? ': ' + res.error : ''); }
+  }
   STATE.repair[id] = false;
   STATE.selected[id] = false;
   await detectAndApply(); // пере-детекция: карточка обновит бейджи
@@ -430,7 +459,9 @@ function refreshDerived() {
   });
   const skillsPart = STATE.selected['config'] ? ` · тематических скиллов: ${nSkills}` : '';
   $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}`;
-  $('#btn-install').disabled = n === 0;
+  // P0-1: кнопка выключена, пока детекция установленного не завершилась — чтобы
+  // установка не стартовала с недодетектированным состоянием (режим/галки).
+  $('#btn-install').disabled = n === 0 || !STATE.detectDone;
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
@@ -468,13 +499,17 @@ function envForRun() {
     // Список выбранных компонентов (id через запятую). verify печатает "skip"
     // для компонентов, которых тут нет, чтобы снятые не давали ложных крестиков.
     HM_SELECTED: selectedIds().join(','),
-    // Аддитивная доустановка конфига: config ВЫБРАН, детектирован установленным и это
-    // НЕ форс-репэйр. Тогда config.ps1/config.sh добавляют только недостающее, не затирая.
+    // Аддитивная доустановка конфига — ПОДСКАЗКА для UI-логики. Авторитетное решение
+    // принимает MAIN (P0-1): живая детекция ФС, fail-safe → additive; clean только
+    // при подтверждённом repair. Renderer это значение переопределить не может.
     HM_ADDITIVE: (STATE.selected['config'] &&
                   STATE.detected['config'] && STATE.detected['config'].installed &&
                   !STATE.repair['config']) ? '1' : '',
     // Компоненты, отмеченные «Переустановить начисто» (форс — игнорировать «installed»).
-    HM_REPAIR: Object.keys(STATE.repair || {}).filter((id) => STATE.repair[id]).join(',')
+    HM_REPAIR: Object.keys(STATE.repair || {}).filter((id) => STATE.repair[id]).join(','),
+    // P0-1: перезапись ~/.claude отдельно подтверждена диалогом (main требует ОБА флага).
+    HM_REPAIR_CONFIRMED: Object.keys(STATE.repairConfirmed || {})
+      .filter((id) => STATE.repairConfirmed[id] && STATE.repair[id]).join(',')
   };
 }
 

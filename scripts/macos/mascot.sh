@@ -320,6 +320,22 @@ else
   open "$DEST" 2>/dev/null && LAUNCHED=1 || echo "  ВНИМАНИЕ: скрепка не запустилась — открой вручную: $DEST"
 fi
 
+# P0-4: квитанция владения — ТОЧНЫЙ путь бандла + его ИДЕНТИЧНОСТЬ (CFBundleIdentifier
+# + Team ID) + LaunchAgent + маркер. Деинсталлятор удалит .app ТОЛЬКО по этому пути
+# и ТОЛЬКО при совпадении идентичности — НИКОГДА не по маске *[Cc]laude*.app.
+echo "HM-RECEIPT path $DEST"
+MASCOT_BUNDLE_ID=""
+if [ -x /usr/libexec/PlistBuddy ]; then
+  MASCOT_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DEST/Contents/Info.plist" 2>/dev/null || true)"
+fi
+if [ -z "$MASCOT_BUNDLE_ID" ]; then
+  MASCOT_BUNDLE_ID="$(defaults read "$DEST/Contents/Info" CFBundleIdentifier 2>/dev/null || true)"
+fi
+[ -n "$MASCOT_BUNDLE_ID" ] && echo "HM-RECEIPT bundleid $MASCOT_BUNDLE_ID"
+echo "HM-RECEIPT teamid $MASCOT_TEAM_ID"
+echo "HM-RECEIPT launchagent com.hamidun.claude-mascot|$LA"
+echo "HM-RECEIPT path $HOME/.claude-mascot"
+
 # 5. Health-check (НЕ критичный): абсолютный дедлайн 10 с (а не 10 итераций по
 # sleep 1 + curl -m 2 = до 30 с). curl на неподнятый порт падает мгновенно.
 HEALTHY=0

@@ -7,6 +7,8 @@ const os = require('os');
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
+const installMode = require('./install-mode');  // P0-1: авторитетный additive-режим (main, не renderer)
+const receipts = require('./install-receipts'); // P0-4: ownership receipts для деинсталлятора
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -405,6 +407,8 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   delete rendererEnv.HM_REMOTE_CACHE;
   // Dry-run: ничего не устанавливаем И не пишем манифест (HM_DRY_RUN уважается новыми путями).
   const isDryRun = !!(rendererEnv && rendererEnv.HM_DRY_RUN);
+  // P1-8: в dry-run НЕ пишем install.log (никаких следов на диске).
+  const logLine = (line) => { if (!isDryRun) logToFile(id, line); };
 
   const send = (line) => {
     if (mainWindow && !mainWindow.isDestroyed() &&
@@ -421,16 +425,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 
   // Remote-компонент: сначала атомарно докачиваем+проверяем+распаковываем в main.
   // remoteId берётся ТОЛЬКО из вшитого реестра (compRemote), не из renderer.
+  // P1-8: ветвление dry-run ДО download — в dry-run НИЧЕГО не скачиваем.
   let remoteCache = '';
   const { reg, compRemote } = loadRemoteMaps();
   const declared = compRemote.get(id);
-  if (declared) {
+  if (declared && isDryRun) {
+    send('[dry-run] Докачка «' + declared + '» пропущена — ничего не скачиваем.');
+  } else if (declared) {
     const entry = remoteFetch.pickEntry(reg, declared, process.platform);
     if (!entry) {
       return { id, ok: false, code: -1, stage: 'fetch', error: `Нет сборки «${declared}» для платформы ${process.platform} в реестре докачки.` };
     }
     const cacheDir = remoteCacheDir(declared);
-    logToFile(id, '=== fetch-remote start (' + declared + ') ===');
+    logLine('=== fetch-remote start (' + declared + ') ===');
     let fr;
     try {
       fr = await remoteFetch.fetchRemote({
@@ -440,13 +447,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
         // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
         // общий лог естественно, атрибутируется по id, ничего не ломает.
-        onLog: (line) => { logToFile(id, line); send(line); }
+        onLog: (line) => { logLine(line); send(line); }
       });
     } catch (e) {
-      logToFile(id, '[ERROR] fetch-remote: ' + String(e));
+      logLine('[ERROR] fetch-remote: ' + String(e));
       return { id, ok: false, code: -1, stage: 'fetch', error: String(e.message || e) };
     }
-    logToFile(id, '=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
+    logLine('=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
     if (!fr || !fr.ok) {
       return { id, ok: false, code: -1, stage: 'fetch', error: (fr && fr.error) || 'докачка не удалась' };
     }
@@ -465,6 +472,27 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
   // HM_REMOTE_CACHE ставим ТОЛЬКО из проверенного пути (или не ставим вовсе).
   if (remoteCache) childEnv.HM_REMOTE_CACHE = remoteCache;
+
+  // P0-1: режим установки конфига решает MAIN — авторитетно, живой детекцией ФС.
+  // Renderer-подсказка HM_ADDITIVE игнорируется: additive, если существует ЛЮБОЙ из
+  // признаков кастомизации (skills/agents/commands/rules/settings.json/credentials/
+  // ~/CLAUDE.md) ИЛИ детекция не смогла отработать (fail-safe). Clean (перезапись
+  // свежей базой) — ТОЛЬКО когда кастомизаций доказуемо нет, ЛИБО пользователь ЯВНО
+  // включил repair И ОТДЕЛЬНО подтвердил (HM_REPAIR + HM_REPAIR_CONFIRMED).
+  if (id === 'config') {
+    const det = installMode.detectAdditive(os.homedir());
+    const repairRequested = installMode.listHas(rendererEnv.HM_REPAIR, 'config');
+    const repairConfirmed = installMode.listHas(rendererEnv.HM_REPAIR_CONFIRMED, 'config');
+    const mode = installMode.decideConfigMode(det, repairRequested, repairConfirmed);
+    if (mode === 'additive') {
+      childEnv.HM_ADDITIVE = '1';
+    } else {
+      delete childEnv.HM_ADDITIVE;
+    }
+    const msg = '[режим конфига] ' + (mode === 'additive' ? 'АДДИТИВНЫЙ (только недостающее)' : 'чистая установка') +
+      ' — ' + det.reason;
+    send(msg); logLine(msg);
+  }
 
   let cmd, args;
   if (IS_WIN) {
@@ -498,7 +526,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // send/sendChannel уже объявлены выше (используются и для докачки, и для лога).
   return new Promise((resolve) => {
     let child;
-    logToFile(id, '=== start ===');
+    logLine('=== start ===');
     try {
       // macOS: give the child its own process group so killChildren can reap the
       // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
@@ -507,20 +535,27 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
-      logToFile(id, '[ERROR] spawn failed: ' + String(e));
+      logLine('[ERROR] spawn failed: ' + String(e));
       resolve({ id, ok: false, code: -1, error: String(e) });
       return;
     }
     CHILDREN.add(child);
 
+    // P0-4: install-скрипт печатает строки "HM-RECEIPT <type> <value>" — ТОЧНЫЕ
+    // абсолютные пути/артефакты, которые он создал. Собираем их в квитанцию
+    // владения (~/.hamidun-setup/receipts/<id>.json) — единственное доказательство
+    // «мы это ставили» для деинсталлятора. В UI-лог эти строки не сыпем.
+    const receiptItems = [];
     const onData = (buf) => {
       buf
         .toString()
         .split(/\r?\n/)
         .forEach((l) => {
           if (l.length) {
+            const ri = receipts.parseReceiptLine(l);
+            if (ri) { receiptItems.push(ri); logLine(l); return; }
             send(l);
-            logToFile(id, l);
+            logLine(l);
           }
         });
     };
@@ -528,11 +563,11 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     child.stderr.on('data', onData);
     child.on('error', (e) => {
       send(`[ERROR] ${e.message}`);
-      logToFile(id, `[ERROR] ${e.message}`);
+      logLine(`[ERROR] ${e.message}`);
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
-      logToFile(id, `=== exit code: ${code} ===`);
+      logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
       // Записываем версию в справочный манифест ~/.hamidun-setup/installed.json ТОЛЬКО
       // при реальном успехе и НЕ в dry-run. Скрытый verify не пишем. Манифест —
@@ -542,7 +577,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
           const ver = (meta && meta.version) || '';
           const src = remoteCache ? 'remote' : (vendorAvailable() ? 'bundled' : 'online');
           manifest.recordInstall(os.homedir(), id, ver, src);
-        } catch (e) { logToFile(id, '[manifest] запись версии не удалась: ' + String(e)); }
+        } catch (e) { logLine('[manifest] запись версии не удалась: ' + String(e)); }
+        // P0-4: квитанция владения — только при успехе, не в dry-run, не для hidden.
+        if (receiptItems.length) {
+          try {
+            receipts.writeReceipt(os.homedir(), id,
+              receipts.buildReceipt(id, process.platform, receiptItems));
+          } catch (e) { logLine('[receipt] запись квитанции не удалась: ' + String(e)); }
+        }
       }
       resolve({ id, ok: okRun, code });
     });
@@ -962,7 +1004,10 @@ ipcMain.handle('detect-state', () => {
         currentVersion: currentVersion,
         // Обновление доступно = детекция подтвердила установку И записанная версия
         // строго старше текущей из components.json.
-        updateAvailable: !!d.installed && manifest.isOutdated(installedVersion, currentVersion)
+        updateAvailable: !!d.installed && manifest.isOutdated(installedVersion, currentVersion),
+        // P0-4: есть ли квитанция владения — UI предлагает «Удалить» ТОЛЬКО для
+        // installer-owned компонентов (а не для всего, что «обнаружено на диске»).
+        receipted: receipts.hasReceipt(home, id)
       };
     }
     return { ok: true, state, manifestPath: manifest.manifestPath(home) };
@@ -996,9 +1041,23 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
     return { id, ok: false, code: -1, error: `Uninstall script not found: ${script}` };
   }
 
+  // P0-4: удаление ТОЛЬКО по квитанции владения (ownership receipt). Нет квитанции →
+  // мы это НЕ ставили (или квитанция утеряна) → отказ, ничего не трогаем (fail-closed).
+  // Информационный манифест installed.json доказательством владения НЕ является.
+  const rec = receipts.readReceipt(os.homedir(), id);
+  if (!rec) {
+    return {
+      id, ok: false, code: -1,
+      error: `Нет квитанции установки для «${id}» — этот установщик его не ставил (или квитанция утеряна). ` +
+             'Удаление отклонено, чтобы не задеть чужие файлы. Если уверен — удали вручную.'
+    };
+  }
+
   const rendererEnv = Object.assign({}, (payload && payload.env) || {});
   delete rendererEnv.HM_REMOTE_CACHE;
   const isDryRun = !!(rendererEnv && rendererEnv.HM_DRY_RUN);
+  // P1-8: в dry-run не пишем install.log (ни при установке, ни при деинсталляции).
+  const logLine = (line) => { if (!isDryRun) logToFile(id, line); };
 
   const send = (line) => {
     if (mainWindow && !mainWindow.isDestroyed() &&
@@ -1008,13 +1067,14 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   };
 
   // Строгий allowlist-env (тот же, что для установки) + авторитетный HM_UNINSTALL из main
-  // (не доверяем renderer, что удалять — берём валидированный id). HM_COURSE_* проходят
-  // как HM_* (нужны для целевой папки курса).
+  // (не доверяем renderer, что удалять — берём валидированный id) + ТОЧНЫЙ инвентарь
+  // артефактов из квитанции (P0-4): скрипт удаляет ТОЛЬКО перечисленное, без масок.
   const childEnv = buildInstallEnv(rendererEnv);
   const vroot = vendorRoot();
   childEnv.HM_VENDOR = vroot;
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
   childEnv.HM_UNINSTALL = id; // авторитетно из main
+  Object.assign(childEnv, receipts.envFromReceipt(rec)); // HM_UNINSTALL_PATHS/REG/…
 
   let cmd, args;
   if (IS_WIN) {
@@ -1037,31 +1097,45 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
 
   return new Promise((resolve) => {
     let child;
-    logToFile(id, '=== uninstall start ===');
+    logLine('=== uninstall start ===');
     try {
       const spawnOpts = { env: childEnv, windowsHide: true };
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
-      logToFile(id, '[ERROR] uninstall spawn failed: ' + String(e));
+      logLine('[ERROR] uninstall spawn failed: ' + String(e));
       resolve({ id, ok: false, code: -1, error: String(e) });
       return;
     }
     CHILDREN.add(child);
     const onData = (buf) => {
-      buf.toString().split(/\r?\n/).forEach((l) => { if (l.length) { send(l); logToFile(id, l); } });
+      buf.toString().split(/\r?\n/).forEach((l) => { if (l.length) { send(l); logLine(l); } });
     };
     child.stdout.on('data', onData);
     child.stderr.on('data', onData);
-    child.on('error', (e) => { send(`[ERROR] ${e.message}`); logToFile(id, `[ERROR] ${e.message}`); });
+    child.on('error', (e) => { send(`[ERROR] ${e.message}`); logLine(`[ERROR] ${e.message}`); });
     child.on('close', (code) => {
       CHILDREN.delete(child);
-      logToFile(id, `=== uninstall exit code: ${code} ===`);
+      logLine(`=== uninstall exit code: ${code} ===`);
       const okRun = code === 0;
-      // Чистим запись манифеста ТОЛЬКО при успехе и НЕ в dry-run.
+      // P1-7: запись манифеста и квитанцию убираем ТОЛЬКО когда скрипт завершился
+      // успехом, НЕ dry-run, И пост-детекция ПОДТВЕРДИЛА отсутствие компонента.
+      // Иначе оставляем всё как есть — «Удалено ✓» при живых файлах недопустимо.
       if (okRun && !isDryRun) {
-        try { manifest.removeEntry(os.homedir(), id); }
-        catch (e) { logToFile(id, '[manifest] удаление записи не удалось: ' + String(e)); }
+        let stillThere = true;
+        try {
+          const det = detectComponents();
+          stillThere = !!(det[id] && det[id].installed);
+        } catch (e) { stillThere = true; } // не смогли проверить → считаем, что остался
+        if (!stillThere) {
+          try { manifest.removeEntry(os.homedir(), id); }
+          catch (e) { logLine('[manifest] удаление записи не удалось: ' + String(e)); }
+          try { receipts.removeReceipt(os.homedir(), id); }
+          catch (e) { logLine('[receipt] удаление квитанции не удалось: ' + String(e)); }
+        } else {
+          const m = '[i] Пост-проверка всё ещё видит компонент «' + id + '» — запись манифеста и квитанция сохранены.';
+          send(m); logLine(m);
+        }
       }
       resolve({ id, ok: okRun, code });
     });

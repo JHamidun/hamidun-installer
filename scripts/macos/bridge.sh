@@ -91,7 +91,15 @@ for RC in "$HOME/.zshrc" "$HOME/.bash_profile"; do
   else
     printf '\n%s\n' "$BRIDGE_RC_LINE" >> "$RC"
   fi
+  # P0-4: наша строка в этом rc-файле (по маркеру) — фиксируем владение в квитанции.
+  if [ -f "$RC" ] && grep -qF "$BRIDGE_RC_MARK" "$RC"; then
+    echo "HM-RECEIPT profileline $RC|$BRIDGE_RC_MARK"
+  fi
 done
+
+# P0-4: квитанция владения — ТОЧНЫЕ пути созданных артефактов (main соберёт в receipt).
+echo "HM-RECEIPT path $DST"
+echo "HM-RECEIPT launchagent com.hamidun.bridge|$LA"
 
 if [ "$TRAY_OK" = "1" ]; then TRAY_MSG="значок в меню-баре"; else TRAY_MSG="фоновый режим без значка"; fi
 if [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). Сервер настроен."

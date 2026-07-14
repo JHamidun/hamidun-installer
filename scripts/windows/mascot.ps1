@@ -101,6 +101,11 @@ try {
     $autoRunOk = $true
 } catch { Write-Host "  ВНИМАНИЕ: автозапуск не прописался ($($_.Exception.Message)) — скрепку придётся запускать вручную: $dest" }
 
+# P0-4: квитанция владения — ТОЧНЫЕ пути/реестр созданных артефактов (main соберёт в receipt).
+Write-Host "HM-RECEIPT path $destDir"
+Write-Host "HM-RECEIPT path $(Join-Path $env:USERPROFILE '.claude-mascot')"
+if ($autoRunOk) { Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|ClaudeMascot" }
+
 # Запуск сейчас
 $proc = $null
 try { $proc = Start-Process -FilePath $dest -PassThru -ErrorAction Stop }

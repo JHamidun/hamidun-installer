@@ -11,6 +11,13 @@
 $ErrorActionPreference = 'Stop'
 $DRY = [bool]$env:HM_DRY_RUN
 
+# P1-8: dry-run ветвится ДО проверки кэша — в dry-run main НИЧЕГО не докачивает,
+# поэтому HM_REMOTE_CACHE легитимно отсутствует; никаких обращений к сети/диску.
+if ($DRY) {
+    Write-Host "  [dry-run] WOULD: докачать uv из CDN (SHA-256), проверить запуском ИЗ ЗАЩИЩЁННОГО кэша, скопировать в %LOCALAPPDATA%\Programs\uv, добавить в PATH (копию НЕ запускать)"
+    exit 0
+}
+
 $cache = $env:HM_REMOTE_CACHE
 if (-not $cache -or -not (Test-Path -LiteralPath $cache)) {
     Write-Host "ОШИБКА: HM_REMOTE_CACHE не задан или не существует — докачка uv не выполнена."
@@ -35,10 +42,6 @@ $srcUvx = Get-ChildItem -Path $cache -Filter 'uvx.exe' -Recurse -File -ErrorActi
           Select-Object -First 1
 
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\uv'
-if ($DRY) {
-    Write-Host "  [dry-run] WOULD: проверить $srcUv запуском ИЗ ЗАЩИЩЁННОГО кэша, скопировать в $dest, добавить в PATH (копию НЕ запускать)"
-    exit 0
-}
 
 # 1) ПРОВЕРКА ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО ИСТОЧНИКА (admin-owned кэш), НЕ из user-writable
 #    места. Требуем exit 0 И вывод формата 'uv <версия>' (не просто подстроку 'uv').
@@ -88,6 +91,7 @@ if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
 }
 
 # 3) Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH (без админа), если его там ещё нет.
+$pathEntryOurs = $false
 try {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($null -eq $userPath) { $userPath = '' }
@@ -96,10 +100,16 @@ try {
         $newPath = if ($userPath.TrimEnd(';')) { $userPath.TrimEnd(';') + ';' + $dest } else { $dest }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
         Write-Host "Добавил $dest в PATH — uv появится в новых терминалах."
+        $pathEntryOurs = $true
     } else {
         Write-Host "$dest уже в PATH."
+        $pathEntryOurs = $true   # запись указывает на НАШ каталог установки — владеем ею
     }
 } catch { Write-Host "  [warn] не удалось прописать PATH: $($_.Exception.Message)" }
+
+# P0-4: квитанция владения — ТОЧНЫЕ пути/PATH-запись (main соберёт в receipt).
+Write-Host "HM-RECEIPT path $dest"
+if ($pathEntryOurs) { Write-Host "HM-RECEIPT pathentry $dest" }
 
 Write-Host "OK: uv установлен ($ver) — проверен из защищённого кэша, скопирован в $dest."
 exit 0

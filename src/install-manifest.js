@@ -49,6 +49,11 @@ function readManifest(homedir) {
 // Атомарная запись: temp-файл в ТОМ ЖЕ каталоге + rename (rename атомарен в пределах
 // тома). Краш в середине записи никогда не оставит наполовину записанный installed.json.
 // dryRun → ничего не пишем (HM_DRY_RUN уважается вызывающим кодом).
+//
+// P2-9 (Windows): rename поверх существующего может дать EPERM. НИКОГДА не делаем
+// unlink-перед-rename (окно, где старый уже удалён, а новый не встал → манифест
+// ПОТЕРЯН при сбое второго rename). Вместо этого: old→backup, temp→dest; при сбое —
+// откат backup→dest и удаление temp. Плюс fsync temp-файла где можно.
 function writeManifest(homedir, data, opts) {
   opts = opts || {};
   const obj = (data && typeof data === 'object') ? data : emptyManifest();
@@ -60,14 +65,31 @@ function writeManifest(homedir, data, opts) {
   const json = JSON.stringify(obj, null, 2);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, FILE_NAME + '.' + process.pid + '.' + Date.now() + '.tmp');
-  fs.writeFileSync(tmp, json, { encoding: 'utf8', mode: 0o600 });
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, json, 'utf8');
+    try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
+  } finally {
+    fs.closeSync(fd);
+  }
   try {
     fs.renameSync(tmp, dst);
   } catch (e) {
-    // Windows: rename поверх существующего файла может дать EPERM — повторяем через
-    // unlink+rename. При провале — убираем temp, чтобы не копить мусор.
-    try { fs.rmSync(dst, { force: true }); fs.renameSync(tmp, dst); }
-    catch (e2) { try { fs.rmSync(tmp, { force: true }); } catch (e3) { /* ignore */ } throw e2; }
+    const bak = dst + '.' + process.pid + '.' + Date.now() + '.bak';
+    let movedOld = false;
+    try {
+      // старый → backup (ENOENT допустим: файла ещё не было)
+      try { fs.renameSync(dst, bak); movedOld = true; }
+      catch (e2) { if (!e2 || e2.code !== 'ENOENT') throw e2; }
+      // temp → dest; старый цел в backup до подтверждения успеха
+      fs.renameSync(tmp, dst);
+      if (movedOld) { try { fs.rmSync(bak, { force: true }); } catch (e3) { /* ignore */ } }
+    } catch (e4) {
+      // ОТКАТ: вернуть старый манифест на место, убрать temp — данные не теряем.
+      if (movedOld) { try { fs.renameSync(bak, dst); } catch (e5) { /* ignore */ } }
+      try { fs.rmSync(tmp, { force: true }); } catch (e6) { /* ignore */ }
+      throw e4;
+    }
   }
   return { ok: true, path: dst };
 }
@@ -100,16 +122,14 @@ function getEntry(homedir, id) {
   return data.components[id] || null;
 }
 
-// Разбор версии в числовые сегменты; нечисловой хвост игнорируется. "v1.2.3" → [1,2,3].
+// P2-10: разбор версии — ТОЛЬКО строгий числовой формат x[.y[.z…]] (v-префикс
+// допустим). Любые суффиксы (-rc, +build, буквы) → null = «не знаем»: не заявляем
+// newer и НЕ показываем ложный апдейт-бейдж. "v1.2.3" → [1,2,3]; "1.2.3-rc1" → null.
 function parseVersion(v) {
   const s = String(v == null ? '' : v).trim().replace(/^v/i, '');
   if (!s) return null;
-  if (!/^\d/.test(s)) return null; // мусор без ведущей цифры → «не знаем» (никаких ложных апдейтов)
-  const parts = s.split(/[.\-+]/).map((p) => {
-    const m = String(p).match(/^\d+/);
-    return m ? parseInt(m[0], 10) : 0;
-  });
-  return parts.length ? parts : null;
+  if (!/^\d+(\.\d+)*$/.test(s)) return null; // не строго-числовой → «не знаем»
+  return s.split('.').map((p) => parseInt(p, 10));
 }
 
 // Простое semver-подобное сравнение: -1 если a<b, 0 если равны, 1 если a>b.

@@ -7,6 +7,7 @@ DRY="${HM_DRY_RUN:-}"
 
 # 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
 SRC="${HM_NOMAD_SRC:-}"
+WE_CLONED_SRC=0   # P0-4: клонировали ли МЫ исходники в ~/.nomad-src
 if [ ! -f "$SRC/pyproject.toml" ]; then
   REPO=""
   CFG="$DIR/../../config.json"
@@ -17,6 +18,7 @@ if [ ! -f "$SRC/pyproject.toml" ]; then
   fi
   if [ -n "$REPO" ]; then
     SRC="$HOME/.nomad-src"
+    WE_CLONED_SRC=1
     echo "Клонирую Nomad из $REPO ..."
     if [ -z "$DRY" ]; then
       if [ -d "$SRC/.git" ]; then git -C "$SRC" pull --ff-only; else git clone --depth 1 "$REPO" "$SRC"; fi
@@ -55,6 +57,18 @@ if [ -z "$DRY" ]; then
     if [ -f "$SRC/branding/config.yaml.template" ]; then cp "$SRC/branding/config.yaml.template" "$HH/config.yaml"
     else echo "  [warn] branding/config.yaml.template не найден — пропускаю"; fi
   fi
+fi
+
+# P0-4: квитанция владения — ТОЧНЫЕ пути созданных артефактов (main соберёт в receipt).
+# ВАЖНО: $HH/config.yaml НЕ записываем — после установки это пользовательский конфиг.
+if [ -z "$DRY" ]; then
+  [ "$WE_CLONED_SRC" = "1" ] && [ -d "$SRC" ] && echo "HM-RECEIPT path $SRC"
+  for shim in nomad hermes; do
+    [ -e "$HOME/.local/bin/$shim" ] && echo "HM-RECEIPT path $HOME/.local/bin/$shim"
+  done
+  [ -d "$HOME/.local/share/uv/tools/nomad" ] && echo "HM-RECEIPT path $HOME/.local/share/uv/tools/nomad"
+  [ -f "$HH/SOUL.md" ] && echo "HM-RECEIPT path $HH/SOUL.md"
+  [ -f "$HH/skins/nomad.yaml" ] && echo "HM-RECEIPT path $HH/skins/nomad.yaml"
 fi
 
 if have nomad; then echo "OK: nomad установлен ($(nomad --version 2>&1 | head -n1))"; else echo "Nomad установлен — команда появится в PATH после перезапуска терминала."; fi
