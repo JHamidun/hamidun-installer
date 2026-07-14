@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Мой проект — стартовый лендинг</title>
+  <meta name="description" content="Стартовый шаблон лендинга. Замените этот текст описанием вашего проекта.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ======= Шапка сайта ======= -->
+  <header class="header">
+    <nav class="nav container">
+      <a href="#" class="logo">Мой&nbsp;Проект</a>
+      <button class="nav-toggle" id="navToggle" aria-label="Открыть меню">☰</button>
+      <ul class="nav-links" id="navLinks">
+        <li><a href="#features">Возможности</a></li>
+        <li><a href="#about">О проекте</a></li>
+        <li><a href="#contact">Контакты</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <!-- ======= Главный экран (hero) ======= -->
+  <section class="hero">
+    <div class="container">
+      <h1>Заголовок вашего проекта</h1>
+      <p class="hero-subtitle">
+        Одно-два предложения о том, какую пользу приносит ваш продукт.
+        Напишите здесь главную мысль — зачем человеку оставаться на этой странице.
+      </p>
+      <div class="hero-actions">
+        <a href="#contact" class="btn btn-primary">Попробовать</a>
+        <a href="#features" class="btn btn-secondary">Узнать больше</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======= Блок возможностей ======= -->
+  <section class="features section" id="features">
+    <div class="container">
+      <h2>Возможности</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3>Быстро</h3>
+          <p>Опишите первое преимущество вашего продукта. Коротко и по делу.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🎯</div>
+          <h3>Точно</h3>
+          <p>Опишите второе преимущество. Что получает пользователь?</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🛡️</div>
+          <h3>Надёжно</h3>
+          <p>Опишите третье преимущество. Почему вам можно доверять?</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======= Блок «О проекте» ======= -->
+  <section class="about section" id="about">
+    <div class="container">
+      <h2>О проекте</h2>
+      <p>
+        Расскажите историю: какую проблему вы решаете, для кого и почему это важно.
+        Два-три абзаца достаточно. Этот текст — заглушка, замените его своим.
+      </p>
+    </div>
+  </section>
+
+  <!-- ======= Блок контактов / призыв к действию ======= -->
+  <section class="contact section" id="contact">
+    <div class="container">
+      <h2>Готовы начать?</h2>
+      <p>Оставьте заявку — форма пока ничего не отправляет, это заготовка.</p>
+      <form class="contact-form" id="contactForm">
+        <input type="text" name="name" placeholder="Ваше имя" required>
+        <input type="email" name="email" placeholder="Ваш e-mail" required>
+        <button type="submit" class="btn btn-primary">Отправить</button>
+      </form>
+      <p class="form-status" id="formStatus"></p>
+    </div>
+  </section>
+
+  <!-- ======= Подвал ======= -->
+  <footer class="footer">
+    <div class="container">
+      <p>© <span id="year"></span> Мой Проект. Все права защищены.</p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

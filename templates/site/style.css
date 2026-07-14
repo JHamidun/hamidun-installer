@@ -1,0 +1,273 @@
+/* ============================================
+   Стартовые стили лендинга.
+   Все основные цвета и размеры собраны в :root —
+   меняйте переменные, и весь сайт перекрасится.
+   ============================================ */
+
+:root {
+  --color-bg: #0f1115;          /* фон страницы */
+  --color-surface: #1a1d24;     /* фон карточек */
+  --color-text: #e8eaf0;        /* основной текст */
+  --color-muted: #9aa1b1;       /* приглушённый текст */
+  --color-primary: #4f7cff;     /* акцентный цвет (кнопки, ссылки) */
+  --color-primary-hover: #6b91ff;
+  --radius: 14px;               /* скругление углов */
+  --container-width: 1080px;    /* ширина контента */
+}
+
+/* --- Сброс и база --- */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth; /* плавная прокрутка по якорям */
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.6;
+}
+
+.container {
+  max-width: var(--container-width);
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+.section {
+  padding: 80px 0;
+}
+
+h1 {
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+  margin-bottom: 24px;
+}
+
+h3 {
+  margin-bottom: 8px;
+}
+
+p {
+  color: var(--color-muted);
+}
+
+/* --- Шапка --- */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(15, 17, 21, 0.85);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--color-text);
+  text-decoration: none;
+}
+
+.nav-links {
+  display: flex;
+  gap: 28px;
+  list-style: none;
+}
+
+.nav-links a {
+  color: var(--color-muted);
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.nav-links a:hover {
+  color: var(--color-text);
+}
+
+/* Кнопка-бургер видна только на мобильных */
+.nav-toggle {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--color-text);
+  font-size: 1.5rem;
+  cursor: pointer;
+}
+
+/* --- Hero --- */
+.hero {
+  padding: 120px 0 100px;
+  text-align: center;
+}
+
+.hero-subtitle {
+  max-width: 620px;
+  margin: 20px auto 36px;
+  font-size: 1.1rem;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* --- Кнопки --- */
+.btn {
+  display: inline-block;
+  padding: 13px 28px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background 0.2s, transform 0.1s;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: var(--color-primary-hover);
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.btn-secondary:hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* --- Карточки возможностей --- */
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.feature-card {
+  background: var(--color-surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius);
+  padding: 28px;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.feature-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(79, 124, 255, 0.4);
+}
+
+.feature-icon {
+  font-size: 2rem;
+  margin-bottom: 12px;
+}
+
+/* --- О проекте --- */
+.about p {
+  max-width: 680px;
+}
+
+/* --- Форма контактов --- */
+.contact {
+  text-align: center;
+}
+
+.contact-form {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 28px;
+}
+
+.contact-form input {
+  padding: 13px 18px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 1rem;
+  min-width: 220px;
+}
+
+.contact-form input:focus {
+  outline: 2px solid var(--color-primary);
+  border-color: transparent;
+}
+
+.form-status {
+  margin-top: 16px;
+  min-height: 1.5em;
+}
+
+/* --- Подвал --- */
+.footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 28px 0;
+  text-align: center;
+}
+
+.footer p {
+  font-size: 0.9rem;
+}
+
+/* --- Мобильная версия --- */
+@media (max-width: 640px) {
+  .nav-toggle {
+    display: block;
+  }
+
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 64px;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    background: var(--color-bg);
+    padding: 20px;
+    gap: 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .nav-links.open {
+    display: flex;
+  }
+
+  .hero {
+    padding: 80px 0 60px;
+  }
+
+  .section {
+    padding: 56px 0;
+  }
+}
