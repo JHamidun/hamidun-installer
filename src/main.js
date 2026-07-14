@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
+const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -402,6 +403,8 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // вырезаем — его задаёт ТОЛЬКО main из проверенного пути ниже (P0-2/P0-4).
   const rendererEnv = Object.assign({}, (payload && payload.env) || {});
   delete rendererEnv.HM_REMOTE_CACHE;
+  // Dry-run: ничего не устанавливаем И не пишем манифест (HM_DRY_RUN уважается новыми путями).
+  const isDryRun = !!(rendererEnv && rendererEnv.HM_DRY_RUN);
 
   const send = (line) => {
     if (mainWindow && !mainWindow.isDestroyed() &&
@@ -530,7 +533,18 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     child.on('close', (code) => {
       CHILDREN.delete(child);
       logToFile(id, `=== exit code: ${code} ===`);
-      resolve({ id, ok: code === 0, code });
+      const okRun = code === 0;
+      // Записываем версию в справочный манифест ~/.hamidun-setup/installed.json ТОЛЬКО
+      // при реальном успехе и НЕ в dry-run. Скрытый verify не пишем. Манифест —
+      // справочный (версия/апдейт); grund-truth «установлен» остаётся детекцией.
+      if (okRun && !isDryRun && !(meta && meta.hidden)) {
+        try {
+          const ver = (meta && meta.version) || '';
+          const src = remoteCache ? 'remote' : (vendorAvailable() ? 'bundled' : 'online');
+          manifest.recordInstall(os.homedir(), id, ver, src);
+        } catch (e) { logToFile(id, '[manifest] запись версии не удалась: ' + String(e)); }
+      }
+      resolve({ id, ok: okRun, code });
     });
   });
 });
@@ -728,6 +742,330 @@ ipcMain.handle('save-credentials', (_e, obj) => {
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+});
+
+// ---- Фаза 2: детекция состояния компонентов (ГРУНД-ТРУТ) --------------
+// «Установлен ли X?» решаем ЖИВОЙ проверкой (fs.existsSync / запуск бинаря),
+// НИКОГДА не манифестом. Манифест даёт лишь версию для показа/сравнения обновлений.
+// Кросс-платформенно (win + mac). Read-only: ничего не пишет, безопасно в dry-run.
+
+// Windows Program Files из env — только для ЧТЕНИЯ путей детекции (не elevated exec),
+// поэтому spoofing здесь безвреден (в отличие от buildInstallEnv, где значения строгие).
+function winPF() { return process.env.ProgramFiles || 'C:\\Program Files'; }
+function winPF86() { return process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'; }
+function winLocalAppData() { return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'); }
+
+// Ищем исполняемый файл: известные абсолютные каталоги, затем свежий PATH (перечитан
+// из реестра на Windows) / POSIX-каталоги. Возвращает путь или ''.
+function resolveExecutable(names, extraDirs) {
+  const dirs = [];
+  (extraDirs || []).forEach((d) => { if (d) dirs.push(d); });
+  if (IS_WIN) {
+    freshWindowsPath().split(';').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
+  } else {
+    ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin',
+      path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.cargo', 'bin')]
+      .forEach((d) => dirs.push(d));
+    (process.env.PATH || '').split(':').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
+  }
+  for (const d of dirs) {
+    for (const n of names) {
+      try { const p = path.join(d, n); if (fs.existsSync(p)) return p; } catch (e) { /* ignore */ }
+    }
+  }
+  return '';
+}
+
+// Запускает bin с args и достаёт версию regex'ом (1-я группа). Ошибка/таймаут → ''.
+function probeVersion(bin, args, re) {
+  if (!bin) return '';
+  try {
+    const out = execFileSync(bin, args, {
+      encoding: 'utf8', windowsHide: true, timeout: 6000, stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const m = String(out || '').match(re);
+    if (m) return (m[1] || m[0]).trim();
+    return out ? String(out).trim().split(/\r?\n/)[0] : '';
+  } catch (e) { return ''; }
+}
+
+function firstExisting(paths) {
+  for (const p of (paths || [])) { try { if (p && fs.existsSync(p)) return p; } catch (e) { /* ignore */ } }
+  return '';
+}
+
+// Каталог существует и в нём есть подкаталог, имя которого начинается с prefix.
+function dirHasChildStarting(dir, prefix) {
+  try {
+    if (!fs.existsSync(dir)) return false;
+    return fs.readdirSync(dir).some((n) => n.toLowerCase().indexOf(String(prefix).toLowerCase()) === 0);
+  } catch (e) { return false; }
+}
+
+// Поиск claude-бинаря (зеркало логики claude.ps1 / verify.ps1, но в Node).
+function findClaudeBinary() {
+  const home = os.homedir();
+  if (IS_WIN) {
+    const prefix = npmPrefixFromRc() || path.join(home, 'AppData', 'Roaming', 'npm');
+    const cands = [
+      path.join(prefix, 'claude.cmd'), path.join(prefix, 'claude.exe'), path.join(prefix, 'claude'),
+      path.join(home, '.local', 'bin', 'claude.exe'), path.join(home, '.local', 'bin', 'claude.cmd')
+    ];
+    return firstExisting(cands);
+  }
+  const prefix = npmPrefixFromRc();
+  const cands = [
+    path.join(home, '.local', 'bin', 'claude'),
+    prefix ? path.join(prefix, 'bin', 'claude') : '',
+    '/usr/local/bin/claude', '/opt/homebrew/bin/claude'
+  ];
+  return firstExisting(cands);
+}
+
+// Детектор на компонент: { installed:bool, detectedVersion:string }.
+function detectComponents() {
+  const home = os.homedir();
+  const claudeHome = path.join(home, '.claude');
+  const out = {};
+
+  // git
+  {
+    const bin = resolveExecutable(IS_WIN ? ['git.exe'] : ['git'],
+      IS_WIN ? [path.join(winPF(), 'Git', 'cmd'), path.join(winPF(), 'Git', 'bin'), path.join(winPF86(), 'Git', 'cmd')] : []);
+    const v = probeVersion(bin, ['--version'], /(\d+\.\d+(?:\.\d+)?)/);
+    out.git = { installed: !!(bin && v), detectedVersion: v };
+  }
+  // node
+  {
+    const bin = resolveExecutable(IS_WIN ? ['node.exe'] : ['node'],
+      IS_WIN ? [path.join(winPF(), 'nodejs')] : []);
+    const v = probeVersion(bin, ['-v'], /v?(\d+\.\d+\.\d+)/);
+    out.node = { installed: !!(bin && v), detectedVersion: v };
+  }
+  // cursor (приложение)
+  {
+    const p = IS_WIN
+      ? firstExisting([path.join(winLocalAppData(), 'Programs', 'cursor', 'Cursor.exe'),
+                       path.join(winPF(), 'cursor', 'Cursor.exe')])
+      : firstExisting(['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')]);
+    out.cursor = { installed: !!p, detectedVersion: '' };
+  }
+  // claude CLI
+  {
+    const bin = findClaudeBinary();
+    out.claude = { installed: !!bin, detectedVersion: '' };
+  }
+  // extension (папка расширения в Cursor/VS Code)
+  {
+    const extId = (readJson('config.json', {}).claudeCodeExtensionId) || 'anthropic.claude-code';
+    const extDirs = [
+      path.join(home, '.cursor', 'extensions'),
+      path.join(home, '.vscode', 'extensions'),
+      path.join(home, '.vscode-oss', 'extensions')
+    ];
+    const found = extDirs.some((d) => dirHasChildStarting(d, extId));
+    out.extension = { installed: found, detectedVersion: '' };
+  }
+  // config (~/.claude развёрнут)
+  {
+    const found = firstExisting([path.join(claudeHome, 'skills'), path.join(claudeHome, 'settings.json')]);
+    out.config = { installed: !!found, detectedVersion: '' };
+  }
+  // pydeps (best-effort: python + представительный пакет). Ложно-негатив безвреден —
+  // переустановка pydeps идемпотентна; ложно-позитив лишь снимает галку по умолчанию.
+  {
+    const py = resolveExecutable(IS_WIN ? ['python.exe', 'python3.exe'] : ['python3', 'python'],
+      IS_WIN ? [path.join(winLocalAppData(), 'Programs', 'Python', 'Python313'),
+                path.join(winLocalAppData(), 'Programs', 'Python', 'Python312')] : []);
+    let found = false;
+    if (py) {
+      try {
+        execFileSync(py, ['-c', 'import PIL, requests'],
+          { windowsHide: true, timeout: 6000, stdio: 'ignore' });
+        found = true;
+      } catch (e) { found = false; }
+    }
+    out.pydeps = { installed: found, detectedVersion: '' };
+  }
+  // course (папка курса)
+  {
+    const target = process.env.HM_COURSE_TARGET
+      ? process.env.HM_COURSE_TARGET.replace(/%USERPROFILE%/gi, home)
+      : path.join(home, 'HamidunCourse');
+    const cd = path.join(target, 'vibecoding-course');
+    const found = firstExisting([path.join(cd, 'CLAUDE.md'),
+      path.join(cd, '.claude', 'skills', 'course-driver', 'SKILL.md')]);
+    out.course = { installed: !!found, detectedVersion: '' };
+  }
+  // nomad (бинарь или клон исходников)
+  {
+    const bin = resolveExecutable(IS_WIN ? ['nomad.exe'] : ['nomad'],
+      [path.join(home, '.local', 'bin')]);
+    const src = IS_WIN
+      ? firstExisting([path.join(winLocalAppData(), 'nomad-src', 'pyproject.toml')])
+      : firstExisting([path.join(home, '.nomad-src', 'pyproject.toml')]);
+    out.nomad = { installed: !!(bin || src), detectedVersion: '' };
+  }
+  // uv
+  {
+    const p = IS_WIN
+      ? firstExisting([path.join(winLocalAppData(), 'Programs', 'uv', 'uv.exe')]) || resolveExecutable(['uv.exe'], [])
+      : firstExisting([path.join(home, '.local', 'bin', 'uv')]) || resolveExecutable(['uv'], []);
+    const v = p ? probeVersion(p, ['--version'], /(\d+\.\d+\.\d+)/) : '';
+    out.uv = { installed: !!p, detectedVersion: v };
+  }
+  // bridge (агент моста)
+  {
+    const p = IS_WIN
+      ? firstExisting([path.join(winLocalAppData(), 'HamidunBridge', 'bridge_agent.py')])
+      : firstExisting([path.join(home, 'Library', 'Application Support', 'HamidunBridge', 'bridge_agent.py')]);
+    out.bridge = { installed: !!p, detectedVersion: '' };
+  }
+  // mascot (скрепка)
+  {
+    let found = '';
+    if (IS_WIN) {
+      found = firstExisting([path.join(winLocalAppData(), 'Programs', 'ClaudeMascot'),
+        path.join(home, '.claude-mascot', '.installed')]);
+    } else {
+      const appsDir = path.join(home, 'Applications');
+      found = dirHasChildStarting(appsDir, 'Claude') && (function () {
+        try {
+          return fs.readdirSync(appsDir).some((n) => /mascot|claude/i.test(n) && /\.app$/i.test(n));
+        } catch (e) { return false; }
+      })() ? appsDir : '';
+    }
+    out.mascot = { installed: !!found, detectedVersion: '' };
+  }
+
+  return out;
+}
+
+// Состояние всех (не скрытых) компонентов: installed (ground-truth) + версии.
+ipcMain.handle('detect-state', () => {
+  try {
+    const home = os.homedir();
+    const man = manifest.readManifest(home);
+    const det = detectComponents();
+    const state = {};
+    for (const [id, comp] of COMPONENT_META) {
+      if (comp && comp.hidden) continue;
+      if (!componentShownOnPlatform(comp, process.platform)) continue;
+      const d = det[id] || { installed: false, detectedVersion: '' };
+      const mEntry = (man.components && man.components[id]) || null;
+      const installedVersion = mEntry ? (mEntry.version || '') : '';
+      const currentVersion = (comp && comp.version) || '';
+      state[id] = {
+        installed: !!d.installed,
+        detectedVersion: d.detectedVersion || '',
+        installedVersion: installedVersion || null,
+        currentVersion: currentVersion,
+        // Обновление доступно = детекция подтвердила установку И записанная версия
+        // строго старше текущей из components.json.
+        updateAvailable: !!d.installed && manifest.isOutdated(installedVersion, currentVersion)
+      };
+    }
+    return { ok: true, state, manifestPath: manifest.manifestPath(home) };
+  } catch (e) {
+    return { ok: false, error: String(e), state: {} };
+  }
+});
+
+// ---- Фаза 2: деинсталлятор -------------------------------------------
+// Удаляет ТОЛЬКО артефакты установщика по ЯВНОМУ выбору id. Скрипт uninstall.*
+// НИКОГДА не трогает пользовательские данные (~/.claude/.credentials*, memory,
+// projects, todos, пользовательские скиллы) — жёсткий guard внутри скрипта.
+// Манифест обновляем ЗДЕСЬ (в JS, через тестируемый модуль), скрипт лишь удаляет файлы.
+function uninstallScript() {
+  const dir = IS_WIN ? 'windows' : 'macos';
+  const ext = IS_WIN ? 'ps1' : 'sh';
+  return path.join(resourceRoot(), 'scripts', dir, `uninstall.${ext}`);
+}
+
+ipcMain.handle('uninstall-component', async (_evt, payload) => {
+  const { id } = payload || {};
+  if (!id || !VALID_COMPONENT_IDS.has(id)) {
+    return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
+  }
+  const meta = COMPONENT_META.get(id);
+  if (meta && meta.hidden) {
+    return { id, ok: false, code: -1, error: `Служебный компонент «${id}» не деинсталлируется.` };
+  }
+  const script = uninstallScript();
+  if (!fs.existsSync(script)) {
+    return { id, ok: false, code: -1, error: `Uninstall script not found: ${script}` };
+  }
+
+  const rendererEnv = Object.assign({}, (payload && payload.env) || {});
+  delete rendererEnv.HM_REMOTE_CACHE;
+  const isDryRun = !!(rendererEnv && rendererEnv.HM_DRY_RUN);
+
+  const send = (line) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('component-log', { id, line });
+    }
+  };
+
+  // Строгий allowlist-env (тот же, что для установки) + авторитетный HM_UNINSTALL из main
+  // (не доверяем renderer, что удалять — берём валидированный id). HM_COURSE_* проходят
+  // как HM_* (нужны для целевой папки курса).
+  const childEnv = buildInstallEnv(rendererEnv);
+  const vroot = vendorRoot();
+  childEnv.HM_VENDOR = vroot;
+  childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
+  childEnv.HM_UNINSTALL = id; // авторитетно из main
+
+  let cmd, args;
+  if (IS_WIN) {
+    const ps = remoteFetch.winPowershellPath();
+    if (!ps) {
+      return { id, ok: false, code: -1, error: 'PowerShell не найден в System32 — деинсталляция заблокирована (fail-closed).' };
+    }
+    const psScript = script.replace(/'/g, "''");
+    const inline =
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "& '" + psScript + "'; " +
+      "if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }";
+    cmd = ps;
+    args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
+  } else {
+    cmd = '/bin/bash';
+    args = [script];
+  }
+
+  return new Promise((resolve) => {
+    let child;
+    logToFile(id, '=== uninstall start ===');
+    try {
+      const spawnOpts = { env: childEnv, windowsHide: true };
+      if (!IS_WIN) spawnOpts.detached = true;
+      child = spawn(cmd, args, spawnOpts);
+    } catch (e) {
+      logToFile(id, '[ERROR] uninstall spawn failed: ' + String(e));
+      resolve({ id, ok: false, code: -1, error: String(e) });
+      return;
+    }
+    CHILDREN.add(child);
+    const onData = (buf) => {
+      buf.toString().split(/\r?\n/).forEach((l) => { if (l.length) { send(l); logToFile(id, l); } });
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('error', (e) => { send(`[ERROR] ${e.message}`); logToFile(id, `[ERROR] ${e.message}`); });
+    child.on('close', (code) => {
+      CHILDREN.delete(child);
+      logToFile(id, `=== uninstall exit code: ${code} ===`);
+      const okRun = code === 0;
+      // Чистим запись манифеста ТОЛЬКО при успехе и НЕ в dry-run.
+      if (okRun && !isDryRun) {
+        try { manifest.removeEntry(os.homedir(), id); }
+        catch (e) { logToFile(id, '[manifest] удаление записи не удалось: ' + String(e)); }
+      }
+      resolve({ id, ok: okRun, code });
+    });
+  });
 });
 
 ipcMain.handle('quit', () => app.quit());

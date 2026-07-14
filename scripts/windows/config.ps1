@@ -23,6 +23,11 @@ function Update-Path {
 }
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
+# Аддитивная доустановка ПОВЕРХ существующего ~/.claude (HM_ADDITIVE=1): добавляем
+# только НЕДОСТАЮЩЕЕ, НЕ затирая пользовательские кастомизации. Ставит renderer,
+# когда конфиг уже детектирован установленным (и это не forced repair).
+$ADDITIVE = ($env:HM_ADDITIVE -eq '1')
+$preExisting = @{}   # скиллы, БЫВШИЕ до нашей раскладки (для консервативного прунинга)
 
 $bundled = $env:HM_BUNDLED_CONFIG
 if ($bundled -and (Test-Path (Join-Path $bundled 'install.ps1'))) {
@@ -49,7 +54,11 @@ $installer = Join-Path $clone 'install.ps1'
 if (-not (Test-Path $installer)) { Write-Host "В репозитории нет install.ps1."; exit 1 }
 
 Write-Host "Разворачиваю .claude в домашнюю папку (с бэкапом, без Python-зависимостей)..."
-if ($DRY) { Write-Host "  [dry-run] WOULD: $installer -BackupExisting -SkipDeps (+ фильтр паков по HM_KEEP_SKILLS)"; Write-Host "[dry-run] Конфиг: источник '$clone', без изменений."; exit 0 }
+if ($DRY) {
+    if ($ADDITIVE) { Write-Host "  [dry-run] WOULD (аддитивно): бэкап ~/.claude, merge-copy ТОЛЬКО недостающих файлов из '$clone\.claude' (robocopy /XC /XN /XO), существующее НЕ трогать, settings.json НЕ перезаписывать (+ прунинг паков не трогает ранее бывшие скиллы)" }
+    else { Write-Host "  [dry-run] WOULD: $installer -BackupExisting -SkipDeps (+ фильтр паков по HM_KEEP_SKILLS)" }
+    Write-Host "[dry-run] Конфиг: источник '$clone', без изменений."; exit 0
+}
 
 # --- защита пользовательских данных при ПОВТОРНОЙ установке ---
 # install.ps1 кладёт свежую базу поверх ~/.claude. Сохраняем пользовательские данные
@@ -104,17 +113,86 @@ Snapshot-UserData $preserveDir
 # Существовал ли рабочий конфиг ДО обновления — чтобы не выдать ложный зелёный на СТАРОМ ~/.claude.
 $hadOldConfig = (Test-Path (Join-Path $claudeHome 'skills')) -or (Test-Path (Join-Path $claudeHome 'settings.json'))
 $installFailed = $false
-# Ловим ОБА класса сбоя: терминирующие исключения (catch) И код возврата install.ps1.
-# install.ps1 заканчивается на robocopy, чей $LASTEXITCODE >= 8 означает реальный провал
-# копирования (0-7 — успех с разными состояниями); exit 1 внутри скрипта — отсутствие
-# исходника. Без этой проверки провалившийся robocopy (диск полон) давал ложный зелёный.
 $global:LASTEXITCODE = 0
-try {
-    & $installer -BackupExisting -SkipDeps
-    if ($LASTEXITCODE -ge 8 -or $LASTEXITCODE -eq 1) {
-        $installFailed = $true; Write-Host "install.ps1 завершился с кодом $LASTEXITCODE — раскладка конфига не удалась."
+
+if ($ADDITIVE) {
+    # === АДДИТИВНАЯ доустановка ПОВЕРХ существующего ~/.claude — НЕ затираем ===
+    $srcClaude   = Join-Path $clone '.claude'
+    $srcClaudeMd = Join-Path $clone 'CLAUDE.md'
+    if (-not (Test-Path $srcClaude)) {
+        $installFailed = $true; Write-Host "Источник конфига (.claude) не найден: $srcClaude"
+    } else {
+        # 1) Полный таймштамп-бэкап ~/.claude ДО любых изменений (fail-closed при нехватке места).
+        if (Test-Path $claudeHome) {
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $backupDir = "$claudeHome.backup.$stamp"
+            Write-Host "Аддитивный режим: резервная копия ~/.claude → $backupDir ..."
+            $backupOk = $true
+            try {
+                Copy-Item -Recurse -Force $claudeHome $backupDir -ErrorAction Stop
+                # грубая сверка: в бэкапе не меньше элементов, чем в оригинале (диск полон → меньше)
+                $srcN = (Get-ChildItem $claudeHome -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+                $dstN = (Get-ChildItem $backupDir  -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+                if ($dstN -lt $srcN) { $backupOk = $false }
+            } catch { $backupOk = $false }
+            if (-not $backupOk) {
+                Write-Host "ВНИМАНИЕ: не удалось сделать полный бэкап ~/.claude (возможно, кончилось место на диске)."
+                Write-Host "  Аддитивная доустановка ОТМЕНЕНА — ничего не менял. Освободи место и повтори."
+                exit 1
+            }
+        }
+        New-Item -ItemType Directory -Force $claudeHome | Out-Null
+
+        # 2) Какие скиллы БЫЛИ до раскладки — чтобы прунинг не тронул чужие (не наши).
+        $skillsDirNow = Join-Path $claudeHome 'skills'
+        if (Test-Path $skillsDirNow) {
+            Get-ChildItem -Directory $skillsDirNow -ErrorAction SilentlyContinue | ForEach-Object { $preExisting[$_.Name] = $true }
+        }
+
+        # 3) Merge-copy ТОЛЬКО недостающих файлов. robocopy /XC /XN /XO = исключить
+        #    Changed/Newer/Older, т.е. копировать лишь ОТСУТСТВУЮЩИЕ в цели файлы;
+        #    существующие любой версии (кастомизации юзера, settings.json) НЕ трогаем.
+        #    /XF/XD дополнительно защищают ключи, память, историю сессий.
+        $excludeNames = @('.credentials.master.env', '.credentials.json', 'MEMORY.md',
+                          'chats.db', 'chats.db-journal', 'chats.db-wal', 'chats.db-shm',
+                          'tg_session.session', 'settings.local.json')
+        $excludeDirs  = @((Join-Path $claudeHome 'memory'), (Join-Path $claudeHome 'projects'),
+                          (Join-Path $claudeHome 'todos'), (Join-Path $claudeHome 'shell-snapshots'))
+        Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
+        robocopy $srcClaude $claudeHome /E /XC /XN /XO /XF $excludeNames /XD $excludeDirs | Out-Null
+        if ($LASTEXITCODE -ge 8) { $installFailed = $true; Write-Host "robocopy аддитивной раскладки вернул код $LASTEXITCODE — часть файлов не скопирована." }
+        $global:LASTEXITCODE = 0
+
+        # settings.json НИКОГДА не перезаписываем: robocopy /XC пропустил существующий;
+        # если его не было — добавлен. Semver-мерж JSON намеренно НЕ делаем (риск сломать
+        # пользовательский конфиг) — консервативно: не трогаем существующее.
+
+        # CLAUDE.md в корне профиля — только если отсутствует (не затираем правки юзера).
+        $profileClaudeMd = Join-Path $env:USERPROFILE 'CLAUDE.md'
+        if ((Test-Path $srcClaudeMd) -and -not (Test-Path $profileClaudeMd)) {
+            Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction SilentlyContinue
+        }
+        # credentials-шаблон — только если ключей ещё нет.
+        $srcEnvTpl = Join-Path $clone '.credentials.template.env'
+        $dstEnv    = Join-Path $claudeHome '.credentials.master.env'
+        if ((Test-Path $srcEnvTpl) -and -not (Test-Path $dstEnv)) {
+            Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction SilentlyContinue
+        }
+        Write-Host "Аддитивная доустановка: добавлено недостающее, существующее сохранено."
     }
-} catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
+} else {
+    # === Чистая установка: свежая база поверх (существующего конфига не было) ===
+    # Ловим ОБА класса сбоя: терминирующие исключения (catch) И код возврата install.ps1.
+    # install.ps1 заканчивается на robocopy, чей $LASTEXITCODE >= 8 означает реальный провал
+    # копирования (0-7 — успех с разными состояниями); exit 1 внутри скрипта — отсутствие
+    # исходника. Без этой проверки провалившийся robocopy (диск полон) давал ложный зелёный.
+    try {
+        & $installer -BackupExisting -SkipDeps
+        if ($LASTEXITCODE -ge 8 -or $LASTEXITCODE -eq 1) {
+            $installFailed = $true; Write-Host "install.ps1 завершился с кодом $LASTEXITCODE — раскладка конфига не удалась."
+        }
+    } catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
+}
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 # Прунятся ТОЛЬКО скиллы, входящие в какой-то пак, но чей пак не выбран.
@@ -126,7 +204,11 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
     if (Test-Path $skillsDir) {
         $removed = 0
         Get-ChildItem -Directory $skillsDir | ForEach-Object {
-            if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name)) {
+            # В АДДИТИВНОМ режиме НЕ удаляем скиллы, которые были у юзера ДО нашей
+            # раскладки (не наши — не трогаем). Удаляем только то, что доложили сами
+            # этим прогоном и чей пак снят. В сомнении — не удаляем (консервативно).
+            $weAdded = (-not $ADDITIVE) -or (-not $preExisting.ContainsKey($_.Name))
+            if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name) -and $weAdded) {
                 Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
                 $removed++
             }

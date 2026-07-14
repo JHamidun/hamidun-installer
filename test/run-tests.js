@@ -387,6 +387,305 @@ ok('#4 main.js: authoritativeWinSystemEnv провязан после filterRend
   assert(iFilter !== -1 && iAuth !== -1 && iAuth > iFilter, 'authoritative override идёт ПОСЛЕ renderer-allowlist');
 });
 
+// ---- Фаза 2: install-manager (манифест версий, аддитивная доустановка, деинсталлятор) ----
+
+console.log('== Фаза 2: install-manifest (версии установленного, атомарная запись) ==');
+const manifestMod = require(path.join(ROOT, 'src', 'install-manifest.js'));
+const { spawnSync } = require('child_process');
+
+ok('manifest: нет файла → пустой валидный манифест (fail-safe, не бросает)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  try {
+    const m = manifestMod.readManifest(home);
+    assert(m && typeof m === 'object', 'объект');
+    assert(m.components && Object.keys(m.components).length === 0, 'components пуст');
+    assert.strictEqual(m.schemaVersion, manifestMod.SCHEMA_VERSION, 'schemaVersion проставлен');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('manifest: битый JSON / не-объект → пустой манифест (не блокирует установку)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  try {
+    fs.mkdirSync(path.join(home, manifestMod.DIR_NAME), { recursive: true });
+    fs.writeFileSync(manifestMod.manifestPath(home), '{broken json!!!', 'utf8');
+    const m1 = manifestMod.readManifest(home);
+    assert(m1.components && Object.keys(m1.components).length === 0, 'битый JSON → пустой');
+    fs.writeFileSync(manifestMod.manifestPath(home), '"просто строка"', 'utf8');
+    const m2 = manifestMod.readManifest(home);
+    assert(m2.components && Object.keys(m2.components).length === 0, 'не-объект → пустой');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('manifest: recordInstall → readManifest round-trip, без .tmp мусора', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  try {
+    const r = manifestMod.recordInstall(home, 'uv', '1.2.3', 'remote');
+    assert(r.ok, 'запись ok');
+    const m = manifestMod.readManifest(home);
+    assert(m.components.uv && m.components.uv.version === '1.2.3', 'версия сохранена');
+    assert(m.components.uv.source === 'remote', 'source сохранён');
+    assert(!isNaN(Date.parse(m.components.uv.installedAt)), 'installedAt — валидная ISO-дата');
+    const leftovers = fs.readdirSync(path.join(home, manifestMod.DIR_NAME)).filter((n) => n.endsWith('.tmp'));
+    assert.strictEqual(leftovers.length, 0, 'temp-файлы не остались: ' + leftovers.join(','));
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('manifest: атомарность — rename упал (EPERM) → unlink+rename fallback, файл валиден', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  const origRename = fs.renameSync;
+  try {
+    manifestMod.recordInstall(home, 'a', '1.0.0', 'bundled');
+    let threw = 0;
+    fs.renameSync = function (src, dst) {
+      if (threw === 0) { threw++; const e = new Error('EPERM (test)'); e.code = 'EPERM'; throw e; }
+      return origRename.call(fs, src, dst);
+    };
+    const r = manifestMod.recordInstall(home, 'a', '2.0.0', 'bundled');
+    fs.renameSync = origRename;
+    assert(r.ok, 'fallback-путь отработал: ' + JSON.stringify(r));
+    assert.strictEqual(threw, 1, 'первый rename действительно падал');
+    const m = manifestMod.readManifest(home);
+    assert(m.components.a.version === '2.0.0', 'новая версия записана');
+    const leftovers = fs.readdirSync(path.join(home, manifestMod.DIR_NAME)).filter((n) => n.endsWith('.tmp'));
+    assert.strictEqual(leftovers.length, 0, 'temp-файлы подчищены');
+  } finally {
+    fs.renameSync = origRename;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+});
+
+ok('manifest: dryRun ничего не пишет на диск', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  try {
+    const r = manifestMod.writeManifest(home, { schemaVersion: 1, components: { x: { version: '1' } } }, { dryRun: true });
+    assert(r.ok && r.dryRun, 'dryRun ok');
+    assert(!fs.existsSync(manifestMod.manifestPath(home)), 'installed.json НЕ создан');
+    const r2 = manifestMod.recordInstall(home, 'x', '1.0.0', 'bundled', { dryRun: true });
+    assert(r2.ok && !fs.existsSync(manifestMod.manifestPath(home)), 'recordInstall(dryRun) не пишет');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('manifest: removeEntry удаляет запись; отсутствующая → no-op ok', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-man-'));
+  try {
+    manifestMod.recordInstall(home, 'course', '1.0.0', 'bundled');
+    manifestMod.recordInstall(home, 'uv', '2.0.0', 'remote');
+    const r = manifestMod.removeEntry(home, 'course');
+    assert(r.ok && r.changed === true, 'удаление существующей записи');
+    const m = manifestMod.readManifest(home);
+    assert(!m.components.course, 'course убран');
+    assert(m.components.uv && m.components.uv.version === '2.0.0', 'соседняя запись цела');
+    const r2 = manifestMod.removeEntry(home, 'nonexistent');
+    assert(r2.ok && r2.changed === false, 'отсутствующая запись → no-op ok');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('manifest: compareVersions — числовые сегменты, v-префикс, 1.2.10 > 1.2.9, мусор → 0', () => {
+  assert.strictEqual(manifestMod.compareVersions('1.2.10', '1.2.9'), 1, '1.2.10 > 1.2.9 (не лексикографика)');
+  assert.strictEqual(manifestMod.compareVersions('v1.2.3', '1.2.3'), 0, 'v-префикс игнорируется');
+  assert.strictEqual(manifestMod.compareVersions('1.2', '1.2.0'), 0, 'хвостовой .0 не значим');
+  assert.strictEqual(manifestMod.compareVersions('0.9', '1.0'), -1, '0.9 < 1.0');
+  assert.strictEqual(manifestMod.compareVersions('garbage', '1.0'), 0, 'мусор → «не знаем» (0, без ложных апдейтов)');
+  assert.strictEqual(manifestMod.compareVersions('', '1.0'), 0, 'пусто → 0');
+});
+
+ok('manifest: isOutdated — только СТРОГО старше даёт true (равно/новее/пусто → false)', () => {
+  assert.strictEqual(manifestMod.isOutdated('1.0.0', '1.0.1'), true, 'старее → обновление доступно');
+  assert.strictEqual(manifestMod.isOutdated('1.0.1', '1.0.1'), false, 'равно → нет');
+  assert.strictEqual(manifestMod.isOutdated('1.0.2', '1.0.1'), false, 'новее → нет');
+  assert.strictEqual(manifestMod.isOutdated('', '1.0.1'), false, 'нет записи → нет ложного апдейта');
+  assert.strictEqual(manifestMod.isOutdated('1.0.0', ''), false, 'нет текущей версии → нет');
+});
+
+ok('Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, id авторитетно из main', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert(/if \(okRun && !isDryRun && !\(meta && meta\.hidden\)\)/.test(s), 'запись версии только при успехе, не dry-run, не hidden');
+  assert(/manifest\.recordInstall\(os\.homedir\(\), id, ver, src\)/.test(s), 'recordInstall провязан в run-component');
+  assert(/manifest\.removeEntry\(os\.homedir\(\), id\)/.test(s), 'removeEntry провязан в uninstall-component');
+  assert(/function detectComponents/.test(s), 'детекция «установлен» — живая проверка ФС (detectComponents), не манифест');
+  assert(/childEnv\.HM_UNINSTALL = id/.test(s), 'что удалять — задаёт main из валидированного id, не renderer');
+  assert(/VALID_COMPONENT_IDS\.has\(id\)/.test(s), 'uninstall принимает только известные id');
+});
+
+console.log('== Фаза 2: аддитивная доустановка (merge-safe, НЕ затирает ~/.claude) ==');
+
+// Аддитивная ветка в config.ps1: lastIndexOf, потому что первый `if ($ADDITIVE)` —
+// это dry-run echo выше по файлу; конец — маркер «Чистая установка» (else-ветка).
+function ps1AdditiveBranch() {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+  const i = s.lastIndexOf('if ($ADDITIVE) {');
+  const j = s.indexOf('Чистая установка', i);
+  assert(i !== -1 && j > i, 'аддитивная ветка найдена');
+  return { s, branch: s.slice(i, j) };
+}
+
+ok('config.ps1: additive-ветка копирует ТОЛЬКО недостающее (robocopy /XC /XN /XO), НЕ запускает install.ps1', () => {
+  const { branch } = ps1AdditiveBranch();
+  assert(/robocopy [^\r\n]*\/E \/XC \/XN \/XO/.test(branch), 'robocopy /E /XC /XN /XO — существующие файлы любой версии НЕ перезаписываются');
+  assert(!/& \$installer/.test(branch), 'аддитивная ветка НЕ запускает install.ps1 (он кладёт свежую базу поверх)');
+  assert(/\.credentials\.master\.env/.test(branch) && /settings\.local\.json/.test(branch) && /chats\.db/.test(branch),
+    'ключи/локальные настройки/история в исключениях /XF');
+  assert(/exit 1/.test(branch) && /бэкап|резервная/i.test(branch), 'неполный бэкап → fail-closed exit 1 (ничего не менял)');
+});
+
+ok('config.ps1: settings.json/CLAUDE.md/credentials добавляются ТОЛЬКО если отсутствуют', () => {
+  const { branch } = ps1AdditiveBranch();
+  assert(/settings\.json НИКОГДА не перезаписываем/.test(branch), 'политика settings.json зафиксирована');
+  assert(/-not \(Test-Path \$profileClaudeMd\)/.test(branch), 'CLAUDE.md — только при отсутствии');
+  assert(/-not \(Test-Path \$dstEnv\)/.test(branch), 'credentials-шаблон — только при отсутствии ключей');
+});
+
+ok('config.ps1: прунинг паков в additive НЕ трогает скиллы, бывшие у юзера ДО раскладки ($preExisting)', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+  assert(/\$weAdded = \(-not \$ADDITIVE\) -or \(-not \$preExisting\.ContainsKey\(\$_\.Name\)\)/.test(s),
+    'guard $weAdded: additive + был до раскладки → не удаляем');
+  assert(/-and \$weAdded\)/.test(s.replace(/\s+/g, ' ')), 'guard участвует в условии удаления');
+  assert(/\$preExisting\[\$_\.Name\] = \$true/.test(s), 'список ранее бывших скиллов собирается ДО robocopy');
+});
+
+ok('config.sh: additive rsync --ignore-existing (fallback cp -Rn), user-данные в excludes, прунинг щадит PRE_EXISTING', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
+  // lastIndexOf: первый `if [ "$ADDITIVE" ...]` — это dry-run echo выше по файлу.
+  const i = s.lastIndexOf('if [ "$ADDITIVE" -eq 1 ]; then');
+  assert(i !== -1, 'есть аддитивная ветка');
+  const branch = s.slice(i, s.indexOf('\nelse', i));
+  assert(/--ignore-existing/.test(branch), 'rsync --ignore-existing — существующее НЕ перезаписывается');
+  assert(/cp -Rn/.test(branch), 'fallback без rsync: cp -Rn (no-clobber)');
+  assert(!/install\.sh/.test(branch), 'аддитивная ветка НЕ запускает install.sh');
+  ['.credentials.master.env', '.credentials.json', 'settings.local.json', 'memory/', 'projects/', 'todos/', 'shell-snapshots/']
+    .forEach((x) => assert(branch.indexOf("--exclude='" + x + "'") !== -1, 'exclude ' + x));
+  assert(/grep -qxF "\$name" "\$PRE_EXISTING_SKILLS"/.test(s), 'прунинг сверяется со списком ранее бывших скиллов');
+  assert(/\[ ! -f "\$HOME\/CLAUDE\.md" \]/.test(branch), 'CLAUDE.md — только при отсутствии');
+});
+
+console.log('== Фаза 2: деинсталлятор (НЕ трогает пользовательские данные) ==');
+
+ok('uninstall.ps1: защищённые поддеревья (credentials/memory/projects/todos/...) + guard ПЕРЕД удалением', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'uninstall.ps1'), 'utf8');
+  ['.credentials.master.env', '.credentials.json', 'memory', 'projects', 'todos', 'shell-snapshots', 'settings.json', 'skills']
+    .forEach((p) => assert(s.indexOf("'" + p + "'") !== -1, 'в ProtectedSubtrees есть ' + p));
+  const fn = s.slice(s.indexOf('function Remove-HmArtifact'), s.indexOf('$id ='));
+  assert(/Test-HmProtected \$path/.test(fn), 'Remove-HmArtifact зовёт Test-HmProtected');
+  assert(fn.indexOf('Test-HmProtected') < fn.indexOf('Remove-Item'), 'guard стоит ДО Remove-Item');
+  assert(/-ieq \$userHome/.test(s), 'домашний каталог защищён целиком');
+  assert(/\$full\.Length -le 3/.test(s), 'корень диска защищён');
+  // Remove-Item по файловой системе — ТОЛЬКО внутри Remove-HmArtifact (реестр Run — исключение).
+  const outside = s.replace(fn, '');
+  assert(!/Remove-Item -LiteralPath/.test(outside), 'файловый Remove-Item только за guard-ом');
+});
+
+ok('uninstall.sh: hm_protected гейт + защищённые поддеревья; rm -rf только внутри hm_remove', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'uninstall.sh'), 'utf8');
+  ['$CLAUDE_HOME/skills', '$CLAUDE_HOME/memory', '$CLAUDE_HOME/projects', '$CLAUDE_HOME/todos',
+    '$CLAUDE_HOME/.credentials.master.env', '$CLAUDE_HOME/settings.json']
+    .forEach((p) => assert(s.indexOf(p) !== -1, 'в PROTECTED_SUBTREES есть ' + p));
+  const fn = s.slice(s.indexOf('hm_remove()'), s.indexOf('ID='));
+  assert(/hm_protected "\$path"/.test(fn), 'hm_remove зовёт hm_protected');
+  assert.strictEqual((s.match(/rm -rf/g) || []).length, 1, 'rm -rf ровно один — внутри hm_remove');
+  assert(/\[ "\$target" = "\$home" \] && return 0/.test(s), 'домашний каталог защищён');
+  assert(/\[ "\$target" = "\/" \] && return 0/.test(s), 'корень ФС защищён');
+});
+
+ok('uninstall.sh (функционально): артефакт курса удалён, ~/.claude цел; цель внутри ~/.claude → ЗАЩИТА', () => {
+  const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) { console.log('     (bash недоступен — пропуск функциональной части)'); return; }
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-un-')).replace(/\\/g, '/');
+  try {
+    fs.mkdirSync(home + '/.claude/skills/my-custom-skill', { recursive: true });
+    fs.writeFileSync(home + '/.claude/skills/my-custom-skill/SKILL.md', 'user skill');
+    fs.writeFileSync(home + '/.claude/.credentials.master.env', 'KEY=secret');
+    fs.mkdirSync(home + '/.claude/memory', { recursive: true });
+    fs.writeFileSync(home + '/.claude/memory/MEMORY.md', 'memories');
+    fs.mkdirSync(home + '/HamidunCourse/vibecoding-course', { recursive: true });
+    fs.writeFileSync(home + '/HamidunCourse/vibecoding-course/CLAUDE.md', 'course');
+    const script = path.join(ROOT, 'scripts', 'macos', 'uninstall.sh');
+    const baseEnv = Object.assign({}, process.env, {
+      HOME: home, HM_UNINSTALL: 'course',
+      HM_COURSE_TARGET: home + '/HamidunCourse', HM_COURSE_SHORTCUT: 'hm-test-shortcut'
+    });
+    const r = spawnSync('bash', [script], { encoding: 'utf8', env: baseEnv, timeout: 30000 });
+    assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+    assert(!fs.existsSync(home + '/HamidunCourse/vibecoding-course'), 'артефакт курса удалён');
+    assert(fs.existsSync(home + '/.claude/.credentials.master.env'), 'credentials целы');
+    assert(fs.existsSync(home + '/.claude/skills/my-custom-skill/SKILL.md'), 'пользовательский скилл цел');
+    assert(fs.existsSync(home + '/.claude/memory/MEMORY.md'), 'память цела');
+    // Попытка увести цель ВНУТРЬ ~/.claude → guard отказывает, ничего не удалено.
+    // Цель вычисляем ИЗНУТРИ bash от $HOME (MSYS на Windows конвертирует HOME в
+    // POSIX-вид — снаружи Windows-путь не совпал бы со строковым префиксом guard-а).
+    fs.mkdirSync(home + '/.claude/vibecoding-course', { recursive: true });
+    fs.writeFileSync(home + '/.claude/vibecoding-course/x.md', 'inside claude');
+    const scriptPosix = script.replace(/\\/g, '/');
+    const r2 = spawnSync('bash', ['-c', 'HM_COURSE_TARGET="$HOME/.claude" exec bash "$1"', 'hm-test', scriptPosix], {
+      encoding: 'utf8', timeout: 30000, env: baseEnv
+    });
+    assert(/ЗАЩИТА/.test(r2.stdout || ''), 'guard печатает ЗАЩИТА: ' + (r2.stdout || '') + (r2.stderr || ''));
+    assert(fs.existsSync(home + '/.claude/vibecoding-course/x.md'), 'внутри ~/.claude ничего не удалено');
+    // Не-канонический путь ("..") → fail-closed отказ (без резолва).
+    const r3 = spawnSync('bash', ['-c', 'HM_COURSE_TARGET="$HOME/HamidunCourse/../.claude" exec bash "$1"', 'hm-test', scriptPosix], {
+      encoding: 'utf8', timeout: 30000, env: baseEnv
+    });
+    assert(/ЗАЩИТА/.test(r3.stdout || ''), 'путь с .. → fail-closed ЗАЩИТА: ' + (r3.stdout || ''));
+    assert(fs.existsSync(home + '/.claude/vibecoding-course/x.md'), 'обход через .. не удалил ничего');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('uninstall.ps1 (функционально, win32): артефакт удалён, ~/.claude цел; цель внутри ~/.claude → ЗАЩИТА', () => {
+  if (process.platform !== 'win32') return; // Windows-специфично
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-unw-'));
+  try {
+    fs.mkdirSync(path.join(home, '.claude', 'skills', 'my-custom-skill'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'skills', 'my-custom-skill', 'SKILL.md'), 'user skill');
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.master.env'), 'KEY=secret');
+    fs.mkdirSync(path.join(home, '.claude', 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'memory', 'MEMORY.md'), 'memories');
+    fs.mkdirSync(path.join(home, 'HamidunCourse', 'vibecoding-course'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'HamidunCourse', 'vibecoding-course', 'CLAUDE.md'), 'course');
+    const script = path.join(ROOT, 'scripts', 'windows', 'uninstall.ps1');
+    // UTF-8 stdout + честный exit-код — тот же паттерн, что в main.js.
+    const inline = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "& '" + script.replace(/'/g, "''") + "'; if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }";
+    const psArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', inline];
+    const baseEnv = Object.assign({}, process.env, {
+      USERPROFILE: home, HM_UNINSTALL: 'course',
+      HM_COURSE_TARGET: path.join(home, 'HamidunCourse'),
+      HM_COURSE_SHORTCUT: 'hm-test-shortcut-' + process.pid
+    });
+    const r = spawnSync('powershell.exe', psArgs, { encoding: 'utf8', env: baseEnv, timeout: 60000 });
+    if (r.error) { console.log('     (powershell недоступен — пропуск функциональной части)'); return; }
+    assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+    assert(!fs.existsSync(path.join(home, 'HamidunCourse', 'vibecoding-course')), 'артефакт курса удалён');
+    assert(fs.existsSync(path.join(home, '.claude', '.credentials.master.env')), 'credentials целы');
+    assert(fs.existsSync(path.join(home, '.claude', 'skills', 'my-custom-skill', 'SKILL.md')), 'пользовательский скилл цел');
+    assert(fs.existsSync(path.join(home, '.claude', 'memory', 'MEMORY.md')), 'память цела');
+    // Попытка увести цель ВНУТРЬ ~/.claude → guard отказывает, ничего не удалено.
+    fs.mkdirSync(path.join(home, '.claude', 'vibecoding-course'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'vibecoding-course', 'x.md'), 'inside claude');
+    const r2 = spawnSync('powershell.exe', psArgs, {
+      encoding: 'utf8', timeout: 60000,
+      env: Object.assign({}, baseEnv, { HM_COURSE_TARGET: path.join(home, '.claude') })
+    });
+    assert(/ЗАЩИТА/.test(r2.stdout || ''), 'guard печатает ЗАЩИТА: ' + (r2.stdout || '') + (r2.stderr || ''));
+    assert(fs.existsSync(path.join(home, '.claude', 'vibecoding-course', 'x.md')), 'внутри ~/.claude ничего не удалено');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('uninstall: UI-набор REMOVABLE (app.js) покрыт ветками обоих uninstall-скриптов', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const m = app.match(/REMOVABLE = new Set\(\[([^\]]+)\]\)/);
+  assert(m, 'REMOVABLE найден в app.js');
+  const ids = m[1].split(',').map((x) => x.trim().replace(/['"]/g, '')).filter(Boolean);
+  assert(ids.length >= 1, 'набор не пуст');
+  const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'uninstall.ps1'), 'utf8');
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'uninstall.sh'), 'utf8');
+  ids.forEach((id) => {
+    assert(new RegExp("'" + id + "'\\s*\\{").test(ps), 'uninstall.ps1: есть ветка ' + id);
+    assert(new RegExp('^\\s*' + id + '\\)', 'm').test(sh), 'uninstall.sh: есть ветка ' + id);
+  });
+  // REMOVABLE — общий UI-код обеих редакций; id может отсутствовать в components.json
+  // конкретной редакции (например, 'course' в free) — это не ошибка. Sanity: пересечение непусто.
+  assert(ids.some((id) => byId[id]), 'хотя бы часть REMOVABLE присутствует в components.json этой редакции');
+});
+
 console.log('== Remote security: content-addressed URLs + script fail-closed guards ==');
 
 // Content-addressed immutability: неплейсхолдерный mirror-URL должен содержать

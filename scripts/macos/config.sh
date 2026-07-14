@@ -26,6 +26,23 @@ fi
 echo "Разворачиваю .claude в домашнюю папку (с бэкапом, без Python-зависимостей)..."
 chmod +x "$CLONE/install.sh" 2>/dev/null || true
 
+# Аддитивная доустановка ПОВЕРХ существующего ~/.claude (HM_ADDITIVE=1): добавляем
+# только НЕДОСТАЮЩЕЕ, НЕ затирая пользовательские кастомизации.
+ADDITIVE=0
+[ "${HM_ADDITIVE:-}" = "1" ] && ADDITIVE=1
+PRE_EXISTING_SKILLS="${TMPDIR:-/tmp}/hamidun-preexisting-skills.txt"
+
+# Dry-run: ничего не пишем (паритет с config.ps1 — ранний выход ДО снапшота/раскладки).
+if [ -n "${HM_DRY_RUN:-}" ]; then
+  if [ "$ADDITIVE" -eq 1 ]; then
+    echo "  [dry-run] WOULD (аддитивно): бэкап ~/.claude, скопировать ТОЛЬКО недостающие файлы из $CLONE/.claude (существующее НЕ трогать, settings.json НЕ перезаписывать; прунинг паков не трогает ранее бывшие скиллы)"
+  else
+    echo "  [dry-run] WOULD: bash $CLONE/install.sh --backup --skip-deps (+ фильтр паков по HM_KEEP_SKILLS)"
+  fi
+  echo "[dry-run] Конфиг: источник '$CLONE', без изменений."
+  exit 0
+fi
+
 # --- защита пользовательских данных при ПОВТОРНОЙ установке ---
 # install.sh кладёт свежую базу поверх ~/.claude. Сохраняем пользовательские данные
 # (ключи, накопленную память, историю сессий projects/, локальные настройки) ДО и
@@ -56,8 +73,66 @@ fi
 echo "Сохраняю твои ключи, память и историю сессий перед обновлением..."
 snapshot_user_data "$PRESERVE_DIR"
 
-bash "$CLONE/install.sh" --backup --skip-deps
-RC=$?
+RC=0
+if [ "$ADDITIVE" -eq 1 ]; then
+  # === АДДИТИВНАЯ доустановка ПОВЕРХ существующего ~/.claude — НЕ затираем ===
+  SRC_CLAUDE="$CLONE/.claude"
+  SRC_CLAUDE_MD="$CLONE/CLAUDE.md"
+  if [ ! -d "$SRC_CLAUDE" ]; then
+    echo "Источник конфига (.claude) не найден: $SRC_CLAUDE"; RC=1
+  else
+    # 1) Полный таймштамп-бэкап ~/.claude ДО изменений (fail-closed при нехватке места).
+    if [ -d "$CLAUDE_HOME" ]; then
+      STAMP=$(date +%Y%m%d-%H%M%S)
+      BACKUP_DIR="$CLAUDE_HOME.backup.$STAMP"
+      echo "Аддитивный режим: резервная копия ~/.claude → $BACKUP_DIR ..."
+      if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
+        SRC_N=$(find "$CLAUDE_HOME" 2>/dev/null | wc -l | tr -d ' ')
+        DST_N=$(find "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${DST_N:-0}" -lt "${SRC_N:-0}" ]; then
+          echo "ВНИМАНИЕ: неполный бэкап ~/.claude (возможно, кончилось место) — аддитивная доустановка ОТМЕНЕНА."; exit 1
+        fi
+      else
+        echo "ВНИМАНИЕ: не удалось сделать бэкап ~/.claude — аддитивная доустановка ОТМЕНЕНА."; exit 1
+      fi
+    fi
+    mkdir -p "$CLAUDE_HOME"
+
+    # 2) Какие скиллы БЫЛИ до раскладки (для консервативного прунинга).
+    : > "$PRE_EXISTING_SKILLS" 2>/dev/null || true
+    if [ -d "$CLAUDE_HOME/skills" ]; then
+      for d in "$CLAUDE_HOME/skills"/*/; do [ -d "$d" ] && basename "$d"; done >> "$PRE_EXISTING_SKILLS" 2>/dev/null || true
+    fi
+
+    # 3) Merge-copy ТОЛЬКО недостающих файлов. rsync --ignore-existing НЕ перезаписывает
+    #    существующие (кастомизации юзера, settings.json); без rsync — cp -Rn (no-clobber).
+    echo "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --ignore-existing \
+        --exclude='.credentials.master.env' --exclude='.credentials.json' \
+        --exclude='settings.local.json' --exclude='MEMORY.md' \
+        --exclude='chats.db*' --exclude='tg_session.session*' \
+        --exclude='memory/' --exclude='projects/' --exclude='todos/' --exclude='shell-snapshots/' \
+        "$SRC_CLAUDE/" "$CLAUDE_HOME/"
+    else
+      cp -Rn "$SRC_CLAUDE/." "$CLAUDE_HOME/" 2>/dev/null || true
+    fi
+
+    # settings.json НЕ перезаписываем (rsync --ignore-existing / cp -n сохранили
+    # существующий). Semver-мерж JSON намеренно не делаем — консервативно.
+
+    # CLAUDE.md в корне профиля — только если отсутствует (не затираем правки юзера).
+    if [ -f "$SRC_CLAUDE_MD" ] && [ ! -f "$HOME/CLAUDE.md" ]; then cp "$SRC_CLAUDE_MD" "$HOME/CLAUDE.md"; fi
+    # credentials-шаблон — только если ключей ещё нет.
+    if [ -f "$CLONE/.credentials.template.env" ] && [ ! -f "$CLAUDE_HOME/.credentials.master.env" ]; then
+      cp "$CLONE/.credentials.template.env" "$CLAUDE_HOME/.credentials.master.env"
+    fi
+    echo "Аддитивная доустановка: добавлено недостающее, существующее сохранено."
+  fi
+else
+  bash "$CLONE/install.sh" --backup --skip-deps
+  RC=$?
+fi
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
@@ -67,7 +142,11 @@ if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
     for d in "$SK"/*/; do
       [ -d "$d" ] || continue
       name=$(basename "$d")
-      if printf ',%s,' "$HM_ALL_PACK_SKILLS" | grep -q ",$name," && ! printf ',%s,' "$HM_KEEP_SKILLS" | grep -q ",$name,"; then
+      # В АДДИТИВНОМ режиме не удаляем скиллы, бывшие ДО нашей раскладки (не наши —
+      # не трогаем). Удаляем только доложенное этим прогоном и чей пак снят.
+      we_added=1
+      if [ "$ADDITIVE" -eq 1 ] && [ -f "$PRE_EXISTING_SKILLS" ] && grep -qxF "$name" "$PRE_EXISTING_SKILLS"; then we_added=0; fi
+      if [ "$we_added" -eq 1 ] && printf ',%s,' "$HM_ALL_PACK_SKILLS" | grep -q ",$name," && ! printf ',%s,' "$HM_KEEP_SKILLS" | grep -q ",$name,"; then
         rm -rf "$d"; removed=$((removed + 1))
       fi
     done

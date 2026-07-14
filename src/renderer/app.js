@@ -15,7 +15,13 @@ let STATE = {
   checks: [],      // результаты "CHECK ok/fail/skip <ярлык>" от компонента verify
   resourcesRoot: '', // абсолютный путь к ресурсам (для оффлайн START-HERE)
   userWarning: '',   // предупреждение, если установщик запущен под другим пользователем
+  detected: {},      // id -> {installed, detectedVersion, installedVersion, currentVersion, updateAvailable}
+  repair: {},        // id -> bool: переустановить начисто (форс — отключает аддитивность)
 };
+
+// Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
+// артефакты вне ~/.claude). Для остального «Удалить» в UI не показываем.
+const REMOVABLE = new Set(['course', 'nomad', 'uv', 'mascot', 'bridge']);
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -66,7 +72,50 @@ async function init() {
     window.installer.quit();
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
+  $('#packs-none').addEventListener('click', () => setAllPacks(false));
   setupMascots();
+  // Детекция состояния — best-effort, после первичного рендера (не блокирует UI).
+  detectAndApply();
+}
+
+// Определяем, что УЖЕ установлено (грунд-труть из main), помечаем «уже установлено» и
+// по умолчанию СНИМАЕМ галку: аддитивно ставим только НЕДОСТАЮЩЕЕ. Пользователь может
+// вручную включить компонент для доустановки/обновления, или «Переустановить начисто».
+async function detectAndApply() {
+  let r;
+  try { r = await window.installer.detectState(); }
+  catch (e) { return; } // детекция best-effort — не ломаем установку
+  if (!r || !r.ok) return;
+  STATE.detected = r.state || {};
+  STATE.manifestPath = r.manifestPath || '';
+  Object.keys(STATE.detected).forEach((id) => {
+    const c = STATE.byId[id];
+    if (STATE.detected[id].installed && c && !c.hidden && !STATE.repair[id]) {
+      STATE.selected[id] = false; // установленное по умолчанию не переустанавливаем
+    }
+  });
+  renderGroups();
+  renderInstalledBanner();
+  refreshDerived();
+}
+
+// Жёлтый баннер: обнаружены установленные компоненты — аддитивная доустановка.
+function renderInstalledBanner() {
+  const anyInstalled = Object.keys(STATE.detected || {}).some(
+    (id) => STATE.detected[id].installed && STATE.byId[id] && !STATE.byId[id].hidden
+  );
+  const existing = document.getElementById('installed-banner');
+  if (!anyInstalled) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const el = document.createElement('div');
+  el.id = 'installed-banner';
+  el.className = 'preflight-warn';
+  el.innerHTML = '✓ Часть компонентов уже установлена — они помечены «уже установлено» и по ' +
+    'умолчанию сняты. Доустановка добавит только НЕДОСТАЮЩЕЕ и не затронет то, что уже стоит ' +
+    '(твои скиллы и настройки в ~/.claude в безопасности). Чтобы поставить заново — включи ' +
+    'компонент или нажми «Переустановить начисто».';
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
 }
 
 // Омлетон-«пасхалка»: клик по маскоту → прыжок + смена позы. Чисто визуально,
@@ -133,9 +182,16 @@ function renderGroups() {
 
 function renderCard(c) {
   const checked = STATE.selected[c.id];
+  const det = (STATE.detected && STATE.detected[c.id]) || null;
+  const installed = !!(det && det.installed);
+  const updateAvail = !!(det && det.updateAvailable);
   const el = document.createElement('div');
-  el.className = 'card' + (checked ? ' checked' : '');
+  el.className = 'card' + (checked ? ' checked' : '') + (installed ? ' installed' : '');
   const reqNames = (c.requires || []).map((r) => STATE.byId[r] && STATE.byId[r].name).filter(Boolean);
+  const okBadge = installed
+    ? `<span class="badge ok">✓ уже установлено${det.detectedVersion ? ' · ' + escapeHtml(det.detectedVersion) : ''}</span>`
+    : '';
+  const updBadge = updateAvail ? `<span class="badge upd">обновление доступно</span>` : '';
   el.innerHTML = `
     <div class="checkbox">${CHECK_SVG}</div>
     <div class="card-body">
@@ -145,10 +201,14 @@ function renderCard(c) {
         ${c.sizeHint ? `<span class="badge">${c.sizeHint}</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
         ${reqNames.length ? `<span class="badge dep">требует: ${reqNames.join(', ')}</span>` : ''}
+        ${okBadge}
+        ${updBadge}
       </div>
       <div class="card-desc">${c.desc}</div>
+      ${installed ? renderInstalledActions(c) : ''}
     </div>`;
   el.addEventListener('click', () => toggle(c.id));
+  if (installed) wireInstalledActions(el, c);
   // Клик по «?» показывает подсказку и НЕ должен переключать карточку.
   const info = el.querySelector('.info');
   if (info) {
@@ -164,6 +224,57 @@ function renderCard(c) {
     info.addEventListener('focus', flip);
   }
   return el;
+}
+
+// Ряд действий для УЖЕ установленного компонента: доустановка (аддитивно, по умолчанию),
+// «Переустановить начисто» (форс) и «Удалить» (для самодостаточных артефактов).
+function renderInstalledActions(c) {
+  const isConfig = c.id === 'config';
+  const removable = REMOVABLE.has(c.id);
+  const repairOn = !!STATE.repair[c.id];
+  const note = isConfig
+    ? `<div class="card-note">Доустановка добавит только НЕДОСТАЮЩЕЕ — твои скиллы и настройки в ~/.claude не тронет.</div>`
+    : '';
+  return `<div class="installed-actions" data-id="${escapeHtml(c.id)}">
+      ${note}
+      <button type="button" class="linkbtn act-repair${repairOn ? ' on' : ''}">${repairOn ? '✓ переустановить начисто' : 'Переустановить начисто'}</button>
+      ${removable ? `<button type="button" class="linkbtn act-uninstall">Удалить</button>` : ''}
+      <span class="installed-status"></span>
+    </div>`;
+}
+
+function wireInstalledActions(el, c) {
+  const row = el.querySelector('.installed-actions');
+  if (!row) return;
+  // Клики внутри ряда не должны переключать саму карточку.
+  ['pointerdown', 'click'].forEach((ev) => row.addEventListener(ev, (e) => e.stopPropagation()));
+  const rep = row.querySelector('.act-repair');
+  if (rep) rep.addEventListener('click', (e) => {
+    e.stopPropagation();
+    STATE.repair[c.id] = !STATE.repair[c.id];
+    // «Переустановить начисто» = форс: выбираем компонент (и его зависимости) на установку.
+    if (STATE.repair[c.id]) enableWithDeps(c.id);
+    renderGroups();
+    refreshDerived();
+  });
+  const un = row.querySelector('.act-uninstall');
+  if (un) un.addEventListener('click', (e) => { e.stopPropagation(); uninstallComponent(c.id, row); });
+}
+
+// Деинсталляция одного компонента. Удаляет только артефакты установщика — данные
+// пользователя (~/.claude/.credentials*, memory, projects, todos, скиллы) не трогаются.
+async function uninstallComponent(id, row) {
+  const name = (STATE.byId[id] && STATE.byId[id].name) || id;
+  const status = row ? row.querySelector('.installed-status') : null;
+  if (!window.confirm(`Удалить «${name}»?\n\nТвои данные и настройки (~/.claude, ключи, память, история) НЕ будут затронуты.`)) return;
+  if (status) status.textContent = ' Удаляю…';
+  let res;
+  try { res = await window.installer.uninstallComponent(id, envForRun()); }
+  catch (e) { res = { ok: false, error: String(e) }; }
+  if (status) status.textContent = (res && res.ok) ? ' Удалено ✓' : ' Не удалось удалить';
+  STATE.repair[id] = false;
+  STATE.selected[id] = false;
+  await detectAndApply(); // пере-детекция: карточка обновит бейджи
 }
 
 // Сколько скиллов пака сейчас выбрано (по умолчанию все включены).
@@ -356,7 +467,14 @@ function envForRun() {
     HM_BRIDGE_PACDOMAINS: ((cfg.bridge && cfg.bridge.pacDomains) || []).join(','),
     // Список выбранных компонентов (id через запятую). verify печатает "skip"
     // для компонентов, которых тут нет, чтобы снятые не давали ложных крестиков.
-    HM_SELECTED: selectedIds().join(',')
+    HM_SELECTED: selectedIds().join(','),
+    // Аддитивная доустановка конфига: config ВЫБРАН, детектирован установленным и это
+    // НЕ форс-репэйр. Тогда config.ps1/config.sh добавляют только недостающее, не затирая.
+    HM_ADDITIVE: (STATE.selected['config'] &&
+                  STATE.detected['config'] && STATE.detected['config'].installed &&
+                  !STATE.repair['config']) ? '1' : '',
+    // Компоненты, отмеченные «Переустановить начисто» (форс — игнорировать «installed»).
+    HM_REPAIR: Object.keys(STATE.repair || {}).filter((id) => STATE.repair[id]).join(',')
   };
 }
 

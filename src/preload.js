@@ -6,6 +6,10 @@ contextBridge.exposeInMainWorld('installer', {
   // Для remote-компонентов main сам докачивает+проверяет+распаковывает АТОМАРНО
   // внутри run-component (renderer не задаёт путь кэша и не вклинивается) — см. main.js.
   runComponent: (id, env) => ipcRenderer.invoke('run-component', { id, env }),
+  // Фаза 2: детекция состояния (installed + версии) — грунд-труть через реальные проверки.
+  detectState: () => ipcRenderer.invoke('detect-state'),
+  // Фаза 2: деинсталляция компонента (только артефакты установщика, не данные юзера).
+  uninstallComponent: (id, env) => ipcRenderer.invoke('uninstall-component', { id, env }),
   onLog: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('component-log', handler);

@@ -149,6 +149,16 @@ h1 {
 }
 .badge.admin { color: var(--h-yellow); border-color: rgba(245,213,71,.3); }
 .badge.dep { color: var(--h-cyan); border-color: rgba(41,169,255,.3); }
+.badge.ok { color: var(--h-green); border-color: rgba(98,197,132,.4); background: rgba(98,197,132,.08); }
+.badge.upd { color: var(--h-yellow); border-color: rgba(245,213,71,.4); background: rgba(245,213,71,.08); }
+
+/* ---- ряд действий для уже установленного компонента (Фаза 2) ---- */
+.card.installed { opacity: .97; }
+.installed-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.installed-actions .card-note { flex-basis: 100%; margin: 0 0 2px; color: var(--text-muted); font-size: 12px; }
+.installed-status { font-size: 12px; color: var(--text-subtle); }
+.act-repair.on { color: var(--h-yellow); text-decoration: underline; }
+.act-uninstall { color: var(--h-red); }
 
 /* ---- «?» подсказка у компонента ---- */
 .info {
