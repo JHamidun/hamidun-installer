@@ -27,14 +27,16 @@ function additiveProbes(homedir) {
 }
 
 // Существует ли путь — с ЧЕСТНЫМ различением «нет» и «не смогли проверить».
-// ENOENT/ENOTDIR → { exists:false }. Любая другая ошибка (EACCES, EIO, ELOOP…)
-// → { error } — вызывающий обязан трактовать как «возможно есть» (fail-safe).
+// ТОЛЬКО genuine ENOENT → { exists:false }. ЛЮБАЯ другая ошибка (EACCES, EIO,
+// ELOOP, ENOTDIR…) → { error } — вызывающий обязан трактовать как «возможно есть»
+// (fail-safe → additive). ENOTDIR намеренно НЕ считается «нет»: файл на месте
+// каталога — аномалия, при которой clean-перезапись небезопасна.
 function probePath(p) {
   try {
     fs.statSync(p);
     return { exists: true };
   } catch (e) {
-    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return { exists: false };
+    if (e && e.code === 'ENOENT') return { exists: false };
     return { exists: false, error: (e && e.code) || String(e) };
   }
 }

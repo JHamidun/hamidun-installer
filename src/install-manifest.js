@@ -31,9 +31,31 @@ function emptyManifest() {
   return { schemaVersion: SCHEMA_VERSION, components: {} };
 }
 
+// P2: восстановление после краха rollback-а — если installed.json пропал, а рядом
+// остался *.bak (см. writeManifest fallback), возвращаем самый свежий .bak на место.
+function recoverBak(homedir) {
+  try {
+    const dst = manifestPath(homedir);
+    if (fs.existsSync(dst)) return;
+    const dir = setupDir(homedir);
+    const cands = fs.readdirSync(dir)
+      .filter((n) => n.indexOf(FILE_NAME + '.') === 0 && n.endsWith('.bak'));
+    if (!cands.length) return;
+    let best = '', bestM = -1;
+    for (const n of cands) {
+      try {
+        const m = fs.statSync(path.join(dir, n)).mtimeMs;
+        if (m > bestM) { bestM = m; best = n; }
+      } catch (e) { /* ignore */ }
+    }
+    if (best) fs.renameSync(path.join(dir, best), dst);
+  } catch (e) { /* best-effort */ }
+}
+
 // Читает манифест. ВСЕГДА возвращает корректный объект (не бросает). Отсутствие/битый
 // файл → пустой манифест: отсутствие манифеста никогда ничего не блокирует (fail-safe).
 function readManifest(homedir) {
+  recoverBak(homedir);
   try {
     const raw = fs.readFileSync(manifestPath(homedir), 'utf8');
     const data = JSON.parse(raw);
@@ -86,7 +108,8 @@ function writeManifest(homedir, data, opts) {
       if (movedOld) { try { fs.rmSync(bak, { force: true }); } catch (e3) { /* ignore */ } }
     } catch (e4) {
       // ОТКАТ: вернуть старый манифест на место, убрать temp — данные не теряем.
-      if (movedOld) { try { fs.renameSync(bak, dst); } catch (e5) { /* ignore */ } }
+      // Если и rollback упал — .bak остаётся, recoverBak вернёт его при следующем чтении.
+      if (movedOld) { try { fs.renameSync(bak, dst); } catch (e5) { /* .bak сохраняется для recoverBak */ } }
       try { fs.rmSync(tmp, { force: true }); } catch (e6) { /* ignore */ }
       throw e4;
     }

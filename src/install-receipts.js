@@ -1,29 +1,34 @@
 'use strict';
 
-// P0-4: ownership receipts — доказательство «это ставил НАШ установщик» — ЧИСТЫЙ
-// модуль (без electron), тестируемый. Живёт в ~/.hamidun-setup/receipts/<id>.json.
+// Receipts = installed-МАРКЕР {id, version, installedAt} — ЧИСТЫЙ модуль (без
+// electron), тестируемый. Живёт в ~/.hamidun-setup/receipts/<id>.json.
 //
-// МОДЕЛЬ ДОВЕРИЯ: деинсталлятор удаляет ТОЛЬКО точные абсолютные пути из квитанции,
-// записанной В МОМЕНТ УСТАНОВКИ самими install-скриптами (строки "HM-RECEIPT …" в
-// их stdout собирает main). НИКАКИХ масок/glob. Нет квитанции → удаление ОТКЛОНЯЕТСЯ
-// (мы это не ставили / квитанция утеряна — в сомнении не удаляем). Информационный
-// манифест installed.json НЕ является доказательством владения — только receipts.
+// МОДЕЛЬ ДОВЕРИЯ (Фаза 2, переделка): квитанция БОЛЬШЕ НЕ содержит и НЕ является
+// источником путей удаления. Она отвечает ровно на один вопрос: «ставил ли ЭТОТ
+// установщик компонент id» (гейт кнопки «Удалить» в UI + гейт деинсталляции).
+// ЦЕЛИ удаления вычисляет ТОЛЬКО доверенный код по зашитому аллоулисту
+// (src/uninstall-targets.js) — user-writable квитанция не может увести удаление
+// в чужой путь. Легаси-квитанции (schemaVersion 1, с artifacts) остаются валидным
+// МАРКЕРОМ; их artifacts игнорируются целиком.
+//
+// Жизненный цикл при деинсталляции (main.js):
+//   deactivateReceipt  — атомарно переименовать маркер в tombstone ДО удаления
+//                        (не смогли → деинсталляция прерывается);
+//   restoreReceipt     — вернуть маркер при провале удаления;
+//   finalizeRemoval    — убрать tombstone после подтверждённого успеха
+//                        (результат проверяется, не «молча ок»).
 
 const fs = require('fs');
 const path = require('path');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DIR_NAME = '.hamidun-setup';
 const SUB_DIR = 'receipts';
+const TOMBSTONE_SUFFIX = '.uninst';
 
-// Типы артефактов в квитанции:
-//   path        — абсолютный путь ФС, созданный установщиком (удаляем на uninstall)
-//   reg         — Windows-реестр 'HIVE|Key\Path|ValueName' (только HKCU)
-//   pathentry   — каталог, добавленный нами в пользовательский PATH (Windows)
-//   profileline — '<rc-файл>|<маркер>' строка shell-профиля с нашим маркером (mac)
-//   launchagent — '<label>|<plist-путь>' LaunchAgent (mac)
-//   bundleid    — CFBundleIdentifier установленного .app (mac, идентичность)
-//   teamid      — Apple Team ID подписи .app (mac, идентичность)
+// Легаси-типы строк 'HM-RECEIPT <type> <value>' в stdout install-скриптов.
+// Используются ТОЛЬКО чтобы отфильтровать эти строки из UI-лога — как источник
+// целей удаления они игнорируются.
 const ALLOWED_TYPES = ['path', 'reg', 'pathentry', 'profileline', 'launchagent', 'bundleid', 'teamid'];
 
 function receiptsDir(homedir) {
@@ -32,9 +37,11 @@ function receiptsDir(homedir) {
 function receiptPath(homedir, id) {
   return path.join(receiptsDir(homedir), String(id) + '.json');
 }
+function tombstonePath(homedir, id) {
+  return receiptPath(homedir, id) + TOMBSTONE_SUFFIX;
+}
 
-// Разбор строки 'HM-RECEIPT <type> <value>' из stdout install-скрипта.
-// Не строка квитанции / неизвестный тип / пустое значение → null.
+// Разбор строки 'HM-RECEIPT <type> <value>' (только для фильтрации из UI-лога).
 function parseReceiptLine(line) {
   const m = /^HM-RECEIPT\s+([a-z]+)\s+(.+)$/.exec(String(line == null ? '' : line).trim());
   if (!m) return null;
@@ -44,41 +51,39 @@ function parseReceiptLine(line) {
   return { type, value };
 }
 
-// Валидация одного артефакта. Пути обязаны быть АБСОЛЮТНЫМИ — относительный путь
-// в квитанции никогда не должен привести к удалению (fail-closed: отбрасываем).
-function validArtifact(a) {
-  if (!a || typeof a !== 'object') return false;
-  if (ALLOWED_TYPES.indexOf(a.type) === -1) return false;
-  if (typeof a.value !== 'string' || !a.value.trim()) return false;
-  if (a.type === 'path' && !path.isAbsolute(a.value)) return false;
-  if (a.type === 'pathentry' && !path.isAbsolute(a.value)) return false;
-  if (a.type === 'launchagent' || a.type === 'profileline') {
-    const parts = a.value.split('|');
-    if (parts.length < 2 || !parts[0].trim() || !parts[1].trim()) return false;
-    // вторая часть launchagent (plist) и первая часть profileline (rc) — абсолютные пути
-    if (a.type === 'launchagent' && !path.isAbsolute(parts[1].trim())) return false;
-    if (a.type === 'profileline' && !path.isAbsolute(parts[0].trim())) return false;
-  }
-  if (a.type === 'reg') {
-    const parts = a.value.split('|');
-    // ТОЛЬКО HKCU: установщик пишет только туда; всё прочее — отклоняем.
-    if (parts.length !== 3 || parts[0].toUpperCase() !== 'HKCU' || !parts[1] || !parts[2]) return false;
-  }
-  return true;
-}
-
-function buildReceipt(id, platform, artifacts) {
+// Маркер владения: НИКАКИХ artifacts-путей.
+function buildReceipt(id, platform, version) {
   return {
     schemaVersion: SCHEMA_VERSION,
     id: String(id),
     platform: String(platform || process.platform),
-    installedAt: new Date().toISOString(),
-    artifacts: (artifacts || []).filter(validArtifact)
+    version: version != null ? String(version) : '',
+    installedAt: new Date().toISOString()
   };
 }
 
-// Атомарная запись: temp в ТОМ ЖЕ каталоге + rename (без unlink-first; паттерн P2-9
-// как в install-manifest: old→backup, temp→dest, откат при сбое). dryRun → не пишем.
+// P2: восстановление после краха rollback-а — если основной файл пропал, а рядом
+// остался *.bak (см. writeReceipt fallback), возвращаем самый свежий .bak на место.
+function recoverBak(dir, dstBaseName) {
+  try {
+    const dst = path.join(dir, dstBaseName);
+    if (fs.existsSync(dst)) return;
+    const cands = fs.readdirSync(dir)
+      .filter((n) => n.indexOf(dstBaseName + '.') === 0 && n.endsWith('.bak'));
+    if (!cands.length) return;
+    let best = '', bestM = -1;
+    for (const n of cands) {
+      try {
+        const m = fs.statSync(path.join(dir, n)).mtimeMs;
+        if (m > bestM) { bestM = m; best = n; }
+      } catch (e) { /* ignore */ }
+    }
+    if (best) fs.renameSync(path.join(dir, best), dst);
+  } catch (e) { /* best-effort */ }
+}
+
+// Атомарная запись: temp в ТОМ ЖЕ каталоге + rename (без unlink-first; old→backup,
+// temp→dest, откат при сбое — P2-9 паттерн). dryRun → не пишем.
 function writeReceipt(homedir, id, receipt, opts) {
   opts = opts || {};
   const dst = receiptPath(homedir, id);
@@ -98,7 +103,8 @@ function writeReceipt(homedir, id, receipt, opts) {
     fs.renameSync(tmp, dst);
   } catch (e) {
     // Windows: rename поверх существующего может дать EPERM. НЕ unlink-first:
-    // old→backup, temp→dest; при сбое возвращаем старый на место (P2-9 паттерн).
+    // old→backup, temp→dest; при сбое возвращаем старый на место. Если и rollback
+    // упал — .bak остаётся и восстановится при следующем чтении (recoverBak).
     const bak = dst + '.' + process.pid + '.' + Date.now() + '.bak';
     let movedOld = false;
     try {
@@ -107,7 +113,10 @@ function writeReceipt(homedir, id, receipt, opts) {
       fs.renameSync(tmp, dst);
       if (movedOld) { try { fs.rmSync(bak, { force: true }); } catch (e3) { /* ignore */ } }
     } catch (e4) {
-      if (movedOld) { try { fs.renameSync(bak, dst); } catch (e5) { /* ignore */ } }
+      if (movedOld) {
+        try { fs.renameSync(bak, dst); }
+        catch (e5) { /* rollback упал → .bak остаётся, recoverBak вернёт при чтении */ }
+      }
       try { fs.rmSync(tmp, { force: true }); } catch (e6) { /* ignore */ }
       throw e4;
     }
@@ -115,17 +124,24 @@ function writeReceipt(homedir, id, receipt, opts) {
   return { ok: true, path: dst };
 }
 
-// Чтение квитанции. Отсутствует/битая/чужой id/невалидная схема → null.
-// null трактуется вызывающим как ОТКАЗ в деинсталляции (fail-closed).
+// Чтение маркера. Отсутствует/битый/чужой id → null (null = «мы это не ставили»).
+// Легаси-схема (v1 c artifacts) — валидный маркер; artifacts НЕ экспонируются.
 function readReceipt(homedir, id) {
+  try {
+    recoverBak(receiptsDir(homedir), String(id) + '.json');
+  } catch (e) { /* ignore */ }
   try {
     const raw = fs.readFileSync(receiptPath(homedir, id), 'utf8');
     const data = JSON.parse(raw);
     if (!data || typeof data !== 'object') return null;
     if (data.id !== String(id)) return null;
-    if (!Array.isArray(data.artifacts)) return null;
-    data.artifacts = data.artifacts.filter(validArtifact);
-    return data;
+    return {
+      schemaVersion: data.schemaVersion,
+      id: data.id,
+      platform: data.platform || '',
+      version: data.version || '',
+      installedAt: data.installedAt || ''
+    };
   } catch (e) {
     return null;
   }
@@ -135,30 +151,59 @@ function hasReceipt(homedir, id) {
   return readReceipt(homedir, id) !== null;
 }
 
-function removeReceipt(homedir, id) {
-  try { fs.rmSync(receiptPath(homedir, id), { force: true }); return { ok: true }; }
-  catch (e) { return { ok: false, error: String(e) }; }
+// Деактивация ДО удаления: маркер → tombstone (атомарный rename). Не смогли →
+// { ok:false } и деинсталляция ОБЯЗАНА прерваться.
+function deactivateReceipt(homedir, id) {
+  const src = receiptPath(homedir, id);
+  const dst = tombstonePath(homedir, id);
+  try {
+    try { fs.rmSync(dst, { force: true }); } catch (e) { /* хвост прошлого краша */ }
+    fs.renameSync(src, dst);
+    return { ok: true, tombstone: dst };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
 }
 
-// env-переменные для uninstall-скрипта: main передаёт ТОЧНЫЙ инвентарь из квитанции
-// (newline-joined). Скрипт удаляет ТОЛЬКО это — сам ничего не вычисляет и не глобит.
-function envFromReceipt(receipt) {
-  const by = (t) => (receipt && receipt.artifacts || [])
-    .filter((a) => a.type === t).map((a) => a.value);
-  const out = {
-    HM_UNINSTALL_PATHS: by('path').join('\n'),
-    HM_UNINSTALL_REG: by('reg').join('\n'),
-    HM_UNINSTALL_PATHENTRIES: by('pathentry').join('\n'),
-    HM_UNINSTALL_PROFILELINES: by('profileline').join('\n'),
-    HM_UNINSTALL_LAUNCHAGENTS: by('launchagent').join('\n')
-  };
-  const bid = by('bundleid'); if (bid.length) out.HM_UNINSTALL_BUNDLEID = bid[0];
-  const tid = by('teamid'); if (tid.length) out.HM_UNINSTALL_TEAMID = tid[0];
-  return out;
+// Вернуть маркер при провале удаления. Возврат честный: {ok:bool}.
+function restoreReceipt(homedir, id) {
+  const src = tombstonePath(homedir, id);
+  const dst = receiptPath(homedir, id);
+  try {
+    fs.renameSync(src, dst);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// Убрать tombstone после подтверждённого успеха. Результат ПРОВЕРЯЕТСЯ.
+function finalizeRemoval(homedir, id) {
+  const t = tombstonePath(homedir, id);
+  try {
+    fs.rmSync(t, { force: true });
+    if (fs.existsSync(t)) return { ok: false, error: 'tombstone остался: ' + t };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+// Прямое удаление маркера (легаси-API). Результат честный: проверяем, что файла нет.
+function removeReceipt(homedir, id) {
+  const p = receiptPath(homedir, id);
+  try {
+    fs.rmSync(p, { force: true });
+    if (fs.existsSync(p)) return { ok: false, error: 'файл остался: ' + p };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 module.exports = {
-  SCHEMA_VERSION, DIR_NAME, SUB_DIR, ALLOWED_TYPES,
-  receiptsDir, receiptPath, parseReceiptLine, validArtifact, buildReceipt,
-  writeReceipt, readReceipt, hasReceipt, removeReceipt, envFromReceipt
+  SCHEMA_VERSION, DIR_NAME, SUB_DIR, ALLOWED_TYPES, TOMBSTONE_SUFFIX,
+  receiptsDir, receiptPath, tombstonePath, parseReceiptLine, buildReceipt,
+  writeReceipt, readReceipt, hasReceipt,
+  deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt
 };

@@ -176,7 +176,10 @@ if ($ADDITIVE) {
                 if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                     throw "skills — reparse point (junction/symlink), перечисление небезопасно"
                 }
-                Get-ChildItem -Directory -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object { $preExisting[$_.Name] = $true }
+                # ВСЕ immediate-детей (включая файлы и symlink/junction — не только
+                # -Directory): пред-существующий symlink-скилл иначе считался бы
+                # «нашим» и удалялся при снятом паке.
+                Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object { $preExisting[$_.Name] = $true }
             }
         } catch {
             $pruneDisabled = $true
@@ -205,17 +208,21 @@ if ($ADDITIVE) {
         # пользовательский конфиг) — консервативно: не трогаем существующее.
 
         # CLAUDE.md в корне профиля — только если отсутствует (не затираем правки юзера).
+        # P1: сбой копирования (ACL/ENOSPC) → честный провал + прунинг off, а не
+        # молчаливо отсутствующий файл (раньше SilentlyContinue глотал ошибку).
         $profileClaudeMd = Join-Path $env:USERPROFILE 'CLAUDE.md'
         if ((Test-Path $srcClaudeMd) -and -not (Test-Path $profileClaudeMd)) {
-            Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction SilentlyContinue
+            try { Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction Stop }
+            catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md ($($_.Exception.Message))." }
         }
         # credentials-шаблон — только если ключей ещё нет.
         $srcEnvTpl = Join-Path $clone '.credentials.template.env'
         $dstEnv    = Join-Path $claudeHome '.credentials.master.env'
         if ((Test-Path $srcEnvTpl) -and -not (Test-Path $dstEnv)) {
-            Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction SilentlyContinue
+            try { Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction Stop }
+            catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать шаблон credentials ($($_.Exception.Message))." }
         }
-        Write-Host "Аддитивная доустановка: добавлено недостающее, существующее сохранено."
+        if (-not $installFailed) { Write-Host "Аддитивная доустановка: добавлено недостающее, существующее сохранено." }
     }
 } else {
     # === Чистая установка: свежая база поверх (кастомизаций не было / подтверждённый repair) ===
@@ -266,6 +273,10 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
         if (Test-Path $skillsDir) {
             $removed = 0
             Get-ChildItem -Directory $skillsDir | ForEach-Object {
+                # Симлинк/junction-скилл НИКОГДА не удаляем: Remove-Item -Recurse на
+                # reparse-point в PS 5.1 может уйти в ЧУЖУЮ цель, и ссылка по
+                # определению не «доложена нами» (мы копируем реальные каталоги).
+                if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
                 # В АДДИТИВНОМ режиме НЕ удаляем скиллы, которые были у юзера ДО нашей
                 # раскладки (не наши — не трогаем). Удаляем только то, что доложили сами
                 # этим прогоном и чей пак снят. В сомнении — не удаляем (консервативно).

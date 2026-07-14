@@ -168,7 +168,9 @@ if [ "$ADDITIVE" -eq 1 ]; then
         if [ -L "$CLAUDE_HOME/skills" ]; then
           PRUNE_DISABLED=1
           echo "  ~/.claude/skills — симлинк, перечисление небезопасно — прунинг паков отключён."
-        elif ! find "$CLAUDE_HOME/skills" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; > "$PRE_EXISTING_SKILLS"; then
+        # ВСЕ immediate-детей, ВКЛЮЧАЯ симлинки и файлы (find -type d терял
+        # symlink-детей → пред-существующий symlink-скилл считался «нашим» и удалялся).
+        elif ! find "$CLAUDE_HOME/skills" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$PRE_EXISTING_SKILLS"; then
           PRUNE_DISABLED=1
           echo "  Перечисление существующих скиллов сбойнуло — прунинг паков отключён (ничего не удаляем)."
         fi
@@ -191,21 +193,25 @@ if [ "$ADDITIVE" -eq 1 ]; then
     else
       hm_copy_missing "$SRC_CLAUDE" "$CLAUDE_HOME" || COPY_FAILED=1
     fi
-    if [ "$COPY_FAILED" -eq 1 ]; then
-      RC=1; PRUNE_DISABLED=1
-      echo "ВНИМАНИЕ: копирование недостающих файлов завершилось с ошибками — прунинг паков отключён, установка будет помечена как неудачная."
-    fi
-
     # settings.json НЕ перезаписываем (existing пропущен и rsync-ом, и hm_copy_missing).
     # Semver-мерж JSON намеренно не делаем — консервативно.
 
     # CLAUDE.md в корне профиля — только если отсутствует (не затираем правки юзера).
-    if [ -f "$SRC_CLAUDE_MD" ] && [ ! -f "$HOME/CLAUDE.md" ]; then cp "$SRC_CLAUDE_MD" "$HOME/CLAUDE.md"; fi
+    # P1: сбой копирования (ACL/ENOSPC) → COPY_FAILED (ненулевой выход + прунинг off),
+    # а не молчаливо отсутствующий файл.
+    if [ -f "$SRC_CLAUDE_MD" ] && [ ! -f "$HOME/CLAUDE.md" ]; then
+      cp "$SRC_CLAUDE_MD" "$HOME/CLAUDE.md" || { COPY_FAILED=1; echo "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md."; }
+    fi
     # credentials-шаблон — только если ключей ещё нет.
     if [ -f "$CLONE/.credentials.template.env" ] && [ ! -f "$CLAUDE_HOME/.credentials.master.env" ]; then
-      cp "$CLONE/.credentials.template.env" "$CLAUDE_HOME/.credentials.master.env"
+      cp "$CLONE/.credentials.template.env" "$CLAUDE_HOME/.credentials.master.env" || { COPY_FAILED=1; echo "ВНИМАНИЕ: не удалось скопировать шаблон credentials."; }
     fi
-    [ "$COPY_FAILED" -eq 0 ] && echo "Аддитивная доустановка: добавлено недостающее, существующее сохранено."
+    if [ "$COPY_FAILED" -eq 1 ]; then
+      RC=1; PRUNE_DISABLED=1
+      echo "ВНИМАНИЕ: копирование файлов конфига завершилось с ошибками — прунинг паков отключён, установка будет помечена как неудачная."
+    else
+      echo "Аддитивная доустановка: добавлено недостающее, существующее сохранено."
+    fi
   fi
 else
   # === Чистая установка: свежая база поверх (кастомизаций не было / подтверждённый repair) ===
@@ -243,26 +249,52 @@ if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
   else
     SK="$HOME/.claude/skills"
     if [ -d "$SK" ]; then
-      removed=0
+      # ДВА прохода: сперва собираем кандидатов БЕЗ удалений, затем удаляем.
+      # grep по файлу списка различает rc: 0 = пред-существующий; 1 = не найден;
+      # >=2 (EIO и т.п.) = сбой чтения → остановить прунинг ЦЕЛИКОМ ДО первого
+      # удаления (fail-closed: «не нашли» и «не смогли прочитать» — разные вещи).
+      PRUNE_LIST=""
+      PRUNE_ABORT=0
       for d in "$SK"/*/; do
         [ -d "$d" ] || continue
         name=$(basename "$d")
+        # Симлинк-скилл НИКОГДА не удаляем: rm -rf по ссылке с хвостовым слэшем
+        # уходит в ЧУЖУЮ цель, и симлинк по определению не «доложен нами».
+        [ -L "${d%/}" ] && continue
         # В АДДИТИВНОМ режиме не удаляем скиллы, бывшие ДО нашей раскладки (не наши —
         # не трогаем). we_added=1 ТОЛЬКО при валидном списке пред-существующих и
         # отсутствии имени в нём; любой изъян списка выше уже отключил прунинг целиком.
         we_added=1
         if [ "$ADDITIVE" -eq 1 ]; then
           if [ -n "$PRE_EXISTING_SKILLS" ] && [ -f "$PRE_EXISTING_SKILLS" ]; then
-            grep -qxF "$name" "$PRE_EXISTING_SKILLS" && we_added=0
+            grep -qxF "$name" "$PRE_EXISTING_SKILLS"
+            g=$?
+            if [ "$g" -eq 0 ]; then
+              we_added=0
+            elif [ "$g" -ge 2 ]; then
+              PRUNE_ABORT=1; break
+            fi
           else
             we_added=0   # списка нет → считаем пред-существующим → не удаляем
           fi
         fi
         if [ "$we_added" -eq 1 ] && printf ',%s,' "$HM_ALL_PACK_SKILLS" | grep -q ",$name," && ! printf ',%s,' "$HM_KEEP_SKILLS" | grep -q ",$name,"; then
-          rm -rf "$d"; removed=$((removed + 1))
+          PRUNE_LIST="${PRUNE_LIST}${name}
+"
         fi
       done
-      echo "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)."
+      if [ "$PRUNE_ABORT" -eq 1 ]; then
+        echo "Прунинг паков пропущен (fail-closed): сбой чтения списка пред-существующих скиллов. Удалено: 0."
+      else
+        removed=0
+        while IFS= read -r name; do
+          [ -z "$name" ] && continue
+          rm -rf "$SK/$name"; removed=$((removed + 1))
+        done <<PRUNE_EOF
+$PRUNE_LIST
+PRUNE_EOF
+        echo "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)."
+      fi
     fi
   fi
 fi
