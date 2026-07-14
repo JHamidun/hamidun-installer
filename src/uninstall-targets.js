@@ -208,13 +208,22 @@ function uninstallTargets(id, ctx) {
       const rawTool = ctx.nomadTool;
       const tool = (typeof rawTool === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(rawTool))
         ? rawTool : 'hermes-agent';
+      // P0-1: ownership-маркер, который install пишет ВНУТРЬ ФАКТИЧЕСКИ созданного venv
+      // после успешного `uv tool install`. Удаляем ТОЛЬКО отмеченный venv и подтверждённые
+      // (нами созданные) шимы — НЕ «оба возможных venv + 4 шима» (иначе снесли бы
+      // собственный uv-tool пользователя с тем же именем пакета).
+      const OWN_MARK = '.hamidun-nomad';
+      // Кандидаты venv-каталогов uv-тула (uv-owned дерево).
+      const venvDirs = [];
+      if (isWin) venvDirs.push(path.join(winRoamingAppData(home), 'uv', 'tools', tool));
+      venvDirs.push(path.join(home, '.local', 'share', 'uv', 'tools', tool));
+      const ownerMarkers = venvDirs.map((d) => path.join(d, OWN_MARK));
+      // Шимы: удаляем ТОЛЬКО при подтверждённом ownership-маркере нашего venv
+      // (шимы идут ДО venv-целей — на момент их обработки маркер ещё существует).
       const shims = isWin ? ['nomad.exe', 'nomad', 'hermes.exe', 'hermes'] : ['nomad', 'hermes'];
-      for (const s of shims) targets.push({ type: 'file', path: path.join(home, '.local', 'bin', s) });
-      // venv uv-тула — uv-owned дерево, известные точные пути.
-      if (isWin) {
-        targets.push({ type: 'dirtree', path: path.join(winRoamingAppData(home), 'uv', 'tools', tool), why: 'venv uv-тула ' + tool });
-      }
-      targets.push({ type: 'dirtree', path: path.join(home, '.local', 'share', 'uv', 'tools', tool), why: 'venv uv-тула ' + tool });
+      for (const s of shims) targets.push({ type: 'file', path: path.join(home, '.local', 'bin', s), onlyIfOwnerMarker: ownerMarkers });
+      // venv uv-тула — gated НАШИМ маркером (quarantine-then-guard), НЕ безусловный снос.
+      for (const d of venvDirs) targets.push({ type: 'dirtree', path: d, onlyIfContains: OWN_MARK, why: 'venv uv-тула ' + tool + ' (наш маркер)' });
       // P0-3: клон исходников — ТОЛЬКО стандартное место клона установщика и ТОЛЬКО
       // при НАШЕМ маркере .hamidun-nomad (его пишет ТОЛЬКО наш install-скрипт после
       // clone). pyproject.toml есть у миллионов чужих Python-проектов — он НЕ гейт.

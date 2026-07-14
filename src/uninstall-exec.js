@@ -223,6 +223,135 @@ function removeDirTree(p, opts, dry) {
   return res('removed', 'удалено дерево');
 }
 
+// P0-1: подтверждён ли НАШ ownership-маркер — хотя бы один из markerPaths существует
+// как ОБЫЧНЫЙ файл (lstat, no-follow: symlink НЕ считается маркером). Пусто → false.
+function anyOwnerMarker(markerPaths) {
+  for (const m of (markerPaths || [])) {
+    try {
+      const st = fs.lstatSync(m);
+      if (st.isFile() && !st.isSymbolicLink()) return true;
+    } catch (e) { /* нет маркера — следующий кандидат */ }
+  }
+  return false;
+}
+
+// P0-1: удалить файл (shim) ТОЛЬКО при подтверждённом нашем ownership-маркере.
+// Нет маркера → файл НЕ наш (напр. собственный uv-tool пользователя) → kept.
+function removeFileGated(p, opts, markerPaths, dry) {
+  if (!anyOwnerMarker(markerPaths)) {
+    return res('kept', 'нет ownership-маркера (наш venv не найден) — файл не наш, не трогаю');
+  }
+  return removeFile(p, opts, dry);
+}
+
+// P0-3: quarantine-then-guard для gated dirtree (onlyIfContains-маркер). Устраняет
+// TOCTOU-окно между проверкой маркера и удалением: атомарно ПЕРЕИМЕНОВЫВАЕМ проверенную
+// цель в СЛУЧАЙНЫЙ quarantine-каталог В ТОМ ЖЕ родителе (подменить захваченный каталог
+// нельзя — имя непредсказуемо), ЗАТЕМ ВНУТРИ quarantine делаем no-follow проверку
+// маркера (lstat, маркер обязан быть обычным файлом, не symlink). Валидный маркер есть
+// → удаляем quarantine (ровно то, что проверили). Маркера нет → ВОЗВРАЩАЕМ каталог на
+// место (rename back), НЕ удаляем.
+function removeDirTreeGated(p, opts, markerName, dry) {
+  if (!valueHygieneOk(markerName) || /[\\/]/.test(markerName) || markerName === '.' || markerName === '..') {
+    return res('failed', 'ЗАЩИТА: некорректное имя маркера');
+  }
+  // 1. Guard исходной цели (symlink/protected/UNC/канонизация) — как у removeDirTree.
+  const g = checkTarget(p, opts);
+  if (!g.ok) return res('failed', 'ЗАЩИТА: ' + g.reason);
+  for (const keep of (opts && opts.extraProtected) || []) {
+    if (pathEq(keep, g.norm, opts.platform) || isInside(keep, g.norm, opts.platform)) {
+      return res('failed', 'ЗАЩИТА: внутри цели лежит сохраняемый путь ' + keep);
+    }
+  }
+  // 2. Цель существует и это НЕ symlink и это каталог?
+  let st = null;
+  try { st = fs.lstatSync(g.norm); }
+  catch (e) {
+    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return res('absent', 'нечего удалять');
+    return res('failed', 'lstat: ' + ((e && e.code) || e));
+  }
+  if (st.isSymbolicLink()) return res('failed', 'ЗАЩИТА: цель — symlink');
+  if (!st.isDirectory()) return res('failed', 'ЗАЩИТА: цель-дерево оказалась не каталогом');
+
+  // 3. Карантин: атомарный rename в непредсказуемое имя В ТОМ ЖЕ родителе.
+  const parent = path.dirname(g.norm);
+  let quarantine = '';
+  for (let attempt = 0; attempt < 5 && !quarantine; attempt++) {
+    const cand = path.join(parent, '.hm-quar.' + crypto.randomBytes(12).toString('hex'));
+    let candFree = false;
+    try { fs.lstatSync(cand); } catch (e) { if (e && e.code === 'ENOENT') candFree = true; else return res('failed', 'карантин (проверка имени): ' + ((e && e.code) || e)); }
+    if (!candFree) continue;
+    try { fs.renameSync(g.norm, cand); quarantine = cand; }
+    catch (e) {
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return res('absent', 'цель исчезла во время карантина');
+      return res('failed', 'карантин (rename): ' + ((e && e.code) || e));
+    }
+  }
+  if (!quarantine) return res('failed', 'ЗАЩИТА: не удалось захватить цель в карантин');
+
+  const restore = () => { try { fs.renameSync(quarantine, g.norm); return true; } catch (e) { return false; } };
+
+  // 4. No-follow проверка маркера на ЗАХВАЧЕННОМ каталоге.
+  let qst = null;
+  try { qst = fs.lstatSync(quarantine); }
+  catch (e) { const back = restore(); return res('failed', 'ЗАЩИТА: карантин не читается: ' + ((e && e.code) || e) + (back ? '' : ' (и не удалось вернуть)')); }
+  if (qst.isSymbolicLink() || !qst.isDirectory()) {
+    const back = restore();
+    return res('failed', 'ЗАЩИТА: захваченная цель — не каталог (возможна подмена)' + (back ? ', возвращена' : ', и не удалось вернуть'));
+  }
+  let markerOk = false;
+  try {
+    const mst = fs.lstatSync(path.join(quarantine, markerName));
+    markerOk = !!(mst && mst.isFile() && !mst.isSymbolicLink());
+  } catch (e) {
+    if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) markerOk = false;
+    else { const back = restore(); return res('failed', 'ЗАЩИТА: проверка маркера: ' + ((e && e.code) || e) + (back ? '' : ' (и не удалось вернуть)')); }
+  }
+
+  if (!markerOk) {
+    // Нет нашего маркера → это НЕ наш каталог. Вернуть на место, НЕ удалять.
+    if (restore()) return res('kept', 'нет маркера ' + markerName + ' — каталог возвращён, не удаляю');
+    return res('failed', 'ЗАЩИТА: нет маркера и не удалось вернуть каталог из карантина: ' + quarantine);
+  }
+
+  if (dry) { restore(); return res('removed', '[dry-run] WOULD remove tree (маркер подтверждён)'); }
+
+  // 5. Маркер подтверждён на ЗАХВАЧЕННОМ каталоге → удаляем quarantine.
+  try {
+    fs.rmSync(quarantine, { recursive: true, force: false });
+  } catch (e) {
+    if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e)); }
+  }
+  if (fs.existsSync(quarantine)) { restore(); return res('failed', 'дерево осталось в карантине'); }
+  return res('removed', 'удалено дерево (карантин, маркер подтверждён)');
+}
+
+// P1: классификаторы результата launchctl — чистые, тестируемые.
+// classifyLaunchctlPrint(result) — `launchctl print gui/<uid>/<label>`:
+//   { ok:true, loaded:true }   — job существует (код 0);
+//   { ok:true, loaded:false }  — ПОДТВЕРЖДЁННОЕ отсутствие (нужный not-found текст);
+//   { ok:false, error }        — ненулевой код без подтверждения отсутствия / ошибка запуска.
+function classifyLaunchctlPrint(execResult) {
+  if (!execResult || typeof execResult !== 'object') return { ok: false, error: 'нет результата launchctl print' };
+  if (execResult.error) return { ok: false, error: String((execResult.error && execResult.error.message) || execResult.error) };
+  if (execResult.status === 0) return { ok: true, loaded: true };
+  const msg = String(execResult.stderr || '') + '\n' + String(execResult.stdout || '');
+  if (/could not find service|could not find|no such (process|service)|not loaded|no such/i.test(msg)) {
+    return { ok: true, loaded: false };
+  }
+  return { ok: false, error: 'launchctl print: код ' + execResult.status + ' без подтверждения отсутствия job: ' + msg.trim().slice(0, 160) };
+}
+// launchctlRemoveError(result) — `launchctl remove <label>`: '' если ok/бенайн
+// (job уже не загружен), иначе текст ошибки (ненулевой код НЕ игнорируем).
+function launchctlRemoveError(execResult) {
+  if (!execResult || typeof execResult !== 'object') return 'нет результата launchctl remove';
+  if (execResult.error) return 'remove: ' + String((execResult.error && execResult.error.message) || execResult.error);
+  if (execResult.status === 0) return '';
+  const msg = String(execResult.stderr || '') + '\n' + String(execResult.stdout || '');
+  if (/could not find|no such (process|service)|not loaded/i.test(msg)) return '';
+  return 'remove: код ' + execResult.status;
+}
+
 // Разрешённые rc-файлы для profileline — ТОЛЬКО эти, ровно в $HOME.
 function allowedRcFiles(home) {
   return ['.zshrc', '.bash_profile', '.bashrc'].map((n) => path.join(home, n));
@@ -315,18 +444,33 @@ function computeUserPathWithout(rawPath, dir) {
   return { changed: removed > 0, removed, value: kept.join(';') };
 }
 
+// P1: reg.exe отдаёт код 1 И на «значение/ключ не найдены» (штатное отсутствие),
+// И на «Access is denied» (реальная ошибка) — по коду их НЕ различить. Различаем
+// по тексту диагностики (reg.exe пишет её по-английски даже на локализованной
+// Windows; ru-фолбэки на случай локализации). Неузнанный код 1 → fail-closed.
+const REG_NOTFOUND_RE = /unable to find the specified|specified registry key or value|cannot find the (registry|specified)|was unable to find|не удаёт?с?я найти|не удалось найти|указанн\w*\s+(раздел|параметр)|раздел или параметр реестра/i;
+const REG_DENIED_RE = /access is denied|permission denied|отказано в доступе|доступ запрещ/i;
+
 // P1-7: чистый tri-state классификатор результата `reg query <key> /v <value>`.
 // НЕ смешивает «значения нет» с ошибкой query/парсера:
 //   { ok:true, found:true, type, data } — значение прочитано;
-//   { ok:true, found:false }            — ключа/значения штатно нет (код 1);
+//   { ok:true, found:false }            — ключа/значения ШТАТНО нет (код 1 + not-found);
 //   { ok:false, error }                 — любая другая ошибка запуска/кода/парсинга
+//                                         (в т.ч. код 1 «Access is denied» или код 1 без
+//                                         распознанной not-found диагностики)
 //                                         → вызывающий обязан дать failed, НЕ absent.
 function classifyRegQuery(valueName, execResult) {
   if (!execResult || typeof execResult !== 'object') return { ok: false, error: 'нет результата reg query' };
   if (execResult.error) return { ok: false, error: String((execResult.error && execResult.error.message) || execResult.error) };
   if (execResult.status !== 0) {
-    // reg.exe: код 1 = «ключ/значение не найдены» (штатное отсутствие)
-    if (execResult.status === 1) return { ok: true, found: false };
+    // P1: код 1 → absent ТОЛЬКО при ЯВНО распознанной not-found диагностике.
+    // «Access is denied» и любой нераспознанный код 1 → ошибка (НЕ absent).
+    if (execResult.status === 1) {
+      const msg = String(execResult.stderr || '') + '\n' + String(execResult.stdout || '');
+      if (REG_DENIED_RE.test(msg)) return { ok: false, error: 'reg query: доступ запрещён (код 1)' };
+      if (REG_NOTFOUND_RE.test(msg)) return { ok: true, found: false };
+      return { ok: false, error: 'reg query: код 1 без распознанной not-found диагностики: ' + msg.trim().slice(0, 200) };
+    }
     return { ok: false, error: 'reg query: код ' + execResult.status };
   }
   const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -355,7 +499,12 @@ function verifyPostconditions(plan, opts, helpers) {
     try {
       switch (t && t.type) {
         case 'file':
-          if (lstatOrNull(t.path)) problems.push('файл остался: ' + t.path);
+          if (lstatOrNull(t.path)) {
+            // P0-1: gated shim — оставшийся файл ЗАКОНЕН, если нашего ownership-маркера
+            // нет (значит файл не наш и мы его намеренно не трогали).
+            if (t.onlyIfOwnerMarker && !anyOwnerMarker(t.onlyIfOwnerMarker)) break;
+            problems.push('файл остался: ' + t.path);
+          }
           break;
         case 'dirtree': {
           if (!lstatOrNull(t.path)) break;
@@ -424,6 +573,8 @@ function verifyPostconditions(plan, opts, helpers) {
 module.exports = {
   protectedRoots, checkTarget, valueHygieneOk, pathEq, isInside,
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
+  removeFileGated, removeDirTreeGated, anyOwnerMarker,
   allowedRcFiles, computeUserPathWithout,
-  classifyRegQuery, verifyPostconditions
+  classifyRegQuery, classifyLaunchctlPrint, launchctlRemoveError,
+  verifyPostconditions
 };

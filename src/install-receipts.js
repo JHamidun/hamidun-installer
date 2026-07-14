@@ -26,6 +26,16 @@ const DIR_NAME = '.hamidun-setup';
 const SUB_DIR = 'receipts';
 const TOMBSTONE_SUFFIX = '.uninst';
 
+// P0-1: distinct-код «компонент осознанно пропущен (нечего ставить)». install-скрипт
+// выходит с ним вместо 0 → main НЕ пишет маркер установки (иначе фантомная кнопка
+// «Удалить» → uninstall снёс бы чужие venv/шимы). Любой ненулевой код тоже не пишет.
+const EXIT_SKIP = 120;
+function isSkipExit(code) { return code === EXIT_SKIP; }
+// Маркер установки пишем ТОЛЬКО при реальном успехе (код 0), не в dry-run, не hidden.
+function shouldRecordInstall(code, isDryRun, hidden) {
+  return code === 0 && !isDryRun && !hidden;
+}
+
 // Легаси-типы строк 'HM-RECEIPT <type> <value>' в stdout install-скриптов.
 // Используются ТОЛЬКО чтобы отфильтровать эти строки из UI-лога — как источник
 // целей удаления они игнорируются.
@@ -183,27 +193,45 @@ function restoreReceipt(homedir, id) {
 // P1-1: хвосты атомарной записи маркера (<id>.json.*.bak / <id>.json.*.tmp).
 // Осиротевший .bak после finalize воскресил бы «удалённый» компонент через
 // recoverBak — finalize обязан подчистить и его.
+// P1: ошибка ПЕРЕЧИСЛЕНИЯ (readdir) ≠ «мусора нет». Возврат { ok, names?, error? }:
+//   ENOENT каталога → мусора нет (ok:true, names:[]); прочая ошибка → ok:false.
 function listReceiptDebris(dir, baseName) {
+  let names;
   try {
-    return fs.readdirSync(dir)
-      .filter((n) => n.indexOf(baseName + '.') === 0 && (n.endsWith('.bak') || n.endsWith('.tmp')));
-  } catch (e) { return []; }
+    names = fs.readdirSync(dir);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { ok: true, names: [] };
+    return { ok: false, error: String((e && e.code) || (e && e.message) || e) };
+  }
+  return {
+    ok: true,
+    names: names.filter((n) => n.indexOf(baseName + '.') === 0 && (n.endsWith('.bak') || n.endsWith('.tmp')))
+  };
 }
 
 // Убрать tombstone (И .bak/.tmp-хвосты — P1-1) после подтверждённого успеха.
-// Результат ПРОВЕРЯЕТСЯ.
+// Результат ПРОВЕРЯЕТСЯ. P1: ошибка перечисления/проверки → ok:false (иначе
+// осиротевший .bak воскресил бы «удалённый» компонент). Отсутствие проверяем
+// операцией, где ТОЛЬКО ENOENT = отсутствие (не existsSync, дающий false на EACCES).
 function finalizeRemoval(homedir, id) {
   const t = tombstonePath(homedir, id);
   const dir = receiptsDir(homedir);
   const base = String(id) + '.json';
   try {
-    fs.rmSync(t, { force: true });
-    for (const n of listReceiptDebris(dir, base)) {
-      try { fs.rmSync(path.join(dir, n), { force: true }); } catch (e) { /* проверим ниже */ }
+    try { fs.rmSync(t, { force: true }); }
+    catch (e) { return { ok: false, error: 'снятие tombstone: ' + String((e && e.code) || e) }; }
+    const deb = listReceiptDebris(dir, base);
+    if (!deb.ok) return { ok: false, error: 'перечисление .bak/.tmp не удалось: ' + deb.error };
+    for (const n of deb.names) {
+      try { fs.rmSync(path.join(dir, n), { force: true }); }
+      catch (e) { return { ok: false, error: 'снятие хвоста ' + n + ': ' + String((e && e.code) || e) }; }
     }
-    if (fs.existsSync(t)) return { ok: false, error: 'tombstone остался: ' + t };
+    // Отсутствие tombstone: ТОЛЬКО ENOENT = отсутствие; прочая ошибка lstat → ok:false.
+    try { fs.lstatSync(t); return { ok: false, error: 'tombstone остался: ' + t }; }
+    catch (e) { if (!e || e.code !== 'ENOENT') return { ok: false, error: 'проверка tombstone: ' + String((e && e.code) || e) }; }
     const left = listReceiptDebris(dir, base);
-    if (left.length) return { ok: false, error: '.bak/.tmp-хвосты остались: ' + left.join(', ') };
+    if (!left.ok) return { ok: false, error: 'повторное перечисление .bak/.tmp: ' + left.error };
+    if (left.names.length) return { ok: false, error: '.bak/.tmp-хвосты остались: ' + left.names.join(', ') };
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -224,6 +252,7 @@ function removeReceipt(homedir, id) {
 
 module.exports = {
   SCHEMA_VERSION, DIR_NAME, SUB_DIR, ALLOWED_TYPES, TOMBSTONE_SUFFIX,
+  EXIT_SKIP, isSkipExit, shouldRecordInstall,
   receiptsDir, receiptPath, tombstonePath, parseReceiptLine, buildReceipt,
   writeReceipt, readReceipt, hasReceipt,
   deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt

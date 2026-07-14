@@ -499,7 +499,10 @@ ok('manifest: isOutdated — только СТРОГО старше даёт tru
 
 ok('Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, цели авторитетно из main', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  assert(/if \(okRun && !isDryRun && !\(meta && meta\.hidden\)\)/.test(s), 'запись версии только при успехе, не dry-run, не hidden');
+  // P0-1: решение «писать ли маркер» делегировано чистой testable-функции
+  // receipts.shouldRecordInstall(code, isDryRun, hidden) — код 0 (не skip-код, не иной).
+  assert(/receipts\.shouldRecordInstall\(code, isDryRun, !!\(meta && meta\.hidden\)\)/.test(s), 'запись маркера/версии только при успехе (код 0), не dry-run, не hidden — через shouldRecordInstall');
+  assert(/receipts\.isSkipExit\(code\)/.test(s), 'skip-код распознаётся (isSkipExit) — маркер НЕ пишется');
   assert(/manifest\.recordInstall\(os\.homedir\(\), id, ver, src\)/.test(s), 'recordInstall провязан в run-component');
   assert(/manifest\.removeEntry\(home, id\)/.test(s), 'removeEntry провязан в uninstall-component');
   assert(/function detectComponents/.test(s), 'детекция «установлен» — живая проверка ФС (detectComponents), не манифест');
@@ -1210,9 +1213,16 @@ ok('P1-7 classifyRegQuery: значение прочитано / штатно о
   assert(okRes.ok === true && okRes.found === true, 'значение прочитано');
   assert.strictEqual(okRes.type, 'REG_EXPAND_SZ', 'тип сохранён');
   assert.strictEqual(okRes.data, '%USERPROFILE%\\bin;C:\\uv', 'данные raw (%VAR% не раскрыт)');
-  // код 1 = штатное отсутствие ключа/значения
-  const absent = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: не найдено' });
-  assert(absent.ok === true && absent.found === false, 'код 1 → штатно отсутствует (found:false)');
+  // P1: код 1 → absent ТОЛЬКО при РАСПОЗНАННОЙ not-found диагностике (reg.exe пишет
+  // её по-английски даже на локализованной Windows — проверено на ru-RU).
+  const absent = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' });
+  assert(absent.ok === true && absent.found === false, 'код 1 + not-found → штатно отсутствует (found:false)');
+  // P1: код 1 «Access is denied» → ОШИБКА, НЕ absent (иначе ложный успех удаления)
+  const denied = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: Access is denied.' });
+  assert(denied.ok === false && !('found' in denied), 'код 1 + access denied → ok:false (НЕ absent)');
+  // P1: код 1 без распознанной not-found диагностики → fail-closed (ok:false)
+  const amb = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: странная неведомая ошибка' });
+  assert(amb.ok === false && !('found' in amb), 'код 1 без not-found диагностики → ok:false (fail-closed)');
   // spawn error → ok:false (НЕ absent)
   const spawnErr = uxMod.classifyRegQuery('Path', { error: new Error('ENOENT reg.exe') });
   assert(spawnErr.ok === false && spawnErr.error, 'ошибка запуска → ok:false');
@@ -1235,11 +1245,13 @@ function execFsPlan(plan, home) {
   const results = [];
   for (const t of plan.targets) {
     let r = { status: 'skipped' };
-    if (t.type === 'file') r = uxMod.removeFile(t.path, opts);
-    else if (t.type === 'emptydir') r = uxMod.removeEmptyDir(t.path, opts);
+    if (t.type === 'file') {
+      // Зеркало main.js: gated shim → removeFileGated (P0-1 ownership).
+      r = t.onlyIfOwnerMarker ? uxMod.removeFileGated(t.path, opts, t.onlyIfOwnerMarker) : uxMod.removeFile(t.path, opts);
+    } else if (t.type === 'emptydir') r = uxMod.removeEmptyDir(t.path, opts);
     else if (t.type === 'dirtree') {
-      if (t.onlyIfContains && !fs.existsSync(path.join(t.path, t.onlyIfContains))) r = { status: 'kept' };
-      else r = uxMod.removeDirTree(t.path, opts);
+      // Зеркало main.js: gated dirtree → removeDirTreeGated (P0-3 quarantine-then-guard).
+      r = t.onlyIfContains ? uxMod.removeDirTreeGated(t.path, opts, t.onlyIfContains) : uxMod.removeDirTree(t.path, opts);
     } else if (t.type === 'profileline') r = uxMod.removeProfileLine(t.file, t.line, opts);
     results.push({ t, r });
   }
@@ -1324,10 +1336,11 @@ ok('PRESERVE: nomad — hermes config.yaml ЦЕЛ, SOUL.md/скин удален
     fs.mkdirSync(src, { recursive: true });
     fs.writeFileSync(path.join(src, 'pyproject.toml'), '[project]\nname = "someones-project"');
     fs.writeFileSync(path.join(src, 'user-notes.txt'), 'mine');
-    // venv hermes-agent — наш, удаляется
+    // venv hermes-agent — НАШ (с ownership-маркером .hamidun-nomad), удаляется
     const venv = path.join(home, 'AppData', 'Roaming', 'uv', 'tools', 'hermes-agent');
     fs.mkdirSync(path.join(venv, 'Scripts'), { recursive: true });
     fs.writeFileSync(path.join(venv, 'uv-receipt.toml'), 'x');
+    fs.writeFileSync(path.join(venv, '.hamidun-nomad'), 'installed-by: hamidun-setup');
     const results = execFsPlan(plan, home);
     assert(results.every((x) => x.r.status !== 'failed'), 'без отказов: ' + JSON.stringify(results.map((x) => x.r)));
     assert(!fs.existsSync(path.join(hh, 'SOUL.md')), 'SOUL.md удалён');
@@ -1353,6 +1366,231 @@ ok('P0-3: nomad-src С нашим маркером .hamidun-nomad → удаля
     const post = uxMod.verifyPostconditions(plan, { home, platform: 'win32' }, { regQuery: () => ({ ok: true, found: false }) });
     assert(post.ok, 'постусловия выполнены: ' + JSON.stringify(post.problems));
   } finally { dropDir(home); }
+});
+
+console.log('== Codex round-4: Nomad — владеем только свежесозданным ==');
+
+// receiptsMod объявлен ниже по файлу (TDZ) — берём кэш require под уникальным именем.
+const rcMod = require(path.join(ROOT, 'src', 'install-receipts.js'));
+
+// P0-1: skip НЕ пишет receipt — решение делегировано чистым функциям.
+ok('P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)', () => {
+  assert.strictEqual(rcMod.EXIT_SKIP, 120, 'distinct skip-код = 120');
+  assert(rcMod.isSkipExit(120) === true, 'код 120 — skip');
+  assert(rcMod.isSkipExit(0) === false && rcMod.isSkipExit(1) === false, '0/1 — не skip');
+  assert(rcMod.shouldRecordInstall(0, false, false) === true, 'код 0, не dry, не hidden → пишем');
+  assert(rcMod.shouldRecordInstall(120, false, false) === false, 'skip-код → НЕ пишем маркер');
+  assert(rcMod.shouldRecordInstall(1, false, false) === false, 'ошибка → НЕ пишем');
+  assert(rcMod.shouldRecordInstall(0, true, false) === false, 'dry-run → НЕ пишем');
+  assert(rcMod.shouldRecordInstall(0, false, true) === false, 'hidden → НЕ пишем');
+});
+
+// P0-1 (функц.): полный оборот install-skip — маркера в ~/.hamidun-setup нет → uninstall
+// отклоняется гейтом hasReceipt (нет фантомной кнопки «Удалить»).
+ok('P0-1 (функц.): при skip-коде маркер НЕ пишется → hasReceipt=false (кнопка «Удалить» не появится)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-skip-'));
+  try {
+    // Эмуляция close-handler: пишем маркер ТОЛЬКО если shouldRecordInstall.
+    const codes = [{ code: 120, expect: false }, { code: 1, expect: false }, { code: 0, expect: true }];
+    for (const { code, expect } of codes) {
+      const id = 'nomad';
+      try { fs.rmSync(rcMod.receiptPath(home, id), { force: true }); } catch (e) { /* ignore */ }
+      if (rcMod.shouldRecordInstall(code, false, false)) {
+        rcMod.writeReceipt(home, id, rcMod.buildReceipt(id, 'win32', '1'));
+      }
+      assert.strictEqual(rcMod.hasReceipt(home, id), expect, 'код ' + code + ' → hasReceipt=' + expect);
+    }
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+// P0-1 (scripts): skip-путь nomad.sh/ps1 выходит distinct-кодом 120, а НЕ 0; реальный
+// провал (repoConfigured + нет источника) → exit 1; ownership-маркер пишется в venv.
+ok('P0-1 (scripts): nomad.sh/ps1 — skip → exit 120 (не 0), real-fail → exit 1, ownership-маркер в venv', () => {
+  const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  assert(/Пропускаю\.[\s\S]{0,240}exit 120/.test(nsh), 'nomad.sh: skip → exit 120');
+  assert(/"\$REPO_CONFIGURED" = "1"[\s\S]{0,400}exit 1/.test(nsh), 'nomad.sh: repoConfigured + нет источника → exit 1');
+  assert(/uv\/tools\/hermes-agent[\s\S]{0,120}\.hamidun-nomad/.test(nsh), 'nomad.sh: ownership-маркер в venv после uv tool install');
+  const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  assert(/Пропускаю\.[\s\S]{0,240}exit 120/.test(nps), 'nomad.ps1: skip → exit 120');
+  assert(/\$repoConfigured -and[\s\S]{0,400}exit 1/.test(nps), 'nomad.ps1: repoConfigured + нет источника → exit 1');
+  assert(/uv\\tools\\hermes-agent[\s\S]{0,220}\.hamidun-nomad/.test(nps), 'nomad.ps1: ownership-маркер в venv');
+  // Оба скрипта пишут маркер ТОЛЬКО через .hamidun-nomad (гейт удаления), не через pyproject.
+});
+
+// P0-1 (функц.): uninstall шимов/venv gated ownership-маркером. НЕТ маркера → чужой
+// собственный uv-tool пользователя (venv + шимы с тем же именем) НЕ тронут.
+ok('P0-1 (функц.): чужой uv-tool hermes-agent (venv БЕЗ нашего маркера) + его шимы → uninstall НЕ трогает', () => {
+  const home = mkHomeDir();
+  try {
+    const plan = utMod.uninstallTargets('nomad', { platform: 'win32', home });
+    // Собственный uv-tool пользователя: venv hermes-agent БЕЗ .hamidun-nomad + шимы.
+    const venv = path.join(home, 'AppData', 'Roaming', 'uv', 'tools', 'hermes-agent');
+    fs.mkdirSync(path.join(venv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(venv, 'pyproject-lock'), 'users own tool');
+    const binDir = path.join(home, '.local', 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    for (const s of ['nomad.exe', 'hermes.exe']) fs.writeFileSync(path.join(binDir, s), 'user shim');
+    const results = execFsPlan(plan, home);
+    assert(results.every((x) => x.r.status !== 'failed'), 'без отказов: ' + JSON.stringify(results.map((x) => x.r)));
+    assert(fs.existsSync(path.join(venv, 'pyproject-lock')), 'чужой venv hermes-agent ЦЕЛ (нет нашего маркера)');
+    for (const s of ['nomad.exe', 'hermes.exe']) assert(fs.existsSync(path.join(binDir, s)), 'чужой шим ' + s + ' ЦЕЛ (нет ownership-маркера)');
+    // Постусловия: оставшиеся файлы/venv ЗАКОННЫ (нет маркера) → ok.
+    const post = uxMod.verifyPostconditions(plan, { home, platform: 'win32' }, { regQuery: () => ({ ok: true, found: false }) });
+    assert(post.ok, 'постусловия ok (чужое оставлено законно): ' + JSON.stringify(post.problems));
+  } finally { dropDir(home); }
+});
+
+// P0-1 (функц.): НАШ venv (с маркером) + его шимы → удаляются.
+ok('P0-1 (функц.): НАШ venv (с .hamidun-nomad) + шимы при подтверждённом маркере → удаляются', () => {
+  const home = mkHomeDir();
+  try {
+    const plan = utMod.uninstallTargets('nomad', { platform: 'win32', home });
+    const venv = path.join(home, 'AppData', 'Roaming', 'uv', 'tools', 'hermes-agent');
+    fs.mkdirSync(path.join(venv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(venv, '.hamidun-nomad'), 'installed-by: hamidun-setup');
+    const binDir = path.join(home, '.local', 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    for (const s of ['nomad.exe', 'nomad', 'hermes.exe', 'hermes']) fs.writeFileSync(path.join(binDir, s), 'our shim');
+    const results = execFsPlan(plan, home);
+    assert(results.every((x) => x.r.status !== 'failed'), 'без отказов: ' + JSON.stringify(results.map((x) => x.r)));
+    assert(!fs.existsSync(venv), 'наш venv (с маркером) удалён');
+    for (const s of ['nomad.exe', 'nomad', 'hermes.exe', 'hermes']) assert(!fs.existsSync(path.join(binDir, s)), 'наш шим ' + s + ' удалён');
+  } finally { dropDir(home); }
+});
+
+// P0-2: install-скрипт НЕ усыновляет существующий unmarked чужой nomad-src.
+ok('P0-2 (scripts): существующий каталог БЕЗ маркера → отказ; git pull ТОЛЬКО для marked + верный remote; маркер ТОЛЬКО после fresh clone', () => {
+  const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  // Существующий БЕЗ .hamidun-nomad → немедленный отказ (exit 1), не pull/clone/mark.
+  assert(/\[ -e "\$SRC" \] \|\| \[ -L "\$SRC" \][\s\S]{0,200}! -f "\$SRC\/\.hamidun-nomad"[\s\S]{0,200}exit 1/.test(nsh), 'nomad.sh: existing unmarked → exit 1');
+  // Update (pull) — под проверкой remote.origin.url == $REPO.
+  assert(/config --get remote\.origin\.url[\s\S]{0,120}!= "\$REPO"[\s\S]{0,400}exit 1/.test(nsh), 'nomad.sh: pull только при origin==REPO, иначе отказ');
+  assert(/git -C "\$SRC" pull --ff-only/.test(nsh), 'nomad.sh: pull для отмеченного клона');
+  // Маркер пишется в ELSE-ветке (fresh clone), после git clone.
+  assert(/git clone --depth 1 "\$REPO" "\$SRC"[\s\S]{0,300}\.hamidun-nomad/.test(nsh), 'nomad.sh: маркер ТОЛЬКО после fresh git clone');
+  const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  assert(/Test-Path -LiteralPath \$src\)[\s\S]{0,220}\.hamidun-nomad[\s\S]{0,160}exit 1/.test(nps), 'nomad.ps1: existing unmarked → exit 1');
+  assert(/config --get remote\.origin\.url[\s\S]{0,160}-ne "\$repo"[\s\S]{0,400}exit 1/.test(nps), 'nomad.ps1: pull только при origin==repo');
+  assert(/git clone --depth 1 \$repo \$src[\s\S]{0,300}\.hamidun-nomad/.test(nps), 'nomad.ps1: маркер ТОЛЬКО после fresh git clone');
+});
+
+// P0-3: quarantine-then-guard — подмена marked-каталога МЕЖДУ проверкой и удалением.
+// removeDirTreeGated атомарно захватывает цель в карантин ДО проверки маркера, поэтому
+// подменённый на её место каталог НЕ удаляется, а удаляется ровно захваченное.
+ok('P0-3 (функц.): подмена marked-каталога между захватом и удалением → удалено ЗАХВАЧЕННОЕ, подставленное ЦЕЛО', () => {
+  const home = mkHomeDir();
+  try {
+    const opts = { home, platform: process.platform };
+    const parent = path.join(home, 'AppData', 'Local');
+    const target = path.join(parent, 'nomad-src');
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, '.hamidun-nomad'), 'installed-by: hamidun-setup');
+    fs.writeFileSync(path.join(target, 'ours.txt'), 'наш клон');
+    // removeDirTreeGated захватывает target в карантин ПЕРЕД проверкой маркера. Мы
+    // не можем вклиниться в синхронный вызов, но проверяем ИНВАРИАНТ: удаляется ровно
+    // помеченный каталог, а если маркера нет — возвращается на место (ниже).
+    const r = uxMod.removeDirTreeGated(target, opts, '.hamidun-nomad');
+    assert(r.status === 'removed', 'помеченный каталог удалён: ' + JSON.stringify(r));
+    assert(!fs.existsSync(target), 'target удалён целиком');
+    // Не осталось карантинных остатков в родителе.
+    const leftovers = fs.readdirSync(parent).filter((n) => n.indexOf('.hm-quar.') === 0);
+    assert(leftovers.length === 0, 'карантинных остатков нет: ' + leftovers.join(','));
+  } finally { dropDir(home); }
+});
+
+ok('P0-3 (функц.): нет маркера → каталог ВОЗВРАЩЁН на место (не удалён), карантинных остатков нет', () => {
+  const home = mkHomeDir();
+  try {
+    const opts = { home, platform: process.platform };
+    const parent = path.join(home, 'AppData', 'Local');
+    const foreign = path.join(parent, 'nomad-src');
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(foreign, 'pyproject.toml'), '[project]\nname="someones"');
+    fs.writeFileSync(path.join(foreign, 'notes.txt'), 'чужое');
+    const r = uxMod.removeDirTreeGated(foreign, opts, '.hamidun-nomad');
+    assert(r.status === 'kept', 'без маркера → kept: ' + JSON.stringify(r));
+    assert(fs.existsSync(path.join(foreign, 'pyproject.toml')) && fs.existsSync(path.join(foreign, 'notes.txt')), 'каталог возвращён ЦЕЛЫМ');
+    const leftovers = fs.readdirSync(parent).filter((n) => n.indexOf('.hm-quar.') === 0);
+    assert(leftovers.length === 0, 'карантинных остатков нет: ' + leftovers.join(','));
+  } finally { dropDir(home); }
+});
+
+ok('P0-3 (функц.): маркер-symlink НЕ считается валидным (no-follow) → каталог возвращён', () => {
+  const home = mkHomeDir();
+  try {
+    const opts = { home, platform: process.platform };
+    const parent = path.join(home, 'AppData', 'Local');
+    const dir = path.join(parent, 'nomad-src');
+    fs.mkdirSync(dir, { recursive: true });
+    const realMarker = path.join(home, 'real-marker');
+    fs.writeFileSync(realMarker, 'x');
+    let linked = false;
+    try { fs.symlinkSync(realMarker, path.join(dir, '.hamidun-nomad'), 'file'); linked = true; }
+    catch (e) { linked = false; }
+    if (!linked) { console.log('     (symlink недоступен — пропуск)'); return; }
+    const r = uxMod.removeDirTreeGated(dir, opts, '.hamidun-nomad');
+    assert(r.status === 'kept', 'маркер-symlink → НЕ валиден → kept: ' + JSON.stringify(r));
+    assert(fs.existsSync(dir), 'каталог возвращён на место');
+  } finally { dropDir(home); }
+});
+
+console.log('== Codex round-4: reg/launchctl/debris — ошибка ≠ absent ==');
+
+// P1: launchctl — print-ошибка → failed; подтверждённое отсутствие → loaded:false.
+ok('P1: classifyLaunchctlPrint — код 0 loaded; not-found → отсутствие; иной ненулевой → failed', () => {
+  assert.strictEqual(uxMod.classifyLaunchctlPrint({ status: 0, stdout: 'com.hamidun.bridge = {...}' }).loaded, true, 'код 0 → loaded');
+  const gone = uxMod.classifyLaunchctlPrint({ status: 113, stderr: 'Could not find service "com.hamidun.bridge" in domain for gui' });
+  assert(gone.ok === true && gone.loaded === false, 'not-found диагностика → подтверждённое отсутствие');
+  const err = uxMod.classifyLaunchctlPrint({ status: 5, stderr: 'Operation not permitted' });
+  assert(err.ok === false, 'иной ненулевой код (не not-found) → failed, НЕ absence');
+  assert(uxMod.classifyLaunchctlPrint({ error: new Error('ENOENT launchctl') }).ok === false, 'ошибка запуска → failed');
+  assert(uxMod.classifyLaunchctlPrint(null).ok === false, 'нет результата → failed');
+});
+
+ok('P1: launchctlRemoveError — ненулевой remove НЕ игнорируется (бенайн not-loaded → пусто, иначе текст)', () => {
+  assert.strictEqual(uxMod.launchctlRemoveError({ status: 0 }), '', 'код 0 → нет ошибки');
+  assert.strictEqual(uxMod.launchctlRemoveError({ status: 3, stderr: 'Could not find specified service' }), '', 'not-found → бенайн (пусто)');
+  assert(uxMod.launchctlRemoveError({ status: 1, stderr: 'Operation not permitted' }).length > 0, 'реальная ошибка → НЕ игнор (текст)');
+  assert(uxMod.launchctlRemoveError({ error: new Error('x') }).length > 0, 'ошибка запуска → текст');
+});
+
+// P1 (source): main.js использует classifyLaunchctlPrint + launchctlRemoveError.
+ok('P1 (source): main.js launchctl — print через classifyLaunchctlPrint, remove через launchctlRemoveError', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert(/uninstallExec\.classifyLaunchctlPrint\(r3\)/.test(s), 'print делегирован classifyLaunchctlPrint (нераспознанный ненулевой → failed)');
+  assert(/uninstallExec\.launchctlRemoveError\(r2\)/.test(s), 'remove делегирован launchctlRemoveError (ненулевой не игнорируется)');
+  assert(!/if \(r3\.status === 0\) \{[\s\S]{0,80}всё ещё загружен[\s\S]{0,40}\}\s*\n\s*return uninstallExec\.removeFile/.test(s), 'старая «любой ненулевой print → absence» логика удалена');
+});
+
+// P1: listReceiptDebris ошибка readdir → finalizeRemoval ok:false (не «мусора нет»).
+ok('P1: finalizeRemoval — ошибка перечисления .bak/.tmp → ok:false (осиротевший .bak не воскресит компонент)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-deb-'));
+  const origReaddir = fs.readdirSync;
+  try {
+    rcMod.writeReceipt(home, 'uv', rcMod.buildReceipt('uv', process.platform, '1'));
+    assert(rcMod.deactivateReceipt(home, 'uv').ok, 'деактивация ok');
+    // Перечисление каталога квитанций падает (EACCES/EIO) — НЕ ENOENT.
+    fs.readdirSync = function (p, o) {
+      if (String(p).indexOf('receipts') !== -1) { const e = new Error('EACCES (test)'); e.code = 'EACCES'; throw e; }
+      return origReaddir.call(fs, p, o);
+    };
+    const fin = rcMod.finalizeRemoval(home, 'uv');
+    assert(fin.ok === false && /перечисл/i.test(fin.error || ''), 'ошибка readdir → ok:false: ' + JSON.stringify(fin));
+  } finally {
+    fs.readdirSync = origReaddir;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  }
+});
+
+ok('P1: finalizeRemoval — ENOENT каталога квитанций = «мусора нет» (ok:true), не ошибка', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-deb2-'));
+  try {
+    rcMod.writeReceipt(home, 'uv', rcMod.buildReceipt('uv', process.platform, '1'));
+    assert(rcMod.deactivateReceipt(home, 'uv').ok, 'деактивация ok');
+    const fin = rcMod.finalizeRemoval(home, 'uv');
+    assert(fin.ok === true, 'штатный finalize (ENOENT-хвостов нет) → ok:true: ' + JSON.stringify(fin));
+    assert(!fs.existsSync(rcMod.tombstonePath(home, 'uv')), 'tombstone снят');
+  } finally { try { fs.rmSync(home, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
 });
 
 console.log('== RECEIPT ≠ источник целей: квитанция — только маркер ==');

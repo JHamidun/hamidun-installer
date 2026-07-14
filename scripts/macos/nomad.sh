@@ -8,6 +8,7 @@ DRY="${HM_DRY_RUN:-}"
 # 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
 SRC="${HM_NOMAD_SRC:-}"
 WE_CLONED_SRC=0   # P0-4: клонировали ли МЫ исходники в ~/.nomad-src
+REPO_CONFIGURED=0 # был ли реально задан repoUrl (тогда clone обязан был сработать)
 if [ ! -f "$SRC/pyproject.toml" ]; then
   REPO=""
   CFG="$DIR/../../config.json"
@@ -19,18 +20,45 @@ if [ ! -f "$SRC/pyproject.toml" ]; then
   if [ -n "$REPO" ]; then
     SRC="$HOME/.nomad-src"
     WE_CLONED_SRC=1
+    REPO_CONFIGURED=1
     echo "Клонирую Nomad из $REPO ..."
     if [ -z "$DRY" ]; then
-      if [ -d "$SRC/.git" ]; then git -C "$SRC" pull --ff-only; else git clone --depth 1 "$REPO" "$SRC"; fi
-      # P0-3: НАШ маркер владения клоном — деинсталлятор удаляет ~/.nomad-src ТОЛЬКО
-      # при его наличии (pyproject.toml есть у чужих проектов — не гейт).
-      [ -f "$SRC/pyproject.toml" ] && printf 'installed-by: hamidun-setup\n' > "$SRC/.hamidun-nomad"
+      # P0-2: НЕ усыновляем существующий ЧУЖОЙ каталог. Существует БЕЗ нашего маркера
+      # → НЕМЕДЛЕННЫЙ отказ (не pull, не mark, не трогаем). Маркер пишем ТОЛЬКО после
+      # FRESH clone в РАНЕЕ ОТСУТСТВОВАВШИЙ каталог. git pull разрешён ТОЛЬКО для уже
+      # отмеченного каталога И с проверкой remote.origin.url == нашего REPO.
+      if [ -e "$SRC" ] || [ -L "$SRC" ]; then
+        if [ ! -f "$SRC/.hamidun-nomad" ]; then
+          echo "ОШИБКА: $SRC уже существует и не помечен нашим маркером (.hamidun-nomad отсутствует) — не трогаю чужой каталог."
+          exit 1
+        fi
+        ORIGIN=$(git -C "$SRC" config --get remote.origin.url 2>/dev/null || true)
+        if [ "$ORIGIN" != "$REPO" ]; then
+          echo "ОШИБКА: $SRC помечен нашим, но remote.origin.url ($ORIGIN) ≠ ожидаемому ($REPO) — отказ обновлять."
+          exit 1
+        fi
+        git -C "$SRC" pull --ff-only
+      else
+        git clone --depth 1 "$REPO" "$SRC"
+        # P0-2/P0-3: маркер владения — ТОЛЬКО после успешного FRESH clone. pyproject.toml
+        # есть у чужих проектов → он НЕ гейт удаления; гейт = наш уникальный .hamidun-nomad.
+        [ -f "$SRC/pyproject.toml" ] && printf 'installed-by: hamidun-setup\n' > "$SRC/.hamidun-nomad"
+      fi
     fi
   fi
 fi
+# P0-1: repoUrl был задан, но источник так и не появился (clone/pull упал или нет
+# pyproject.toml) — это НАСТОЯЩИЙ провал, а не осознанный skip: честный выход 1.
+if [ -z "$DRY" ] && [ "$REPO_CONFIGURED" = "1" ] && [ ! -f "$SRC/pyproject.toml" ]; then
+  echo "ОШИБКА: источник Nomad не склонировался (git clone/pull упал или pyproject.toml не появился) — смотри лог выше."
+  exit 1
+fi
 if [ ! -f "$SRC/pyproject.toml" ]; then
   echo "Источник Nomad не задан. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
-  exit 0
+  # P0-1: осознанный skip (нечего ставить) — distinct-код «не установлено», чтобы main
+  # НЕ писал маркер установки (иначе uninstall снёс бы чужие venv/шимы). В dry-run — 0.
+  [ -n "$DRY" ] && exit 0
+  exit 120
 fi
 
 # 2. uv — менеджер Python
@@ -46,6 +74,12 @@ if [ -z "$DRY" ]; then
   echo "Устанавливаю Nomad (команды nomad/hermes)..."
   uv tool install --python 3.12 --force "$SRC"
   export PATH="$HOME/.local/bin:$PATH"
+  # P0-1: ownership-маркер ВНУТРЬ ФАКТИЧЕСКИ созданного venv uv-тула. Деинсталлятор
+  # удаляет venv/шимы ТОЛЬКО при этом маркере — не «оба возможных venv + 4 шима»
+  # (иначе снёс бы собственный uv-tool пользователя с тем же именем пакета).
+  for v in "$HOME/.local/share/uv/tools/hermes-agent"; do
+    [ -d "$v" ] && printf 'installed-by: hamidun-setup\n' > "$v/.hamidun-nomad" 2>/dev/null || true
+  done
 fi
 
 # 4. Брендинг → HERMES_HOME (по умолчанию ~/.hermes)

@@ -575,10 +575,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       CHILDREN.delete(child);
       logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
+      // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
+      // (receipts.EXIT_SKIP) — НЕ ошибка, но и НЕ установка: маркер НЕ пишем.
+      const skipped = receipts.isSkipExit(code);
       // Записываем версию в справочный манифест ~/.hamidun-setup/installed.json ТОЛЬКО
-      // при реальном успехе и НЕ в dry-run. Скрытый verify не пишем. Манифест —
-      // справочный (версия/апдейт); grund-truth «установлен» остаётся детекцией.
-      if (okRun && !isDryRun && !(meta && meta.hidden)) {
+      // при реальном успехе (код 0) и НЕ в dry-run. Скрытый verify не пишем. Skip-код
+      // и любой ненулевой код маркер НЕ пишут (иначе фантомная кнопка «Удалить» → снос
+      // чужого venv/шимов при деинсталляции). Манифест справочный; grund-truth — детекция.
+      if (receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))) {
         const ver = (meta && meta.version) || '';
         try {
           const src = remoteCache ? 'remote' : (vendorAvailable() ? 'bundled' : 'online');
@@ -589,8 +593,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         try {
           receipts.writeReceipt(os.homedir(), id, receipts.buildReceipt(id, process.platform, ver));
         } catch (e) { logLine('[receipt] запись маркера не удалась: ' + String(e)); }
+      } else if (skipped && !isDryRun) {
+        logLine(`=== компонент «${id}» пропущен (код ${code}, нечего ставить) — маркер/манифест НЕ записаны ===`);
       }
-      resolve({ id, ok: okRun, code });
+      // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
+      // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
+      resolve({ id, ok: okRun || skipped, code, skipped });
     });
   });
 });
@@ -1197,16 +1205,18 @@ function describeTarget(t) {
 // Исполнить одну цель. guardOpts прокидывается в uninstall-exec (fail-closed guard).
 function executeUninstallTarget(t, guardOpts) {
   switch (t.type) {
-    case 'file': return uninstallExec.removeFile(t.path, guardOpts);
+    case 'file':
+      // P0-1: gated shim — удаляем ТОЛЬКО при подтверждённом нашем ownership-маркере
+      // (наш venv), иначе файл не наш (собственный uv-tool пользователя) → kept.
+      if (t.onlyIfOwnerMarker) return uninstallExec.removeFileGated(t.path, guardOpts, t.onlyIfOwnerMarker);
+      return uninstallExec.removeFile(t.path, guardOpts);
     case 'emptydir': return uninstallExec.removeEmptyDir(t.path, guardOpts);
     case 'dirtree': {
-      if (t.onlyIfContains) {
-        try {
-          if (!fs.existsSync(path.join(t.path, t.onlyIfContains))) {
-            return { status: 'kept', message: 'санити-гейт: нет ' + t.onlyIfContains + ' внутри — не трогаю' };
-          }
-        } catch (e) { return { status: 'failed', message: 'санити-гейт: ' + String((e && e.code) || e) }; }
-      }
+      // P0-3: gated dirtree (onlyIfContains-маркер) → quarantine-then-guard: атомарный
+      // захват проверенной цели в карантин В ТОМ ЖЕ родителе, затем no-follow проверка
+      // маркера на ЗАХВАЧЕННОМ каталоге. Нет TOCTOU-окна между проверкой маркера и
+      // удалением: маркера нет → каталог возвращается на место (не удаляется).
+      if (t.onlyIfContains) return uninstallExec.removeDirTreeGated(t.path, guardOpts, t.onlyIfContains);
       return uninstallExec.removeDirTree(t.path, guardOpts);
     }
     case 'profileline': return uninstallExec.removeProfileLine(t.file, t.line, guardOpts);
@@ -1231,14 +1241,22 @@ function executeUninstallTarget(t, guardOpts) {
           errs.push('unload: код ' + r1.status);
         }
       }
+      // P1: ненулевой `launchctl remove` НЕ игнорируем — бенайн («не загружен»)
+      // отсеивает launchctlRemoveError, реальную ошибку фиксирует в errs.
       const r2 = run(['remove', t.label]);
-      if (r2.error) errs.push('remove: ' + String(r2.error.message || r2.error));
+      const remErr = uninstallExec.launchctlRemoveError(r2);
+      if (remErr) errs.push(remErr);
       // Авторитетная проверка ФАКТА: job с нашим label не должен существовать.
       const uid = (typeof process.getuid === 'function') ? process.getuid() : null;
       if (uid == null) return { status: 'failed', message: 'нет uid для launchctl print (fail-closed)' };
       const r3 = run(['print', 'gui/' + uid + '/' + t.label]);
-      if (r3.error) return { status: 'failed', message: 'launchctl print: ' + String(r3.error.message || r3.error) };
-      if (r3.status === 0) {
+      // P1: ненулевой `print` → отсутствие job ТОЛЬКО при ПОДТВЕРЖДЁННОМ «not found/
+      // not loaded»; любой иной ненулевой код (напр. отказ в доступе) → failed, НЕ absence.
+      const pc = uninstallExec.classifyLaunchctlPrint(r3);
+      if (!pc.ok) {
+        return { status: 'failed', message: pc.error + (errs.length ? ' (' + errs.join('; ') + ')' : '') };
+      }
+      if (pc.loaded) {
         return { status: 'failed', message: 'LaunchAgent «' + t.label + '» всё ещё загружен' + (errs.length ? ' (' + errs.join('; ') + ')' : '') };
       }
       return uninstallExec.removeFile(t.plist, guardOpts);

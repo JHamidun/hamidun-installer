@@ -56,14 +56,31 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
         $weClonedSrc = $true
         Write-Host "Клонирую Nomad из $repo ..."
         if ($DRY) {
-            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (or pull if exists)"
+            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (fresh only; existing unmarked → отказ)"
         } else {
-            if (Test-Path (Join-Path $src '.git')) { git -C $src pull --ff-only }
-            else { git clone --depth 1 $repo $src }
-            # P0-3: НАШ маркер владения клоном. Деинсталлятор удаляет nomad-src ТОЛЬКО
-            # при его наличии (pyproject.toml есть у миллионов чужих проектов — не гейт).
-            if (Test-Path (Join-Path $src 'pyproject.toml')) {
-                Set-Content -Path (Join-Path $src '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII
+            # P0-2: НЕ усыновляем существующий ЧУЖОЙ каталог. Существует БЕЗ нашего
+            # маркера → НЕМЕДЛЕННЫЙ отказ (не pull, не mark, не трогаем). Маркер пишем
+            # ТОЛЬКО после FRESH clone в РАНЕЕ ОТСУТСТВОВАВШИЙ каталог. git pull разрешён
+            # ТОЛЬКО для уже отмеченного каталога И с проверкой remote.origin.url == $repo.
+            if (Test-Path -LiteralPath $src) {
+                if (-not (Test-Path -LiteralPath (Join-Path $src '.hamidun-nomad'))) {
+                    Write-Host "ОШИБКА: $src уже существует и не помечен нашим маркером (.hamidun-nomad отсутствует) — не трогаю чужой каталог."
+                    exit 1
+                }
+                $origin = (& git -C $src config --get remote.origin.url 2>$null | Select-Object -First 1)
+                if ("$origin".Trim() -ne "$repo") {
+                    Write-Host "ОШИБКА: $src помечен нашим, но remote.origin.url ($origin) != ожидаемому ($repo) — отказ обновлять."
+                    exit 1
+                }
+                git -C $src pull --ff-only
+            } else {
+                git clone --depth 1 $repo $src
+                # P0-2/P0-3: маркер владения — ТОЛЬКО после успешного FRESH clone.
+                # pyproject.toml есть у миллионов чужих проектов → он НЕ гейт удаления;
+                # гейт = наш уникальный .hamidun-nomad.
+                if (Test-Path (Join-Path $src 'pyproject.toml')) {
+                    Set-Content -Path (Join-Path $src '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII
+                }
             }
         }
     }
@@ -76,7 +93,9 @@ if (-not $DRY -and $repoConfigured -and -not ($src -and (Test-Path (Join-Path $s
 }
 if (-not $DRY -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
     Write-Host "Источник Nomad не задан. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
-    exit 0
+    # P0-1: осознанный skip (нечего ставить) — distinct-код «не установлено», чтобы main
+    # НЕ писал маркер установки (иначе uninstall снёс бы чужие venv/шимы).
+    exit 120
 }
 if ($DRY -and (-not $src)) {
     Write-Host "  [dry-run] Источник Nomad не задан — продолжаем dry-run preview секций 2/3/4."
@@ -109,6 +128,15 @@ if ($DRY) {
     & $uv tool install --python 3.12 --force "$src"
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
+    # P0-1: ownership-маркер ВНУТРЬ ФАКТИЧЕСКИ созданного venv uv-тула. Деинсталлятор
+    # удаляет venv/шимы ТОЛЬКО при этом маркере — не «оба возможных venv + 4 шима»
+    # (иначе снёс бы собственный uv-tool пользователя с тем же именем пакета).
+    foreach ($v in @((Join-Path $env:APPDATA 'uv\tools\hermes-agent'),
+                     (Join-Path $env:USERPROFILE '.local\share\uv\tools\hermes-agent'))) {
+        if (Test-Path -LiteralPath $v -PathType Container) {
+            try { Set-Content -Path (Join-Path $v '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII } catch {}
+        }
+    }
 }
 
 # 4. Брендинг → HERMES_HOME (по умолчанию %LOCALAPPDATA%\hermes)
