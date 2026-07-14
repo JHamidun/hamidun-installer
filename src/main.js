@@ -1,6 +1,6 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
-const { spawn, execFileSync, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -75,7 +75,10 @@ function killChildren() {
       if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } continue; }
       if (IS_WIN) {
         try {
-          execFileSync('taskkill', ['/PID', String(c.pid), '/T', '/F'],
+          // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
+          // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
+          const tk = remoteFetch.sysBin('taskkill.exe') || 'taskkill.exe';
+          execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
             { windowsHide: true, stdio: 'ignore' });
         } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
       } else {
@@ -234,28 +237,24 @@ function loadRemoteMaps() {
   return { reg, ids, compRemote };
 }
 
-// Куда докачивать: %LOCALAPPDATA%\HamidunSetup\cache\<remoteId> (Windows),
-// ~/Library/Caches/HamidunSetup/<remoteId> (macOS), иначе ~/.cache/... (linux).
+// Куда докачивать (ADMIN-OWNED STAGING, FIX-A):
+//   Windows: %ProgramData%\HamidunSetup\cache\<remoteId> — admin-owned корень,
+//            remote-fetch.fetchRemote() ужесточает и ПРОВЕРЯЕТ его DACL (SYSTEM +
+//            Administrators, /inheritance:r, без user-SID) — обычный/medium
+//            процесс пользователя туда писать НЕ может (закрывает TOCTOU-класс).
+//   macOS/Linux: ~/Library/Caches | ~/.cache — установка uv здесь неэлевейтед
+//            end-to-end (эскалации нет); полная изоляция от процессов ТОГО ЖЕ
+//            пользователя без root на POSIX недостижима (см. remote-fetch модель угроз).
 function remoteCacheDir(remoteId) {
   let base;
   if (IS_WIN) {
-    base = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
-      'HamidunSetup', 'cache');
+    base = path.join(remoteFetch.winProgramData(), 'HamidunSetup', 'cache');
   } else if (IS_MAC) {
     base = path.join(os.homedir(), 'Library', 'Caches', 'HamidunSetup');
   } else {
     base = path.join(os.homedir(), '.cache', 'HamidunSetup');
   }
   return path.join(base, remoteId);
-}
-
-// Абсолютный путь к системному powershell.exe (анти-PATH-hijack): даже если PATH
-// подменён, запускается настоящий бинарь, а не подложенный.
-function winPowershellPath() {
-  const sysroot = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-  const p = path.join(sysroot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  try { if (fs.existsSync(p)) return p; } catch (e) { /* ignore */ }
-  return 'powershell.exe';
 }
 
 // Run one component script, streaming output back to the renderer.
@@ -342,6 +341,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 
   let cmd, args;
   if (IS_WIN) {
+    // Абсолютный powershell.exe из ВАЛИДИРОВАННОГО System32 (FIX-E). Fail-closed:
+    // не нашли → блокируем установку (никакого fallback в короткое имя, иначе
+    // PATH-hijack воскресает; установщик elevated — это была бы эскалация).
+    const ps = remoteFetch.winPowershellPath();
+    if (!ps) {
+      return { id, ok: false, code: -1, error: 'PowerShell не найден в System32 — установка заблокирована (fail-closed).' };
+    }
     // PowerShell 5.1 emits pipe output in the console's OEM code page (CP866 on
     // ru-RU Windows). Node reads the pipe as UTF-8, so Cyrillic logs turn to
     // garbage. Force the console output encoding to UTF-8 *before* running the
@@ -355,7 +361,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
       "& '" + psScript + "'; " +
       "if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }";
-    cmd = winPowershellPath(); // абсолютный путь — анти-PATH-hijack
+    cmd = ps;
     args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
     cmd = '/bin/bash';
@@ -454,7 +460,7 @@ ipcMain.handle('launch-cursor', () => {
       const cexe = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe');
       if (fs.existsSync(cexe)) { spawn(cexe, [], { detached: true, stdio: 'ignore' }).unref(); return true; }
     } else if (IS_MAC) {
-      spawn('open', ['-a', 'Cursor'], { detached: true, stdio: 'ignore' }).unref();
+      spawn('/usr/bin/open', ['-a', 'Cursor'], { detached: true, stdio: 'ignore' }).unref();
       return true;
     }
   } catch (e) { /* ignore */ }
@@ -468,11 +474,26 @@ ipcMain.handle('launch-cursor', () => {
 // User PATH from the registry and add the places `claude` lands in.
 function regQueryValue(keyPath, valueName) {
   try {
-    const out = execFileSync('reg.exe', ['query', keyPath, '/v', valueName],
+    // reg.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
+    const reg = remoteFetch.sysBin('reg.exe');
+    if (!reg) return '';
+    const out = execFileSync(reg, ['query', keyPath, '/v', valueName],
       { encoding: 'utf8', windowsHide: true });
     const m = out.match(new RegExp('^\\s*' + valueName + '\\s+REG(?:_EXPAND)?_SZ\\s+(.+)$', 'im'));
     return m ? m[1].trim() : '';
   } catch (e) { return ''; }
+}
+
+// npm global prefix БЕЗ спавна npm через shell (FIX-E: убираем shell-строки).
+// Читаем `prefix=` из пользовательского ~/.npmrc (единственное надёжное место
+// кастомного префикса). Дефолтные локации npm покрыты push() в freshWindowsPath.
+function npmPrefixFromRc() {
+  try {
+    const rc = fs.readFileSync(path.join(os.homedir(), '.npmrc'), 'utf8');
+    const m = rc.match(/^\s*prefix\s*=\s*(.+?)\s*$/m);
+    if (m) return expandWinEnv(m[1].replace(/^["']|["']$/g, '').trim());
+  } catch (e) { /* нет .npmrc — дефолты покрывают */ }
+  return '';
 }
 
 // Expand %VAR% in REG_EXPAND_SZ values (User PATH often contains %USERPROFILE%).
@@ -500,16 +521,12 @@ function freshWindowsPath() {
   // Claude Code native install target + default npm global prefix.
   push(path.join(os.homedir(), '.local', 'bin'));
   push(path.join(os.homedir(), 'AppData', 'Roaming', 'npm'));
+  // npm может иметь кастомный global prefix — читаем из ~/.npmrc БЕЗ spawn через
+  // shell (FIX-E). Дефолтные локации уже добавлены push() выше.
+  const prefix = npmPrefixFromRc();
+  if (prefix && !seen.has(prefix.toLowerCase())) { seen.add(prefix.toLowerCase()); parts.push(prefix); }
   let joined = parts.join(';');
   if (!joined) joined = process.env.PATH || '';
-  // npm may use a custom global prefix — ask it (best-effort, with the fresh PATH).
-  try {
-    const prefix = execSync('npm config get prefix', {
-      encoding: 'utf8', windowsHide: true, timeout: 10000,
-      env: Object.assign({}, process.env, { PATH: joined, Path: joined })
-    }).trim();
-    if (prefix && !seen.has(prefix.toLowerCase())) joined += ';' + prefix;
-  } catch (e) { /* npm not found — the defaults above still cover it */ }
   return joined;
 }
 
@@ -518,15 +535,17 @@ ipcMain.handle('open-claude-terminal', () => {
     if (IS_WIN) {
       const freshPath = freshWindowsPath();
       const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
+      // cmd.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
       // `start "Claude Code" cmd /k claude` — a new console window that stays
       // open; it inherits the fresh PATH from this spawn's env.
-      const child = spawn('cmd.exe', ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
+      const cmdExe = remoteFetch.sysBin('cmd.exe') || 'cmd.exe';
+      const child = spawn(cmdExe, ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
         { env, detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       return true;
     }
     if (IS_MAC) {
-      const child = spawn('osascript', [
+      const child = spawn('/usr/bin/osascript', [
         '-e', 'tell application "Terminal" to activate',
         '-e', 'tell application "Terminal" to do script "claude"'
       ], { detached: true, stdio: 'ignore' });

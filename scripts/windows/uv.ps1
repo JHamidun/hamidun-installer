@@ -1,48 +1,75 @@
-﻿# uv — быстрый менеджер Python (Astral). REMOTE-компонент: бинарь НЕ вшит,
-# а докачан установщиком из CDN и распакован в $env:HM_REMOTE_CACHE (см. main.js
-# fetch-remote / remote-fetch.js). Здесь только: скопировать в %LOCALAPPDATA%\Programs\uv,
-# добавить в PATH, проверить запуск. Honor HM_DRY_RUN. Честный статус (exit 0/1).
-# Stop, чтобы провал Copy-Item/New-Item НЕ был проглочен (иначе можно запустить
-# старый exe и отрапортовать ложный успех). Ошибки ловим явно try/catch → exit 1.
+﻿# uv — быстрый менеджер Python (Astral). REMOTE-компонент: бинарь НЕ вшит, а
+# докачан установщиком из CDN, проверен по SHA-256 и разложен в admin-owned
+# $env:HM_REMOTE_CACHE (%ProgramData%\HamidunSetup\… — DACL SYSTEM+Admins,
+# см. main.js / remote-fetch.js). Оттуда его БЕЗОПАСНО запускать даже elevated.
+#
+# БЕЗОПАСНОСТЬ (FIX-D/FIX-G): проверку версии делаем ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО
+# КЭША (не из будущей user-writable копии), затем копируем в %LOCALAPPDATA%\Programs\uv
+# для PATH пользователя, но копию под elevated-токеном НЕ запускаем (это была бы
+# TOCTOU-гонка: medium-integrity процесс юзера мог бы подменить exe между copy и run).
+# Успех — ТОЛЬКО при exit-коде 0 И валидном формате вывода `uv --version`. Honor HM_DRY_RUN.
 $ErrorActionPreference = 'Stop'
 $DRY = [bool]$env:HM_DRY_RUN
 
 $cache = $env:HM_REMOTE_CACHE
-if (-not $cache -or -not (Test-Path $cache)) {
+if (-not $cache -or -not (Test-Path -LiteralPath $cache)) {
     Write-Host "ОШИБКА: HM_REMOTE_CACHE не задан или не существует — докачка uv не выполнена."
     exit 1
 }
 
-# Архив Astral кладёт uv.exe/uvx.exe в корень; ищем рекурсивно на всякий случай.
-$uvExe = Get-ChildItem -Path $cache -Filter 'uv.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $uvExe) {
-    Write-Host "ОШИБКА: uv.exe не найден в распакованном кэше ($cache)."
+# Ищем uv.exe в защищённом кэше. Отвергаем reparse-point (симлинк/junction).
+$src = Get-ChildItem -Path $cache -Filter 'uv.exe' -Recurse -File -ErrorAction SilentlyContinue |
+       Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
+       Select-Object -First 1
+if (-not $src) {
+    Write-Host "ОШИБКА: uv.exe не найден в защищённом кэше ($cache)."
     exit 1
 }
-$uvxExe = Get-ChildItem -Path $cache -Filter 'uvx.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+$srcUv = $src.FullName
+if (-not (Test-Path -LiteralPath $srcUv -PathType Leaf)) {
+    Write-Host "ОШИБКА: источник uv.exe — не файл (Leaf)."
+    exit 1
+}
+$srcUvx = Get-ChildItem -Path $cache -Filter 'uvx.exe' -Recurse -File -ErrorAction SilentlyContinue |
+          Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
+          Select-Object -First 1
 
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\uv'
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: скопировать $($uvExe.FullName) -> $dest\uv.exe и добавить $dest в PATH (пользовательский)"
+    Write-Host "  [dry-run] WOULD: проверить $srcUv запуском ИЗ ЗАЩИЩЁННОГО кэша, скопировать в $dest, добавить в PATH (копию НЕ запускать)"
     exit 0
 }
 
+# 1) ПРОВЕРКА ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО ИСТОЧНИКА (admin-owned кэш), НЕ из user-writable
+#    места. Требуем exit 0 И вывод формата 'uv <версия>' (не просто подстроку 'uv').
+$ver = ''
+try { $ver = (& $srcUv --version 2>&1 | Select-Object -First 1) }
+catch {
+    Write-Host "ОШИБКА: uv.exe из кэша не запустился — $($_.Exception.Message)"
+    exit 1
+}
+if ($LASTEXITCODE -ne 0 -or ("$ver" -notmatch '^uv\s+\d')) {
+    Write-Host "ОШИБКА: uv --version дал некорректный результат (код=$LASTEXITCODE, вывод=$ver)."
+    exit 1
+}
+
+# 2) Копируем ПРОВЕРЕННЫЙ бинарь в пользовательский каталог (для PATH). Копию
+#    под elevated-токеном НЕ запускаем.
 $target = Join-Path $dest 'uv.exe'
 try {
     New-Item -ItemType Directory -Force $dest -ErrorAction Stop | Out-Null
-    Copy-Item -Force $uvExe.FullName $target -ErrorAction Stop
-    if ($uvxExe) { Copy-Item -Force $uvxExe.FullName (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
+    Copy-Item -Force -LiteralPath $srcUv $target -ErrorAction Stop
+    if ($srcUvx) { Copy-Item -Force -LiteralPath $srcUvx.FullName (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
 } catch {
     Write-Host "ОШИБКА: не удалось скопировать uv в $dest — $($_.Exception.Message)"
     exit 1
 }
-# Проверяем, что целевой файл реально появился (а не «успех» на непройденной копии).
-if (-not (Test-Path -LiteralPath $target)) {
+if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
     Write-Host "ОШИБКА: uv.exe не оказался в $dest после копирования."
     exit 1
 }
 
-# Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH (без админа), если его там ещё нет.
+# 3) Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH (без админа), если его там ещё нет.
 try {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($null -eq $userPath) { $userPath = '' }
@@ -55,13 +82,6 @@ try {
         Write-Host "$dest уже в PATH."
     }
 } catch { Write-Host "  [warn] не удалось прописать PATH: $($_.Exception.Message)" }
-$env:Path = $dest + ';' + $env:Path
 
-# Под $ErrorActionPreference='Stop' stderr нативного exe при 2>&1 может кинуть —
-# запускаем в try/catch, чтобы диагностика не превратилась в необработанное падение.
-$ver = ''
-try { $ver = (& $target --version 2>&1 | Select-Object -First 1) }
-catch { $ver = $_.Exception.Message }
-if ("$ver" -match 'uv') { Write-Host "OK: uv установлен ($ver)"; exit 0 }
-Write-Host "ОШИБКА: uv.exe скопирован, но не запустился корректно ($ver)."
-exit 1
+Write-Host "OK: uv установлен ($ver) — проверен из защищённого кэша, скопирован в $dest."
+exit 0
