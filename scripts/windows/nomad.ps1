@@ -60,6 +60,11 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
         } else {
             if (Test-Path (Join-Path $src '.git')) { git -C $src pull --ff-only }
             else { git clone --depth 1 $repo $src }
+            # P0-3: НАШ маркер владения клоном. Деинсталлятор удаляет nomad-src ТОЛЬКО
+            # при его наличии (pyproject.toml есть у миллионов чужих проектов — не гейт).
+            if (Test-Path (Join-Path $src 'pyproject.toml')) {
+                Set-Content -Path (Join-Path $src '.hamidun-nomad') -Value 'installed-by: hamidun-setup' -Encoding ASCII
+            }
         }
     }
 }
@@ -95,9 +100,14 @@ if ($DRY) {
     Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 --force `"$src`""
 } else {
     if (-not $uv) { Write-Host "uv не найден после установки — прерываю."; exit 1 }
+    # P1-5: коды нативных команд НЕ проглатываем ($ErrorActionPreference=Continue их
+    # не ловит) — любой сбой = честный exit 1 ДО брендинга и квитанции. Иначе старый
+    # nomad.exe в ~/.local/bin проходил финальную проверку и писался новый receipt.
     & $uv python install 3.12
+    if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv python install 3.12 завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Write-Host "Устанавливаю Nomad (команды nomad/hermes)..."
     & $uv tool install --python 3.12 --force "$src"
+    if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
 }
 
@@ -131,8 +141,9 @@ function Write-NomadReceipt {
         $p = Join-Path $env:USERPROFILE ".local\bin\$shim"
         if (Test-Path -LiteralPath $p) { Write-Host "HM-RECEIPT path $p" }
     }
-    foreach ($toolDir in @((Join-Path $env:APPDATA 'uv\tools\nomad'),
-                           (Join-Path $env:USERPROFILE '.local\share\uv\tools\nomad'))) {
+    # P1-4: uv-тул называется по pyproject [project].name = hermes-agent (не «nomad»).
+    foreach ($toolDir in @((Join-Path $env:APPDATA 'uv\tools\hermes-agent'),
+                           (Join-Path $env:USERPROFILE '.local\share\uv\tools\hermes-agent'))) {
         if (Test-Path -LiteralPath $toolDir) { Write-Host "HM-RECEIPT path $toolDir" }
     }
     $soul = Join-Path $hh 'SOUL.md'

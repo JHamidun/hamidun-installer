@@ -1,6 +1,6 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1030,18 +1030,17 @@ ipcMain.handle('detect-state', () => {
 // credentials, memory, projects, прогресс курса, config моста) — священны:
 // guard fail-closed, в сомнении НЕ удаляем.
 
-// reg.exe запрос значения с ТИПОМ (raw, без раскрытия %VAR% — reg query отдаёт
-// REG_EXPAND_SZ неразвёрнутым). null при сбое/отсутствии.
+// P1-7: reg.exe запрос значения с ТИПОМ (raw, без раскрытия %VAR% — reg query
+// отдаёт REG_EXPAND_SZ неразвёрнутым). Tri-state (uninstall-exec.classifyRegQuery):
+//   { ok:true, found:true, type, data } | { ok:true, found:false } | { ok:false, error }.
+// «Нет значения» НЕ смешивается с ошибкой запуска/кода/парсера — любая ошибка у
+// вызывающих обязана дать failed (fail-closed), а НЕ absent.
 function regQueryValueTyped(keyPath, valueName) {
-  try {
-    const reg = remoteFetch.sysBin('reg.exe');
-    if (!reg) return null;
-    const out = execFileSync(reg, ['query', keyPath, '/v', valueName],
-      { encoding: 'utf8', windowsHide: true });
-    const m = out.match(new RegExp('^\\s*' + valueName + '\\s+(REG_(?:EXPAND_)?SZ)\\s+(.*)$', 'im'));
-    if (!m) return null;
-    return { type: m[1], data: m[2].replace(/\r$/, '') };
-  } catch (e) { return null; }
+  const reg = remoteFetch.sysBin('reg.exe');
+  if (!reg) return { ok: false, error: 'reg.exe не найден в System32 (fail-closed)' };
+  const r = spawnSync(reg, ['query', keyPath, '/v', valueName],
+    { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+  return uninstallExec.classifyRegQuery(valueName, r);
 }
 
 // Разрешённые HKCU-ключи для удаления значений — ТОЛЬКО автозапуск Run.
@@ -1057,35 +1056,47 @@ function winRegDeleteValue(t) {
   const reg = remoteFetch.sysBin('reg.exe');
   if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
   const keyPath = 'HKCU\\' + t.key;
-  if (!regQueryValueTyped(keyPath, t.value)) return { status: 'absent', message: 'значения нет' };
+  // P1-7: tri-state — ошибка чтения/парсинга ≠ «значения нет» (та давала бы absent
+  // и ложный успех). Любая ошибка → failed.
+  const q0 = regQueryValueTyped(keyPath, t.value);
+  if (!q0.ok) return { status: 'failed', message: 'reg query: ' + q0.error };
+  if (!q0.found) return { status: 'absent', message: 'значения нет' };
   try {
     execFileSync(reg, ['delete', keyPath, '/v', t.value, '/f'], { windowsHide: true, stdio: 'ignore' });
   } catch (e) {
     return { status: 'failed', message: 'reg delete: ' + String((e && e.message) || e) };
   }
-  if (regQueryValueTyped(keyPath, t.value)) return { status: 'failed', message: 'значение реестра осталось' };
+  const q1 = regQueryValueTyped(keyPath, t.value);
+  if (!q1.ok) return { status: 'failed', message: 'верификация reg: ' + q1.error };
+  if (q1.found) return { status: 'failed', message: 'значение реестра осталось' };
   return { status: 'removed', message: 'реестр: ' + keyPath + ' → ' + t.value };
 }
 
 // Убрать ТОЧНУЮ запись из пользовательского PATH (HKCU\Environment), сохранив
 // тип значения (REG_SZ/REG_EXPAND_SZ) и НЕ раскрывая %VAR% чужих записей.
-// Запись убирается ТОЛЬКО когда каталог установки исчез/опустел (t.onlyIfDirGone).
-function winRemoveUserPathEntry(t) {
+// P0-5: pathentry идёт через ТОТ ЖЕ fail-closed guard, что и файловые цели
+// (reparse/junction в каталоге-цели или предках → отказ), и запись убирается
+// ТОЛЬКО когда целевой каталог реально ОТСУТСТВУЕТ (после удаления наших файлов
+// emptydir его снёс; junction/подмена/чужие файлы → запись остаётся).
+function winRemoveUserPathEntry(t, guardOpts) {
   const dir = t && t.dir;
   if (!dir) return { status: 'failed', message: 'ЗАЩИТА: пустая pathentry-цель' };
-  if (t.onlyIfDirGone) {
-    try {
-      if (fs.existsSync(dir) && fs.readdirSync(dir).length > 0) {
-        return { status: 'kept', message: 'каталог ' + dir + ' не пуст — запись PATH оставлена (там чужие файлы)' };
-      }
-    } catch (e) {
+  const g = uninstallExec.checkTarget(dir, guardOpts);
+  if (!g.ok) return { status: 'failed', message: 'ЗАЩИТА: ' + g.reason };
+  try {
+    fs.lstatSync(g.norm);
+    return { status: 'kept', message: 'каталог ' + dir + ' ещё существует — запись PATH оставлена' };
+  } catch (e) {
+    if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) {
       return { status: 'failed', message: 'проверка каталога PATH-записи: ' + String((e && e.code) || e) };
     }
   }
   const reg = remoteFetch.sysBin('reg.exe');
   if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
+  // P1-7: tri-state — ошибка чтения PATH ≠ «PATH нет» (иначе ложный absent).
   const cur = regQueryValueTyped('HKCU\\Environment', 'Path');
-  if (!cur) return { status: 'absent', message: 'пользовательского PATH нет' };
+  if (!cur.ok) return { status: 'failed', message: 'чтение PATH: ' + cur.error };
+  if (!cur.found) return { status: 'absent', message: 'пользовательского PATH нет' };
   const upd = uninstallExec.computeUserPathWithout(cur.data, dir);
   if (!upd.changed) return { status: 'absent', message: 'записи в PATH нет' };
   try {
@@ -1095,7 +1106,7 @@ function winRemoveUserPathEntry(t) {
     return { status: 'failed', message: 'запись PATH: ' + String((e && e.message) || e) };
   }
   const after = regQueryValueTyped('HKCU\\Environment', 'Path');
-  if (!after || after.data !== upd.value) {
+  if (!after.ok || !after.found || after.data !== upd.value) {
     // Верификация не сошлась — пробуем вернуть исходное значение (не теряем PATH).
     try { execFileSync(reg, ['add', 'HKCU\\Environment', '/v', 'Path', '/t', cur.type, '/d', cur.data, '/f'], { windowsHide: true, stdio: 'ignore' }); } catch (e) { /* лучшее из возможного */ }
     return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — вернул исходный' };
@@ -1111,19 +1122,21 @@ function macBundleIdOf(appPath) {
       { encoding: 'utf8', timeout: 10000 }).trim();
   } catch (e) { return ''; }
 }
-// macOS: TeamIdentifier подписи бандла (пусто при сбое).
+// macOS: TeamIdentifier подписи бандла (пусто при сбое/adhoc).
+// P1-2: codesign -dv пишет диагностику (вкл. TeamIdentifier=) в STDERR при
+// УСПЕХЕ (exit 0) — stdout пуст. Берём spawnSync и парсим stdout+stderr вместе,
+// иначе валидный маскот получает пустой TeamID и .app никогда не удаляется.
 function macTeamIdOf(appPath) {
   try {
-    const out = execFileSync('/usr/bin/codesign', ['-dv', '--verbose=4', appPath],
-      { encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
-    const m = String(out).match(/^TeamIdentifier=(.+)$/m);
-    return m ? m[1].trim() : '';
-  } catch (e) {
-    // codesign пишет в stderr; execFileSync с pipe stderr кладёт его в e.stderr
-    const s = String((e && e.stderr) || '');
-    const m = s.match(/^TeamIdentifier=(.+)$/m);
-    return m ? m[1].trim() : '';
-  }
+    const r = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', appPath],
+      { encoding: 'utf8', timeout: 20000 });
+    if (r.error) return '';
+    const both = String(r.stdout || '') + '\n' + String(r.stderr || '');
+    const m = both.match(/^TeamIdentifier=(.+)$/m);
+    const team = m ? m[1].trim() : '';
+    // adhoc-подпись даёт «TeamIdentifier=not set» — это НЕ идентичность.
+    return team && team.toLowerCase() !== 'not set' ? team : '';
+  } catch (e) { return ''; }
 }
 
 // macOS: доверенная информация о .app скрепки из ВШИТОГО vendor (не user-writable).
@@ -1152,18 +1165,18 @@ function buildUninstallCtx() {
     desktop,
     courseTargetRaw: (cfg.course && cfg.course.targetDirDefault) || '',
     courseShortcut: (cfg.course && cfg.course.shortcutName) || 'Курс вайбкодинг (Claude Code)',
+    // P1-4: доверенное имя пакета uv-тула nomad из вшитого config.json
+    // (pyproject [project].name); гигиена и дефолт — в uninstall-targets.
+    nomadTool: (cfg.nomad && cfg.nomad.packageName) || '',
     mascotMac: IS_MAC ? resolveMascotVendorApp() : null
   };
 }
 
-// Абсолютный путь uv для `uv tool uninstall` (не через PATH).
-function findUvBinary() {
-  const home = os.homedir();
-  const cands = IS_WIN
-    ? [path.join(home, '.local', 'bin', 'uv.exe'), path.join(home, 'AppData', 'Local', 'Programs', 'uv', 'uv.exe')]
-    : [path.join(home, '.local', 'bin', 'uv'), '/usr/local/bin/uv', '/opt/homebrew/bin/uv'];
-  return firstExisting(cands);
-}
+// P0-2: findUvBinary/`uv tool uninstall` из деинсталлятора УДАЛЕНЫ. На Windows
+// main работает elevated (requireAdministrator), а ~/.local/bin/uv.exe —
+// user-writable: запуск подменённого бинаря под elevated-токеном = admin RCE.
+// Инвентарь uv-тула (venv + шимы) деинсталлятор удаляет напрямую точными
+// file/dirtree-целями через guard — uv для этого не нужен.
 
 // Человекочитаемое описание цели (для dry-run и лога).
 function describeTarget(t) {
@@ -1172,12 +1185,11 @@ function describeTarget(t) {
     case 'dirtree': return 'дерево ' + t.path + (t.why ? ' (' + t.why + ')' : '');
     case 'emptydir': return 'каталог (если пуст) ' + t.path;
     case 'reg': return 'реестр HKCU\\' + t.key + ' → ' + t.value;
-    case 'pathentry': return 'запись PATH ' + t.dir + ' (только если каталог опустел)';
-    case 'profileline': return 'строки «' + t.marker + '» из ' + t.file;
+    case 'pathentry': return 'запись PATH ' + t.dir + ' (только если каталог исчез)';
+    case 'profileline': return 'точная строка «' + t.line + '» из ' + t.file;
     case 'launchagent': return 'LaunchAgent ' + t.label + ' (' + t.plist + ')';
     case 'appbundle': return '.app ' + t.path + ' (при совпадении идентичности)';
     case 'killproc': return 'остановка процесса ' + (t.image || t.pattern);
-    case 'uvtool': return 'uv tool uninstall ' + t.tool;
     default: return JSON.stringify(t);
   }
 }
@@ -1197,11 +1209,38 @@ function executeUninstallTarget(t, guardOpts) {
       }
       return uninstallExec.removeDirTree(t.path, guardOpts);
     }
-    case 'profileline': return uninstallExec.removeProfileLine(t.file, t.marker, guardOpts);
+    case 'profileline': return uninstallExec.removeProfileLine(t.file, t.line, guardOpts);
     case 'launchagent': {
       if (!IS_MAC) return { status: 'failed', message: 'launchagent вне macOS' };
-      try { execFileSync('/bin/launchctl', ['unload', t.plist], { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* best-effort */ }
-      try { execFileSync('/bin/launchctl', ['remove', t.label], { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* best-effort */ }
+      // P1-3: guard plist ПЕРВЫМ — для подозрительной цели launchctl не дёргаем.
+      const g = uninstallExec.checkTarget(t.plist, guardOpts);
+      if (!g.ok) return { status: 'failed', message: 'ЗАЩИТА: ' + g.reason };
+      if (!uninstallExec.valueHygieneOk(t.label) || !/^[A-Za-z0-9._-]+$/.test(t.label)) {
+        return { status: 'failed', message: 'ЗАЩИТА: некорректный label LaunchAgent' };
+      }
+      const run = (args) => spawnSync('/bin/launchctl', args, { encoding: 'utf8', timeout: 20000 });
+      // unload/remove: «не загружен» — норма; РЕАЛЬНУЮ ошибку не проглатываем,
+      // а фиксируем и сверяем с фактом ниже.
+      const errs = [];
+      let plistExists = false;
+      try { plistExists = fs.existsSync(g.norm); } catch (e) { plistExists = false; }
+      if (plistExists) {
+        const r1 = run(['unload', g.norm]);
+        if (r1.error) errs.push('unload: ' + String(r1.error.message || r1.error));
+        else if (r1.status !== 0 && !/not (currently )?loaded|could not find|no such/i.test(String(r1.stderr || '') + String(r1.stdout || ''))) {
+          errs.push('unload: код ' + r1.status);
+        }
+      }
+      const r2 = run(['remove', t.label]);
+      if (r2.error) errs.push('remove: ' + String(r2.error.message || r2.error));
+      // Авторитетная проверка ФАКТА: job с нашим label не должен существовать.
+      const uid = (typeof process.getuid === 'function') ? process.getuid() : null;
+      if (uid == null) return { status: 'failed', message: 'нет uid для launchctl print (fail-closed)' };
+      const r3 = run(['print', 'gui/' + uid + '/' + t.label]);
+      if (r3.error) return { status: 'failed', message: 'launchctl print: ' + String(r3.error.message || r3.error) };
+      if (r3.status === 0) {
+        return { status: 'failed', message: 'LaunchAgent «' + t.label + '» всё ещё загружен' + (errs.length ? ' (' + errs.join('; ') + ')' : '') };
+      }
       return uninstallExec.removeFile(t.plist, guardOpts);
     }
     case 'appbundle': {
@@ -1226,7 +1265,8 @@ function executeUninstallTarget(t, guardOpts) {
     }
     case 'pathentry': {
       if (!IS_WIN) return { status: 'failed', message: 'pathentry вне Windows' };
-      return winRemoveUserPathEntry(t);
+      // P0-5: через guard (junction/reparse в цели или предках → отказ).
+      return winRemoveUserPathEntry(t, guardOpts);
     }
     case 'killproc': {
       // best-effort остановка НАШЕГО процесса (иначе exe залочен) — не влияет на статус
@@ -1240,18 +1280,8 @@ function executeUninstallTarget(t, guardOpts) {
       } catch (e) { /* процесса нет — норма */ }
       return { status: 'absent', message: 'остановка процесса (best-effort)' };
     }
-    case 'uvtool': {
-      const uv = findUvBinary();
-      if (!uv) return { status: 'absent', message: 'uv не найден — venv доудалят файловые цели' };
-      try {
-        execFileSync(uv, ['tool', 'uninstall', String(t.tool)], { windowsHide: true, stdio: 'ignore', timeout: 120000 });
-        return { status: 'removed', message: 'uv tool uninstall ' + t.tool + ' — выполнено' };
-      } catch (e) {
-        // ненулевой код (в т.ч. «not installed») — не маскируем под успех; файловые
-        // цели ниже и пост-детекция дадут честный итог.
-        return { status: 'kept', message: 'uv tool uninstall ' + t.tool + ': код ' + ((e && e.status) != null ? e.status : '?') + ' — доудаляю файлы напрямую' };
-      }
-    }
+    // P0-2: типа 'uvtool' больше нет — user-writable uv.exe из (elevated)
+    // деинсталлятора НЕ запускается; venv/шимы удаляются file/dirtree-целями.
     default:
       return { status: 'failed', message: 'ЗАЩИТА: неизвестный тип цели «' + String(t && t.type) + '» (fail-closed)' };
   }
@@ -1265,6 +1295,12 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   const meta = COMPONENT_META.get(id);
   if (meta && meta.hidden) {
     return { id, ok: false, code: -1, error: `Служебный компонент «${id}» не деинсталлируется.` };
+  }
+  // P0-4: платформенный гейт применяется и к ДЕИНСТАЛЛЯЦИИ — ДО построения и
+  // исполнения плана. Crafted/legacy receipt для win32-only компонента на macOS
+  // не должен исполнять win32-план (и наоборот).
+  if (meta && !componentShownOnPlatform(meta, process.platform)) {
+    return { id, ok: false, code: -1, error: `Компонент «${id}» недоступен на платформе ${process.platform} — деинсталляция отклонена.` };
   }
 
   const home = os.homedir();
@@ -1323,18 +1359,26 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
     if (r.status === 'failed') failed++;
   }
 
-  // Пост-детекция: компонент реально исчез? Сбой детекции → считаем, что остался.
+  // P1-6: пост-проверка по ТОЧНЫМ managed-целям плана (uninstall-exec.
+  // verifyPostconditions), НЕ по глобальной детекции — чужой uv/nomad/Claude.app
+  // на машине не даёт ни вечного failure, ни ложного успеха. Сбой проверки →
+  // считаем, что компонент остался (fail-closed).
   let stillThere = true;
+  let postProblems = [];
   try {
-    const det = detectComponents();
-    stillThere = !!(det[id] && det[id].installed);
+    const post = uninstallExec.verifyPostconditions(plan, guardOpts, {
+      regQuery: (key, value) => regQueryValueTyped(key, value),
+      bundleIdOf: (p) => macBundleIdOf(p)
+    });
+    stillThere = !post.ok;
+    postProblems = post.problems || [];
   } catch (e) { stillThere = true; }
 
   if (failed > 0 || stillThere) {
     const rest = receipts.restoreReceipt(home, id);
     const why = failed > 0
       ? 'часть целей не удалена (' + failed + ' отказ/сбой — см. лог)'
-      : 'пост-проверка всё ещё видит компонент';
+      : 'пост-проверка managed-целей: ' + (postProblems.length ? postProblems.join('; ') : 'не подтвердила удаление');
     say('Деинсталляция «' + id + '» НЕ завершена: ' + why + '. Отметка установки ' + (rest.ok ? 'возвращена' : 'НЕ восстановилась (' + rest.error + ')') + '.');
     logLine('=== uninstall FAILED (failed=' + failed + ', stillThere=' + stillThere + ') ===');
     return { id, ok: false, code: 1, error: why };

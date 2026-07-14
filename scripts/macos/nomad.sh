@@ -22,6 +22,9 @@ if [ ! -f "$SRC/pyproject.toml" ]; then
     echo "Клонирую Nomad из $REPO ..."
     if [ -z "$DRY" ]; then
       if [ -d "$SRC/.git" ]; then git -C "$SRC" pull --ff-only; else git clone --depth 1 "$REPO" "$SRC"; fi
+      # P0-3: НАШ маркер владения клоном — деинсталлятор удаляет ~/.nomad-src ТОЛЬКО
+      # при его наличии (pyproject.toml есть у чужих проектов — не гейт).
+      [ -f "$SRC/pyproject.toml" ] && printf 'installed-by: hamidun-setup\n' > "$SRC/.hamidun-nomad"
     fi
   fi
 fi
@@ -66,7 +69,8 @@ if [ -z "$DRY" ]; then
   for shim in nomad hermes; do
     [ -e "$HOME/.local/bin/$shim" ] && echo "HM-RECEIPT path $HOME/.local/bin/$shim"
   done
-  [ -d "$HOME/.local/share/uv/tools/nomad" ] && echo "HM-RECEIPT path $HOME/.local/share/uv/tools/nomad"
+  # P1-4: uv-тул называется по pyproject [project].name = hermes-agent (не «nomad»).
+  [ -d "$HOME/.local/share/uv/tools/hermes-agent" ] && echo "HM-RECEIPT path $HOME/.local/share/uv/tools/hermes-agent"
   [ -f "$HH/SOUL.md" ] && echo "HM-RECEIPT path $HH/SOUL.md"
   [ -f "$HH/skins/nomad.yaml" ] && echo "HM-RECEIPT path $HH/skins/nomad.yaml"
 fi

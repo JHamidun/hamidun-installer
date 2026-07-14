@@ -19,13 +19,16 @@
 //   emptydir    — родительский каталог; удалять ТОЛЬКО если реально пуст
 //   reg         — точное значение HKCU-реестра {key, value} (только Windows)
 //   pathentry   — точная запись пользовательского PATH; убирается ТОЛЬКО если
-//                 каталог установки исчез/пуст после удаления файлов
-//   profileline — точный маркер в разрешённом rc-файле (~/.zshrc и т.п., macOS)
+//                 каталог установки реально ОТСУТСТВУЕТ (guard: не junction,
+//                 не подменён — P0-5) после удаления файлов
+//   profileline — ТОЧНАЯ installer-строка в разрешённом rc-файле (~/.zshrc и
+//                 т.п., macOS); полное совпадение строки, не подстрока (P0-6)
 //   launchagent — точный label + точный plist-путь (macOS)
 //   appbundle   — точный .app-бандл; удаляется ТОЛЬКО при подтверждённой
 //                 идентичности (CFBundleIdentifier из ДОВЕРЕННОГО vendor + пин TeamID)
 //   killproc    — best-effort остановка НАШЕГО процесса перед удалением
-//   uvtool      — `uv tool uninstall <tool>` (собственный инвентарь uv)
+// (типа uvtool больше НЕТ — P0-2: деинсталлятор не запускает user-writable
+//  uv.exe; инвентарь uv-тула удаляется напрямую file/dirtree-целями)
 //
 // preserve[] — пути, которые деинсталляция ОБЯЗАНА пережить (пользовательское
 // состояние: прогресс курса, SSH-конфиг моста, конфиг hermes). Guard добавляет их
@@ -35,6 +38,11 @@ const path = require('path');
 
 // Пин издателя маскота (Apple Team ID) — как в scripts/macos/mascot.sh.
 const MASCOT_TEAM_ID = '3VN93XA9DY';
+
+// P0-6: ТОЧНАЯ installer-строка CLI-прокси моста — verbatim BRIDGE_RC_LINE из
+// scripts/macos/bridge.sh. Деинсталляция убирает из rc ТОЛЬКО строки, целиком
+// равные ей (после trim); строки, лишь СОДЕРЖАЩИЕ маркер-текст, не трогаются.
+const BRIDGE_RC_LINE = '[ -f "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" ] && . "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" # Hamidun Bridge CLI proxy';
 
 // Известные install-корни, производные ТОЛЬКО от home (не из подменяемого env).
 function winLocalAppData(home) { return path.join(home, 'AppData', 'Local'); }
@@ -61,6 +69,8 @@ function resolveCourseTarget(raw, home, platform) {
 //   desktop: абсолютный путь рабочего стола (Electron app.getPath('desktop')),
 //   courseTargetRaw: config.json course.targetDirDefault (вшитый ресурс),
 //   courseShortcut: config.json course.shortcutName (вшитый ресурс),
+//   nomadTool: config.json nomad.packageName (вшитый ресурс; после гигиены,
+//              иначе дефолт 'hermes-agent') — P1-4,
 //   mascotMac: { appName, bundleId } | null — из ДОВЕРЕННОГО vendor-бандла
 //              (main резолвит на macOS; null = vendor недоступен → .app НЕ удаляем)
 // }
@@ -142,9 +152,10 @@ function uninstallTargets(id, ctx) {
         });
         targets.push({ type: 'file', path: path.join(dst, 'bridge_agent.py') });
         targets.push({ type: 'emptydir', path: dst });
-        const MARK = '# Hamidun Bridge CLI proxy';
-        targets.push({ type: 'profileline', file: path.join(home, '.zshrc'), marker: MARK });
-        targets.push({ type: 'profileline', file: path.join(home, '.bash_profile'), marker: MARK });
+        // P0-6: удаляем ТОЛЬКО строку, ТОЧНО РАВНУЮ installer-строке из bridge.sh
+        // (BRIDGE_RC_LINE, verbatim) — НЕ любую строку, содержащую маркер-подстроку.
+        targets.push({ type: 'profileline', file: path.join(home, '.zshrc'), line: BRIDGE_RC_LINE });
+        targets.push({ type: 'profileline', file: path.join(home, '.bash_profile'), line: BRIDGE_RC_LINE });
         preserve.push(path.join(dst, 'config.json'));
       }
       notes.push('config.json моста (SSH-настройки) НЕ удаляется.');
@@ -187,19 +198,29 @@ function uninstallTargets(id, ctx) {
 
     case 'nomad': {
       const hermesHome = isWin ? path.join(winLocalAppData(home), 'hermes') : path.join(home, '.hermes');
-      // Собственный инвентарь uv — сперва честный `uv tool uninstall` (чистит и метаданные uv).
-      targets.push({ type: 'uvtool', tool: 'nomad' });
+      // P0-2: НИКАКОГО запуска user-writable uv.exe из деинсталлятора (на Windows
+      // main работает elevated → подменённый ~/.local/bin/uv.exe исполнился бы под
+      // админом = RCE). Инвентарь uv-тула (venv + шимы) удаляем НАПРЯМУЮ точными
+      // file/dirtree-целями — uv-метаданные тула живут внутри его же venv-каталога.
+      // P1-4: имя пакета uv-тула — доверенное (вшитый config.json nomad.packageName,
+      // pyproject [project].name = hermes-agent), после гигиены; НЕ «nomad»: тула с
+      // таким именем uv не создаёт, а чужой каталог tools/nomad сносить нельзя.
+      const rawTool = ctx.nomadTool;
+      const tool = (typeof rawTool === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(rawTool))
+        ? rawTool : 'hermes-agent';
       const shims = isWin ? ['nomad.exe', 'nomad', 'hermes.exe', 'hermes'] : ['nomad', 'hermes'];
       for (const s of shims) targets.push({ type: 'file', path: path.join(home, '.local', 'bin', s) });
-      // venv uv-тула nomad — uv-owned дерево, известные точные пути.
+      // venv uv-тула — uv-owned дерево, известные точные пути.
       if (isWin) {
-        targets.push({ type: 'dirtree', path: path.join(winRoamingAppData(home), 'uv', 'tools', 'nomad'), why: 'venv uv-тула nomad' });
+        targets.push({ type: 'dirtree', path: path.join(winRoamingAppData(home), 'uv', 'tools', tool), why: 'venv uv-тула ' + tool });
       }
-      targets.push({ type: 'dirtree', path: path.join(home, '.local', 'share', 'uv', 'tools', 'nomad'), why: 'venv uv-тула nomad' });
-      // Клон исходников — удаляем ТОЛЬКО стандартное место клона установщика и
-      // ТОЛЬКО если внутри действительно лежит pyproject.toml (санити-гейт).
+      targets.push({ type: 'dirtree', path: path.join(home, '.local', 'share', 'uv', 'tools', tool), why: 'venv uv-тула ' + tool });
+      // P0-3: клон исходников — ТОЛЬКО стандартное место клона установщика и ТОЛЬКО
+      // при НАШЕМ маркере .hamidun-nomad (его пишет ТОЛЬКО наш install-скрипт после
+      // clone). pyproject.toml есть у миллионов чужих Python-проектов — он НЕ гейт.
+      // Нет маркера → каталог не трогаем (fail-closed).
       const srcClone = isWin ? path.join(winLocalAppData(home), 'nomad-src') : path.join(home, '.nomad-src');
-      targets.push({ type: 'dirtree', path: srcClone, onlyIfContains: 'pyproject.toml', why: 'клон исходников nomad' });
+      targets.push({ type: 'dirtree', path: srcClone, onlyIfContains: '.hamidun-nomad', why: 'клон исходников nomad (наш маркер)' });
       // Брендинг: точные файлы; config.yaml (ключи/настройки юзера) СОХРАНЯЕТСЯ.
       targets.push({ type: 'file', path: path.join(hermesHome, 'SOUL.md') });
       targets.push({ type: 'file', path: path.join(hermesHome, 'skins', 'nomad.yaml') });
@@ -217,4 +238,4 @@ function uninstallTargets(id, ctx) {
   return { targets, preserve, notes };
 }
 
-module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID };
+module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, BRIDGE_RC_LINE };

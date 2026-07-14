@@ -24,6 +24,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 function isCaseInsensitive(platform) { return platform === 'win32' || platform === 'darwin'; }
 function normKey(p, platform) {
@@ -227,10 +228,16 @@ function allowedRcFiles(home) {
   return ['.zshrc', '.bash_profile', '.bashrc'].map((n) => path.join(home, n));
 }
 
-// Убрать из rc-файла ТОЛЬКО строки, содержащие точный маркер. Атомарная
-// перезапись: tmp (0600, fsync, ре-чтение) → rename; при сбое оригинал цел.
-function removeProfileLine(rcFile, marker, opts, dry) {
-  if (!valueHygieneOk(marker)) return res('failed', 'ЗАЩИТА: некорректный маркер');
+// P0-6: убрать из rc-файла ТОЛЬКО строки, ТОЧНО РАВНЫЕ нашей installer-строке
+// (полное совпадение после trim) — НЕ по подстроке: пользовательская строка,
+// внутри которой встречается наш маркер-текст (export NOTE="… # Hamidun …"),
+// НЕ удаляется.
+// P0-1: атомарная перезапись через temp в ТОМ ЖЕ каталоге с НЕПРЕДСКАЗУЕМЫМ
+// именем и O_EXCL ('wx' — по существующему пути/hardlink/symlink НЕ идём, EEXIST),
+// затем fstat-проверка открытого fd (обычный файл, nlink==1 — не чей-то hardlink),
+// запись через fd, fsync, ре-чтение, rename. Любая аномалия → отказ, цель цела.
+function removeProfileLine(rcFile, line, opts, dry) {
+  if (!valueHygieneOk(line)) return res('failed', 'ЗАЩИТА: некорректная строка-цель');
   const home = path.resolve(opts.home);
   if (!allowedRcFiles(home).some((a) => pathEq(a, rcFile, opts.platform))) {
     return res('failed', 'ЗАЩИТА: rc-файл вне разрешённого списка: ' + rcFile);
@@ -243,35 +250,51 @@ function removeProfileLine(rcFile, marker, opts, dry) {
     if (e && e.code === 'ENOENT') return res('absent', 'rc-файла нет');
     return res('failed', 'чтение rc: ' + ((e && e.code) || e));
   }
-  if (raw.indexOf(marker) === -1) return res('absent', 'маркера нет');
-  const kept = raw.split('\n').filter((l) => l.indexOf(marker) === -1);
+  const want = String(line).trim();
+  const lines = raw.split('\n');
+  const kept = lines.filter((l) => l.trim() !== want);
+  if (kept.length === lines.length) return res('absent', 'нашей строки нет');
   const next = kept.join('\n');
-  if (dry) return res('removed', '[dry-run] WOULD убрать строки с маркером');
-  const tmp = g.norm + '.hm-un.' + process.pid + '.tmp';
+  if (dry) return res('removed', '[dry-run] WOULD убрать точную installer-строку');
+  let tmp = '';
   try {
-    const fd = fs.openSync(tmp, 'w', 0o600);
+    // O_EXCL + случайное имя: заранее заготовленный hardlink на чужой файл
+    // (например ~/.claude/settings.json) даст EEXIST, а не запись в его inode.
+    let fd = -1;
+    for (let attempt = 0; attempt < 3 && fd < 0; attempt++) {
+      const cand = g.norm + '.hm-un.' + crypto.randomBytes(8).toString('hex') + '.tmp';
+      try { fd = fs.openSync(cand, 'wx', 0o600); tmp = cand; }
+      catch (e) { if (!e || e.code !== 'EEXIST') throw e; }
+    }
+    if (fd < 0) throw new Error('ЗАЩИТА: temp уже существует (EEXIST) — возможная подмена, отказ');
     try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile()) throw new Error('ЗАЩИТА: temp — не обычный файл');
+      if (typeof st.nlink === 'number' && st.nlink !== 1) {
+        throw new Error('ЗАЩИТА: temp имеет nlink=' + st.nlink + ' (hardlink на чужое) — отказ');
+      }
       fs.writeFileSync(fd, next, 'utf8');
       try { fs.fsyncSync(fd); } catch (e) { /* не фатально */ }
     } finally { fs.closeSync(fd); }
     if (fs.readFileSync(tmp, 'utf8') !== next) throw new Error('tmp не совпал');
     try { fs.renameSync(tmp, g.norm); }
     catch (e) {
-      // Windows EPERM поверх существующего: old→bak, tmp→dst, откат при сбое.
-      const bak = g.norm + '.' + process.pid + '.bak';
+      // Windows EPERM поверх существующего: old→bak (тоже непредсказуемое имя),
+      // tmp→dst, откат при сбое.
+      const bak = g.norm + '.' + crypto.randomBytes(8).toString('hex') + '.bak';
       let moved = false;
       try {
         fs.renameSync(g.norm, bak); moved = true;
         fs.renameSync(tmp, g.norm);
-        try { fs.rmSync(bak, { force: true }); } catch (e2) { /* bak восстановится при чтении */ }
+        try { fs.rmSync(bak, { force: true }); } catch (e2) { /* bak останется рядом */ }
       } catch (e3) {
         if (moved) { try { fs.renameSync(bak, g.norm); } catch (e4) { /* bak остаётся для ручного восстановления */ } }
         throw e3;
       }
     }
-    return res('removed', 'строки с маркером убраны');
+    return res('removed', 'точная installer-строка убрана');
   } catch (e) {
-    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
+    if (tmp) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } }
     return res('failed', 'перезапись rc не удалась: ' + String((e && e.message) || e));
   }
 }
@@ -292,8 +315,115 @@ function computeUserPathWithout(rawPath, dir) {
   return { changed: removed > 0, removed, value: kept.join(';') };
 }
 
+// P1-7: чистый tri-state классификатор результата `reg query <key> /v <value>`.
+// НЕ смешивает «значения нет» с ошибкой query/парсера:
+//   { ok:true, found:true, type, data } — значение прочитано;
+//   { ok:true, found:false }            — ключа/значения штатно нет (код 1);
+//   { ok:false, error }                 — любая другая ошибка запуска/кода/парсинга
+//                                         → вызывающий обязан дать failed, НЕ absent.
+function classifyRegQuery(valueName, execResult) {
+  if (!execResult || typeof execResult !== 'object') return { ok: false, error: 'нет результата reg query' };
+  if (execResult.error) return { ok: false, error: String((execResult.error && execResult.error.message) || execResult.error) };
+  if (execResult.status !== 0) {
+    // reg.exe: код 1 = «ключ/значение не найдены» (штатное отсутствие)
+    if (execResult.status === 1) return { ok: true, found: false };
+    return { ok: false, error: 'reg query: код ' + execResult.status };
+  }
+  const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = String(execResult.stdout || '').match(new RegExp('^\\s*' + esc + '\\s+(REG_(?:EXPAND_)?SZ)\\s+(.*)$', 'im'));
+  if (!m) return { ok: false, error: 'вывод reg query не разобрался как REG_(EXPAND_)SZ (это ОШИБКА, не absent)' };
+  return { ok: true, found: true, type: m[1], data: m[2].replace(/\r$/, '') };
+}
+
+// P1-6: пост-проверка деинсталляции по ТОЧНЫМ managed-целям плана — НЕ глобальная
+// детекция («любой uv/nomad/Claude.app на машине»): чужая установка не даёт ни
+// вечного failure, ни ложного успеха. Правила по типам:
+//   file/launchagent      — путь обязан отсутствовать;
+//   dirtree               — отсутствует, ЛИБО намеренно оставлен (onlyIfContains-маркер отсутствует);
+//   emptydir              — отсутствует или НЕ пуст (preserve/чужие данные — законно);
+//   reg/pathentry (win)   — через helpers.regQuery (tri-state); ошибка чтения → проблема (fail-closed);
+//   profileline           — точной installer-строки в rc больше нет;
+//   appbundle             — отсутствует, ЛИБО чужой (bundleId ≠ эталону — не наш, законно оставлен);
+//   killproc              — не постусловие.
+// helpers: { regQuery(key, value) → tri-state, bundleIdOf(path) → string }.
+function verifyPostconditions(plan, opts, helpers) {
+  helpers = helpers || {};
+  const isWin = !!(opts && opts.platform === 'win32');
+  const problems = [];
+  const lstatOrNull = (p) => { try { return fs.lstatSync(p); } catch (e) { return null; } };
+  for (const t of (plan && plan.targets) || []) {
+    try {
+      switch (t && t.type) {
+        case 'file':
+          if (lstatOrNull(t.path)) problems.push('файл остался: ' + t.path);
+          break;
+        case 'dirtree': {
+          if (!lstatOrNull(t.path)) break;
+          if (t.onlyIfContains) {
+            let gated = false;
+            try { gated = !fs.existsSync(path.join(t.path, t.onlyIfContains)); } catch (e) { gated = false; }
+            if (gated) break; // нет нашего маркера → каталог намеренно оставлен (не наш)
+          }
+          problems.push('дерево осталось: ' + t.path);
+          break;
+        }
+        case 'emptydir': {
+          if (!lstatOrNull(t.path)) break;
+          let n = -1;
+          try { n = fs.readdirSync(t.path).length; } catch (e) { n = -1; }
+          if (n === 0) problems.push('пустой каталог остался: ' + t.path);
+          break;
+        }
+        case 'reg': {
+          if (!isWin) break;
+          if (typeof helpers.regQuery !== 'function') { problems.push('нет regQuery для пост-проверки реестра'); break; }
+          const q = helpers.regQuery('HKCU\\' + t.key, t.value);
+          if (!q || q.ok !== true) { problems.push('реестр не читается: ' + t.key + ' → ' + t.value + (q && q.error ? ' (' + q.error + ')' : '')); break; }
+          if (q.found) problems.push('значение реестра осталось: ' + t.key + ' → ' + t.value);
+          break;
+        }
+        case 'pathentry': {
+          if (!isWin) break;
+          if (lstatOrNull(t.dir)) break; // каталог существует → запись законно оставлена
+          if (typeof helpers.regQuery !== 'function') { problems.push('нет regQuery для пост-проверки PATH'); break; }
+          const q = helpers.regQuery('HKCU\\Environment', 'Path');
+          if (!q || q.ok !== true) { problems.push('пользовательский PATH не читается' + (q && q.error ? ' (' + q.error + ')' : '')); break; }
+          if (q.found && computeUserPathWithout(q.data, t.dir).changed) problems.push('запись PATH осталась: ' + t.dir);
+          break;
+        }
+        case 'profileline': {
+          let raw = null;
+          try { raw = fs.readFileSync(t.file, 'utf8'); } catch (e) { raw = null; }
+          if (raw == null) break;
+          const want = String(t.line || '').trim();
+          if (want && raw.split('\n').some((l) => l.trim() === want)) problems.push('installer-строка осталась в ' + t.file);
+          break;
+        }
+        case 'launchagent':
+          if (lstatOrNull(t.plist)) problems.push('plist остался: ' + t.plist);
+          break;
+        case 'appbundle': {
+          if (!lstatOrNull(t.path)) break;
+          const bid = typeof helpers.bundleIdOf === 'function' ? String(helpers.bundleIdOf(t.path) || '') : '';
+          if (bid && t.expectBundleId && bid !== t.expectBundleId) break; // чужой .app → законно оставлен
+          problems.push('.app остался: ' + t.path);
+          break;
+        }
+        case 'killproc':
+          break;
+        default:
+          problems.push('неизвестный тип цели в пост-проверке: ' + String(t && t.type));
+      }
+    } catch (e) {
+      problems.push('пост-проверка ' + String(t && t.type) + ': ' + String((e && e.message) || e));
+    }
+  }
+  return { ok: problems.length === 0, problems };
+}
+
 module.exports = {
   protectedRoots, checkTarget, valueHygieneOk, pathEq, isInside,
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
-  allowedRcFiles, computeUserPathWithout
+  allowedRcFiles, computeUserPathWithout,
+  classifyRegQuery, verifyPostconditions
 };

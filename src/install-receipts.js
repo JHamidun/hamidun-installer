@@ -68,6 +68,9 @@ function recoverBak(dir, dstBaseName) {
   try {
     const dst = path.join(dir, dstBaseName);
     if (fs.existsSync(dst)) return;
+    // P1-1: идёт (или упала посреди) деинсталляция — маркер деактивирован в
+    // tombstone. «Удалённый» компонент НЕ воскрешаем из осиротевшего .bak.
+    if (fs.existsSync(dst + TOMBSTONE_SUFFIX)) return;
     const cands = fs.readdirSync(dir)
       .filter((n) => n.indexOf(dstBaseName + '.') === 0 && n.endsWith('.bak'));
     if (!cands.length) return;
@@ -177,12 +180,30 @@ function restoreReceipt(homedir, id) {
   }
 }
 
-// Убрать tombstone после подтверждённого успеха. Результат ПРОВЕРЯЕТСЯ.
+// P1-1: хвосты атомарной записи маркера (<id>.json.*.bak / <id>.json.*.tmp).
+// Осиротевший .bak после finalize воскресил бы «удалённый» компонент через
+// recoverBak — finalize обязан подчистить и его.
+function listReceiptDebris(dir, baseName) {
+  try {
+    return fs.readdirSync(dir)
+      .filter((n) => n.indexOf(baseName + '.') === 0 && (n.endsWith('.bak') || n.endsWith('.tmp')));
+  } catch (e) { return []; }
+}
+
+// Убрать tombstone (И .bak/.tmp-хвосты — P1-1) после подтверждённого успеха.
+// Результат ПРОВЕРЯЕТСЯ.
 function finalizeRemoval(homedir, id) {
   const t = tombstonePath(homedir, id);
+  const dir = receiptsDir(homedir);
+  const base = String(id) + '.json';
   try {
     fs.rmSync(t, { force: true });
+    for (const n of listReceiptDebris(dir, base)) {
+      try { fs.rmSync(path.join(dir, n), { force: true }); } catch (e) { /* проверим ниже */ }
+    }
     if (fs.existsSync(t)) return { ok: false, error: 'tombstone остался: ' + t };
+    const left = listReceiptDebris(dir, base);
+    if (left.length) return { ok: false, error: '.bak/.tmp-хвосты остались: ' + left.join(', ') };
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
