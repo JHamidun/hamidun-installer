@@ -23,24 +23,48 @@ function Update-Path {
 }
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
-# P0-1: аддитивная доустановка ПОВЕРХ существующего ~/.claude (HM_ADDITIVE=1):
-# добавляем только НЕДОСТАЮЩЕЕ, НЕ затирая пользовательские кастомизации.
-# HM_ADDITIVE ставит АВТОРИТЕТНО main.js (живой детекцией ФС, fail-safe → additive);
-# при HM_ADDITIVE base install.ps1 (перезапись свежей базой) НЕ запускается.
+
+# === РЕДИЗАЙН: config НИКОГДА не стирает и не переносит ~/.claude ===
+# Пользовательские данные ОСТАЮТСЯ НА МЕСТЕ. Мы лишь раскладываем НАШУ базу ПОВЕРХ
+# существующего ~/.claude копированием (merge), НИКОГДА не перенося и не стирая всё
+# дерево. Два режима merge:
+#   add-missing (HM_ADDITIVE=1)  — robocopy /XC /XN /XO: докладываем ТОЛЬКО отсутствующие
+#                                  файлы; существующие пользовательские НЕ трогаем.
+#   repair      (HM_ADDITIVE≠1)  — robocopy без /XC: перезаписываем НАШИ базовые файлы
+#                                  свежими; пользовательское (preserve-list) исключено.
+# В ОБОИХ режимах preserve-list (/XF имена+globs, /XD каталоги) защищает ключи, память,
+# историю сессий, локальные настройки и ~/CLAUDE.md — они не перезаписываются даже в repair.
+# Механизм snapshot/restore/rescue/fingerprint УДАЛЁН — без wipe он не нужен (именно он
+# в инциденте затирал реальный ~/.claude). Полная копия-бэкап делается ПЕРВОЙ операцией
+# как сейф-нет; её неполнота НЕ фатальна (оригинал на месте).
+#
+# Режим решает MAIN (install-mode.js/main.js) живой детекцией ФС и, для repair, явным
+# подтверждением (HM_REPAIR + HM_REPAIR_CONFIRMED), и сообщает сюда через HM_ADDITIVE.
 $ADDITIVE = ($env:HM_ADDITIVE -eq '1')
 $claudeHome = Join-Path $env:USERPROFILE '.claude'
-$preExisting = @{}     # скиллы, БЫВШИЕ до нашей раскладки (для консервативного прунинга)
-$pruneDisabled = $false # P0-3: сбой перечисления/копирования → прунинг ПОЛНОСТЬЮ выключен
+$preExisting = @{}      # скиллы, БЫВШИЕ до нашей раскладки (для консервативного прунинга)
+$pruneDisabled = $false # сбой перечисления/копирования → прунинг ПОЛНОСТЬЮ выключен
+$installFailed = $false
 
-# --- источник конфига (P1-8: dry-run ветвится ДО clone/fetch/reset) ---
+# preserve-list — ПОЛЬЗОВАТЕЛЬСКОЕ, НИКОГДА не перезаписываем (ни в add-missing, ни в repair).
+# Glob-aware: chats.db* — история чатов (FTS5 + -wal/-shm/-journal, ~30МБ),
+# tg_session.session* — Telegram-авторизация (+ -wal/-shm/-journal). settings.local.json —
+# локальные настройки юзера. settings.json (НАШ базовый) в список НЕ входит: add-missing в
+# обычном режиме, overwrite в repair. ~/CLAUDE.md обрабатывается отдельно (только-если-нет).
+$excludeNames = @('.credentials.master.env', '.credentials.json', 'settings.local.json', 'MEMORY.md',
+                  'chats.db*', 'tg_session.session*')
+$excludeDirs  = @('memory', 'projects', 'todos', 'shell-snapshots')
+
+# --- источник конфига (dry-run ветвится ДО clone/fetch/reset) ---
 $bundled = $env:HM_BUNDLED_CONFIG
 $haveBundled = [bool]($bundled -and (Test-Path (Join-Path $bundled 'install.ps1')))
 
 if ($DRY) {
     if ($haveBundled) { Write-Host "  [dry-run] Источник: встроенный конфиг (офлайн) $bundled" }
     else { Write-Host "  [dry-run] WOULD: git clone/fetch конфига с GitHub (в dry-run НЕ выполняется)" }
-    if ($ADDITIVE) { Write-Host "  [dry-run] WOULD (аддитивно): полный таймштамп-бэкап ~/.claude ПЕРВОЙ операцией, merge-copy ТОЛЬКО недостающих файлов (robocopy /XC /XN /XO), существующее НЕ трогать, settings.json НЕ перезаписывать, БЕЗ snapshot/restore hamidun-preserve (+ прунинг паков fail-closed)" }
-    else { Write-Host "  [dry-run] WOULD: полный таймштамп-бэкап ~/.claude, install.ps1 -BackupExisting -SkipDeps (+ фильтр паков по HM_KEEP_SKILLS)" }
+    Write-Host "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна)"
+    if ($ADDITIVE) { Write-Host "  [dry-run] WOULD (add-missing): merge-copy ТОЛЬКО недостающих файлов (robocopy /XC /XN /XO), существующее НЕ трогать; ~/.claude НЕ переносится и не стирается; preserve-list (/XF+/XD) исключён" }
+    else { Write-Host "  [dry-run] WOULD (repair): перезаписать НАШИ базовые файлы свежими (robocopy без /XC), пользовательское (ключи/память/история/settings.local/CLAUDE.md) исключено; БЕЗ move/wipe" }
     Write-Host "[dry-run] Конфиг: без изменений."; exit 0
 }
 
@@ -64,374 +88,116 @@ if ($haveBundled) {
     }
 }
 
-$installer = Join-Path $clone 'install.ps1'
-if (-not (Test-Path $installer)) { Write-Host "В репозитории нет install.ps1."; exit 1 }
+# Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.ps1
+# (его backup-режим переносил всё ~/.claude в сторону — именно этот wipe удалён).
+$srcClaude   = Join-Path $clone '.claude'
+$srcClaudeMd = Join-Path $clone 'CLAUDE.md'
+if (-not (Test-Path $srcClaude)) { Write-Host "Источник конфига (.claude) не найден: $srcClaude"; exit 1 }
 
 Write-Host "Разворачиваю .claude в домашнюю папку..."
 
-# === P0-2: ПОЛНЫЙ таймштамп-бэкап ~/.claude — ПЕРВАЯ операция, трогающая ~/.claude ===
-# КОПИЯ (не move), в ОБОИХ режимах. Неполный бэкап → fail-closed: ничего не меняем.
+# === Полная копия-бэкап ~/.claude — сейф-нет, ПЕРВАЯ операция (КОПИЯ, не move) ===
+# ВАЖНО: неполный бэкап НЕ фатален — оригинал ~/.claude НЕ переносится и не стирается,
+# данные на месте. Залоченный файл (открыт Cursor/Claude) → robocopy /R:1 пропустит его;
+# предупреждаем и ПРОДОЛЖАЕМ. Это принципиально иначе, чем раньше, где бэкап был
+# единственной копией перед wipe и его неполнота означала потерю данных.
 if (Test-Path $claudeHome) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $backupDir = "$claudeHome.backup.$stamp"
     Write-Host "Резервная копия ~/.claude → $backupDir ..."
     $backupOk = $true
     try {
-        # M7: robocopy вместо Copy-Item -Recurse — PS 5.1 не longPathAware, Copy-Item
-        # падает на путях >260 символов (projects/ этим славится); robocopy устойчив.
-        # /R:1 /W:1 — не зависать на залоченном файле (дефолт robocopy — 1M ретраев по 30с).
+        # M7: robocopy (не Copy-Item -Recurse) — PS 5.1 не longPathAware; /R:1 /W:1 — не
+        # зависать на залоченном файле (дефолт robocopy — 1M ретраев по 30с).
         robocopy $claudeHome $backupDir /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
         if ($LASTEXITCODE -ge 8) { $backupOk = $false }
         $global:LASTEXITCODE = 0
         if (-not (Test-Path $backupDir)) { $backupOk = $false }
-        # грубая сверка: в бэкапе не меньше элементов, чем в оригинале (диск полон → меньше)
-        $srcN = (Get-ChildItem $claudeHome -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-        $dstN = (Get-ChildItem $backupDir  -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-        if ($dstN -lt $srcN) { $backupOk = $false }
     } catch { $backupOk = $false }
     if (-not $backupOk) {
-        Write-Host "ВНИМАНИЕ: не удалось сделать полный бэкап ~/.claude (возможно, кончилось место на диске)."
-        Write-Host "  Установка конфига ОТМЕНЕНА — ничего не менял. Освободи место и повтори."
-        exit 1
+        Write-Host "ВНИМАНИЕ: полный бэкап ~/.claude снять не удалось (возможно, часть файлов занята — открыт Cursor/Claude)."
+        Write-Host "  Это НЕ критично: оригинал ~/.claude НЕ переносится и НЕ стирается — твои данные на месте. Продолжаю."
     }
 }
 
-# Существовал ли рабочий конфиг ДО обновления — чтобы не выдать ложный зелёный на СТАРОМ ~/.claude.
+# Существовал ли рабочий конфиг ДО обновления — для честного финального рапорта.
 $hadOldConfig = (Test-Path (Join-Path $claudeHome 'skills')) -or (Test-Path (Join-Path $claudeHome 'settings.json'))
-$installFailed = $false
+New-Item -ItemType Directory -Force $claudeHome | Out-Null
+
+# Какие скиллы БЫЛИ до раскладки — ПОЛНОЕ УСПЕШНОЕ перечисление обязательно.
+# Любой сбой перечисления → прунинг ПОЛНОСТЬЮ выключен (никогда не удаляем чужое).
+$skillsDirNow = Join-Path $claudeHome 'skills'
+try {
+    if (Test-Path -LiteralPath $skillsDirNow) {
+        $item = Get-Item -LiteralPath $skillsDirNow -Force -ErrorAction Stop
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "skills — reparse point (junction/symlink), перечисление небезопасно"
+        }
+        # ВСЕ immediate-дети (включая файлы и symlink/junction — не только -Directory):
+        # пред-существующий symlink-скилл иначе считался бы «нашим» и удалялся при снятом паке.
+        Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object { $preExisting[$_.Name] = $true }
+    }
+} catch {
+    $pruneDisabled = $true
+    Write-Host "  Перечисление существующих скиллов не удалось ($($_.Exception.Message)) — прунинг паков отключён (ничего не удаляем)."
+}
+
+# === Merge-copy НАШЕЙ базы ПОВЕРХ ~/.claude (БЕЗ переноса/стирания) ===
+# add-missing: /XC /XN /XO — исключить Changed/Newer/Older, т.е. копировать лишь
+#   ОТСУТСТВУЮЩИЕ в цели файлы; существующие любой версии (кастомизации, settings.json) не трогаем.
+# repair:      без /XC/XN/XO — перезаписать НАШИ базовые файлы свежими (add missing тоже).
+# /XF (preserve-имена+globs) и /XD (preserve-каталоги) в ОБОИХ режимах исключают
+#   пользовательское — ключи/память/история/settings.local/tg_session НЕ перезаписываются.
+if ($ADDITIVE) {
+    Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
+    robocopy $srcClaude $claudeHome /E /XC /XN /XO /XF $excludeNames /XD $excludeDirs | Out-Null
+} else {
+    Write-Host "Переустановка начисто: перезаписываю НАШИ базовые файлы свежими (пользовательское — ключи/память/история/CLAUDE.md — не трогаю)..."
+    robocopy $srcClaude $claudeHome /E /XF $excludeNames /XD $excludeDirs | Out-Null
+}
+if ($LASTEXITCODE -ge 8) {
+    $installFailed = $true; $pruneDisabled = $true
+    Write-Host "robocopy раскладки конфига вернул код $LASTEXITCODE — часть файлов не скопирована; прунинг паков отключён."
+}
 $global:LASTEXITCODE = 0
 
-# --- защита пользовательских данных при ЧИСТОЙ переустановке (НЕ additive) ---
-# install.ps1 кладёт свежую базу поверх ~/.claude. Сохраняем пользовательские данные
-# (ключи, память, историю сессий projects, локальные настройки) ДО и возвращаем merge-ом ПОСЛЕ.
-# P0-2: снапшот живёт в ~/.hamidun-setup/preserve (user-owned, НЕ предсказуемый общий TEMP).
-# В АДДИТИВНОМ режиме snapshot/restore НЕ используются вовсе (живое дерево не трогаем).
-$preserveDir   = Join-Path $env:USERPROFILE '.hamidun-setup\preserve'
-# H4: ЕДИНЫЙ канонический список user-data — совпадает с additive-исключениями (/XF ниже).
-# chats.db* — история чатов (FTS5, ~30МБ), tg_session.session* — Telegram-авторизация:
-# base install.ps1 делает Move-Item ВСЕГО ~/.claude, без снапшота они исчезали навсегда.
-$preserveFiles = @('.credentials.master.env', '.credentials.json', 'settings.local.json', 'MEMORY.md',
-                   'chats.db', 'chats.db-wal', 'chats.db-shm', 'chats.db-journal',
-                   'tg_session.session', 'tg_session.session-wal', 'tg_session.session-shm', 'tg_session.session-journal')
-$preserveDirs  = @('memory', 'projects', 'todos', 'shell-snapshots')
+# settings.json — НАШ базовый: в add-missing robocopy /XC пропускает существующий (добавит,
+# если не было); в repair — перезаписывает свежим. settings.local.json (пользовательский) —
+# в preserve-list, цел ВСЕГДА. Semver-мерж JSON намеренно НЕ делаем (риск сломать конфиг).
 
-# P1: SHA-256 считаем через .NET напрямую (штатный PS-командлет хэширования файлов при
-# унаследованном PSModulePath, где модули PowerShell 7 идут раньше 5.1, может не найтись, и
-# корректный restore падал бы exit 1 со снапшотом на диске). FileShare.ReadWrite — считаем
-# хэш даже если файл открыт другим процессом.
-function Get-Sha256Hex($p) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    $fs = $null
-    try {
-        $fs = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $hash = $sha.ComputeHash($fs)
-        return ([System.BitConverter]::ToString($hash)).Replace('-', '')
-    } catch { return $null } finally { if ($fs) { $fs.Dispose() }; $sha.Dispose() }
+# CLAUDE.md в корне профиля — ПОЛЬЗОВАТЕЛЬСКИЙ: добавляем ТОЛЬКО если отсутствует (в ОБОИХ
+# режимах — не затираем правки юзера даже в repair). Сбой копирования → честный провал.
+$profileClaudeMd = Join-Path $env:USERPROFILE 'CLAUDE.md'
+if ((Test-Path $srcClaudeMd) -and -not (Test-Path $profileClaudeMd)) {
+    try { Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction Stop }
+    catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md ($($_.Exception.Message))." }
 }
-# P0-2: отпечаток источника (размер+mtime) — для детекции конкурентной модификации во
-# время копирования (работающий Claude/SQLite пишет в chats.db того же/иного размера).
-function Get-FileFingerprint($p) {
-    try {
-        $it = Get-Item -LiteralPath $p -Force -ErrorAction Stop
-        return "$($it.Length):$($it.LastWriteTimeUtc.Ticks)"
-    } catch { return $null }
+# credentials-шаблон — только если ключей ещё нет (в ОБОИХ режимах: preserve-list).
+$srcEnvTpl = Join-Path $clone '.credentials.template.env'
+$dstEnv    = Join-Path $claudeHome '.credentials.master.env'
+if ((Test-Path $srcEnvTpl) -and -not (Test-Path $dstEnv)) {
+    try { Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction Stop }
+    catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать шаблон credentials ($($_.Exception.Message))." }
 }
-# P0-2: стабильный манифест дерева (относительный путь|размер|mtime по каждому файлу).
-function Get-DirManifest($root) {
-    $lines = New-Object System.Collections.Generic.List[string]
-    try {
-        Get-ChildItem -LiteralPath $root -Recurse -Force -File -ErrorAction Stop | ForEach-Object {
-            $lines.Add("$($_.FullName.Substring($root.Length))|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)")
-        }
-    } catch { return $null }
-    $arr = $lines.ToArray(); [Array]::Sort($arr)
-    return ($arr -join "`n")
-}
-# P0-1: конфликт stale-снапшота с живым ~/.claude. Прерванный прошлый прогон мог оставить
-# снапшот с РЕАЛЬНЫМИ ключами, а install.ps1 успеть положить ШАБЛОН поверх живого файла.
-# MissingOnly не тронет живой (он существует) → реальные ключи потерялись бы под зелёным
-# рапортом. Если живой preserve-файл ОТЛИЧАЕТСЯ от снапшота (или не сравнить — каталог) →
-# конфликт: $true (fail-closed, не даём шаблону перезаписать реальные ключи).
-function Test-StaleSnapshotConflict($src) {
-    foreach ($f in $preserveFiles) {
-        $ss = Join-Path $src $f
-        $lv = Join-Path $claudeHome $f
-        if ((Test-Path -LiteralPath $ss) -and (Test-Path -LiteralPath $lv)) {
-            if (-not (Test-Path -LiteralPath $lv -PathType Leaf)) { return $true }
-            $hs = Get-Sha256Hex $ss
-            $hl = Get-Sha256Hex $lv
-            if ((-not $hs) -or (-not $hl) -or ($hs -ne $hl)) { return $true }
-        }
-    }
-    return $false
-}
-
-# H2/H3: снапшот с ПРОВЕРКОЙ полноты. Возвращает $true только если КАЖДЫЙ существующий
-# в ~/.claude preserve-элемент реально лёг в снапшот (файлы — существование + размер;
-# каталоги — robocopy-код < 8 и элементов не меньше). Тихий Copy-Item -SilentlyContinue
-# убран: неполный снапшот перед wipe = невосстановимая потеря ключей/памяти.
-function Snapshot-UserData($dst) {
-    try { New-Item -ItemType Directory -Force $dst -ErrorAction Stop | Out-Null } catch { return $false }
-    $ok = $true
-    foreach ($f in $preserveFiles) {
-        $s = Join-Path $claudeHome $f
-        if (Test-Path -LiteralPath $s) {
-            $t = Join-Path $dst $f
-            # P0-2: копия должна быть КОНСИСТЕНТНОЙ — источник не меняется во время копии.
-            # До 3 попыток: отпечаток источника ДО, копия, сверка размера, отпечаток ПОСЛЕ.
-            # Работающий Claude/SQLite мог переписать chats.db во время копирования —
-            # рассинхрон размера/mtime → повтор; несходимость за 3 попытки → снапшот неполон.
-            $copied = $false
-            for ($attempt = 1; ($attempt -le 3) -and (-not $copied); $attempt++) {
-                $fpBefore = Get-FileFingerprint $s
-                if (-not $fpBefore) { break }
-                try { Copy-Item -LiteralPath $s -Destination $t -Force -ErrorAction Stop } catch { continue }
-                if (-not (Test-Path -LiteralPath $t)) { continue }
-                $srcLen = $null; $dstLen = $null
-                try {
-                    $srcLen = (Get-Item -LiteralPath $s -Force -ErrorAction Stop).Length
-                    $dstLen = (Get-Item -LiteralPath $t -Force -ErrorAction Stop).Length
-                } catch { continue }
-                if ($dstLen -ne $srcLen) { continue }
-                $fpAfter = Get-FileFingerprint $s
-                if (-not ($fpAfter -and ($fpAfter -eq $fpBefore))) { continue }
-                # финальная сверка СОДЕРЖИМОГО: копия побайтно равна ТЕКУЩЕМУ источнику
-                # (аналог cmp в config.sh — ловит подмену тем же размером во время копии).
-                $hSrc = Get-Sha256Hex $s
-                $hDst = Get-Sha256Hex $t
-                if ($hSrc -and $hDst -and ($hSrc -eq $hDst)) { $copied = $true }
-            }
-            if (-not $copied) { $ok = $false }
-        }
-    }
-    foreach ($d in $preserveDirs) {
-        $s = Join-Path $claudeHome $d
-        if (Test-Path -LiteralPath $s) {
-            $t = Join-Path $dst $d
-            # P0-2: манифест дерева (относит.путь|размер|mtime) ДО и ПОСЛЕ копии — расхождение
-            # = конкурентная запись во время снапшота; до 3 попыток, иначе снапшот неполон.
-            $done = $false
-            for ($attempt = 1; ($attempt -le 3) -and (-not $done); $attempt++) {
-                if (Test-Path -LiteralPath $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }
-                $manBefore = Get-DirManifest $s
-                if ($null -eq $manBefore) { break }
-                # M7: robocopy — projects/ регулярно содержит пути >260 символов (PS 5.1 не осилит).
-                robocopy $s $t /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-                $robocopyFailed = ($LASTEXITCODE -ge 8)
-                $global:LASTEXITCODE = 0
-                if ($robocopyFailed) { continue }
-                $manAfter = Get-DirManifest $s
-                $srcN = (Get-ChildItem -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-                $dstN = 0
-                if (Test-Path -LiteralPath $t) { $dstN = (Get-ChildItem -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count }
-                if (($null -ne $manAfter) -and ($manAfter -eq $manBefore) -and ($dstN -ge $srcN)) { $done = $true }
-            }
-            if (-not $done) { $ok = $false }
-        }
-    }
-    return $ok
-}
-# Возвращает $true, только если ВСЁ из снапшота реально восстановилось. Тихий провал
-# (диск полон, залоченный файл) больше не маскируется под успех — снапшот не удаляем.
-# M8: файлы сверяются С СОДЕРЖИМЫМ снапшота (hash), а не Test-Path цели: install.ps1
-# ГАРАНТИРОВАННО кладёт ШАБЛОН поверх .credentials.master.env, и «файл существует»
-# ничего не доказывает — ложный успех на шаблоне вместо живых ключей.
-function Restore-UserData($src) {
-    New-Item -ItemType Directory -Force $claudeHome | Out-Null
-    $ok = $true
-    foreach ($f in $preserveFiles) {
-        $s = Join-Path $src $f
-        if (Test-Path -LiteralPath $s) {
-            $t = Join-Path $claudeHome $f
-            try { Copy-Item -LiteralPath $s -Destination $t -Force -ErrorAction Stop } catch { $ok = $false; continue }
-            try {
-                $hs = Get-Sha256Hex $s
-                $ht = Get-Sha256Hex $t
-                if ((-not $hs) -or (-not $ht) -or ($hs -ne $ht)) { $ok = $false }
-            } catch { $ok = $false }
-        }
-    }
-    foreach ($d in $preserveDirs) {
-        $s = Join-Path $src $d
-        if (Test-Path -LiteralPath $s) {
-            $t = Join-Path $claudeHome $d
-            # M7: robocopy (создаёт цель сам) — длинные пути projects/ переживают restore.
-            robocopy $s $t /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-            if ($LASTEXITCODE -ge 8) { $ok = $false }
-            $global:LASTEXITCODE = 0
-            # грубая сверка: в цели не меньше элементов, чем в снапшоте
-            $srcN = (Get-ChildItem -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-            $dstN = 0
-            if (Test-Path -LiteralPath $t) { $dstN = (Get-ChildItem -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count }
-            elseif ($srcN -gt 0) { $ok = $false }
-            if ($dstN -lt $srcN) { $ok = $false }
-        }
-    }
-    return $ok
-}
-# P0-2: восстановление СТАРОГО снапшота — ТОЛЬКО недостающих файлов (никогда не льём
-# старые значения KEY=OLD поверх живых KEY=NEW). Нужен для rescue после краша прошлого
-# прогона МЕЖДУ wipe и restore (тогда файлов в живом дереве нет — и они вернутся).
-function Restore-UserDataMissingOnly($src) {
-    New-Item -ItemType Directory -Force $claudeHome | Out-Null
-    foreach ($f in $preserveFiles) {
-        $s = Join-Path $src $f; $t = Join-Path $claudeHome $f
-        if ((Test-Path $s) -and -not (Test-Path $t)) { Copy-Item -Force $s $t -ErrorAction SilentlyContinue }
-    }
-    foreach ($d in $preserveDirs) {
-        $s = Join-Path $src $d
-        if (Test-Path $s) {
-            $t = Join-Path $claudeHome $d
-            New-Item -ItemType Directory -Force $t | Out-Null
-            # robocopy /XC /XN /XO: копировать ЛИШЬ отсутствующие в цели файлы
-            robocopy $s $t /E /XC /XN /XO | Out-Null
-            $global:LASTEXITCODE = 0
-        }
-    }
-}
-
-if ($ADDITIVE) {
-    # === АДДИТИВНАЯ доустановка ПОВЕРХ существующего ~/.claude — НЕ затираем ===
-    # P0-2: НИКАКОГО hamidun-preserve здесь — ни restore старого снапшота (он льёт
-    # старые значения поверх живых), ни нового снапшота. Полный бэкап уже сделан выше.
-    $srcClaude   = Join-Path $clone '.claude'
-    $srcClaudeMd = Join-Path $clone 'CLAUDE.md'
-    if (-not (Test-Path $srcClaude)) {
-        $installFailed = $true; Write-Host "Источник конфига (.claude) не найден: $srcClaude"
-    } else {
-        New-Item -ItemType Directory -Force $claudeHome | Out-Null
-
-        # P0-3: какие скиллы БЫЛИ до раскладки — ПОЛНОЕ УСПЕШНОЕ перечисление обязательно.
-        # Любой сбой перечисления → прунинг ПОЛНОСТЬЮ выключен (никогда не удаляем).
-        $skillsDirNow = Join-Path $claudeHome 'skills'
-        try {
-            if (Test-Path -LiteralPath $skillsDirNow) {
-                $item = Get-Item -LiteralPath $skillsDirNow -Force -ErrorAction Stop
-                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                    throw "skills — reparse point (junction/symlink), перечисление небезопасно"
-                }
-                # ВСЕ immediate-детей (включая файлы и symlink/junction — не только
-                # -Directory): пред-существующий symlink-скилл иначе считался бы
-                # «нашим» и удалялся при снятом паке.
-                Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object { $preExisting[$_.Name] = $true }
-            }
-        } catch {
-            $pruneDisabled = $true
-            Write-Host "  Перечисление существующих скиллов не удалось ($($_.Exception.Message)) — прунинг паков отключён (ничего не удаляем)."
-        }
-
-        # Merge-copy ТОЛЬКО недостающих файлов. robocopy /XC /XN /XO = исключить
-        # Changed/Newer/Older, т.е. копировать лишь ОТСУТСТВУЮЩИЕ в цели файлы;
-        # существующие любой версии (кастомизации юзера, settings.json) НЕ трогаем.
-        # /XF/XD дополнительно защищают ключи, память, историю сессий.
-        # H4: канонический список user-data — тот же состав, что $preserveFiles clean-режима.
-        $excludeNames = @('.credentials.master.env', '.credentials.json', 'settings.local.json', 'MEMORY.md',
-                          'chats.db', 'chats.db-wal', 'chats.db-shm', 'chats.db-journal',
-                          'tg_session.session', 'tg_session.session-wal', 'tg_session.session-shm', 'tg_session.session-journal')
-        $excludeDirs  = @((Join-Path $claudeHome 'memory'), (Join-Path $claudeHome 'projects'),
-                          (Join-Path $claudeHome 'todos'), (Join-Path $claudeHome 'shell-snapshots'))
-        Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
-        robocopy $srcClaude $claudeHome /E /XC /XN /XO /XF $excludeNames /XD $excludeDirs | Out-Null
-        if ($LASTEXITCODE -ge 8) {
-            $installFailed = $true; $pruneDisabled = $true
-            Write-Host "robocopy аддитивной раскладки вернул код $LASTEXITCODE — часть файлов не скопирована; прунинг паков отключён."
-        }
-        $global:LASTEXITCODE = 0
-
-        # settings.json НИКОГДА не перезаписываем: robocopy /XC пропустил существующий;
-        # если его не было — добавлен. Semver-мерж JSON намеренно НЕ делаем (риск сломать
-        # пользовательский конфиг) — консервативно: не трогаем существующее.
-
-        # CLAUDE.md в корне профиля — только если отсутствует (не затираем правки юзера).
-        # P1: сбой копирования (ACL/ENOSPC) → честный провал + прунинг off, а не
-        # молчаливо отсутствующий файл (раньше SilentlyContinue глотал ошибку).
-        $profileClaudeMd = Join-Path $env:USERPROFILE 'CLAUDE.md'
-        if ((Test-Path $srcClaudeMd) -and -not (Test-Path $profileClaudeMd)) {
-            try { Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction Stop }
-            catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md ($($_.Exception.Message))." }
-        }
-        # credentials-шаблон — только если ключей ещё нет.
-        $srcEnvTpl = Join-Path $clone '.credentials.template.env'
-        $dstEnv    = Join-Path $claudeHome '.credentials.master.env'
-        if ((Test-Path $srcEnvTpl) -and -not (Test-Path $dstEnv)) {
-            try { Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction Stop }
-            catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать шаблон credentials ($($_.Exception.Message))." }
-        }
-        if (-not $installFailed) { Write-Host "Аддитивная доустановка: добавлено недостающее, существующее сохранено." }
-    }
-} else {
-    # === Чистая установка: свежая база поверх (кастомизаций не было / подтверждённый repair) ===
-    # Легаси-снапшот в %TEMP%\hamidun-preserve НЕ восстанавливаем автоматически (P0-2:
-    # предсказуемый общий путь; старые значения не льём) — только сообщаем, где он лежит.
-    $legacyPreserve = Join-Path $env:TEMP 'hamidun-preserve'
-    if ((Test-Path $legacyPreserve) -and (Get-ChildItem $legacyPreserve -Force -ErrorAction SilentlyContinue)) {
-        Write-Host "ВНИМАНИЕ: найден снапшот старого установщика: $legacyPreserve — он НЕ восстанавливается автоматически."
-        Write-Host "  Если после прошлой установки пропали ключи/память — скопируй нужные файлы оттуда вручную."
-    }
-    # Снапшот ПРЕРВАННОГО прошлого прогона: возвращаем ТОЛЬКО отсутствующие файлы
-    # (краш между wipe и restore — файлы пропали → вернутся; живые файлы НЕ трогаем),
-    # затем откладываем его в rescue-папку (не удаляем: там может быть единственная копия).
-    if ((Test-Path $preserveDir) -and (Get-ChildItem $preserveDir -Force -ErrorAction SilentlyContinue)) {
-        # P0-1: если stale-снапшот КОНФЛИКТУЕТ с живым деревом (живой preserve-файл есть, но
-        # ОТЛИЧАЕТСЯ от снапшота — напр. живой = шаблон install.ps1, снапшот = реальные ключи) —
-        # НЕ продолжаем. Иначе MissingOnly пропустит существующий файл, реальные ключи из
-        # снапшота потеряются, а финальный restore отрапортует успех на шаблоне. Fail-closed:
-        # не вайпим, снапшот сохраняем НА МЕСТЕ, требуем ручного разбора конфликта.
-        if (Test-StaleSnapshotConflict $preserveDir) {
-            Write-Host "ВНИМАНИЕ: снапшот прерванной установки КОНФЛИКТУЕТ с текущим ~/.claude."
-            Write-Host "  В снапшоте могут лежать твои РЕАЛЬНЫЕ ключи/данные, а в ~/.claude — шаблон"
-            Write-Host "  от прерванного прошлого прогона. Автозамена ОТМЕНЕНА, чтобы не потерять реальные ключи."
-            Write-Host "  Снапшот сохранён здесь: $preserveDir"
-            Write-Host "  Разбери вручную (скопируй нужные значения из снапшота в ~/.claude), удали снапшот и повтори."
-            exit 1
-        }
-        Write-Host "Обнаружен снапшот прерванной установки — возвращаю только НЕДОСТАЮЩИЕ файлы..."
-        Restore-UserDataMissingOnly $preserveDir
-        $rescue = Join-Path $env:USERPROFILE ('.hamidun-setup\preserve-rescue-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        try { Move-Item -Force $preserveDir $rescue -ErrorAction Stop; Write-Host "  Старый снапшот отложен: $rescue" }
-        catch { Write-Host "  Не удалось отложить старый снапшот ($($_.Exception.Message)) — оставляю на месте." }
-    }
-    Write-Host "Сохраняю твои ключи, память и историю сессий перед обновлением..."
-    # H2/H3: снапшот сверяется на ПОЛНОТУ; неполный → abort ДО install.ps1 (он делает
-    # Move-Item всего ~/.claude — wipe живого дерева; restore из снапшота — единственный
-    # механизм возврата). Живое ~/.claude на этот момент НЕ изменено.
-    $snapOk = Snapshot-UserData $preserveDir
-    if (-not $snapOk) {
-        Write-Host "ВНИМАНИЕ: не удалось сохранить твои данные (ключи/память/историю сессий) — снапшот неполный."
-        Write-Host "  Установка конфига ОТМЕНЕНА — НИЧЕГО не менял, повтори позже (освободи место, закрой Claude)."
-        Write-Host "  Частичный снапшот (если создался) лежит здесь: $preserveDir"
-        exit 1
-    }
-
-    # Ловим ОБА класса сбоя: терминирующие исключения (catch) И код возврата install.ps1.
-    # install.ps1 заканчивается на robocopy, чей $LASTEXITCODE >= 8 означает реальный провал
-    # копирования (0-7 — успех с разными состояниями); exit 1 внутри скрипта — отсутствие
-    # исходника. Без этой проверки провалившийся robocopy (диск полон) давал ложный зелёный.
-    try {
-        & $installer -BackupExisting -SkipDeps
-        if ($LASTEXITCODE -ge 8 -or $LASTEXITCODE -eq 1) {
-            $installFailed = $true; Write-Host "install.ps1 завершился с кодом $LASTEXITCODE — раскладка конфига не удалась."
-        }
-    } catch { $installFailed = $true; Write-Host "install.ps1 предупреждение: $($_.Exception.Message)" }
+if (-not $installFailed) {
+    if ($ADDITIVE) { Write-Host "Готово: добавлено недостающее, существующее сохранено." }
+    else { Write-Host "Готово: наши базовые файлы обновлены, пользовательские данные (ключи/память/история) на месте." }
 }
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 # Прунятся ТОЛЬКО скиллы, входящие в какой-то пак, но чей пак не выбран.
 # core и скиллы вне всех паков остаются всегда.
-# P0-3 fail-closed: сбой перечисления/копирования ($pruneDisabled) или провал раскладки
+# fail-closed: сбой перечисления/копирования ($pruneDisabled) или провал раскладки
 # ($installFailed) → прунинг НЕ выполняется вовсе (лучше лишний скилл, чем удалённый чужой).
 if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
-    # M5: fail-closed в ОБОИХ режимах (раньше guard действовал только в additive):
-    # провал раскладки/перечисления в clean тоже отменяет прунинг — при $installFailed
-    # в ~/.claude может лежать СТАРОЕ дерево юзера, удалять из него нечего и нельзя.
     if ($pruneDisabled -or $installFailed) {
         Write-Host "Прунинг паков пропущен (fail-closed): раскладка/перечисление не подтверждены. Удалено: 0."
     } else {
         $keep = @{}; $env:HM_KEEP_SKILLS.Split(',') | ForEach-Object { if ($_) { $keep[$_] = $true } }
         $packAll = @{}; $env:HM_ALL_PACK_SKILLS.Split(',') | ForEach-Object { if ($_) { $packAll[$_] = $true } }
         $skillsDir = Join-Path $env:USERPROFILE '.claude\skills'
-        # M6: reparse-проверка skills-каталога действует и в CLEAN-режиме — junction/symlink
-        # на месте ~/.claude/skills уводит Remove-Item в ЧУЖУЮ цель.
+        # reparse-проверка skills-каталога: junction/symlink на месте ~/.claude/skills
+        # уводит Remove-Item в ЧУЖУЮ цель.
         $skillsReparse = $false
         try {
             if (Test-Path -LiteralPath $skillsDir) {
@@ -448,9 +214,8 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
                 # reparse-point в PS 5.1 может уйти в ЧУЖУЮ цель, и ссылка по
                 # определению не «доложена нами» (мы копируем реальные каталоги).
                 if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
-                # В АДДИТИВНОМ режиме НЕ удаляем скиллы, которые были у юзера ДО нашей
-                # раскладки (не наши — не трогаем). Удаляем только то, что доложили сами
-                # этим прогоном и чей пак снят. В сомнении — не удаляем (консервативно).
+                # В add-missing НЕ удаляем скиллы, которые были у юзера ДО нашей раскладки
+                # (не наши — не трогаем). Удаляем только доложенное этим прогоном и чей пак снят.
                 $weAdded = (-not $ADDITIVE) -or (-not $preExisting.ContainsKey($_.Name))
                 if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name) -and $weAdded) {
                     Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
@@ -459,24 +224,6 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
             }
             Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)."
         }
-    }
-}
-
-# --- вернуть пользовательские данные поверх свежей базы (merge) — ТОЛЬКО clean-режим ---
-# P0-2: в additive живое дерево не трогали — восстанавливать нечего и НЕЛЬЗЯ.
-# Снапшот удаляем ТОЛЬКО при успешном restore — иначе в нём может лежать единственная
-# копия ключей/памяти, и молчаливая потеря (диск полон) была бы невосстановимой.
-$restoreFailed = $false
-if (-not $ADDITIVE) {
-    $restoreOk = Restore-UserData $preserveDir
-    if ($restoreOk) {
-        Remove-Item -Recurse -Force $preserveDir -ErrorAction SilentlyContinue
-        Write-Host "Вернул твои ключи, память и историю сессий."
-    } else {
-        $restoreFailed = $true
-        Write-Host "ВНИМАНИЕ: не удалось полностью вернуть твои данные (возможно, кончилось место на диске)."
-        Write-Host "  Резервная копия НЕ удалена и лежит здесь: $preserveDir"
-        Write-Host "  Освободи место и запусти установку ещё раз, либо скопируй файлы оттуда в ~/.claude вручную."
     }
 }
 
@@ -499,22 +246,14 @@ $dst = Join-Path $env:USERPROFILE '.claude'
 $dstPresent = (Test-Path (Join-Path $dst 'skills')) -or (Test-Path (Join-Path $dst 'settings.json'))
 
 if ($installFailed) {
-    # Раскладка упала. Наличие ~/.claude ещё НЕ значит успех — это может быть
-    # СТАРЫЙ конфиг от прошлой установки. Не выдаём ложный зелёный.
+    # Раскладка упала. Пользовательские данные НЕ тронуты (мы их не переносим/не стираем).
     if ($hadOldConfig -and $dstPresent) {
-        Write-Host "ВНИМАНИЕ: обновление конфига НЕ применилось — раскладка завершилась с ошибкой (см. выше)."
-        Write-Host "  В ~/.claude остался ПРЕДЫДУЩИЙ конфиг; твои ключи, память и история сессий сохранены."
+        Write-Host "ВНИМАНИЕ: обновление конфига применилось НЕ полностью — часть файлов не скопирована (см. выше)."
+        Write-Host "  Твои ключи, память и история сессий НЕ тронуты (остались на месте)."
         Write-Host "  Запусти установку повторно после устранения причины ошибки."
     } else {
         Write-Host "Конфиг не развернулся — раскладка завершилась с ошибкой (см. выше)."
     }
-    exit 1
-}
-
-# H1: неуспешный restore НЕ маскируется под зелёный успех — честный ненулевой выход,
-# снапшот с данными юзера сохранён (путь напечатан выше).
-if ($restoreFailed) {
-    Write-Host "Конфиг развёрнут, но восстановление твоих данных НЕ завершено — см. предупреждение выше."
     exit 1
 }
 
