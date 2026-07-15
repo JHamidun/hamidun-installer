@@ -5,71 +5,36 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 export PATH="/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 DRY="${HM_DRY_RUN:-}"
 
-# GUARD (Codex P0): не перезаписываем ЧУЖОЙ uv-tool/шимы. Если uv-tool hermes-agent ИЛИ
-# команды nomad/hermes уже существуют — установщик их НЕ трогает и НЕ ставит поверх
-# (без принудительной перезаписи): осознанный skip (exit 120). Клон/сборку тоже не запускаем.
+# GUARD (Codex P0): не перезаписываем ЧУЖОЙ uv-tool/шимы. Если uv-tool nomad-agent ИЛИ
+# команды nmd/nomad-agent/nomad-acp (entrypoints агента) уже существуют — установщик их
+# НЕ трогает и НЕ ставит поверх (без принудительной перезаписи): осознанный skip (exit 120).
+# Клонирования нет вовсе (vendor-only).
 if [ -z "$DRY" ]; then
-  UV_TOOL_HA="$HOME/.local/share/uv/tools/hermes-agent"
-  if [ -e "$UV_TOOL_HA" ] || [ -L "$UV_TOOL_HA" ] \
-     || [ -e "$HOME/.local/bin/nomad" ] || [ -L "$HOME/.local/bin/nomad" ] \
-     || [ -e "$HOME/.local/bin/hermes" ] || [ -L "$HOME/.local/bin/hermes" ]; then
-    echo "uv-tool hermes-agent или команды nomad/hermes уже установлены — не перезаписываю чужое (без принудительной перезаписи). Пропускаю."
+  UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"
+  if [ -e "$UV_TOOL_NA" ] || [ -L "$UV_TOOL_NA" ] \
+     || [ -e "$HOME/.local/bin/nmd" ] || [ -L "$HOME/.local/bin/nmd" ] \
+     || [ -e "$HOME/.local/bin/nomad-agent" ] || [ -L "$HOME/.local/bin/nomad-agent" ] \
+     || [ -e "$HOME/.local/bin/nomad-acp" ] || [ -L "$HOME/.local/bin/nomad-acp" ]; then
+    echo "uv-tool nomad-agent или команды nmd/nomad-agent/nomad-acp уже установлены — не перезаписываю чужое (без принудительной перезаписи). Пропускаю."
     exit 120
   fi
 fi
 
-# 1. Источник Nomad — ТОЛЬКО доверенный: (а) вшитый bundled vendor (HM_NOMAD_SRC с
-#    pyproject.toml; путь задаёт main из vendorRoot, не renderer), ЛИБО (б) СВЕЖИЙ git
-#    clone в РАНЕЕ ОТСУТСТВОВАВШИЙ путь ~/.nomad-src. Любой уже существующий ~/.nomad-src
-#    (в т.ч. с pyproject.toml — чужой) НЕ доверяем: не клонируем, НЕ ставим из него и НЕ
-#    исполняем его build-backend. Иначе → graceful skip ниже.
+# 1. Источник Nomad — VENDOR-ONLY: ТОЛЬКО вшитый bundled vendor (HM_NOMAD_SRC с
+#    pyproject.toml; путь задаёт main из vendorRoot, не renderer). Клонирования НЕТ:
+#    ветка клонирования удалена целиком, и с ней ушла TOCTOU-P0 (Фаза 2, Codex round-7) —
+#    подмена чужого pyproject.toml между Test-Path и клоном → исполнение чужого
+#    build-backend. Нет vendor → graceful skip 120 (НЕ клонируем, НЕ падаем).
 SRC="${HM_NOMAD_SRC:-}"
-WE_CLONED_SRC=0    # клонировали ли МЫ исходники этим запуском (для квитанции владения)
-REPO_CONFIGURED=0  # был ли реально задан repoUrl
-CLONE_ATTEMPTED=0  # реально ли запускали git clone (отличаем «clone упал» от «пропущен»)
-SRC_TRUSTED=0      # можно ли ставить из SRC: доверенный vendor ИЛИ наш свежий clone
+SRC_TRUSTED=0      # можно ли ставить из SRC: доверенный вшитый vendor
 if [ -n "$SRC" ] && [ -f "$SRC/pyproject.toml" ]; then
-  # (а) Доверенный bundled vendor — единственный «существующий каталог», из которого можно ставить.
+  # Доверенный bundled vendor — единственный источник, из которого можно ставить.
   SRC_TRUSTED=1
-else
-  # (б) vendor не вшит → пробуем СВЕЖИЙ git clone из repoUrl в ОТСУТСТВУЮЩИЙ путь.
-  REPO=""
-  CFG="$DIR/../../config.json"
-  if [ -f "$CFG" ]; then
-    # Парсим nomad.repoUrl без python (иначе bare python3 без CLT дёргает диалог).
-    # Берём первую строку вида "repoUrl": "..." и вытаскиваем значение в кавычках.
-    REPO=$(grep -o '"repoUrl"[[:space:]]*:[[:space:]]*"[^"]*"' "$CFG" 2>/dev/null | head -n1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' || true)
-  fi
-  if [ -n "$REPO" ]; then
-    SRC="$HOME/.nomad-src"
-    REPO_CONFIGURED=1
-    if [ -z "$DRY" ]; then
-      # ЖЁСТКО: клонируем ТОЛЬКО в ОТСУТСТВУЮЩИЙ путь. ЛЮБОЙ существующий $SRC (файл,
-      # каталог или симлинк — в т.ч. чужой с pyproject.toml) → НЕ трогаем и НЕ ставим
-      # из него: не исполняем чужой build-backend. Уходит в graceful skip (SRC_TRUSTED=0).
-      if [ -e "$SRC" ] || [ -L "$SRC" ]; then
-        echo "Каталог $SRC уже существует — чужому источнику не доверяю: не клонирую и не устанавливаю из него. Пропускаю."
-      else
-        echo "Клонирую Nomad из $REPO ..."
-        CLONE_ATTEMPTED=1
-        git clone --depth 1 "$REPO" "$SRC"
-        if [ -f "$SRC/pyproject.toml" ]; then SRC_TRUSTED=1; WE_CLONED_SRC=1; fi
-      fi
-    fi
-  fi
 fi
-# repoUrl задан и МЫ пытались клонировать, но источник так и не появился (git clone упал
-# / нет pyproject.toml) — НАСТОЯЩИЙ провал: честный выход 1. Намеренный пропуск клона
-# (чужой каталог) сюда НЕ попадает (CLONE_ATTEMPTED=0) → уходит в graceful skip ниже.
-if [ -z "$DRY" ] && [ "$CLONE_ATTEMPTED" = "1" ] && [ "$SRC_TRUSTED" != "1" ]; then
-  echo "ОШИБКА: источник Nomad не склонировался (git clone упал или pyproject.toml не появился) — смотри лог выше."
-  exit 1
-fi
-# Ставим ТОЛЬКО из доверенного источника. Недоверенный/отсутствующий (чужой существующий
-# каталог, либо clone не выполнен) → осознанный skip: distinct-код 120 (main НЕ пишет
-# маркер установки). В dry-run — 0.
+# Vendor не вшит → осознанный skip: distinct-код 120 (main НЕ пишет маркер установки).
+# В dry-run — 0.
 if [ "$SRC_TRUSTED" != "1" ]; then
-  echo "Источник Nomad не задан/недоступен/недоверенный. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
+  echo "Источник Nomad (vendor/nomad-src) не вшит — устанавливать нечего (клонирование не выполняется). Вшей vendor/nomad-src (см. tools/fetch-vendor-mac.sh). Пропускаю."
   [ -n "$DRY" ] && exit 0
   exit 120
 fi
@@ -81,12 +46,12 @@ if ! have uv; then
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 fi
 
-# 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nomad/hermes).
+# 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nmd/nomad-agent/nomad-acp).
 # БЕЗ принудительной перезаписи: uv-тул/шимы этого имени уже отсеяны guard-ом выше, а
 # принудительная замена могла бы затронуть и не-uv бинарь того же имени — недопустимо.
 if [ -z "$DRY" ]; then
   uv python install 3.12
-  echo "Устанавливаю Nomad (команды nomad/hermes)..."
+  echo "Устанавливаю Nomad (команды nmd/nomad-agent/nomad-acp)..."
   uv tool install --python 3.12 "$SRC"
   export PATH="$HOME/.local/bin:$PATH"
   # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
@@ -114,19 +79,60 @@ if [ -z "$DRY" ]; then
   fi
 fi
 
+# 5. Nomad Cloud (cp.nomadnet.ai) — доступ к ИИ-моделям через облако владельца (без VPN).
+#    OpenAI-совместимый custom-провайдер: model.provider=custom + base_url + api_key + default.
+#    Ключ — ТОЛЬКО кабинетный ключ ДРУГА (HM_NOMAD_CLOUD_KEY), ключ владельца нигде не зашит.
+#    Ключ не задан → блок НЕ пишем (graceful): любую нейросеть подключишь позже своим ключом
+#    через `nmd model`. Идемпотентно: awk снимает прежний управляемый блок + top-level model:.
+CLOUD_KEY="${HM_NOMAD_CLOUD_KEY:-}"
+CLOUD_URL="${HM_NOMAD_CLOUD_BASEURL:-https://cp.nomadnet.ai/v1}"
+CLOUD_MODEL="${HM_NOMAD_CLOUD_MODEL:-claude-opus-4-6}"
+# trim + вычистка кавычек/переводов строк (значение уходит в YAML в кавычках)
+CLOUD_KEY="$(printf '%s' "$CLOUD_KEY" | tr -d '"\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+CLOUD_URL="$(printf '%s' "$CLOUD_URL" | tr -d '"\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+CLOUD_MODEL="$(printf '%s' "$CLOUD_MODEL" | tr -d '"\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+CFGY="$HH/config.yaml"
+if [ -z "$CLOUD_KEY" ]; then
+  echo "Ключ Nomad Cloud не задан — облачный блок НЕ пишу (graceful). Подключишь позже: nmd model → custom endpoint $CLOUD_URL или свой ключ любой нейросети."
+elif [ -n "$DRY" ]; then
+  echo "  [dry-run] WOULD: в $CFGY вписать model.provider=custom base_url=$CLOUD_URL default=$CLOUD_MODEL api_key=<скрыт>"
+else
+  STRIPPED=""
+  if [ -f "$CFGY" ]; then
+    STRIPPED="$(awk '
+      /^# >>> nomad-cloud/ { skipm=1; next }
+      skipm==1 { if ($0 ~ /^# <<< nomad-cloud/) { skipm=0 } next }
+      /^model:[[:blank:]]*$/ { skipmod=1; next }
+      skipmod==1 { if ($0 ~ /^[[:blank:]]/ || $0 ~ /^[[:blank:]]*$/) { next } else { skipmod=0 } }
+      { print }
+    ' "$CFGY")"
+  fi
+  {
+    echo '# >>> nomad-cloud (managed by installer -- do not edit inside markers) >>>'
+    echo 'model:'
+    echo '  provider: "custom"'
+    echo "  base_url: \"$CLOUD_URL\""
+    echo "  api_key: \"$CLOUD_KEY\""
+    echo "  default: \"$CLOUD_MODEL\""
+    echo '# <<< nomad-cloud <<<'
+    printf '%s\n' "$STRIPPED"
+  } > "$CFGY"
+  echo "OK: Nomad подключён к облаку $CLOUD_URL (модель $CLOUD_MODEL). Ключ записан в config.yaml."
+fi
+
 # P0-4: квитанция владения — ТОЧНЫЕ пути СОЗДАННЫХ артефактов (main соберёт в receipt).
 # ВАЖНО: $HH/config.yaml НЕ записываем — после установки это пользовательский конфиг.
-# Брендинг попадает в квитанцию ТОЛЬКО если МЫ его создали (чужой файл не присваиваем).
+# Vendor-only: клона ~/.nomad-src больше нет (источник — read-only вшитый vendor) → в
+# квитанцию его НЕ пишем. Брендинг — ТОЛЬКО если МЫ его создали (чужой файл не присваиваем).
 if [ -z "$DRY" ]; then
-  [ "$WE_CLONED_SRC" = "1" ] && [ -d "$SRC" ] && echo "HM-RECEIPT path $SRC"
-  for shim in nomad hermes; do
+  for shim in nmd nomad-agent nomad-acp; do
     [ -e "$HOME/.local/bin/$shim" ] && echo "HM-RECEIPT path $HOME/.local/bin/$shim"
   done
-  # P1-4: uv-тул называется по pyproject [project].name = hermes-agent (не «nomad»).
-  [ -d "$HOME/.local/share/uv/tools/hermes-agent" ] && echo "HM-RECEIPT path $HOME/.local/share/uv/tools/hermes-agent"
+  # P1-4: uv-тул называется по pyproject [project].name = nomad-agent.
+  [ -d "$HOME/.local/share/uv/tools/nomad-agent" ] && echo "HM-RECEIPT path $HOME/.local/share/uv/tools/nomad-agent"
   [ "$WROTE_SOUL" = "1" ] && [ -f "$HH/SOUL.md" ] && echo "HM-RECEIPT path $HH/SOUL.md"
   [ "$WROTE_SKIN" = "1" ] && [ -f "$HH/skins/nomad.yaml" ] && echo "HM-RECEIPT path $HH/skins/nomad.yaml"
 fi
 
-if have nomad; then echo "OK: nomad установлен ($(nomad --version 2>&1 | head -n1))"; else echo "Nomad установлен — команда появится в PATH после перезапуска терминала."; fi
+if have nmd; then echo "OK: nomad установлен ($(nmd --version 2>&1 | head -n1))"; else echo "Nomad установлен — команда nmd появится в PATH после перезапуска терминала."; fi
 exit 0

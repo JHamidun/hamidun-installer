@@ -2,9 +2,21 @@
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
   "configRepoBranch": "main",
   "nomad": {
-    "_comment": "Fill repoUrl with the Nomad agent repo once pushed (e.g. https://github.com/JHamidun/nomad). Empty => the Nomad component installs from vendor/nomad-src if bundled, else skips gracefully. packageName matches pyproject [project].name.",
+    "_comment": "VENDOR-ONLY: repoUrl is ALWAYS empty and MUST stay empty — the Nomad component NEVER clones. It installs only from the bundled vendor/nomad-src (main.js sets HM_NOMAD_SRC); if not bundled it skips gracefully (exit 120). Removing the clone path closes the round-7 TOCTOU P0 (foreign pyproject.toml swapped between Test-Path and git clone). packageName matches pyproject [project].name.",
     "repoUrl": "",
-    "packageName": "hermes-agent"
+    "packageName": "nomad-agent",
+    "cloud": {
+      "_comment": "The friend's local Nomad routes LLM traffic through the owner's cloud control-plane (OpenAI-compatible) — no VPN, no personal model key required — OR the friend uses any neural net by its own API key via `nmd model`. baseUrl is written into HERMES_HOME/config.yaml as a custom provider only when the friend pastes their OWN cabinet key (HM_NOMAD_CLOUD_KEY). The owner's key is NEVER embedded. defaultModel MUST be a model id that cp.nomadnet.ai/v1/models actually serves — confirm and adjust.",
+      "baseUrl": "https://cp.nomadnet.ai/v1",
+      "defaultModel": "claude-opus-4-6",
+      "registerUrl": "https://cp.nomadnet.ai/cabinet/register",
+      "keysUrl": "https://cp.nomadnet.ai/cabinet/keys",
+      "cabinetUrl": "https://cp.nomadnet.ai/cabinet"
+    }
+  },
+  "dashboard": {
+    "_comment": "Local Nomad web dashboard. `nmd dashboard` starts the SPA + API on this port.",
+    "url": "http://127.0.0.1:9119"
   },
   "bridge": {
     "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер.",
@@ -23,6 +35,7 @@
     "support": "https://hamidun.com",
     "docs": "https://github.com/JHamidun/claude-code-config-pack",
     "bot": "https://t.me/HamidunAcademyBot",
+    "cabinet": "https://cp.nomadnet.ai/cabinet",
     "video": ""
   }
 }

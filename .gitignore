@@ -1,6 +1,8 @@
 node_modules/
 release/
 release-mac/
+# vendor (в т.ч. приватный vendor/nomad-src — код агента) вшивается фетчером
+# на сборке (tools/fetch-vendor*); в git НЕ коммитим.
 vendor/
 *.log
 *.dmg

@@ -153,6 +153,44 @@ if (Test-Path $mascotSrc) {
   Write-Host "  ! исходник скрепки не найден ($mascotSrc) — компонент «Скрепка» не попадёт в сборку."
 }
 
+Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive merged-кода, БЕЗ .git; vendor-only установка)..."
+# Компонент Nomad объявлен? Друзьям не нужен доступ к репозиторию: код едет офлайн внутри
+# установщика. nomad-src приватный, в git НЕ коммитится (.gitignore vendor/). Нет
+# исходника → компонент Nomad у пользователя выполнит graceful skip (exit 120) — сборку НЕ валим.
+$componentsRawN = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
+if ($componentsRawN -and $componentsRawN -match '"nomad"') {
+  $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO } else { 'C:\Vibecode\hamidun-agent' }
+  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'main' }
+  $srcOut    = Join-Path $root 'vendor\nomad-src'
+  if (-not (Test-Path (Join-Path $agentRepo '.git'))) {
+    Write-Host "  ! репозиторий Nomad не найден ($agentRepo) — задай HM_NOMAD_AGENT_REPO. nomad-src НЕ вшит (компонент Nomad → graceful skip)."
+  } else {
+    $resolved = (& git -C $agentRepo rev-parse --short $nomadRef 2>$null)
+    Write-Host "  ref $nomadRef → коммит $resolved"
+    $tmpTar = Join-Path $env:TEMP 'nomad-src.tar'
+    if (Test-Path $tmpTar) { Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue }
+    # git archive пишет корректный tar (пайп в PowerShell портит бинарь → используем --output).
+    & git -C $agentRepo archive --format=tar --output "$tmpTar" $nomadRef
+    if ((Test-Path $tmpTar) -and ((Get-Item $tmpTar).Length -gt 0)) {
+      if (Test-Path $srcOut) { Remove-Item -Recurse -Force $srcOut -ErrorAction SilentlyContinue }
+      New-Item -ItemType Directory -Force $srcOut | Out-Null
+      # Нативный Windows tar.exe (bsdtar) — понимает C:\ пути. НЕ msys /usr/bin/tar.
+      & "$env:SystemRoot\System32\tar.exe" -x -f "$tmpTar" -C "$srcOut"
+      Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue
+      if (Test-Path (Join-Path $srcOut 'pyproject.toml')) {
+        $mbn = [math]::Round(((Get-ChildItem $srcOut -Recurse -File | Measure-Object Length -Sum).Sum)/1MB, 0)
+        Write-Host "  ok vendor\nomad-src ($mbn МБ, pyproject.toml на месте)"
+      } else {
+        Write-Host "  ! в vendor\nomad-src нет pyproject.toml — архив пустой/битый (компонент Nomad → graceful skip)."
+      }
+    } else {
+      Write-Host "  ! git archive не создал tar — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
+    }
+  }
+} else {
+  Write-Host "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"
+}
+
 Write-Host "[vendor] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
 try {
   # Чистый .NET (Get-FileHash недоступен в powershell electron-builder-сборки —

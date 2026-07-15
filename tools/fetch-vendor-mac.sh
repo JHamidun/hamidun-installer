@@ -172,6 +172,43 @@ print(u)' 2>/dev/null)
   fi
 fi
 
+echo "[vendor-mac] Исходник Nomad → vendor/nomad-src (git archive, БЕЗ .git; vendor-only установка)..."
+# Компонент Nomad объявлен? На локальной машине: git archive из HM_NOMAD_AGENT_REPO.
+# На GitHub-раннере (нет локального репо): git clone --depth 1 из NOMAD_AGENT_GIT_URL
+#   (приватный репо → URL со встроенным токеном, напр. https://x:${TOKEN}@github.com/OWNER/nomad-agent.git).
+# nomad-src приватный, в git НЕ коммитится (.gitignore vendor/*). Нет исходника →
+# компонент Nomad у пользователя выполнит graceful skip (exit 120) — сборку НЕ валим (WARNING).
+if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
+  AGENT_REPO="${HM_NOMAD_AGENT_REPO:-/c/Vibecode/hamidun-agent}"
+  NOMAD_REF="${HM_NOMAD_REF:-main}"
+  GITURL="${NOMAD_AGENT_GIT_URL:-}"
+  SRCOUT="$ROOT/vendor/nomad-src"
+  rm -rf "$SRCOUT"; mkdir -p "$SRCOUT"
+  if [ -d "$AGENT_REPO/.git" ]; then
+    echo "  git archive $NOMAD_REF из локального репо $AGENT_REPO"
+    git -C "$AGENT_REPO" archive --format=tar "$NOMAD_REF" | tar -x -C "$SRCOUT"
+  elif [ -n "$GITURL" ]; then
+    echo "  git clone --depth 1 -b $NOMAD_REF <NOMAD_AGENT_GIT_URL> (раннер без локального репо)"
+    TMPC="$(mktemp -d)"
+    if git clone --depth 1 -b "$NOMAD_REF" "$GITURL" "$TMPC" 2>/dev/null || git clone --depth 1 "$GITURL" "$TMPC"; then
+      (cd "$TMPC" && git archive --format=tar HEAD) | tar -x -C "$SRCOUT"
+      rm -rf "$TMPC"
+    else
+      echo "  ! git clone не удался — проверь NOMAD_AGENT_GIT_URL/токен. Компонент Nomad → graceful skip."
+      rm -rf "$TMPC"
+    fi
+  else
+    echo "  ! нет локального репо ($AGENT_REPO) и не задан NOMAD_AGENT_GIT_URL — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
+  fi
+  if [ -f "$SRCOUT/pyproject.toml" ]; then
+    echo "  ok vendor/nomad-src (pyproject.toml на месте)"
+  else
+    echo "  ! в vendor/nomad-src нет pyproject.toml — компонент Nomad у пользователя выполнит graceful skip."
+  fi
+else
+  echo "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"
+fi
+
 echo "[vendor-mac] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
 CHK="$ROOT/vendor/checksums.json"
 {
