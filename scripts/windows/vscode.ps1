@@ -73,16 +73,91 @@ if ($present) {
 }
 
 # --- Расширения: ставим в VS Code ОБА — панель Claude (anthropic.claude-code) и Codex (openai.chatgpt) ---
-$codeCli = Find-CodeCli
-if (-not $codeCli) { $g = Get-Command code -ErrorAction SilentlyContinue; if ($g) { $codeCli = $g.Source } }
+#
+# P0 (privesc): этот скрипт исполняется ELEVATED (установщик requireAdministrator).
+# Прямой запуск user-writable code.cmd/Code.exe под АДМИНОМ выполнил бы то, что
+# medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить на его место
+# (integrity-escalation). Поэтому ЛЮБОЙ вызов бинаря VS Code (install + list-extensions)
+# идёт ДЕ-ЭЛЕВИРОВАННО — через одноразовую scheduled task от текущего интерактивного
+# пользователя с /RL LIMITED (medium integrity). Если де-элевация недоступна — FAIL-CLOSED:
+# бинарь под админом НЕ запускаем.
+# Остаточный риск: если Task Scheduler недоступен, авто-установка расширений не произойдёт
+# (UX-деградация, НЕ эскалация); пользователь ставит их из панели Extensions вручную.
 
-function Test-ExtPresent($cli, $extId) {
-    # --list-extensions лагает сразу после установки — ретраим.
-    for ($k = 0; $k -lt 3; $k++) {
-        try { $list = & $cli --list-extensions 2>$null; if (("$list") -match [regex]::Escape($extId)) { return $true } } catch { }
-        Start-Sleep -Milliseconds 1500
+# Доверенный сигнал установки VS Code: ключ Uninstall его инсталлятора (Inno _is1).
+# User Setup -> HKCU, System Setup -> HKLM(+WOW). Возвращает bin\code.cmd из
+# InstallLocation ('' если ключа нет) — НЕ доверяем «просто нашли code.cmd на диске».
+function Get-VsCodeCli {
+    foreach ($root in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+                        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
+        if (-not (Test-Path $root)) { continue }
+        foreach ($k in (Get-ChildItem $root -ErrorAction SilentlyContinue)) {
+            $p = $null
+            try { $p = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue } catch { }
+            if ($p -and ($p.DisplayName -match 'Visual Studio Code') -and $p.InstallLocation) {
+                $cli = Join-Path $p.InstallLocation 'bin\code.cmd'
+                if (Test-Path $cli) { return $cli }
+            }
+        }
     }
-    return $false
+    return ''
+}
+
+# Де-элевированный запуск <Exe> <Args> от ТЕКУЩЕГО интерактивного пользователя с medium
+# integrity (одноразовая scheduled task, /RL LIMITED). Возвращает @{ Code; Output } или
+# $null, если де-элевацию выполнить не удалось (FAIL-CLOSED — вызывающий НЕ должен
+# запускать бинарь elevated).
+function Invoke-DeElevated {
+    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
+    $tag = 'HmDeElev_' + [guid]::NewGuid().ToString('N')
+    $tmp = [System.IO.Path]::GetTempPath()
+    $wrapper  = Join-Path $tmp ($tag + '.ps1')
+    $outFile  = Join-Path $tmp ($tag + '.out')
+    $codeFile = Join-Path $tmp ($tag + '.code')
+    $argLit = ''
+    if ($Arguments.Count -gt 0) {
+        $argLit = ' ' + (($Arguments | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
+    }
+    $exeLit  = $Exe -replace "'", "''"
+    $outLit  = $outFile -replace "'", "''"
+    $codeLit = $codeFile -replace "'", "''"
+    $body = @"
+`$ErrorActionPreference = 'Continue'
+`$c = 1
+try {
+  `$o = & '$exeLit'$argLit 2>&1 | Out-String
+  `$c = `$LASTEXITCODE; if (`$null -eq `$c) { `$c = 0 }
+  Set-Content -LiteralPath '$outLit' -Value `$o -Encoding UTF8
+} catch {
+  Set-Content -LiteralPath '$outLit' -Value `$_.Exception.Message -Encoding UTF8
+}
+Set-Content -LiteralPath '$codeLit' -Value ([string]`$c) -Encoding ASCII
+"@
+    try { Set-Content -LiteralPath $wrapper -Value $body -Encoding UTF8 } catch { return $null }
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $started = $false
+    try {
+        $act  = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $wrapper + '"')
+        $prin = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+        Register-ScheduledTask -TaskName $tag -InputObject (New-ScheduledTask -Action $act -Principal $prin) -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $tag -ErrorAction Stop
+        $started = $true
+    } catch { $started = $false }
+    $result = $null
+    if ($started) {
+        $deadline = (Get-Date).AddSeconds(180)
+        while (-not (Test-Path -LiteralPath $codeFile) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 400 }
+        if (Test-Path -LiteralPath $codeFile) {
+            $code = 1; $out = ''
+            try { $code = [int]((Get-Content -LiteralPath $codeFile -Raw).Trim()) } catch { $code = 1 }
+            try { $out = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue } catch { $out = '' }
+            $result = [pscustomobject]@{ Code = $code; Output = $out }
+        }
+    }
+    try { Unregister-ScheduledTask -TaskName $tag -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+    Remove-Item -LiteralPath $wrapper, $outFile, $codeFile -Force -ErrorAction SilentlyContinue
+    return $result
 }
 
 # Вшитый .vsix (офлайн). vsix исполняется как код внутри VS Code -> целостность ДО установки (fail-closed).
@@ -94,25 +169,46 @@ function Get-Vsix($name) {
     return ''
 }
 
-function Install-Ext($cli, $extId, $vsix) {
+$script:DeElevFailed = $false
+
+# Установка расширения ДЕ-ЭЛЕВИРОВАННО + проверка через --list-extensions (тоже
+# де-элевированно — user-writable бинарь под админом НЕ запускаем). $true, если extId подтверждён.
+function Install-ExtSafe($cli, $extId, $vsix) {
     if (-not $cli) { return $false }
-    Write-Host "Ставлю расширение $extId в VS Code..."
+    Write-Host "Ставлю расширение $extId в VS Code (от имени пользователя, без прав администратора)..."
     if ($DRY) {
-        if ($vsix) { Write-Host "  [dry-run] WOULD: $cli --install-extension $vsix --force" }
-        else { Write-Host "  [dry-run] WOULD: $cli --install-extension $extId --force" }
+        if ($vsix) { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $vsix --force" }
+        else { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $extId --force" }
         return $true
     }
-    # Приоритет — вшитый .vsix (офлайн); фолбэк — Marketplace по id.
-    if ($vsix) {
-        Write-Host "  из вшитого vsix (офлайн): $vsix"
-        & $cli --install-extension $vsix --force 2>&1 | Out-Host
-        if (Test-ExtPresent $cli $extId) { Write-Host "  ${extId}: на месте (офлайн vsix)."; return $true }
-        Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
+    $target = if ($vsix) { $vsix } else { $extId }
+    if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
+    $r = Invoke-DeElevated $cli @('--install-extension', $target, '--force')
+    if ($null -eq $r) {
+        Write-Host "  Не удалось безопасно (де-элевированно) выполнить установку — пропускаю (fail-closed, НЕ запускаю под админом)."
+        $script:DeElevFailed = $true
+        return $false
     }
-    & $cli --install-extension $extId --force 2>&1 | Out-Host
-    if (Test-ExtPresent $cli $extId) { Write-Host "  ${extId}: на месте."; return $true }
-    Write-Host "  ${extId}: не подтвердилось."; return $false
+    if ($r.Output) { Write-Host ($r.Output.TrimEnd()) }
+    $lst = Invoke-DeElevated $cli @('--list-extensions')
+    if ($null -eq $lst) { $script:DeElevFailed = $true; return $false }
+    if (("$($lst.Output)") -match [regex]::Escape($extId)) { Write-Host "  ${extId}: на месте."; return $true }
+    if ($vsix) {
+        Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
+        $r2 = Invoke-DeElevated $cli @('--install-extension', $extId, '--force')
+        if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
+        if ($r2.Output) { Write-Host ($r2.Output.TrimEnd()) }
+        $lst2 = Invoke-DeElevated $cli @('--list-extensions')
+        if (($null -ne $lst2) -and (("$($lst2.Output)") -match [regex]::Escape($extId))) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
+    }
+    Write-Host "  ${extId}: не подтвердилось."
+    return $false
 }
+
+# CLI: доверенный (реестр Uninstall) в приоритете; иначе — найденный на диске (но
+# исполняем его ВСЁ РАВНО только де-элевированно, что снимает эскалацию).
+$codeCli = Get-VsCodeCli
+if (-not $codeCli) { $codeCli = Find-CodeCli }
 
 if (-not $codeCli -and -not $DRY) {
     Write-Host "CLI VS Code (code.cmd) не найден — расширения не поставить автоматически. Открой VS Code, панель Extensions -> найди 'Claude Code' и 'ChatGPT - Codex' -> Install."
@@ -121,11 +217,20 @@ if (-not $codeCli -and -not $DRY) {
 
 $claudeVsix = Get-Vsix 'claude-code.vsix'
 $codexVsix  = Get-Vsix 'chatgpt.vsix'
-$okClaude = Install-Ext $codeCli 'anthropic.claude-code' $claudeVsix
-$okCodex  = Install-Ext $codeCli 'openai.chatgpt' $codexVsix
+$okClaude = Install-ExtSafe $codeCli 'anthropic.claude-code' $claudeVsix
+$okCodex  = Install-ExtSafe $codeCli 'openai.chatgpt' $codexVsix
 
 if ($okClaude) { Write-Host "OK: панель Claude Code в VS Code установлена." }
 if ($okCodex)  { Write-Host "OK: Codex (openai.chatgpt) в VS Code установлен." }
-if ($okClaude) { exit 0 }
-Write-Host "Claude Code расширение не подтвердилось. Открой VS Code -> Extensions -> 'Claude Code' -> Install. Claude Code также работает в терминале командой 'claude'."
+
+# P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
+if ($okClaude -and $okCodex) { exit 0 }
+$missing = @()
+if (-not $okClaude) { $missing += 'Claude Code (anthropic.claude-code)' }
+if (-not $okCodex)  { $missing += 'Codex (openai.chatgpt)' }
+if ($script:DeElevFailed) {
+    Write-Host "Не удалось безопасно доставить расширения (де-элевация недоступна): $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install."
+} else {
+    Write-Host "Не установились расширения: $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
+}
 exit 1

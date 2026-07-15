@@ -6,7 +6,15 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
 DRY="${HM_DRY_RUN:-}"
-APP="/Applications/Visual Studio Code.app"
+# P1: VS Code может стоять в /Applications (обычная установка) ИЛИ ~/Applications
+# (user-install без прав администратора). detectComponents (main.js) поддерживает оба —
+# поэтому детектим ОБА и здесь: иначе при user-install мы ошибочно вернули бы 120 и не
+# доставили расширения, а при vendor — поставили бы ВТОРУЮ копию в /Applications.
+APP_SYS="/Applications/Visual Studio Code.app"
+APP_USER="$HOME/Applications/Visual Studio Code.app"
+if   [ -d "$APP_SYS" ];  then APP="$APP_SYS"
+elif [ -d "$APP_USER" ]; then APP="$APP_USER"
+else APP="$APP_SYS"; fi   # ни одного нет -> цель установки по умолчанию /Applications
 CODE_CLI="$APP/Contents/Resources/app/bin/code"
 
 echo "Проверяю VS Code..."
@@ -37,10 +45,12 @@ else
       echo "В архиве VS Code не найдено приложение (.app)."; rm -rf "$MNT"; exit 1
     fi
     echo "Копирую $(basename "$SRC") в /Applications (может потребоваться пароль администратора)..."
-    admin_run "cp -R '$SRC' /Applications/"
+    # P2: cp + снятие карантина — в ОДНОМ scoped admin_run. Бандл копируется root-owned,
+    # поэтому xattr от обычного юзера падал бы, а `|| true` глушил ошибку -> карантин
+    # оставался и Gatekeeper блокировал первый запуск. Теперь xattr тоже под root, таргет
+    # строго на ОДИН .app-бандл ($APP), а не рекурсивно по /Applications.
+    admin_run "cp -R '$SRC' '$APP' && /usr/bin/xattr -dr com.apple.quarantine '$APP'"
     rm -rf "$MNT"
-    # Снять карантин (архив метит содержимое com.apple.quarantine) — иначе Gatekeeper заблокирует запуск.
-    xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
     if [ -d "$APP" ]; then
       echo "VS Code установлен."
       echo "HM-RECEIPT path $APP"
@@ -112,6 +122,10 @@ install_ext "$CODE_CLI" "openai.chatgpt" "$CODEX_VSIX" && EXT_OK_CODEX=1
 
 [ "$EXT_OK_CLAUDE" -eq 1 ] && echo "OK: панель Claude Code в VS Code установлена."
 [ "$EXT_OK_CODEX" -eq 1 ] && echo "OK: Codex (openai.chatgpt) в VS Code установлен."
-[ "$EXT_OK_CLAUDE" -eq 1 ] && exit 0
-echo "Claude Code расширение не подтвердилось. Открой VS Code -> Extensions -> 'Claude Code' -> Install. Claude Code также работает в терминале командой 'claude'."
+# P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
+if [ "$EXT_OK_CLAUDE" -eq 1 ] && [ "$EXT_OK_CODEX" -eq 1 ]; then exit 0; fi
+missing=""
+[ "$EXT_OK_CLAUDE" -eq 1 ] || missing="Claude Code (anthropic.claude-code)"
+[ "$EXT_OK_CODEX" -eq 1 ]  || missing="${missing:+$missing, }Codex (openai.chatgpt)"
+echo "Не установились расширения: $missing. Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
 exit 1

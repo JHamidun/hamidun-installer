@@ -577,6 +577,9 @@ async function runComponents(ids, env) {
   const failed = [];
   const skipped = [];
   const bad = new Set();
+  // Компоненты, пропущенные В ХОДЕ прогона (dep-провал ИЛИ осознанный exit-120-skip).
+  // Их убираем из HM_SELECTED перед verify, иначе verify нарисует по ним красный крест.
+  const runtimeSkipped = new Set();
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -586,6 +589,7 @@ async function runComponents(ids, env) {
       setStep(id, 'skipped');
       skipped.push(id);
       bad.add(id);
+      runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
       continue;
@@ -612,13 +616,34 @@ async function runComponents(ids, env) {
       });
     }
 
+    // verify читает HM_SELECTED, чтобы печатать "skip" для НЕ выбранных. Компоненты,
+    // осознанно пропущенные В ХОДЕ прогона (exit 120 — нечего ставить — или из-за
+    // провала зависимости), из HM_SELECTED для verify убираем: иначе он нарисует по
+    // ним красный крест, хотя их корректно не ставили.
+    let runEnv = env;
+    if (id === 'verify' && runtimeSkipped.size) {
+      const sel = String((env && env.HM_SELECTED) || '').split(',')
+        .filter((s) => s && !runtimeSkipped.has(s));
+      runEnv = Object.assign({}, env, { HM_SELECTED: sel.join(',') });
+    }
+
     let res;
-    try { res = await window.installer.runComponent(id, env); }
+    try { res = await window.installer.runComponent(id, runEnv); }
     catch (e) { res = { id, ok: false, code: -1, error: String(e) }; }
 
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
 
-    if (res && res.ok) { setStep(id, 'done'); ok++; }
+    if (res && res.skipped) {
+      // P1: осознанный пропуск компонента (exit 120 — нечего ставить, напр. VS Code не
+      // вшит в сборку И не установлен). НЕ успех и НЕ ошибка: помечаем skipped И заносим
+      // в bad, чтобы зависимые (extension requires vscode) не запускались красным впустую,
+      // а тоже грациозно пропускались. Из HM_SELECTED для verify компонент уже убираем.
+      setStep(id, 'skipped');
+      skipped.push(id);
+      bad.add(id);
+      runtimeSkipped.add(id);
+      appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
+    } else if (res && res.ok) { setStep(id, 'done'); ok++; }
     else {
       setStep(id, 'error');
       failed.push(id);

@@ -4,6 +4,7 @@ const { spawn, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
@@ -659,6 +660,52 @@ ipcMain.handle('launch-cursor', () => {
   return false;
 });
 
+// P0 (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
+// Прямой spawn user-writable Code.exe (%LOCALAPPDATA%\…\Code.exe) исполнил бы ПОД АДМИНОМ
+// (high integrity) то, что medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить
+// на его место — integrity-escalation. Поэтому редактор запускаем ДЕ-ЭЛЕВИРОВАННО, от
+// текущего интерактивного пользователя (medium integrity):
+//   1) primary — одноразовая scheduled task с /RL LIMITED (сохраняет аргумент-папку);
+//   2) fallback — explorer.exe (наследует medium-integrity токен уже запущенного shell).
+// Из ЭТОГО elevated-процесса Code.exe напрямую НЕ spawn'им никогда.
+// Остаточный риск: путь к Code.exe берём из user-writable каталога, но т.к. запуск идёт
+// de-elevated (medium integrity), подмена бинаря НЕ даёт эскалации (та же граница, что уже
+// доступна малвари). Folder-open в fallback-ветке — best-effort (explorer не форвардит
+// аргумент папки; редактор всё равно откроется де-элевированно).
+function winLaunchDeElevated(exe, folderArg) {
+  const windir = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const explorerFallback = () => {
+    try {
+      const exp = path.join(windir, 'explorer.exe');
+      if (fs.existsSync(exp)) { spawn(exp, [exe], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); return true; }
+    } catch (e) { /* ignore */ }
+    return false;
+  };
+  try {
+    const ps = remoteFetch.winPowershellPath(); // абсолютный, из валидированного System32
+    if (!ps) return explorerFallback();
+    const tag = 'HmLaunchVSCode_' + crypto.randomBytes(6).toString('hex');
+    const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";          // PS single-quote
+    const argD = '"' + String(folderArg).replace(/"/g, '""') + '"';      // dq-аргумент для Code.exe
+    const psCmd =
+      "$ErrorActionPreference='Stop';" +
+      'try{' +
+        '$a=New-ScheduledTaskAction -Execute ' + q(exe) + ' -Argument ' + q(argD) + ';' +
+        '$p=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited;' +
+        'Register-ScheduledTask -TaskName ' + q(tag) + ' -InputObject (New-ScheduledTask -Action $a -Principal $p) -Force | Out-Null;' +
+        'Start-ScheduledTask -TaskName ' + q(tag) + ';' +
+        'Start-Sleep -Seconds 3;' +
+        'Unregister-ScheduledTask -TaskName ' + q(tag) + ' -Confirm:$false;' +
+      '}catch{' +
+        'Start-Process explorer.exe -ArgumentList ' + q('"' + exe + '"') + ';' +
+      '}';
+    const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psCmd],
+      { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return true;
+  } catch (e) { return explorerFallback(); }
+}
+
 // Открыть VS Code НА ПАПКЕ проекта (IDE-режим), а не в агент-чате: аналог `code "<папка>"`.
 // Папка ~/HamidunStart создаётся, если её нет, чтобы VS Code открыл реальный воркспейс
 // (пустой проект), а не безымянное окно. НАМЕРЕННО без URI вида vscode://…/open — тот
@@ -666,15 +713,20 @@ ipcMain.handle('launch-cursor', () => {
 ipcMain.handle('launch-vscode', () => {
   try {
     const startDir = path.join(os.homedir(), 'HamidunStart');
-    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* ignore */ }
+    // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
+    // редактор получил бы путь к файлу/несуществующему — подтверждаем, что это директория.
+    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
+    try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
     if (IS_WIN) {
       const codeExe = firstExisting([
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
         path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
       ]);
-      if (codeExe) { spawn(codeExe, [startDir], { detached: true, stdio: 'ignore' }).unref(); return true; }
+      // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
+      if (codeExe) { return winLaunchDeElevated(codeExe, startDir); }
     } else if (IS_MAC) {
-      // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE.
+      // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE. `open` запускает
+      // цель от имени пользователя (macOS не эскалирует integrity как Windows).
       spawn('/usr/bin/open', ['-a', 'Visual Studio Code', startDir], { detached: true, stdio: 'ignore' }).unref();
       return true;
     }
@@ -879,6 +931,14 @@ function dirHasChildStarting(dir, prefix) {
   } catch (e) { return false; }
 }
 
+// Расширение (по точному id-префиксу) установлено ИМЕННО в VS Code (папки .vscode /
+// .vscode-oss), а НЕ в Cursor. Нужен для «полного» детекта VS Code-бандла.
+function vsCodeHasExt(home, extId) {
+  return [path.join(home, '.vscode', 'extensions'),
+          path.join(home, '.vscode-oss', 'extensions')]
+    .some((d) => dirHasChildStarting(d, extId));
+}
+
 // Поиск claude-бинаря (зеркало логики claude.ps1 / verify.ps1, но в Node).
 function findClaudeBinary() {
   const home = os.homedir();
@@ -927,13 +987,19 @@ function detectComponents() {
       : firstExisting(['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')]);
     out.cursor = { installed: !!p, detectedVersion: '' };
   }
-  // vscode (приложение) — рекомендуемый редактор
+  // vscode (полный бандл: приложение + ОБА расширения) — рекомендуемый редактор.
+  // P1: «установлен» (и авто-снятие галки) ТОЛЬКО когда есть И приложение, И оба
+  // расширения (Claude + Codex) ИМЕННО в VS Code. Иначе НЕ снимаем — vscode.ps1/sh
+  // единственный доставщик Codex, и он до-ставит недостающее даже при уже
+  // предустановленном VS Code (сценарий «VS Code есть, Codex нет» больше не молчит).
   {
-    const p = IS_WIN
+    const appPresent = IS_WIN
       ? firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
                        path.join(winPF(), 'Microsoft VS Code', 'Code.exe')])
       : firstExisting(['/Applications/Visual Studio Code.app', path.join(home, 'Applications', 'Visual Studio Code.app')]);
-    out.vscode = { installed: !!p, detectedVersion: '' };
+    const claudeExtId = (readJson('config.json', {}).claudeCodeExtensionId) || 'anthropic.claude-code';
+    const bothExts = vsCodeHasExt(home, claudeExtId) && vsCodeHasExt(home, 'openai.chatgpt');
+    out.vscode = { installed: !!appPresent && bothExts, detectedVersion: '' };
   }
   // claude CLI
   {
