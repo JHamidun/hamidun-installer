@@ -658,7 +658,7 @@ ok('preload.js: экспортирует launchVsCode (launchCursor сохран
 ok('app.js: бейдж «рекомендуется» + финиш зовёт launchVsCode; Cursor-кнопка условная', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   assert(/badge rec/.test(s) && /c\.recommended/.test(s), 'карточка рисует badge rec по c.recommended');
-  assert(/id="ns-vscode" class="btn-sm primary"/.test(s), 'кнопка «Открыть VS Code» — primary');
+  assert(/id="ns-vscode" class="btn-sm primary/.test(s), 'кнопка «Открыть VS Code» — primary (класс начинается с btn-sm primary; Задача 3 добавила ns-main)');
   assert(/launchVsCode\(\)/.test(s), 'финиш зовёт launchVsCode');
   assert(/cursorSelected \?/.test(s), 'кнопка Cursor показывается ТОЛЬКО если cursor выбран');
   assert(/#ns-autovscode/.test(s), 'авто-открытие на «Готово» теперь VS Code');
@@ -1126,6 +1126,18 @@ ok('P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED филь
   assert(/runtimeSkipped\.add\(id\)/.test(fh), 'dependents, снятые из-за провала зависимости, тоже уходят в runtimeSkipped');
   assert(/id === 'verify' && runtimeSkipped\.size/.test(s), 'фильтрация HM_SELECTED привязана к verify');
   assert(/HM_SELECTED[\s\S]{0,120}filter\(\(s\) => s && !runtimeSkipped\.has\(s\)\)/.test(s), 'из HM_SELECTED убираем runtime-skipped');
+});
+
+// Задача 3 (тестер-фидбек): finish-экран ведёт новичка — заметная CTA бота, 3 шага, приоритет VS Code.
+ok('Задача 3 (app.js): finish-экран — CTA @HamidunAcademyBot (data-ext), 3 шага, приоритет Открыть VS Code', () => {
+  const s = EG_APP();
+  assert(/class="ns-bot"/.test(s), 'CTA-карточка бота .ns-bot присутствует');
+  assert(/@HamidunAcademyBot/.test(s), 'кнопка ведёт на @HamidunAcademyBot');
+  assert(/class="ns-bot-btn" data-ext=/.test(s), 'кнопка бота — через data-ext (переиспользован openExternal, без нового IPC)');
+  assert(/Что дальше — три простых шага/.test(s), 'блок «что дальше — три простых шага»');
+  assert(/const step3 = botUrl/.test(s), '3-й шаг ведёт на бота (fallback на памятку при пустом links.bot)');
+  assert(/id="ns-vscode" class="btn-sm primary ns-main"/.test(s), 'Открыть VS Code — главная кнопка (.ns-main)');
+  assert(/id="ns-cursor"/.test(s) && /cursorSelected \?/.test(s), 'Открыть Cursor — условная (cursorSelected)');
 });
 
 // P1 (vscode.sh): VS Code детектится и в ~/Applications; вторая копия в /Applications не ставится.
