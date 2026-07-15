@@ -953,6 +953,22 @@ if (bashAvailable()) {
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 
+  ok('config.sh REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);   // ~/.claude/skills/user-skill (пред-существующий, содержимое 'user skill')
+      // repair (БЕЗ HM_ADDITIVE): user-skill в снятом паке (в ALL, НЕ в KEEP), но user-skill
+      // НЕ в clone. До фикса repair считал его 'нашим' (weAdded игнорировал pre-existing) и
+      // сносил rm -rf. Теперь inventory щадит пред-существующее в ОБОИХ режимах.
+      const r = runCfgSh(home, clone, { HM_ALL_PACK_SKILLS: 'user-skill,our-skill', HM_KEEP_SKILLS: 'something-else' });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(home + '/.claude/skills/user-skill/SKILL.md', 'utf8'), 'user skill',
+        'пред-существующий скилл юзера ЦЕЛ и не перезаписан в repair (P1 закрыт)');
+      assert(!fs.existsSync(home + '/.claude/skills/our-skill'), 'доложенный нами скилл снятого пака удалён (прунинг работает и в repair)');
+      assert(/убрано: 1/.test(r.stdout || ''), 'удалён ровно 1 (наш, не юзера): ' + (r.stdout || ''));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
   ok('config.sh: TMPDIR недоступен → mktemp сбой → 0 удалений (fail-closed) + ненулевой выход, скилл юзера ЦЕЛ', () => {
     const { base, home, clone } = mkCfgSandbox();
     try {
@@ -1030,6 +1046,22 @@ if (powershellAvailable()) {
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл разложен');
       assertUserDataIntact(home);   // пользовательское НЕ тронуто даже в repair
       assertNoWipe(home);
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('config.ps1 REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);   // ~/.claude/skills/user-skill (пред-существующий, содержимое 'user skill')
+      // repair (БЕЗ HM_ADDITIVE): user-skill в снятом паке (в ALL, НЕ в KEEP), но НЕ в clone.
+      // До фикса weAdded=(-not $ADDITIVE)-or… → в repair всегда true → Remove-Item -Recurse
+      // сносил чужой скилл. Теперь $preExisting щадит его в ОБОИХ режимах.
+      const r = runCfgPs1(home, clone, { HM_ALL_PACK_SKILLS: 'user-skill,our-skill', HM_KEEP_SKILLS: 'something-else' });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(home + '/.claude/skills/user-skill/SKILL.md', 'utf8'), 'user skill',
+        'пред-существующий скилл юзера ЦЕЛ и не перезаписан в repair (P1 закрыт)');
+      assert(!fs.existsSync(home + '/.claude/skills/our-skill'), 'доложенный нами скилл снятого пака удалён (прунинг работает и в repair)');
+      assert(/убрано: 1/.test(r.stdout || ''), 'удалён ровно 1 (наш, не юзера): ' + (r.stdout || ''));
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 } else {
