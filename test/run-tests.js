@@ -1396,27 +1396,230 @@ ok('P0-1 (scripts): nomad.sh/ps1 — skip → exit 120 (не 0), real-fail → e
   assert(!/\.hamidun-nomad/.test(nps), 'nomad.ps1: НЕТ упоминаний .hamidun-nomad (маркеры не пишутся)');
 });
 
-// INSTALL-ГИГИЕНА (сохранена): Nomad install НЕ усыновляет/не затирает/не удаляет чужой
-// nomad-src. Клон ТОЛЬКО в отсутствующий/пустой путь; непустой посторонний каталог не
-// трогаем (используем как есть при наличии pyproject.toml, иначе пропускаем клон).
-ok('install-гигиена (scripts): Nomad клонирует ТОЛЬКО в пустой/отсутствующий путь; чужой непустой nomad-src не трогает; ни pull-усыновления, ни rm', () => {
+// INSTALL-ГИГИЕНА (Codex P0, ужесточено): Nomad ставится ТОЛЬКО из ДОВЕРЕННОГО источника —
+// (а) вшитый bundled vendor (HM_NOMAD_SRC с pyproject.toml, путь задаёт main), ЛИБО (б)
+// СВЕЖИЙ git clone в РАНЕЕ ОТСУТСТВОВАВШИЙ путь. ЛЮБОЙ уже существующий nomad-src (в т.ч. с
+// pyproject.toml — чужой) НЕ усыновляется: не клонируем, НЕ ставим из него, не исполняем
+// его build-backend. Старая ветка «использую как есть» УДАЛЕНА.
+ok('install-гигиена (scripts): Nomad — доверенный источник (vendor|свежий clone); существующий/чужой nomad-src → НЕ ставим (skip); ни pull, ни rm, ни --force, ни «use as-is»', () => {
   const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
-  // Есть pyproject.toml → используем как есть (без clone/pull/overwrite).
-  assert(/if \[ -f "\$SRC\/pyproject\.toml" \]; then[\s\S]{0,160}использую как есть/.test(nsh), 'nomad.sh: существующий источник — используем как есть');
-  // Непустой посторонний каталог → НЕ трогаем, клон пропускаем.
-  assert(/не пуст[\s\S]{0,120}не трогаю чужой каталог, клон пропускаю/.test(nsh), 'nomad.sh: непустой чужой каталог → пропуск клона');
-  // Клон — только в else-ветке (иначе отсутствует/пуст).
-  assert(/else\s*\n\s*echo "Клонирую[\s\S]{0,120}git clone --depth 1 "\$REPO" "\$SRC"/.test(nsh), 'nomad.sh: git clone только в else (пустой/отсутствующий путь)');
-  // НЕТ усыновления чужого: ни git pull, ни rm/rm -rf над nomad-src.
-  assert(!/git -C "\$SRC" pull/.test(nsh), 'nomad.sh: НЕТ git pull (усыновления существующего)');
+  // Доверие: SRC_TRUSTED=1 только для vendor с pyproject.
+  assert(/if \[ -n "\$SRC" \] && \[ -f "\$SRC\/pyproject\.toml" \]; then/.test(nsh) && /SRC_TRUSTED=1/.test(nsh),
+    'nomad.sh: bundled vendor с pyproject → SRC_TRUSTED=1');
+  // Существующий $SRC (любой) → пропуск клона и установки (клон только в else).
+  assert(/if \[ -e "\$SRC" \] \|\| \[ -L "\$SRC" \]; then/.test(nsh), 'nomad.sh: существующий $SRC ловится (-e/-L)');
+  assert(/не устанавливаю из него\. Пропускаю/.test(nsh), 'nomad.sh: существующий/чужой каталог → не устанавливаем');
+  // clone ТОЛЬКО в else + доверие ставится ТОЛЬКО после успешного клона.
+  assert(/else\s*\n\s*echo "Клонирую[\s\S]{0,180}git clone --depth 1 "\$REPO" "\$SRC"/.test(nsh), 'nomad.sh: git clone только в else (отсутствующий путь)');
+  assert(/if \[ -f "\$SRC\/pyproject\.toml" \]; then SRC_TRUSTED=1; WE_CLONED_SRC=1/.test(nsh), 'nomad.sh: доверие+WE_CLONED только после успешного клона');
+  // Установка гейтится доверием ДО секции uv.
+  assert(/if \[ "\$SRC_TRUSTED" != "1" \]; then/.test(nsh), 'nomad.sh: гейт SRC_TRUSTED');
+  assert(nsh.indexOf('SRC_TRUSTED" != "1" ]; then') !== -1 && nsh.indexOf('SRC_TRUSTED" != "1" ]; then') < nsh.indexOf('uv tool install'),
+    'nomad.sh: skip-гейт ПЕРЕД uv tool install');
+  // Никакого усыновления/затирания/принудиловки/«use as-is».
+  assert(!/git -C "\$SRC" pull/.test(nsh), 'nomad.sh: НЕТ git pull');
   assert(!/rm -rf[^\n]*\$SRC|rm -rf[^\n]*nomad-src/.test(nsh), 'nomad.sh: НЕТ rm -rf над nomad-src');
+  assert(!/--force/.test(nsh), 'nomad.sh: НЕТ --force');
+  assert(!/использую как есть/.test(nsh), 'nomad.sh: старая ветка «использую как есть» удалена');
+
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
-  assert(/Test-Path -LiteralPath \(Join-Path \$src 'pyproject\.toml'\)[\s\S]{0,160}использую как есть/.test(nps), 'nomad.ps1: существующий источник — используем как есть');
-  assert(/не пуст[\s\S]{0,120}не трогаю чужой каталог, клон пропускаю/.test(nps), 'nomad.ps1: непустой чужой каталог → пропуск клона');
-  assert(/\} else \{\s*\n\s*Write-Host "Клонирую[\s\S]{0,140}git clone --depth 1 \$repo \$src/.test(nps), 'nomad.ps1: git clone только в else (пустой/отсутствующий путь)');
-  assert(!/git -C \$src pull/.test(nps), 'nomad.ps1: НЕТ git pull (усыновления существующего)');
+  assert(/if \(\$src -and \(Test-Path \(Join-Path \$src 'pyproject\.toml'\)\)\) \{/.test(nps) && /\$srcTrusted = \$true/.test(nps),
+    'nomad.ps1: bundled vendor с pyproject → $srcTrusted=$true');
+  assert(/if \(Test-Path -LiteralPath \$src\) \{/.test(nps), 'nomad.ps1: существующий $src ловится (Test-Path -LiteralPath)');
+  assert(/не устанавливаю из него\. Пропускаю/.test(nps), 'nomad.ps1: существующий/чужой каталог → не устанавливаем');
+  assert(/\} else \{\s*\n\s*Write-Host "Клонирую[\s\S]{0,220}git clone --depth 1 \$repo \$src/.test(nps), 'nomad.ps1: git clone только в else');
+  assert(/if \(Test-Path \(Join-Path \$src 'pyproject\.toml'\)\) \{ \$srcTrusted = \$true; \$weClonedSrc = \$true/.test(nps), 'nomad.ps1: доверие+weCloned только после клона');
+  assert(/if \(-not \$DRY -and -not \$srcTrusted\) \{/.test(nps), 'nomad.ps1: гейт $srcTrusted');
+  assert(nps.indexOf('-not $srcTrusted) {') !== -1 && nps.indexOf('-not $srcTrusted) {') < nps.indexOf('tool install --python 3.12 "$src"'),
+    'nomad.ps1: skip-гейт ПЕРЕД uv tool install');
+  assert(!/git -C \$src pull/.test(nps), 'nomad.ps1: НЕТ git pull');
   assert(!/Remove-Item[^\n]*\$src/.test(nps), 'nomad.ps1: НЕТ Remove-Item над nomad-src');
+  assert(!/--force/.test(nps), 'nomad.ps1: НЕТ --force');
+  assert(!/использую как есть/.test(nps), 'nomad.ps1: старая ветка «использую как есть» удалена');
 });
+
+// Codex P0-2: убран --force + guard существующего uv-tool/шимов (чужое не перезаписываем).
+ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существующего hermes-agent/шимов → skip 120', () => {
+  const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  assert(!/--force/.test(nsh), 'nomad.sh: НИ ОДНОГО --force');
+  assert(/uv tool install --python 3\.12 "\$SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
+  assert(nsh.indexOf('UV_TOOL_HA="$HOME/.local/share/uv/tools/hermes-agent"') !== -1, 'nomad.sh: проверяется uv-tool hermes-agent');
+  assert(nsh.indexOf('[ -e "$HOME/.local/bin/nomad" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/hermes" ]') !== -1,
+    'nomad.sh: проверяются шимы nomad/hermes');
+  const guardSh = nsh.slice(nsh.indexOf('UV_TOOL_HA='), nsh.indexOf('UV_TOOL_HA=') + 600);
+  assert(/exit 120/.test(guardSh), 'nomad.sh: существующий тул/шим → exit 120');
+  assert(nsh.indexOf('UV_TOOL_HA=') !== -1 && nsh.indexOf('UV_TOOL_HA=') < nsh.indexOf('uv tool install'),
+    'nomad.sh: guard ПЕРЕД uv tool install');
+
+  const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  assert(!/--force/.test(nps), 'nomad.ps1: НИ ОДНОГО --force');
+  assert(/& \$uv tool install --python 3\.12 "\$src"/.test(nps), 'nomad.ps1: uv tool install без --force');
+  assert(/uv\\tools\\hermes-agent/.test(nps) && /\.local\\share\\uv\\tools\\hermes-agent/.test(nps),
+    'nomad.ps1: guard проверяет hermes-agent tool (APPDATA + .local\\share)');
+  assert(/\.local\\bin\\nomad\.exe/.test(nps) && /\.local\\bin\\hermes/.test(nps), 'nomad.ps1: проверяются шимы nomad/hermes(.exe)');
+  const guardPs = nps.slice(nps.indexOf('$existingNomad = @('), nps.indexOf('$existingNomad = @(') + 700);
+  assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
+  assert(nps.indexOf('$existingNomad = @(') !== -1 && nps.indexOf('$existingNomad = @(') < nps.indexOf('tool install --python 3.12 "$src"'),
+    'nomad.ps1: guard ПЕРЕД uv tool install');
+});
+
+// Codex P0-3: брендинг копируется ТОЛЬКО если целевого файла НЕТ (не перезаписываем чужой).
+ok('Codex P0 (scripts): брендинг SOUL.md/nomad.yaml копируется ТОЛЬКО если целевого НЕТ', () => {
+  const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  assert(/if \[ ! -f "\$HH\/SOUL\.md" \]; then/.test(nsh), 'nomad.sh: SOUL.md — гейт на отсутствие');
+  assert(/cp "\$SRC\/branding\/SOUL\.md" "\$HH\/SOUL\.md"/.test(nsh), 'nomad.sh: cp SOUL.md');
+  assert(/if \[ ! -f "\$HH\/skins\/nomad\.yaml" \]; then/.test(nsh), 'nomad.sh: nomad.yaml — гейт на отсутствие');
+  assert(/cp "\$SRC\/branding\/skins\/nomad\.yaml" "\$HH\/skins\/nomad\.yaml"/.test(nsh), 'nomad.sh: cp nomad.yaml');
+  assert(/не перезаписываю/.test(nsh), 'nomad.sh: сообщение о не-перезаписи');
+
+  const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  assert(/if \(-not \(Test-Path -LiteralPath \$soulDst\)\) \{/.test(nps), 'nomad.ps1: SOUL.md — гейт на отсутствие');
+  assert(/Copy-Item \$soulSrc \$soulDst/.test(nps), 'nomad.ps1: Copy-Item SOUL.md');
+  assert(/if \(-not \(Test-Path -LiteralPath \$skinDst\)\) \{/.test(nps), 'nomad.ps1: nomad.yaml — гейт на отсутствие');
+  assert(/Copy-Item \$nomadYamlSrc \$skinDst/.test(nps), 'nomad.ps1: Copy-Item nomad.yaml');
+  assert(!/Copy-Item \$soulSrc[^\n]*-Force/.test(nps), 'nomad.ps1: -Force убран у SOUL.md');
+  assert(!/Copy-Item \$nomadYamlSrc[^\n]*-Force/.test(nps), 'nomad.ps1: -Force убран у nomad.yaml');
+  assert(/не перезаписываю/.test(nps), 'nomad.ps1: сообщение о не-перезаписи');
+});
+
+// ---- Функциональные прогоны nomad.sh на РЕАЛЬНОЙ ФС (bash + фейковые git/uv) --------
+// Проверяем ЖИВЫЕ инварианты install-гигиены Nomad без сети: (1) чужой существующий
+// nomad-src → skip 120 и НИ git clone, НИ uv НЕ вызваны (build-backend чужого не исполнен);
+// (2) чистая машина (отсутствующий путь) → свежий clone + install проходят, брендинг
+// копируется; (3) существующий брендинг НЕ перезаписывается. Фейки — исполняемые
+// shebang-скрипты в ~/.local/bin (среда без exec-shebang → тест корректно пропускается).
+const NOMAD_FAKE_GIT =
+  '#!/bin/sh\n' +
+  ': > "$HOME/.hm-git-called"\n' +
+  'if [ "$1" = "clone" ]; then\n' +
+  '  dst=""\n' +
+  '  for a in "$@"; do dst="$a"; done\n' +
+  '  mkdir -p "$dst/branding/skins"\n' +
+  '  printf \'[project]\\nname = "hermes-agent"\\n\' > "$dst/pyproject.toml"\n' +
+  '  printf \'SOUL_FROM_CLONE\\n\' > "$dst/branding/SOUL.md"\n' +
+  '  printf \'skin: nomad\\n\' > "$dst/branding/skins/nomad.yaml"\n' +
+  'fi\n' +
+  'exit 0\n';
+const NOMAD_FAKE_UV =
+  '#!/bin/sh\n' +
+  ': > "$HOME/.hm-uv-called"\n' +
+  'case "$1" in\n' +
+  '  --version) echo "uv 0.0.0-fake" ;;\n' +
+  '  python) exit 0 ;;\n' +
+  '  tool)\n' +
+  '    mkdir -p "$HOME/.local/share/uv/tools/hermes-agent"\n' +
+  '    printf \'#!/bin/sh\\necho "nomad 9.9-fake"\\n\' > "$HOME/.local/bin/nomad"\n' +
+  '    chmod +x "$HOME/.local/bin/nomad"\n' +
+  '    printf \'#!/bin/sh\\necho "hermes 9.9-fake"\\n\' > "$HOME/.local/bin/hermes"\n' +
+  '    chmod +x "$HOME/.local/bin/hermes"\n' +
+  '    ;;\n' +
+  '  *) exit 0 ;;\n' +
+  'esac\n' +
+  'exit 0\n';
+
+function writeNomadFakes(bin) {
+  try {
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'git'), NOMAD_FAKE_GIT); fs.chmodSync(path.join(bin, 'git'), 0o755);
+    fs.writeFileSync(path.join(bin, 'uv'), NOMAD_FAKE_UV); fs.chmodSync(path.join(bin, 'uv'), 0o755);
+    fs.writeFileSync(path.join(bin, 'hm_probe'), '#!/bin/sh\necho HM_PROBE_OK\n'); fs.chmodSync(path.join(bin, 'hm_probe'), 0o755);
+    const p = spawnSync('bash', ['-c', 'hm_probe'], {
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, { PATH: bin + path.delimiter + process.env.PATH })
+    });
+    return !p.error && /HM_PROBE_OK/.test(p.stdout || '');
+  } catch (e) { return false; }
+}
+
+function mkNomadTree(repoUrl) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nomad-')).replace(/\\/g, '/');
+  fs.mkdirSync(base + '/scripts/macos', { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), base + '/scripts/macos/nomad.sh');
+  fs.copyFileSync(path.join(ROOT, 'scripts', 'macos', '_lib.sh'), base + '/scripts/macos/_lib.sh');
+  fs.writeFileSync(base + '/config.json', JSON.stringify({ nomad: { repoUrl: repoUrl || '' } }, null, 2));
+  const home = base + '/home';
+  fs.mkdirSync(home + '/.local/bin', { recursive: true });
+  return { base, home, script: base + '/scripts/macos/nomad.sh' };
+}
+
+function runNomadSh(home, script, extraEnv) {
+  return spawnSync('bash', [script], {
+    encoding: 'utf8', timeout: 60000,
+    env: Object.assign({}, process.env, { HOME: home, HM_NOMAD_SRC: '', HM_DRY_RUN: '' }, extraEnv || {})
+  });
+}
+
+if (bashAvailable()) {
+  console.log('== Codex P0 nomad.sh (функционально): доверенный источник, чужое не исполняем/не затираем ==');
+
+  ok('nomad.sh (функц.): ЧУЖОЙ существующий ~/.nomad-src → skip 120; git clone и uv НЕ вызваны (build-backend чужого не исполнен)', () => {
+    const { base, home, script } = mkNomadTree('https://example.test/nomad.git');
+    try {
+      const bin = home + '/.local/bin';
+      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      // Чужой источник УЖЕ на месте (с pyproject.toml — соблазн «использовать как есть»).
+      fs.mkdirSync(home + '/.nomad-src', { recursive: true });
+      fs.writeFileSync(home + '/.nomad-src/pyproject.toml',
+        '[project]\nname = "someone-else"\n[build-system]\nrequires = ["evil-backend"]\n');
+      const r = runNomadSh(home, script);
+      assert.strictEqual(r.status, 120, 'skip exit 120: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(!fs.existsSync(home + '/.hm-git-called'), 'git clone НЕ вызван (чужой каталог не трогаем)');
+      assert(!fs.existsSync(home + '/.hm-uv-called'), 'uv (python/tool install) НЕ вызван — чужой build-backend НЕ исполнен');
+      assert(!fs.existsSync(bin + '/nomad'), 'шим nomad НЕ создан');
+      assert(fs.readFileSync(home + '/.nomad-src/pyproject.toml', 'utf8').indexOf('someone-else') !== -1, 'чужой pyproject.toml ЦЕЛ');
+      assert(/уже существует|Пропускаю/.test(r.stdout || ''), 'сообщение о пропуске чужого источника');
+    } finally { dropDir(base); }
+  });
+
+  ok('nomad.sh (функц.): чистая машина (отсутствующий путь) → свежий clone + install + брендинг, exit 0', () => {
+    const { base, home, script } = mkNomadTree('https://example.test/nomad.git');
+    try {
+      const bin = home + '/.local/bin';
+      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      const hermesHome = home + '/.hermes';
+      const r = runNomadSh(home, script, { HERMES_HOME: hermesHome });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(fs.existsSync(home + '/.nomad-src/pyproject.toml'), 'свежий clone в РАНЕЕ отсутствовавший ~/.nomad-src');
+      assert(fs.existsSync(home + '/.hm-git-called') && fs.existsSync(home + '/.hm-uv-called'), 'git+uv реально вызваны');
+      assert(fs.existsSync(bin + '/nomad'), 'шим nomad создан установкой');
+      assert(fs.existsSync(hermesHome + '/SOUL.md'), 'SOUL.md скопирован');
+      assert(/SOUL_FROM_CLONE/.test(fs.readFileSync(hermesHome + '/SOUL.md', 'utf8')), 'SOUL.md из свежего clone');
+      assert(fs.existsSync(hermesHome + '/skins/nomad.yaml'), 'nomad.yaml скопирован');
+      assert(/OK: nomad установлен/.test(r.stdout || ''), 'финальное OK');
+    } finally { dropDir(base); }
+  });
+
+  ok('nomad.sh (функц.): существующий брендинг SOUL.md НЕ перезаписывается', () => {
+    const { base, home, script } = mkNomadTree('https://example.test/nomad.git');
+    try {
+      const bin = home + '/.local/bin';
+      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      const hermesHome = home + '/.hermes';
+      fs.mkdirSync(hermesHome, { recursive: true });
+      fs.writeFileSync(hermesHome + '/SOUL.md', 'USER_SOUL_KEEP');
+      const r = runNomadSh(home, script, { HERMES_HOME: hermesHome });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(hermesHome + '/SOUL.md', 'utf8'), 'USER_SOUL_KEEP', 'существующий SOUL.md ЦЕЛ (не перезаписан)');
+      assert(/SOUL\.md уже существует/.test(r.stdout || ''), 'сообщение о не-перезаписи брендинга');
+    } finally { dropDir(base); }
+  });
+
+  ok('nomad.sh (функц.): пред-существующий шим ~/.local/bin/nomad → guard skip 120 (не перезаписываем)', () => {
+    const { base, home, script } = mkNomadTree('https://example.test/nomad.git');
+    try {
+      const bin = home + '/.local/bin';
+      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      // Чужой шим nomad уже на месте — установщик не должен его перезаписать.
+      fs.writeFileSync(bin + '/nomad', '#!/bin/sh\necho "FOREIGN NOMAD"\n'); fs.chmodSync(bin + '/nomad', 0o755);
+      const r = runNomadSh(home, script);
+      assert.strictEqual(r.status, 120, 'guard skip exit 120: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(!fs.existsSync(home + '/.hm-git-called') && !fs.existsSync(home + '/.hm-uv-called'), 'ни clone, ни uv (guard до всего)');
+      assert.strictEqual(fs.readFileSync(bin + '/nomad', 'utf8'), '#!/bin/sh\necho "FOREIGN NOMAD"\n', 'чужой шим nomad ЦЕЛ');
+    } finally { dropDir(base); }
+  });
+} else {
+  console.log('  ⚠️  bash недоступен — функциональные прогоны nomad.sh пропущены.');
+}
 
 // P0-3: quarantine-then-guard — подмена marked-каталога МЕЖДУ проверкой и удалением.
 // removeDirTreeGated атомарно захватывает цель в карантин ДО проверки маркера, поэтому

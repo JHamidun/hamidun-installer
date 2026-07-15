@@ -40,12 +40,38 @@ function Resolve-UvExe {
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
 
-# 1. Источник Nomad: офлайн vendor → git repoUrl из config.json → graceful skip
+# GUARD (Codex P0): не перезаписываем ЧУЖОЙ uv-tool/шимы. Если uv-tool hermes-agent ИЛИ
+# команды nomad/hermes уже существуют — НЕ ставим поверх (без принудительной перезаписи):
+# осознанный skip (exit 120). Клон/сборку тоже не запускаем.
+if (-not $DRY) {
+    $existingNomad = @(
+        (Join-Path $env:APPDATA 'uv\tools\hermes-agent'),
+        (Join-Path $env:USERPROFILE '.local\share\uv\tools\hermes-agent'),
+        (Join-Path $env:USERPROFILE '.local\bin\nomad.exe'),
+        (Join-Path $env:USERPROFILE '.local\bin\nomad'),
+        (Join-Path $env:USERPROFILE '.local\bin\hermes.exe'),
+        (Join-Path $env:USERPROFILE '.local\bin\hermes')
+    ) | Where-Object { Test-Path -LiteralPath $_ }
+    if ($existingNomad) {
+        Write-Host "uv-tool hermes-agent или команды nomad/hermes уже установлены — не перезаписываю чужое (без принудительной перезаписи). Пропускаю."
+        exit 120
+    }
+}
+
+# 1. Источник Nomad — ТОЛЬКО доверенный: (а) вшитый bundled vendor (HM_NOMAD_SRC с
+#    pyproject.toml; путь задаёт main, не renderer), ЛИБО (б) СВЕЖИЙ git clone в РАНЕЕ
+#    ОТСУТСТВОВАВШИЙ %LOCALAPPDATA%\nomad-src. Любой уже существующий nomad-src (в т.ч. с
+#    pyproject.toml — чужой) НЕ доверяем: не клонируем, НЕ ставим из него и НЕ исполняем
+#    его build-backend. Иначе → graceful skip.
 $src = $env:HM_NOMAD_SRC
 $repoConfigured = $false   # был ли реально задан repoUrl
 $weClonedSrc = $false      # клонировали ли МЫ исходники в LOCALAPPDATA\nomad-src этим запуском
-$cloneAttempted = $false   # реально ли запускали git clone (отличаем «clone упал» от «намеренно пропущен»)
-if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
+$cloneAttempted = $false   # реально ли запускали git clone (отличаем «clone упал» от «пропущен»)
+$srcTrusted = $false       # можно ли ставить из $src: доверенный vendor ИЛИ наш свежий clone
+if ($src -and (Test-Path (Join-Path $src 'pyproject.toml'))) {
+    # (а) Доверенный bundled vendor — единственный «существующий каталог», из которого можно ставить.
+    $srcTrusted = $true
+} else {
     $repo = ''
     $cfg = Join-Path $PSScriptRoot '..\..\config.json'
     if (Test-Path $cfg) {
@@ -55,21 +81,18 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
         $repoConfigured = $true
         $src = Join-Path $env:LOCALAPPDATA 'nomad-src'
         if ($DRY) {
-            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (только в отсутствующий/пустой путь; чужой каталог не трогаем)"
+            Write-Host "  [dry-run] WOULD: git clone --depth 1 $repo $src (только в отсутствующий путь; существующий/чужой не трогаем и не ставим)"
         } else {
-            # INSTALL-ГИГИЕНА (без ownership-маркеров): НИКОГДА не усыновляем, не затираем
-            # и не удаляем существующий каталог. Клонируем ТОЛЬКО в отсутствующий/пустой
-            # путь (наш свежий clone). Уже есть pyproject.toml → используем как есть (не
-            # клонируем, не обновляем). Непустой посторонний каталог → НЕ трогаем, пропуск.
-            if (Test-Path -LiteralPath (Join-Path $src 'pyproject.toml')) {
-                Write-Host "Каталог $src уже содержит исходники Nomad — использую как есть (не клонирую, не обновляю)."
-            } elseif ((Test-Path -LiteralPath $src) -and (Get-ChildItem -LiteralPath $src -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
-                Write-Host "Каталог $src существует и не пуст, но без исходников Nomad — не трогаю чужой каталог, клон пропускаю."
+            # ЖЁСТКО: клонируем ТОЛЬКО в ОТСУТСТВУЮЩИЙ путь. ЛЮБОЙ существующий $src
+            # (файл/каталог/симлинк — в т.ч. чужой с pyproject.toml) → НЕ трогаем и НЕ
+            # ставим из него: не исполняем чужой build-backend.
+            if (Test-Path -LiteralPath $src) {
+                Write-Host "Каталог $src уже существует — чужому источнику не доверяю: не клонирую и не устанавливаю из него. Пропускаю."
             } else {
                 Write-Host "Клонирую Nomad из $repo ..."
                 $cloneAttempted = $true
                 git clone --depth 1 $repo $src
-                if (Test-Path (Join-Path $src 'pyproject.toml')) { $weClonedSrc = $true }
+                if (Test-Path (Join-Path $src 'pyproject.toml')) { $srcTrusted = $true; $weClonedSrc = $true }
             }
         }
     }
@@ -77,14 +100,15 @@ if (-not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
 # repoUrl задан и МЫ пытались клонировать, но источник так и не появился (git clone упал
 # / нет pyproject.toml) — НАСТОЯЩИЙ провал: честный выход 1. Намеренный пропуск клона
 # (чужой каталог) сюда НЕ попадает ($cloneAttempted=$false) → уходит в graceful skip.
-if (-not $DRY -and $cloneAttempted -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
+if (-not $DRY -and $cloneAttempted -and -not $srcTrusted) {
     Write-Host "ОШИБКА: источник Nomad не склонировался (git clone упал или pyproject.toml не появился) — смотри лог выше."
     exit 1
 }
-if (-not $DRY -and -not ($src -and (Test-Path (Join-Path $src 'pyproject.toml')))) {
-    Write-Host "Источник Nomad не задан или недоступен. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
-    # P0-1: осознанный skip (нечего ставить) — distinct-код «не установлено», чтобы main
-    # НЕ писал маркер установки.
+# Ставим ТОЛЬКО из доверенного источника. Недоверенный/отсутствующий (чужой существующий
+# каталог, либо clone не выполнен) → осознанный skip: distinct-код 120 (main НЕ пишет
+# маркер установки). В dry-run skip НЕ делаем — превьюим секции 2/3/4 ниже.
+if (-not $DRY -and -not $srcTrusted) {
+    Write-Host "Источник Nomad не задан/недоступен/недоверенный. Укажите nomad.repoUrl в config.json или вшейте vendor/nomad-src. Пропускаю."
     exit 120
 }
 if ($DRY -and (-not $src)) {
@@ -104,9 +128,11 @@ if (-not $uv) {
     $uv = Resolve-UvExe
 }
 
-# 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nomad/hermes)
+# 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nomad/hermes).
+# БЕЗ принудительной перезаписи: uv-тул/шимы этого имени уже отсеяны guard-ом выше, а
+# принудительная замена могла бы затронуть и не-uv бинарь того же имени — недопустимо.
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 --force `"$src`""
+    Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 `"$src`" (без принудительной перезаписи)"
 } else {
     if (-not $uv) { Write-Host "uv не найден после установки — прерываю."; exit 1 }
     # P1-5: коды нативных команд НЕ проглатываем ($ErrorActionPreference=Continue их
@@ -115,7 +141,7 @@ if ($DRY) {
     & $uv python install 3.12
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv python install 3.12 завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Write-Host "Устанавливаю Nomad (команды nomad/hermes)..."
-    & $uv tool install --python 3.12 --force "$src"
+    & $uv tool install --python 3.12 "$src"
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
     # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
@@ -123,20 +149,28 @@ if ($DRY) {
     # пользовательские candidate-venv была install-side P0 (портила чужой uv-tool).
 }
 
-# 4. Брендинг → HERMES_HOME (по умолчанию %LOCALAPPDATA%\hermes)
+# 4. Брендинг → HERMES_HOME (по умолчанию %LOCALAPPDATA%\hermes). Брендинг-файл копируем
+# ТОЛЬКО если целевого НЕТ — существующий пользовательский файл НЕ перезаписываем.
 $hh = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
+$wroteSoul = $false; $wroteSkin = $false
 if (-not $DRY) {
     New-Item -ItemType Directory -Force -Path $hh, (Join-Path $hh 'skins') | Out-Null
-    $soulSrc = Join-Path $src 'branding\SOUL.md'
-    if (Test-Path $soulSrc) { Copy-Item $soulSrc (Join-Path $hh 'SOUL.md') -Force }
-    else { Write-Host "  [warn] branding\SOUL.md не найден — пропускаю" }
-    $nomadYamlSrc = Join-Path $src 'branding\skins\nomad.yaml'
-    if (Test-Path $nomadYamlSrc) { Copy-Item $nomadYamlSrc (Join-Path $hh 'skins\nomad.yaml') -Force }
-    else { Write-Host "  [warn] branding\skins\nomad.yaml не найден — пропускаю" }
+    $soulDst = Join-Path $hh 'SOUL.md'
+    if (-not (Test-Path -LiteralPath $soulDst)) {
+        $soulSrc = Join-Path $src 'branding\SOUL.md'
+        if (Test-Path $soulSrc) { Copy-Item $soulSrc $soulDst; $wroteSoul = $true }
+        else { Write-Host "  [warn] branding\SOUL.md не найден — пропускаю" }
+    } else { Write-Host "  SOUL.md уже существует — не перезаписываю." }
+    $skinDst = Join-Path $hh 'skins\nomad.yaml'
+    if (-not (Test-Path -LiteralPath $skinDst)) {
+        $nomadYamlSrc = Join-Path $src 'branding\skins\nomad.yaml'
+        if (Test-Path $nomadYamlSrc) { Copy-Item $nomadYamlSrc $skinDst; $wroteSkin = $true }
+        else { Write-Host "  [warn] branding\skins\nomad.yaml не найден — пропускаю" }
+    } else { Write-Host "  skins\nomad.yaml уже существует — не перезаписываю." }
     $cfgY = Join-Path $hh 'config.yaml'
     if (-not (Test-Path $cfgY)) {
         $cfgTmpl = Join-Path $src 'branding\config.yaml.template'
-        if (Test-Path $cfgTmpl) { Copy-Item $cfgTmpl $cfgY -Force }
+        if (Test-Path $cfgTmpl) { Copy-Item $cfgTmpl $cfgY }
         else { Write-Host "  [warn] branding\config.yaml.template не найден — пропускаю" }
     }
 }
@@ -144,9 +178,10 @@ if (-not $DRY) {
 if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }
 Update-Path
 
-# P0-4: квитанция владения — ТОЧНЫЕ пути созданных артефактов (main соберёт в receipt).
+# P0-4: квитанция владения — ТОЧНЫЕ пути СОЗДАННЫХ артефактов (main соберёт в receipt).
 # ВАЖНО: HERMES_HOME\config.yaml НЕ записываем в квитанцию — после установки это
 # пользовательский конфиг (ключи/настройки), деинсталлятор его трогать не должен.
+# Брендинг попадает в квитанцию ТОЛЬКО если МЫ его создали (чужой файл не присваиваем).
 function Write-NomadReceipt {
     if ($weClonedSrc -and (Test-Path $src)) { Write-Host "HM-RECEIPT path $src" }
     foreach ($shim in @('nomad.exe', 'nomad', 'hermes.exe', 'hermes')) {
@@ -158,10 +193,14 @@ function Write-NomadReceipt {
                            (Join-Path $env:USERPROFILE '.local\share\uv\tools\hermes-agent'))) {
         if (Test-Path -LiteralPath $toolDir) { Write-Host "HM-RECEIPT path $toolDir" }
     }
-    $soul = Join-Path $hh 'SOUL.md'
-    if (Test-Path -LiteralPath $soul) { Write-Host "HM-RECEIPT path $soul" }
-    $skin = Join-Path $hh 'skins\nomad.yaml'
-    if (Test-Path -LiteralPath $skin) { Write-Host "HM-RECEIPT path $skin" }
+    if ($wroteSoul) {
+        $soul = Join-Path $hh 'SOUL.md'
+        if (Test-Path -LiteralPath $soul) { Write-Host "HM-RECEIPT path $soul" }
+    }
+    if ($wroteSkin) {
+        $skin = Join-Path $hh 'skins\nomad.yaml'
+        if (Test-Path -LiteralPath $skin) { Write-Host "HM-RECEIPT path $skin" }
+    }
 }
 
 if (Get-Command nomad -ErrorAction SilentlyContinue) {
