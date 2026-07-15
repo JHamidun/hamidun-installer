@@ -1105,6 +1105,27 @@ if (bashAvailable()) {
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 
+  ok('config.sh REPAIR: скрытый (dot) дочерний skill-junction → skills исключён, внешняя цель цела (P1 Codex dot-child)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);
+      fs.mkdirSync(clone + '/.claude/skills/.hidden', { recursive: true });   // источник везёт коллизию
+      fs.writeFileSync(clone + '/.claude/skills/.hidden/SKILL.md', 'ours');
+      fs.mkdirSync(base + '/ext-hidden', { recursive: true });
+      fs.writeFileSync(base + '/ext-hidden/DATA.md', 'EXTERNAL');
+      let linked = false;
+      // skills — реальный каталог, но скрытый .hidden внутри — junction на внешнюю папку
+      try { fs.symlinkSync(base + '/ext-hidden', home + '/.claude/skills/.hidden', 'junction'); linked = true; }
+      catch (e) { linked = false; }
+      if (!linked) { console.log('     (junction недоступен — пропуск)'); return; }
+      const r = runCfgSh(home, clone, {});   // repair
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(/симлинк\/junction/.test(r.stdout || ''), 'dot-child junction обнаружен → skills пропущен: ' + (r.stdout || ''));
+      assert.strictEqual(fs.readFileSync(base + '/ext-hidden/DATA.md', 'utf8'), 'EXTERNAL', 'внешняя цель за dot-junction ЦЕЛА');
+      assert(!fs.existsSync(base + '/ext-hidden/SKILL.md'), 'наш .hidden/SKILL.md НЕ дописан во внешнюю цель через dot-junction');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
   ok('config.sh: TMPDIR недоступен → mktemp сбой → 0 удалений (fail-closed) + ненулевой выход, скилл юзера ЦЕЛ', () => {
     const { base, home, clone } = mkCfgSandbox();
     try {

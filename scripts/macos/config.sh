@@ -163,7 +163,11 @@ SKILLS_REPARSE=0
 if [ -L "$CLAUDE_HOME/skills" ]; then
   SKILLS_REPARSE=1
 elif [ -d "$CLAUDE_HOME/skills" ]; then
-  for _c in "$CLAUDE_HOME/skills"/*; do
+  # ВСЕ дети, включая скрытые (dot): *, .[!.]*, ..?*. Иначе skills/.foo → external
+  # (symlink) не заметили бы и merge прошёл бы сквозь него (Codex regate #3).
+  # Нераскрытый glob остаётся литералом → [ -L литерал ] = false (нет ложных срабатываний);
+  # .[!.]* и ..?* НЕ матчат сами "." и ".." (нужен непустой хвост).
+  for _c in "$CLAUDE_HOME/skills"/* "$CLAUDE_HOME/skills"/.[!.]* "$CLAUDE_HOME/skills"/..?*; do
     [ -L "$_c" ] && { SKILLS_REPARSE=1; break; }
   done
 fi
