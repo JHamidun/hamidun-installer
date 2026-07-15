@@ -214,9 +214,12 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
                 # reparse-point в PS 5.1 может уйти в ЧУЖУЮ цель, и ссылка по
                 # определению не «доложена нами» (мы копируем реальные каталоги).
                 if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
-                # В add-missing НЕ удаляем скиллы, которые были у юзера ДО нашей раскладки
-                # (не наши — не трогаем). Удаляем только доложенное этим прогоном и чей пак снят.
-                $weAdded = (-not $ADDITIVE) -or (-not $preExisting.ContainsKey($_.Name))
+                # В ОБОИХ режимах НЕ удаляем скиллы, которые были у юзера ДО нашей раскладки
+                # (не наши — не трогаем, даже в repair). $preExisting захвачен до merge в любом
+                # режиме; сбой захвата → $pruneDisabled → сюда не доходим. Пустой хеш (skills не
+                # было до нас) → всё тут доложено нами → прунится по снятому паку. Удаляем только
+                # доложенное этим прогоном и чей пак снят.
+                $weAdded = -not $preExisting.ContainsKey($_.Name)
                 if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name) -and $weAdded) {
                     Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
                     $removed++

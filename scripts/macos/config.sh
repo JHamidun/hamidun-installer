@@ -225,21 +225,21 @@ if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
         # Симлинк-скилл НИКОГДА не удаляем: rm -rf по ссылке с хвостовым слэшем
         # уходит в ЧУЖУЮ цель, и симлинк по определению не «доложен нами».
         [ -L "${d%/}" ] && continue
-        # В add-missing не удаляем скиллы, бывшие ДО нашей раскладки (не наши — не трогаем).
-        # we_added=1 ТОЛЬКО при валидном списке пред-существующих и отсутствии имени в нём.
+        # В ОБОИХ режимах не удаляем скиллы, бывшие ДО нашей раскладки (не наши — не трогаем,
+        # даже в repair). PRE_EXISTING_SKILLS собран до merge в любом режиме; сбой сбора →
+        # PRUNE_DISABLED → сюда не доходим. we_added=1 ТОЛЬКО при валидном списке
+        # пред-существующих и отсутствии имени в нём (пустой список = skills не было = всё наше).
         we_added=1
-        if [ "$ADDITIVE" -eq 1 ]; then
-          if [ -n "$PRE_EXISTING_SKILLS" ] && [ -f "$PRE_EXISTING_SKILLS" ]; then
-            grep -qxF "$name" "$PRE_EXISTING_SKILLS"
-            g=$?
-            if [ "$g" -eq 0 ]; then
-              we_added=0
-            elif [ "$g" -ge 2 ]; then
-              PRUNE_ABORT=1; break
-            fi
-          else
-            we_added=0   # списка нет → считаем пред-существующим → не удаляем
+        if [ -n "$PRE_EXISTING_SKILLS" ] && [ -f "$PRE_EXISTING_SKILLS" ]; then
+          grep -qxF "$name" "$PRE_EXISTING_SKILLS"
+          g=$?
+          if [ "$g" -eq 0 ]; then
+            we_added=0
+          elif [ "$g" -ge 2 ]; then
+            PRUNE_ABORT=1; break
           fi
+        else
+          we_added=0   # списка нет → считаем пред-существующим → не удаляем
         fi
         if [ "$we_added" -eq 1 ] && printf ',%s,' "$HM_ALL_PACK_SKILLS" | grep -q ",$name," && ! printf ',%s,' "$HM_KEEP_SKILLS" | grep -q ",$name,"; then
           PRUNE_LIST="${PRUNE_LIST}${name}
