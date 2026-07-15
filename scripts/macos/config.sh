@@ -76,18 +76,71 @@ fi
 # (user-owned; НЕ предсказуемый и не world-writable /tmp). В АДДИТИВНОМ режиме
 # snapshot/restore НЕ используются вовсе (живое дерево не трогаем).
 PRESERVE_DIR="$HOME/.hamidun-setup/preserve"
-PRESERVE_FILES=".credentials.master.env .credentials.json settings.local.json"
+# H4: ЕДИНЫЙ канонический список user-data — совпадает с additive-исключениями (rsync
+# --exclude / hm_copy_missing ниже). chats.db* — история чатов (FTS5, ~30МБ),
+# tg_session.session* — Telegram-авторизация: base install.sh делает mv ВСЕГО ~/.claude,
+# без снапшота они исчезали навсегда.
+PRESERVE_FILES=".credentials.master.env .credentials.json settings.local.json MEMORY.md chats.db chats.db-wal chats.db-shm chats.db-journal tg_session.session tg_session.session-journal"
 PRESERVE_DIRS="memory projects todos shell-snapshots"
 
+# Размер файла в байтах (portable: macOS/Linux/Git Bash).
+hm_fsize() { wc -c < "$1" 2>/dev/null | tr -d '[:space:]'; }
+
+# H2/H3: снапшот с ПРОВЕРКОЙ полноты — rc каждого cp + сверка (файлы: существование и
+# размер; каталоги: число элементов не меньше). Возвращает 0 только если КАЖДЫЙ
+# существующий preserve-элемент реально лёг в снапшот. Неполный снапшот перед wipe
+# (install.sh --backup = mv всего ~/.claude) = невосстановимая потеря ключей/памяти.
 snapshot_user_data() {
-  mkdir -p "$1"
-  for f in $PRESERVE_FILES; do [ -f "$CLAUDE_HOME/$f" ] && cp -f "$CLAUDE_HOME/$f" "$1/$f"; done
-  for d in $PRESERVE_DIRS; do [ -d "$CLAUDE_HOME/$d" ] && { rm -rf "$1/$d"; cp -R "$CLAUDE_HOME/$d" "$1/$d"; }; done
+  local dst="$1" rc=0 f d s src_sz dst_sz src_n dst_n
+  mkdir -p "$dst" || return 1
+  for f in $PRESERVE_FILES; do
+    s="$CLAUDE_HOME/$f"
+    [ -f "$s" ] || continue
+    cp -f "$s" "$dst/$f" || { rc=1; continue; }
+    [ -f "$dst/$f" ] || { rc=1; continue; }
+    src_sz="$(hm_fsize "$s")"; dst_sz="$(hm_fsize "$dst/$f")"
+    { [ -n "$src_sz" ] && [ "$src_sz" = "$dst_sz" ]; } || rc=1
+  done
+  for d in $PRESERVE_DIRS; do
+    s="$CLAUDE_HOME/$d"
+    [ -d "$s" ] || continue
+    rm -rf "$dst/$d"
+    cp -R "$s" "$dst/$d" || rc=1
+    src_n=$(find "$s" 2>/dev/null | wc -l | tr -d ' ')
+    dst_n=$(find "$dst/$d" 2>/dev/null | wc -l | tr -d ' ')
+    [ "${dst_n:-0}" -ge "${src_n:-0}" ] || rc=1
+  done
+  return $rc
 }
+# H1: restore с проверкой rc каждого cp и полноты (порт fail-closed логики config.ps1).
+# Возвращает 0 только если ВСЁ из снапшота реально восстановилось; тихий провал (диск
+# полон, cp на каталог) больше не маскируется под успех — снапшот НЕ удаляем.
+# M8: файлы сверяются С СОДЕРЖИМЫМ снапшота (размер + cmp), а не «файл существует»:
+# install.sh гарантированно кладёт ШАБЛОН поверх .credentials.master.env.
 restore_user_data() {
-  mkdir -p "$CLAUDE_HOME"
-  for f in $PRESERVE_FILES; do [ -f "$1/$f" ] && cp -f "$1/$f" "$CLAUDE_HOME/$f"; done
-  for d in $PRESERVE_DIRS; do [ -d "$1/$d" ] && { mkdir -p "$CLAUDE_HOME/$d"; cp -R "$1/$d/." "$CLAUDE_HOME/$d/"; }; done
+  local src="$1" rc=0 f d s src_sz dst_sz src_n dst_n
+  mkdir -p "$CLAUDE_HOME" || return 1
+  for f in $PRESERVE_FILES; do
+    s="$src/$f"
+    [ -f "$s" ] || continue
+    cp -f "$s" "$CLAUDE_HOME/$f" || { rc=1; continue; }
+    src_sz="$(hm_fsize "$s")"; dst_sz="$(hm_fsize "$CLAUDE_HOME/$f")"
+    { [ -n "$src_sz" ] && [ "$src_sz" = "$dst_sz" ]; } || { rc=1; continue; }
+    if command -v cmp >/dev/null 2>&1; then
+      cmp -s "$s" "$CLAUDE_HOME/$f" || rc=1
+    fi
+  done
+  for d in $PRESERVE_DIRS; do
+    s="$src/$d"
+    [ -d "$s" ] || continue
+    mkdir -p "$CLAUDE_HOME/$d" || { rc=1; continue; }
+    cp -R "$s/." "$CLAUDE_HOME/$d/" || rc=1
+    # грубая сверка: в цели не меньше элементов, чем в снапшоте
+    src_n=$(find "$s" 2>/dev/null | wc -l | tr -d ' ')
+    dst_n=$(find "$CLAUDE_HOME/$d" 2>/dev/null | wc -l | tr -d ' ')
+    [ "${dst_n:-0}" -ge "${src_n:-0}" ] || rc=1
+  done
+  return $rc
 }
 # P0-2: восстановление СТАРОГО снапшота — ТОЛЬКО недостающих файлов (никогда не льём
 # старые значения KEY=OLD поверх живых KEY=NEW). Нужно для rescue после краша прошлого
@@ -233,7 +286,15 @@ else
     else echo "  Не удалось отложить старый снапшот — оставляю на месте."; fi
   fi
   echo "Сохраняю твои ключи, память и историю сессий перед обновлением..."
-  snapshot_user_data "$PRESERVE_DIR"
+  # H2/H3: снапшот сверяется на ПОЛНОТУ; неполный → abort ДО install.sh (он делает
+  # mv всего ~/.claude — wipe живого дерева; restore из снапшота — единственный
+  # механизм возврата). Живое ~/.claude на этот момент НЕ изменено.
+  if ! snapshot_user_data "$PRESERVE_DIR"; then
+    echo "ВНИМАНИЕ: не удалось сохранить твои данные (ключи/память/историю сессий) — снапшот неполный."
+    echo "  Установка конфига ОТМЕНЕНА — НИЧЕГО не менял, повтори позже (освободи место, закрой Claude)."
+    echo "  Частичный снапшот (если создался) лежит здесь: $PRESERVE_DIR"
+    exit 1
+  fi
 
   bash "$CLONE/install.sh" --backup --skip-deps
   RC=$?
@@ -244,11 +305,18 @@ fi
 # → прунинг НЕ выполняется вовсе. В additive скилл без ЗАПИСИ в списке считается
 # пред-существующим ТОЛЬКО при валидном списке; без списка не удаляем ничего.
 if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
-  if [ "$ADDITIVE" -eq 1 ] && { [ "$PRUNE_DISABLED" -eq 1 ] || [ "$RC" -ne 0 ]; }; then
-    echo "Прунинг паков пропущен (fail-closed): не удалось надёжно определить, что добавили мы. Удалено: 0."
+  # M5: fail-closed в ОБОИХ режимах (раньше guard действовал только в additive):
+  # провал раскладки в clean тоже отменяет прунинг — при RC!=0 в ~/.claude может
+  # лежать СТАРОЕ дерево юзера, удалять из него нечего и нельзя.
+  if [ "$PRUNE_DISABLED" -eq 1 ] || [ "$RC" -ne 0 ]; then
+    echo "Прунинг паков пропущен (fail-closed): раскладка/перечисление не подтверждены. Удалено: 0."
   else
     SK="$HOME/.claude/skills"
-    if [ -d "$SK" ]; then
+    # M6: symlink-проверка skills-каталога действует и в CLEAN-режиме — ссылка на месте
+    # ~/.claude/skills уводит rm -rf в ЧУЖУЮ цель.
+    if [ -L "$SK" ]; then
+      echo "Прунинг паков пропущен (fail-closed): ~/.claude/skills — симлинк (перечисление небезопасно). Удалено: 0."
+    elif [ -d "$SK" ]; then
       # ДВА прохода: сперва собираем кандидатов БЕЗ удалений, затем удаляем.
       # grep по файлу списка различает rc: 0 = пред-существующий; 1 = не найден;
       # >=2 (EIO и т.п.) = сбой чтения → остановить прунинг ЦЕЛИКОМ ДО первого
@@ -301,10 +369,19 @@ fi
 
 # --- вернуть пользовательские данные поверх свежей базы (merge) — ТОЛЬКО clean-режим ---
 # P0-2: в additive живое дерево не трогали — восстанавливать нечего и НЕЛЬЗЯ.
+# H1 (порт из config.ps1): снапшот удаляем ТОЛЬКО при полном успехе restore — иначе в
+# нём может лежать единственная копия ключей/памяти; «Вернул…» не печатаем при провале.
+RESTORE_FAILED=0
 if [ "$ADDITIVE" -ne 1 ]; then
-  restore_user_data "$PRESERVE_DIR"
-  rm -rf "$PRESERVE_DIR"
-  echo "Вернул твои ключи, память и историю сессий."
+  if restore_user_data "$PRESERVE_DIR"; then
+    rm -rf "$PRESERVE_DIR"
+    echo "Вернул твои ключи, память и историю сессий."
+  else
+    RESTORE_FAILED=1
+    echo "ВНИМАНИЕ: не удалось полностью вернуть твои данные (возможно, кончилось место на диске)."
+    echo "  Резервная копия НЕ удалена и лежит здесь: $PRESERVE_DIR"
+    echo "  Освободи место и запусти установку ещё раз, либо скопируй файлы оттуда в ~/.claude вручную."
+  fi
 fi
 
 # --- стартовый проект из вшитых ассетов (идемпотентно: существующий НЕ перезаписываем) ---
@@ -335,6 +412,13 @@ if [ "$RC" -ne 0 ]; then
   else
     echo "~/.claude пуст — конфиг не развернулся. Смотри лог выше."
   fi
+  exit 1
+fi
+
+# H1: неуспешный restore НЕ маскируется под зелёный успех — честный ненулевой выход,
+# снапшот с данными юзера сохранён (путь напечатан выше).
+if [ "$RESTORE_FAILED" -eq 1 ]; then
+  echo "Конфиг развёрнут, но восстановление твоих данных НЕ завершено — см. предупреждение выше."
   exit 1
 fi
 
