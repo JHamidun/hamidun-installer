@@ -97,10 +97,21 @@ $cxvsix = Join-Path $apps 'chatgpt.vsix'
 if (Test-Path $cxvsix) {
   Write-Host "  skip chatgpt.vsix"
 } else {
-  # Open VSX отдаёт метаданные последней версии с прямой ссылкой files.download на .vsix.
+  # Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
+  # платформы отдаёт ЧУЖУЮ платформу (напр. alpine-arm64/linux-x64) → офлайн-install на Windows
+  # упадёт по несовпадению платформы. Резолвим win32-x64; нет такой цели → generic /latest
+  # (хуже для офлайна, но online-фолбэк в vscode.ps1 спасёт). Всё non-fatal: Codex опционален.
   try {
-    $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/latest' -Headers $UA -MaximumRedirection 6
-    $cxUrl = $cxMeta.files.download
+    $cxUrl = $null
+    try {
+      $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/win32-x64/latest' -Headers $UA -MaximumRedirection 6
+      $cxUrl = $cxMeta.files.download
+    } catch { }
+    if (-not $cxUrl) {
+      $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/latest' -Headers $UA -MaximumRedirection 6
+      $cxUrl = $cxMeta.files.download
+      if ($cxUrl) { Write-Host "  win32-x64-цель не найдена — беру generic (офлайн может не встать, online-фолбэк)" }
+    }
     if ($cxUrl) { Dl $cxUrl $cxvsix }
     else { Write-Host "  ! Open VSX не отдал ссылку на .vsix — Codex поставится онлайн при установке" }
   } catch { Write-Host "  ! Open VSX недоступен ($($_.Exception.Message)) — Codex поставится онлайн при установке" }

@@ -56,8 +56,15 @@ CXVSIX="$APPS/chatgpt.vsix"
 if [ -f "$CXVSIX" ]; then
   echo "  skip $(basename "$CXVSIX")"
 else
-  # Open VSX отдаёт метаданные последней версии с прямой ссылкой files.download на .vsix.
-  CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
+  # Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
+  # платформы отдаёт чужую платформу → офлайн-install на macOS упадёт. Резолвим darwin-arm64
+  # (как claude-code.vsix; GitHub Actions mac-раннеры arm64); нет цели → generic /latest
+  # (online-фолбэк в vscode.sh спасёт). Non-fatal: Codex опционален.
+  CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/darwin-arm64/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
+  if [ -z "$CXURL" ]; then
+    CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
+    [ -n "$CXURL" ] && echo "  darwin-arm64-цель не найдена — беру generic (офлайн может не встать, online-фолбэк)"
+  fi
   if [ -n "$CXURL" ]; then dl "$CXURL" "$CXVSIX"; else echo "  ! Open VSX недоступен — Codex поставится онлайн при установке"; fi
 fi
 
