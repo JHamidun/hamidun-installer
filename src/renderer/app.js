@@ -213,6 +213,7 @@ function renderCard(c) {
         ${recBadge}
         ${c.why ? `<span class="info" tabindex="0" role="button" aria-label="Что это?">?<span class="tip">${c.why || c.desc}</span></span>` : ''}
         ${c.sizeHint ? `<span class="badge">${c.sizeHint}</span>` : ''}
+        ${c.online ? `<span class="badge online" title="Скачивается онлайн во время установки">онлайн</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
         ${reqNames.length ? `<span class="badge dep">требует: ${reqNames.join(', ')}</span>` : ''}
         ${okBadge}

@@ -1281,6 +1281,33 @@ function detectComponents() {
     }
     out.mascot = { installed: !!found, detectedVersion: '' };
   }
+  // claude-desktop (нативное приложение Anthropic) — идемпотентность (детект пути).
+  {
+    let found = '';
+    if (IS_WIN) {
+      const la = winLocalAppData();
+      found = firstExisting([
+        path.join(la, 'AnthropicClaude', 'claude.exe'),
+        path.join(la, 'Microsoft', 'WindowsApps', 'claude.exe')
+      ]) || (dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-') ? path.join(la, 'AnthropicClaude') : '')
+        || (dirHasChildStarting(path.join(la, 'Packages'), 'Claude') ? path.join(la, 'Packages') : '');
+    } else {
+      found = firstExisting(['/Applications/Claude.app', path.join(home, 'Applications', 'Claude.app')]);
+    }
+    out['claude-desktop'] = { installed: !!found, detectedVersion: '' };
+  }
+  // chatgpt-desktop (нативное приложение OpenAI) — идемпотентность (детект пути).
+  {
+    let found = '';
+    if (IS_WIN) {
+      // MSIX/Store-пакет: каталог данных в %LOCALAPPDATA%\Packages\<ChatGPT|OpenAI…>.
+      const pkgs = path.join(winLocalAppData(), 'Packages');
+      found = (dirHasChildStarting(pkgs, 'ChatGPT') || dirHasChildStarting(pkgs, 'OpenAI')) ? pkgs : '';
+    } else {
+      found = firstExisting(['/Applications/ChatGPT.app', path.join(home, 'Applications', 'ChatGPT.app')]);
+    }
+    out['chatgpt-desktop'] = { installed: !!found, detectedVersion: '' };
+  }
 
   return out;
 }
