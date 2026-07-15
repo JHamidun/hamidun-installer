@@ -23,9 +23,11 @@ from openai import OpenAI
 # Загружаем настройки из файла .env
 load_dotenv()
 
-API_KEY = os.getenv("LLM_API_KEY")
-BASE_URL = os.getenv("LLM_BASE_URL")  # пусто = официальный API OpenAI
-MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# .env кладёт пустые строки (LLM_MODEL=), а не отсутствие ключа — поэтому `or`,
+# иначе os.getenv вернул бы "" и дефолт/официальный API не применились бы.
+API_KEY = (os.getenv("LLM_API_KEY") or "").strip()
+BASE_URL = (os.getenv("LLM_BASE_URL") or "").strip() or None  # пусто = официальный API OpenAI
+MODEL = (os.getenv("LLM_MODEL") or "").strip() or "gpt-4o-mini"
 
 # Инструкция агенту: кто он и как отвечать.
 # Поменяйте этот текст — и характер агента изменится.

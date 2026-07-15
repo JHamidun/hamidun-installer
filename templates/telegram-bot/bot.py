@@ -20,12 +20,13 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
+from aiogram.utils.token import TokenValidationError
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из файла .env
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 
 # Диспетчер принимает входящие сообщения и раздаёт их обработчикам
 dp = Dispatcher()
@@ -75,7 +76,16 @@ async def main() -> None:
         )
 
     logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=BOT_TOKEN)
+    # Кривой/лишний-пробельный токен aiogram отвергает — покажем понятную подсказку,
+    # а не сырой TokenValidationError с трейсбеком.
+    try:
+        bot = Bot(token=BOT_TOKEN)
+    except TokenValidationError:
+        raise SystemExit(
+            "Токен бота выглядит неправильно.\n"
+            "Проверьте BOT_TOKEN в .env — он должен быть вида <цифры>:<буквы_и_цифры>,\n"
+            "скопированным от @BotFather целиком, без лишних пробелов и кавычек."
+        )
 
     print("Бот запущен. Остановить: Ctrl+C")
     # Long polling: бот сам опрашивает Telegram о новых сообщениях
