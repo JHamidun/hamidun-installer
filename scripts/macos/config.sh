@@ -116,6 +116,11 @@ hm_copy() {
       */chats.db*|*/tg_session.session*) continue ;;
       */memory/*|*/projects/*|*/todos/*|*/shell-snapshots/*) continue ;;
     esac
+    # skills — reparse point (симлинк/junction)? НЕ пишем сквозь ссылку (cp ушёл бы во внешнюю
+    # цель). $SKILLS_REPARSE — глобал, выставляется до вызова hm_copy.
+    if [ "${SKILLS_REPARSE:-0}" -eq 1 ]; then
+      case "/$rel" in */skills/*) continue ;; esac
+    fi
     if [ "$mode" = "missing" ] && [ -e "$dst/$rel" ]; then continue; fi   # add-missing: существующее не трогаем
     d="$(dirname "$dst/$rel")"
     mkdir -p "$d" || { rc=1; continue; }
@@ -152,6 +157,22 @@ else
   fi
 fi
 
+# skills корень ИЛИ дочерний skill — симлинк/junction? Тогда merge НЕЛЬЗЯ пускать в skills:
+# rsync/cp пойдут ПО ссылке и в repair перезапишут ВНЕШНЮЮ цель (data-loss). Исключаем skills.
+SKILLS_REPARSE=0
+if [ -L "$CLAUDE_HOME/skills" ]; then
+  SKILLS_REPARSE=1
+elif [ -d "$CLAUDE_HOME/skills" ]; then
+  for _c in "$CLAUDE_HOME/skills"/*; do
+    [ -L "$_c" ] && { SKILLS_REPARSE=1; break; }
+  done
+fi
+SKILLS_EXCLUDE=""
+if [ "$SKILLS_REPARSE" -eq 1 ]; then
+  SKILLS_EXCLUDE="--exclude=/skills"   # rsync: не трогать skills (внешняя цель за ссылкой цела)
+  echo "  ~/.claude/skills — симлинк/junction: пропускаю skills в раскладке (внешняя цель не тронута)."
+fi
+
 # === Merge-copy НАШЕЙ базы ПОВЕРХ ~/.claude (БЕЗ переноса/стирания) ===
 # add-missing: rsync --ignore-existing (существующее не трогаем) / hm_copy missing.
 # repair:      rsync без --ignore-existing (перезапись наших базовых) / hm_copy overwrite.
@@ -160,7 +181,7 @@ fi
 if [ "$ADDITIVE" -eq 1 ]; then
   echo "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
   if command -v rsync >/dev/null 2>&1; then
-    if ! rsync -a --ignore-existing $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
+    if ! rsync -a --ignore-existing $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
       COPY_FAILED=1
     fi
   else
@@ -169,7 +190,7 @@ if [ "$ADDITIVE" -eq 1 ]; then
 else
   echo "Переустановка начисто: перезаписываю НАШИ базовые файлы свежими (пользовательское — ключи/память/история/CLAUDE.md — не трогаю)..."
   if command -v rsync >/dev/null 2>&1; then
-    if ! rsync -a $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
+    if ! rsync -a $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
       COPY_FAILED=1
     fi
   else

@@ -681,10 +681,12 @@ const CFG_SH  = () => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'confi
 
 ok('config.ps1: add-missing = robocopy /XC /XN /XO; repair = robocopy без /XC; оба с /XF preserve + /XD; НЕ запускает install.ps1', () => {
   const s = CFG_PS1();
-  assert(/robocopy \$srcClaude \$claudeHome \/E \/XC \/XN \/XO \/XF \$excludeNames \/XD \$excludeDirs/.test(s),
-    'add-missing: /XC /XN /XO — существующее НЕ перезаписываем');
-  assert(/robocopy \$srcClaude \$claudeHome \/E \/XF \$excludeNames \/XD \$excludeDirs/.test(s),
-    'repair: robocopy БЕЗ /XC — наши базовые файлы перезаписываются, но /XF/XD исключают пользовательское');
+  assert(/robocopy \$srcClaude \$claudeHome \/E \/XC \/XN \/XO \/XJ \/XF \$excludeNames \/XD \$mergeXD/.test(s),
+    'add-missing: /XC /XN /XO — существующее НЕ перезаписываем; /XJ — не сквозь junction; /XD $mergeXD');
+  assert(/robocopy \$srcClaude \$claudeHome \/E \/XJ \/XF \$excludeNames \/XD \$mergeXD/.test(s),
+    'repair: robocopy БЕЗ /XC — наши базовые перезаписываются, /XF/XD исключают пользовательское; /XJ не сквозь junction');
+  assert(/\$mergeXD = @\(\$excludeDirs\) \+ @\('skills'\)/.test(s),
+    'skills — reparse point → исключается из merge (/XD skills), robocopy не пишет сквозь junction');
   assert(/if \(\$ADDITIVE\) \{/.test(s), 'ветвление по $ADDITIVE (add-missing / repair)');
   assert(!/& \$installer/.test(s), 'НЕ запускает install.ps1 через & $installer (он делал Move-Item = wipe)');
   assert(!/-BackupExisting/.test(s), 'нет -BackupExisting (это и был wipe: Move-Item всего ~/.claude)');
@@ -721,7 +723,9 @@ ok('config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $pre
   assert(/\$weAdded = -not \$preExisting\.ContainsKey\(\$_\.Name\)/.test(s),
     'guard $weAdded: в ОБОИХ режимах скилл, бывший ДО раскладки, не удаляем (синхр. с config.ps1 после concurrent-коммита 094b15c)');
   assert(/\$preExisting\[\$_\.Name\] = \$true/.test(s), 'инвентарь пред-существующих скиллов собирается ДО merge-copy');
-  assert(/-ErrorAction Stop \| ForEach-Object \{ \$preExisting/.test(s), 'перечисление с -ErrorAction Stop (fail-closed)');
+  assert(/-ErrorAction Stop \| ForEach-Object \{/.test(s), 'перечисление с -ErrorAction Stop (fail-closed)');
+  assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$skillsReparse = \$true \}/.test(s),
+    'дочерний skill-reparse → $skillsReparse (merge не пишет сквозь него)');
   const loop = s.slice(s.indexOf('Get-ChildItem -Directory $skillsDir | ForEach-Object'));
   assert(/ReparsePoint\) \{ return \}/.test(loop.slice(0, 700)), 'reparse-скилл (symlink/junction) в прунинге скипается');
 });
@@ -969,6 +973,26 @@ if (bashAvailable()) {
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 
+  ok('config.sh REPAIR: ~/.claude/skills — junction на внешнюю папку → merge НЕ пишет сквозь ссылку (P1 Codex merge-through-symlink)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);
+      fs.rmSync(home + '/.claude/skills', { recursive: true, force: true });
+      fs.mkdirSync(base + '/external-skills/our-skill', { recursive: true });
+      fs.writeFileSync(base + '/external-skills/our-skill/DATA.md', 'EXTERNAL');
+      let linked = false;
+      try { fs.symlinkSync(base + '/external-skills', home + '/.claude/skills', 'junction'); linked = true; }
+      catch (e) { linked = false; }
+      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      const r = runCfgSh(home, clone, {});   // repair (clone везёт skills/our-skill/SKILL.md)
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(base + '/external-skills/our-skill/DATA.md', 'utf8'), 'EXTERNAL',
+        'внешний файл за junction НЕ тронут (merge не прошёл сквозь ссылку)');
+      assert(!fs.existsSync(base + '/external-skills/our-skill/SKILL.md'),
+        'наш skills/our-skill/SKILL.md НЕ дописан во внешнюю цель через junction');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
   ok('config.sh: TMPDIR недоступен → mktemp сбой → 0 удалений (fail-closed) + ненулевой выход, скилл юзера ЦЕЛ', () => {
     const { base, home, clone } = mkCfgSandbox();
     try {
@@ -1062,6 +1086,26 @@ if (powershellAvailable()) {
         'пред-существующий скилл юзера ЦЕЛ и не перезаписан в repair (P1 закрыт)');
       assert(!fs.existsSync(home + '/.claude/skills/our-skill'), 'доложенный нами скилл снятого пака удалён (прунинг работает и в repair)');
       assert(/убрано: 1/.test(r.stdout || ''), 'удалён ровно 1 (наш, не юзера): ' + (r.stdout || ''));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('config.ps1 REPAIR: ~/.claude/skills — junction на внешнюю папку → merge НЕ пишет сквозь ссылку (P1 Codex merge-through-symlink)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);
+      fs.rmSync(home + '/.claude/skills', { recursive: true, force: true });
+      fs.mkdirSync(base + '/external-skills/our-skill', { recursive: true });
+      fs.writeFileSync(base + '/external-skills/our-skill/DATA.md', 'EXTERNAL');
+      let linked = false;
+      try { fs.symlinkSync(base + '/external-skills', home + '/.claude/skills', 'junction'); linked = true; }
+      catch (e) { linked = false; }
+      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      const r = runCfgPs1(home, clone, {});   // repair (clone везёт skills/our-skill/SKILL.md)
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(base + '/external-skills/our-skill/DATA.md', 'utf8'), 'EXTERNAL',
+        'внешний файл за junction НЕ тронут (robocopy /XD skills + /XJ — не прошёл сквозь ссылку)');
+      assert(!fs.existsSync(base + '/external-skills/our-skill/SKILL.md'),
+        'наш skills/our-skill/SKILL.md НЕ дописан во внешнюю цель через junction');
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 } else {

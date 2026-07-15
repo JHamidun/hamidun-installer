@@ -127,15 +127,23 @@ New-Item -ItemType Directory -Force $claudeHome | Out-Null
 # Какие скиллы БЫЛИ до раскладки — ПОЛНОЕ УСПЕШНОЕ перечисление обязательно.
 # Любой сбой перечисления → прунинг ПОЛНОСТЬЮ выключен (никогда не удаляем чужое).
 $skillsDirNow = Join-Path $claudeHome 'skills'
+# корень skills ИЛИ дочерний skill — reparse point? Тогда merge НЕЛЬЗЯ пускать в skills:
+# robocopy пойдёт ПО junction и в repair перезапишет ВНЕШНЮЮ цель (data-loss). Исключаем skills.
+$skillsReparse = $false
 try {
     if (Test-Path -LiteralPath $skillsDirNow) {
         $item = Get-Item -LiteralPath $skillsDirNow -Force -ErrorAction Stop
         if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            $skillsReparse = $true
             throw "skills — reparse point (junction/symlink), перечисление небезопасно"
         }
         # ВСЕ immediate-дети (включая файлы и symlink/junction — не только -Directory):
         # пред-существующий symlink-скилл иначе считался бы «нашим» и удалялся при снятом паке.
-        Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object { $preExisting[$_.Name] = $true }
+        # Дочерний reparse → тоже помечаем skillsReparse (merge не должен писать сквозь него).
+        Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object {
+            $preExisting[$_.Name] = $true
+            if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $skillsReparse = $true }
+        }
     }
 } catch {
     $pruneDisabled = $true
@@ -148,12 +156,20 @@ try {
 # repair:      без /XC/XN/XO — перезаписать НАШИ базовые файлы свежими (add missing тоже).
 # /XF (preserve-имена+globs) и /XD (preserve-каталоги) в ОБОИХ режимах исключают
 #   пользовательское — ключи/память/история/settings.local/tg_session НЕ перезаписываются.
+# Если ~/.claude/skills (корень или дочерний skill) — reparse point, ИСКЛЮЧАЕМ skills из merge:
+# иначе robocopy пойдёт ПО junction и в repair перезапишет внешнюю цель. /XJ — не рекурсировать
+# в junction-точки нигде в дереве (defense-in-depth; наш source junction-ов не содержит).
+$mergeXD = $excludeDirs
+if ($skillsReparse) {
+    $mergeXD = @($excludeDirs) + @('skills')
+    Write-Host "  ~/.claude/skills — reparse point (symlink/junction): пропускаю skills в раскладке (внешняя цель не тронута; наши скиллы туда не докладываю)."
+}
 if ($ADDITIVE) {
     Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
-    robocopy $srcClaude $claudeHome /E /XC /XN /XO /XF $excludeNames /XD $excludeDirs | Out-Null
+    robocopy $srcClaude $claudeHome /E /XC /XN /XO /XJ /XF $excludeNames /XD $mergeXD | Out-Null
 } else {
     Write-Host "Переустановка начисто: перезаписываю НАШИ базовые файлы свежими (пользовательское — ключи/память/история/CLAUDE.md — не трогаю)..."
-    robocopy $srcClaude $claudeHome /E /XF $excludeNames /XD $excludeDirs | Out-Null
+    robocopy $srcClaude $claudeHome /E /XJ /XF $excludeNames /XD $mergeXD | Out-Null
 }
 if ($LASTEXITCODE -ge 8) {
     $installFailed = $true; $pruneDisabled = $true
