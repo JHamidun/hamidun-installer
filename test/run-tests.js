@@ -829,12 +829,15 @@ ok('P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%
   assert(/path\.join\(sysRoot, 'explorer\.exe'\)/.test(h), 'explorer.exe — абсолютный (из валидированного sysRoot)');
   assert(/spawn\(exp, \[String\(folderArg\)\]/.test(h), 'fallback открывает ТОЛЬКО папку (folderArg)');
   assert(!/spawn\(exp, \[exe\]/.test(h), 'fallback НЕ исполняет editor-exe через explorer (P0-D#4)');
-  // winMakeSecureDir: ProgramData + icacls + verify (owner=Admins, посторонних ACE нет), без %TEMP%.
+  // winMakeSecureDir: staging РОЖДАЕТСЯ АТОМАРНО через укреплённый PS-примитив
+  // New-HmSecureStagingDir (DACL в момент создания), БЕЗ Node create-then-icacls; без %TEMP%.
   const mi = s.indexOf('function winMakeSecureDir(');
   assert(mi !== -1, 'winMakeSecureDir объявлена');
-  const mh = s.slice(mi, mi + 1400);
-  assert(/winProgramData\(\)/.test(mh) && /buildIcaclsArgs/.test(mh) && /verifyDirSecureWin/.test(mh),
-    'staging: ProgramData + icacls + verifyDirSecureWin (owner=Admins, посторонних ACE нет)');
+  const mh = s.slice(mi, s.indexOf('function winLaunchDeElevated('));
+  assert(/winProgramData\(\)/.test(mh) && /New-HmSecureStagingDir/.test(mh) && /verifyDirSecureWin/.test(mh),
+    'staging: ProgramData + АТОМАРНЫЙ New-HmSecureStagingDir + verifyDirSecureWin (defense-in-depth)');
+  assert(!/fs\.mkdirSync/.test(mh) && !/buildIcaclsArgs/.test(mh),
+    'НЕТ fs.mkdirSync+icacls: ACL-гонка create-then-icacls устранена (каталог рождается атомарно с DACL)');
   assert(!/os\.tmpdir/.test(mh), 'winMakeSecureDir НЕ использует %TEMP%');
   // launch-vscode И launch-cursor зовут лаунчер, без прямого spawn редактора.
   const lvi = s.indexOf("ipcMain.handle('launch-vscode'");
@@ -844,6 +847,63 @@ ok('P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%
   const lch = s.slice(lci, lci + 1200);
   assert(/winLaunchDeElevated\(cexe/.test(lch) && !/spawn\(cexe, \[\]/.test(lch), 'launch-cursor: де-элевированно, без прямого spawn(cexe) [P0-C]');
 });
+
+// P0 (Codex privesc regate #4): launch secure-dir РОЖДАЕТСЯ АТОМАРНО с protected DACL.
+// Источник-инвариант: (a) _deelev.ps1 создаёт каталог ОДНОЙ операцией [IO.Directory]::
+// CreateDirectory($dir,$sd) с SD {SYSTEM,Administrators}, protection on, fail на exists/reparse;
+// (b) main.js winMakeSecureDir делегирует этому примитиву и НЕ содержит create-then-icacls.
+ok('P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::CreateDirectory($dir,$sd) + main.js делегирует, нет fs.mkdirSync+icacls)', () => {
+  const d = EG_DEELEV();
+  // (a) атомарное создание каталога С SD одной операцией (DACL в момент создания, не после).
+  assert(/\[System\.IO\.Directory\]::CreateDirectory\(\$dir,\s*\$sd\)/.test(d),
+    '_deelev.ps1: каталог рождается [IO.Directory]::CreateDirectory($dir,$sd) — SD атомарно при создании');
+  assert(/SetAccessRuleProtection\(\$true/.test(d), 'protection on (наследование ProgramData/Users снято)');
+  assert(/S-1-5-32-544/.test(d) && /S-1-5-18/.test(d), 'DACL: Administrators + SYSTEM (FullControl)');
+  // fail-closed на уже существующий каталог (CREATE_NEW-семантика) и на reparse-point (junction).
+  assert(/if \(Test-Path -LiteralPath \$dir\) \{ return \$null \}/.test(d), 'fail на ERROR_ALREADY_EXISTS (каталог занят)');
+  assert(/ReparsePoint/.test(d) && /Remove-Item -LiteralPath \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
+  // (b) main.js: winMakeSecureDir ДЕЛЕГИРУЕТ примитиву; НЕТ Node create-then-icacls.
+  const m = EG_MAIN();
+  const mi = m.indexOf('function winMakeSecureDir(');
+  const mh = m.slice(mi, m.indexOf('function winLaunchDeElevated('));
+  assert(/New-HmSecureStagingDir/.test(mh), 'winMakeSecureDir зовёт атомарный New-HmSecureStagingDir');
+  assert(!/fs\.mkdirSync/.test(mh), 'НЕТ fs.mkdirSync (Node не умеет создать каталог с DACL атомарно)');
+  assert(!/buildIcaclsArgs/.test(mh) && !/execFileSync\(icacls/.test(mh), 'НЕТ post-icacls (create-then-icacls окно устранено)');
+  assert(/winDeElevScript\(\)/.test(mh) && /_deelev\.ps1/.test(m), 'дот-сорсит вшитый _deelev.ps1 (абс. путь, не renderer/PATH)');
+});
+
+if (powershellAvailable()) {
+  // P0 regate#4 (функц.): New-HmSecureStagingDir реально создаёт каталог с PROTECTED DACL
+  // (наследование ProgramData снято В МОМЕНТ создания) и БЕЗ посторонних (Users/Everyone) ACE.
+  // Elevated $false (тест-процесс обычно medium): каталог с {SYSTEM,Administrators,me}. Это
+  // ПРЯМО доказывает устранение гонки: будь это Node mkdir, каталог унаследовал бы ACL
+  // ProgramData (AreAccessRulesProtected=$false, Users writable). NULL = fail-closed (валидно).
+  ok('P0 regate#4 (round-trip): New-HmSecureStagingDir -> каталог PROTECTED (наследование снято) без посторонних ACE; либо fail-closed $null', () => {
+    const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const icacls = path.join(sysRoot, 'System32', 'icacls.exe');
+    const pd = process.env.ProgramData || path.join(path.parse(sysRoot).root, 'ProgramData');
+    const cmd =
+      ". '" + dot + "';" +
+      "$d=New-HmSecureStagingDir -ProgramData '" + pd.replace(/'/g, "''") + "' -Icacls '" + icacls.replace(/'/g, "''") + "' -Elevated $false;" +
+      "if($null -eq $d){Write-Output 'NULL';exit 0};" +
+      "$a=Get-Acl -LiteralPath $d;" +
+      "$allow=@('S-1-5-18','S-1-5-32-544',([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value));" +
+      "$bad=0; foreach($ace in $a.Access){ try{$sid=$ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$sid=[string]$ace.IdentityReference}; if($allow -notcontains $sid){$bad++} };" +
+      "$rp=[bool]((Get-Item -LiteralPath $d -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint);" +
+      "Write-Output ('PROT='+$a.AreAccessRulesProtected+';BAD='+$bad+';REPARSE='+$rp);" +
+      "Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue";
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { encoding: 'utf8', timeout: 60000 });
+    const out = (r.stdout || '').trim();
+    if (/NULL/.test(out)) {
+      // fail-closed (нет прав создать/запереть каталог под ProgramData) — валидно, не эскалация.
+    } else {
+      assert(/PROT=True/.test(out), 'DACL protected: наследование ProgramData (Users writable) снято В МОМЕНТ создания: ' + out);
+      assert(/BAD=0/.test(out), 'ни одного постороннего ACE (только SYSTEM/Administrators/владелец): ' + out);
+      assert(/REPARSE=False/.test(out), 'реальная директория, не reparse-point: ' + out);
+    }
+  });
+}
 
 // P2 (launch): mkdir не глушится вслепую — путь подтверждается как директория.
 ok('P2 (main.js): launch-vscode проверяет statSync(startDir).isDirectory() — не открывает файл/несуществующее', () => {

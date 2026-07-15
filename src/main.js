@@ -666,26 +666,62 @@ ipcMain.handle('launch-cursor', () => {
   return false;
 });
 
+// Абсолютный путь к вшитому примитиву де-элевации (_deelev.ps1) — из resourceRoot
+// (packaged -> resourcesPath, dev -> корень проекта), НЕ из renderer/PATH. Тот же
+// bundled-скрипт, что дот-сорсят install-скрипты (vscode.ps1/extension.ps1).
+function winDeElevScript() {
+  try { return path.join(resourceRoot(), 'scripts', 'windows', '_deelev.ps1'); }
+  catch (e) { return null; }
+}
+
 // PRIVATE high-integrity staging-каталог под ProgramData (для транзиентного task.xml).
-// Рождается НАШИМ elevated-процессом со случайным именем (mkdirSync без recursive -> throw
-// если существует), затем icacls: владелец=Administrators + inheritance:r + доступ РОВНО
-// {SYSTEM, Administrators}. Verify (owner+DACL, SID-based) -> null при провале. Users туда
-// писать не могут -> pre-creation/tamper XML невозможны ПО КОНСТРУКЦИИ. Никакого %TEMP%.
+// P0 (Codex privesc regate #4): каталог РОЖДАЕТСЯ АТОМАРНО с protected DACL
+// {SYSTEM, Administrators: FullControl} — ОДНОЙ операцией [System.IO.Directory]::
+// CreateDirectory($dir, $sd) через УЖЕ УКРЕПЛЁННЫЙ PS-примитив New-HmSecureStagingDir
+// (_deelev.ps1, тот же, что запирает staging install-пути). SD применяется В МОМЕНТ
+// создания -> НЕТ окна, где каталог наследует ACL ProgramData (Users writable).
+// Node fs.mkdirSync + post-icacls ЗАПРЕЩЁН: между mkdirSync и icacls medium-малварь
+// ТОГО ЖЕ юзера успевала создать task.xml, ДЕРЖАТЬ write-handle и подменить XML
+// (RunLevel LeastPrivilege->HighestAvailable + свой payload) ДО schtasks /Create ->
+// HIGH execution. Теперь Users в каталог писать НЕ могут ПО КОНСТРУКЦИИ -> ни
+// pre-creation, ни удержанного handle, ни tamper. Имя каталога — случайный GUID,
+// генерируемый ВНУТРИ примитива (JS его не выбирает и не знает заранее); примитив
+// fail-closed на ERROR_ALREADY_EXISTS и reparse-point и сам верифицирует владельца/ACE.
+// JS перепроверяет (defense-in-depth): путь строго под ProgramData + verifyDirSecureWin.
 function winMakeSecureDir() {
   try {
     const pd = remoteFetch.winProgramData();
     if (!pd || !fs.existsSync(pd)) return null;
-    const dir = path.join(pd, 'HmLaunch-' + crypto.randomBytes(9).toString('hex'));
-    if (fs.existsSync(dir)) return null;             // CREATE_NEW: занят -> fail-closed
-    fs.mkdirSync(dir);                                // без recursive: throw если существует
-    const icacls = remoteFetch.sysBin('icacls.exe');
-    const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };
-    if (!icacls) { rm(); return null; }
-    const a = remoteFetch.buildIcaclsArgs(dir);
+    const ps = remoteFetch.winPowershellPath();       // абс. powershell из валидир. System32
+    const icacls = remoteFetch.sysBin('icacls.exe');   // абс. icacls (примитив ставит владельца)
+    const deelev = winDeElevScript();                  // абс. путь к вшитому _deelev.ps1
+    if (!ps || !icacls || !deelev || !fs.existsSync(deelev)) return null;
+    // Инлайн: дот-сорсим bundled-примитив и зовём АТОМАРНЫЙ конструктор secure-dir.
+    // Пути — ЛИТЕРАЛАМИ (single-quoted, ''-экранирование); ни одного аргумента из
+    // renderer/сети. Установщик elevated -> каталог {SYSTEM,Admins}, без user-ACE.
+    const deLit = String(deelev).replace(/'/g, "''");
+    const pdLit = String(pd).replace(/'/g, "''");
+    const icLit = String(icacls).replace(/'/g, "''");
+    const inline =
+      "$ErrorActionPreference='Stop';" +
+      ". '" + deLit + "';" +
+      "$d=New-HmSecureStagingDir -ProgramData '" + pdLit + "' -Icacls '" + icLit + "' -Elevated $true;" +
+      "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
+    let out = '';
     try {
-      execFileSync(icacls, a.setowner, { windowsHide: true, timeout: 15000, stdio: 'ignore' });
-      execFileSync(icacls, a.grant, { windowsHide: true, timeout: 15000, stdio: 'ignore' });
-    } catch (e) { rm(); return null; }
+      out = execFileSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+        { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (e) { return null; }
+    const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(out || ''));
+    if (!m) return null;                               // примитив вернул $null -> fail-closed
+    const dir = m[1].trim();
+    if (!dir) return null;
+    const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };
+    // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
+    // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
+    const root = path.resolve(pd);
+    if (!path.resolve(dir).startsWith(root + path.sep)) { rm(); return null; }
+    if (!fs.existsSync(dir)) return null;
     if (!remoteFetch.verifyDirSecureWin(dir)) { rm(); return null; }   // owner=Admins, посторонних ACE нет
     return dir;
   } catch (e) { return null; }
