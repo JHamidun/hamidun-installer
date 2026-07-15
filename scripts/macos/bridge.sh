@@ -13,9 +13,30 @@ if [ -n "$DRY" ]; then
   echo "[dry-run] AI-мост: без изменений."; exit 0
 fi
 
-PY="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
-[ -x "$PY" ] || PY="$(command -v python3 || true)"
-[ -n "$PY" ] && [ -x "$PY" ] || { echo "Python3 не найден — выберите «Python-пакеты»."; exit 1; }
+# Ищем РЕАЛЬНЫЙ интерпретатор — тот же приоритет, что и pydeps.sh (framework-Python,
+# под который собраны wheels и агент). НИКОГДА не берём CLT-шим /usr/bin/python3 при
+# НЕустановленных Command Line Tools (xcode-select -p не проходит): его запуск дёргает
+# GUI-диалог CLT, TRAY_OK=0, pip/import падают, а прописанный в LaunchAgent с
+# KeepAlive=true шим уводит launchd в бесконечный рестарт нерабочего интерпретатора +
+# шторм CLT-диалогов — при этом печаталось бы «OK: AI-мост установлен». Фолбэк-guard
+# `[ -x "$PY" ]` был мёртвым: шим всегда существует и исполним на чистом маке.
+PY=""
+for CAND in \
+  "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
+  "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"; do
+  [ -x "$CAND" ] && { PY="$CAND"; break; }
+done
+if [ -z "$PY" ]; then
+  P3="$(command -v python3 2>/dev/null || true)"
+  # Принимаем python3 из PATH ТОЛЬКО если это НЕ CLT-шим /usr/bin/python3 без
+  # установленных CLT. Реальный интерпретатор (Homebrew/framework) — или сам
+  # /usr/bin/python3, но лишь когда CLT уже стоят (xcode-select -p проходит) —
+  # запускается без GUI-диалога и годен для plist LaunchAgent.
+  if [ -n "$P3" ] && [ -x "$P3" ] && { [ "$P3" != "/usr/bin/python3" ] || xcode-select -p >/dev/null 2>&1; }; then
+    PY="$P3"
+  fi
+fi
+[ -n "$PY" ] && [ -x "$PY" ] || { echo "Python3 не найден (CLT-шим /usr/bin/python3 без Command Line Tools не годится) — выберите компонент «Python-пакеты»."; exit 1; }
 
 mkdir -p "$DST"
 cp -f "$AGENT" "$DST/bridge_agent.py"
@@ -42,7 +63,7 @@ if [ ! -f "$CFG" ]; then
   "bridgeToken": "${HM_BRIDGE_TOKEN:-}",
   "ssh": { "host": "", "port": 22, "user": "", "keyPath": "", "password": "" },
   "socksPort": 1080, "httpPort": 1081, "pacPort": 1082,
-  "pacDomains": ["claude.ai","anthropic.com","openai.com","chatgpt.com","oaistatic.com","higgsfield.ai"],
+  "pacDomains": ["claude.ai","anthropic.com","openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com","claudeusercontent.com","sora.com","higgsfield.ai"],
   "enabled": false
 }
 EOF

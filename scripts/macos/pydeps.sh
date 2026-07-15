@@ -47,7 +47,19 @@ PWB="${HM_VENDOR:-}/playwright-browsers"
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$PWB" ]; then
   echo "Встроенные браузеры Playwright (офлайн)..."
   mkdir -p "$HOME/Library/Caches/ms-playwright"
-  cp -R "$PWB/"* "$HOME/Library/Caches/ms-playwright/" 2>/dev/null || true
+  # cp БЕЗ `|| true`: молчаливый сбой копирования раньше давал ложный OK, а потом
+  # браузерные скиллы падали без следа. Ловим код возврата и честно фолбэчимся в онлайн.
+  if cp -R "$PWB/"* "$HOME/Library/Caches/ms-playwright/" 2>/dev/null; then
+    # macOS `cp` тащит xattrs, в т.ч. com.apple.quarantine. Ненотаризованный Chromium
+    # с карантином блокируется Gatekeeper → браузер не стартует, а скрипт печатал OK.
+    # Снимаем карантин рекурсивно (тот же приём, что в git.sh:51 для вшитого git).
+    xattr -dr com.apple.quarantine "$HOME/Library/Caches/ms-playwright" 2>/dev/null || true
+  else
+    echo "  ВНИМАНИЕ: встроенные браузеры Playwright не скопировались — качаю онлайн..."
+    if ! "$PY" -m playwright install chromium >/dev/null 2>&1; then
+      echo "  ВНИМАНИЕ: браузеры Playwright не скачались (проверь сеть и повтори установку этого компонента). Остальные Python-зависимости на месте."
+    fi
+  fi
 else
   # Онлайн-докачка браузеров (~150 МБ, самый хрупкий по сети шаг). Сбой раньше
   # молча глотался, а скрипт печатал OK — потом браузерные скиллы падали без следа.

@@ -74,7 +74,7 @@ if (-not $trayOk) {
 # 4. конфиг агента (если ещё нет)
 $cfgPath = Join-Path $dst 'config.json'
 if (-not (Test-Path $cfgPath)) {
-    $domains = if ($env:HM_BRIDGE_PACDOMAINS) { $env:HM_BRIDGE_PACDOMAINS.Split(',') } else { @('claude.ai', 'anthropic.com', 'openai.com', 'chatgpt.com', 'oaistatic.com', 'higgsfield.ai') }
+    $domains = if ($env:HM_BRIDGE_PACDOMAINS) { $env:HM_BRIDGE_PACDOMAINS.Split(',') } else { @('claude.ai', 'anthropic.com', 'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'claudeusercontent.com', 'sora.com', 'higgsfield.ai') }
     $cfgJson = ([ordered]@{
         enrollEndpoint = "$($env:HM_BRIDGE_ENDPOINT)"; bridgeToken = "$($env:HM_BRIDGE_TOKEN)"
         ssh = [ordered]@{ host = ''; port = 22; user = ''; keyPath = ''; password = '' }

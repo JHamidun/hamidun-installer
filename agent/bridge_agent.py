@@ -13,7 +13,7 @@ Hamidun Bridge agent — стабильный зарубежный IP тольк
     "bridgeToken": "",               # выдаёт бот после оплаты/trial
     "ssh": {"host":"","port":22,"user":"","keyPath":"","password":""},  # "База": свой VPS напрямую (нужен keyPath — SSH-ключ; парольная авторизация НЕ поддерживается, ssh -D неинтерактивен)
     "socksPort": 1080, "httpPort": 1081, "pacPort": 1082,
-    "pacDomains": ["claude.ai","anthropic.com","openai.com","chatgpt.com","oaistatic.com","higgsfield.ai"],
+    "pacDomains": ["claude.ai","anthropic.com","openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com","claudeusercontent.com","sora.com","higgsfield.ai"],
     "enabled": false
   }
 """
