@@ -749,7 +749,7 @@ function finishInstall(res) {
   let title, sub;
   if (okAll) {
     title = 'Готово!';
-    sub = 'Осталось войти в Claude Code своей подпиской — шаги ниже.';
+    sub = 'Всё установлено. Ниже — три простых шага до первого результата.';
   } else if (failed.length === 0 && skipped.length === 0) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
@@ -801,7 +801,19 @@ function renderNextSteps(failed, skipped) {
     ((failed.length || skipped.length) ? '_f' : '_ok') +
     '_' + (isWin ? 'w' : 'm')).slice(0, 64);
   const botUrl = links.bot ? links.bot + '?start=' + encodeURIComponent(startPayload) : '';
-  const botBtn = botUrl ? `<button type="button" class="btn-sm primary" data-ext="${botUrl}">↩ Открыть бота — что дальше</button>` : '';
+  // Заметная CTA-карточка бота академии: новичок должен сразу видеть, куда бежать
+  // за помощью. Открытие ссылки — через тот же механизм data-ext → openExternal,
+  // что и остальные внешние кнопки (обработчик вешается ниже одним querySelectorAll).
+  const botCta = botUrl
+    ? `<div class="ns-bot">
+         <div class="ns-bot-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M21.5 3.6 2.9 10.8c-1 .4-1 1.8.1 2.1l4.6 1.5 1.7 5.2c.3 1 1.6 1.2 2.2.4l2.4-2.9 4.7 3.4c.8.6 2 .2 2.2-.9l2.5-14.2c.2-1.1-.8-2-1.8-1.6Z" fill="#fff"/></svg></div>
+         <div class="ns-bot-body">
+           <div class="ns-bot-title">Застрял или что-то непонятно?</div>
+           <div class="ns-bot-text">Спроси бота академии — он ответит и проведёт по шагам. Это нормально в первый день.</div>
+         </div>
+         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота @HamidunAcademyBot</button>
+       </div>`
+    : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
   // Памятка «Что дальше»: START-HERE.html вшит (finish.startHtmlRelPath). На финише
   // копируем её на рабочий стол (постоянная, всегда доступна) и открываем один раз.
@@ -844,26 +856,31 @@ function renderNextSteps(failed, skipped) {
       </div>
     </div>`;
 
+  // Третий шаг ведёт на бота; если ссылки на бота в конфиге нет — на памятку.
+  const step3 = botUrl
+    ? `<li><b>Если что-то не получается</b> — не разбирайся в одиночку. Жми на кнопку бота ниже: он ответит и проведёт по шагам.</li>`
+    : `<li><b>Если что-то не получается</b> — открой памятку «Что дальше» ниже: в ней ответы на весь первый день.</li>`;
+
   const ns = $('#next-steps');
   ns.innerHTML = `
-    <div class="ns-title">Что дальше</div>
+    <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
-      <li>Нажми <b>«Войти в Claude сейчас»</b> — откроется терминал с Claude Code, войди своей подпиской (Pro/Max). Позже это же — панель Claude Code в Cursor или команда <code>claude</code>.</li>
-      <li>Если нужны доп. сервисы — вставь API-ключи ниже или в файл <code>.credentials.master.env</code>.</li>
-      <li>Готово — можно работать. Продолжение инструкции — в боте.</li>
+      <li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>.</li>
+      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». При первом запуске Claude попросит войти в подписку (Pro/Max) — просто следуй подсказкам.</li>
+      ${step3}
     </ol>
     ${checksHtml}
     ${failHtml}
     <div class="ns-actions">
-      <button type="button" id="ns-claude" class="btn-sm primary">⚡ Войти в Claude сейчас</button>
-      <button type="button" id="ns-vscode" class="btn-sm primary">Открыть VS Code</button>
+      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code</button>
       ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
+      <button type="button" id="ns-claude" class="btn-sm">⚡ Войти в Claude через терминал</button>
       <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
       ${logBtn}
-      ${botBtn}
       ${videoBtn}
       ${startBtn}
     </div>
+    ${botCta}
     ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autovscode" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть VS Code на папке проекта при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');

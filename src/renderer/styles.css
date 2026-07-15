@@ -256,7 +256,7 @@ h1 {
 }
 
 /* ---- next-steps (финальный экран «что дальше») ---- */
-.next-steps { flex: 0 0 auto; overflow-y: auto; max-height: 40vh; padding: 4px 2px 0; }
+.next-steps { flex: 0 0 auto; overflow-y: auto; max-height: 46vh; padding: 4px 2px 0; }
 .ns-title { font-family: var(--h-font-head); font-weight: 700; font-size: 18px; margin-bottom: 8px; }
 .ns-steps { margin: 0 0 10px; padding-left: 20px; font-size: 14px; line-height: 1.6; }
 .ns-steps code { font-family: var(--h-font-mono); font-size: 12px; background: var(--surface-2); padding: 1px 6px; border-radius: 5px; color: var(--h-cyan); }
@@ -266,6 +266,46 @@ h1 {
 .btn-sm:hover { border-color: var(--h-primary); background: var(--surface-2); }
 .btn-sm.primary { background: var(--h-primary); border-color: var(--h-primary); color: #fff; }
 .btn-sm.primary:hover { background: var(--h-primary-hover); }
+/* Главная кнопка финального экрана («Открыть VS Code») — крупнее и с тенью,
+   чтобы взгляд новичка падал на неё первой. */
+.btn-sm.ns-main {
+  font-family: var(--h-font-head); font-weight: 700; font-size: 14.5px;
+  padding: 10px 24px;
+  box-shadow: 0 8px 24px rgba(45,47,232,.4);
+}
+.btn-sm.ns-main:active { transform: translateY(1px); }
+
+/* ---- CTA-карточка бота академии (финальный экран) ---- */
+.ns-bot {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px 14px;
+  background: linear-gradient(135deg, rgba(41,169,255,.14), rgba(45,47,232,.14));
+  border: 1px solid rgba(41,169,255,.45);
+  border-radius: var(--h-r-lg);
+  padding: 12px 16px;
+  margin: 0 0 10px;
+}
+.ns-bot-icon {
+  flex: 0 0 auto; width: 40px; height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--h-cyan), var(--h-primary));
+  display: grid; place-items: center;
+  box-shadow: 0 6px 18px rgba(41,169,255,.35);
+}
+.ns-bot-icon svg { display: block; }
+.ns-bot-body { flex: 1 1 auto; min-width: 200px; }
+.ns-bot-title { font-family: var(--h-font-head); font-weight: 700; font-size: 14.5px; }
+.ns-bot-text { color: var(--text-muted); font-size: 12.5px; margin-top: 1px; line-height: 1.45; }
+.ns-bot-btn {
+  flex: 0 0 auto;
+  font-family: var(--h-font-head); font-weight: 700; font-size: 14px;
+  border: none; border-radius: var(--h-r-pill);
+  padding: 11px 22px; color: #fff; cursor: pointer;
+  background: linear-gradient(135deg, var(--h-cyan), var(--h-primary));
+  box-shadow: 0 8px 24px rgba(41,169,255,.4);
+  transition: transform .05s, box-shadow .15s, filter .15s;
+}
+.ns-bot-btn:hover { filter: brightness(1.12); }
+.ns-bot-btn:active { transform: translateY(1px); }
 .ns-auto { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
 .ns-auto input { width: 15px; height: 15px; }
 
