@@ -78,7 +78,7 @@ if ($present) {
 # P0 (privesc): этот скрипт исполняется ELEVATED (установщик requireAdministrator).
 # Прямой запуск user-writable code.cmd/Code.exe под АДМИНОМ выполнил бы то, что
 # medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить на его место
-# (integrity-escalation). Поэтому ЛЮБОЙ вызов бинаря VS Code (install + list-extensions)
+# (integrity-escalation). Поэтому УСТАНОВКА расширений в VS Code через бинарь code.cmd
 # идёт ДЕ-ЭЛЕВИРОВАННО — через одноразовую scheduled task от текущего интерактивного
 # пользователя с /RL LIMITED (medium integrity). Если де-элевация недоступна — FAIL-CLOSED:
 # бинарь под админом НЕ запускаем.
@@ -120,8 +120,25 @@ function Get-Vsix($name) {
 
 $script:DeElevFailed = $false
 
-# Установка расширения ДЕ-ЭЛЕВИРОВАННО + проверка через --list-extensions (тоже
-# де-элевированно — user-writable бинарь под админом НЕ запускаем). $true, если extId подтверждён.
+# Каталоги расширений VS Code (User + OSS). Проверка установки — ПРЯМО по каталогам
+# (Test-HmExtInstalled), а НЕ через вывод editor CLI: elevated-процесс user-writable
+# бинарь VS Code под админом НЕ запускает даже для чтения списка.
+function Get-VsCodeExtDirs {
+    @((Join-Path $env:USERPROFILE '.vscode\extensions'),
+      (Join-Path $env:USERPROFILE '.vscode-oss\extensions'))
+}
+
+# FS-аттестация с коротким ретраем (каталог расширения появляется чуть позже install).
+function Confirm-ExtInstalled($extId, $dirs) {
+    for ($k = 0; $k -lt 6; $k++) {
+        if (Test-HmExtInstalled -ExtId $extId -Dirs $dirs) { return $true }
+        Start-Sleep -Milliseconds 1000
+    }
+    return $false
+}
+
+# Установка расширения ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevated), затем аттестация через ПРЯМУЮ
+# проверку каталога расширений (НЕ через вывод бинаря). $true, если extId подтверждён на диске.
 function Install-ExtSafe($cli, $extId, $vsix) {
     if (-not $cli) { return $false }
     Write-Host "Ставлю расширение $extId в VS Code (от имени пользователя, без прав администратора)..."
@@ -130,6 +147,8 @@ function Install-ExtSafe($cli, $extId, $vsix) {
         else { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $extId --force" }
         return $true
     }
+    $dirs = Get-VsCodeExtDirs
+    if (Test-HmExtInstalled -ExtId $extId -Dirs $dirs) { Write-Host "  ${extId}: уже на месте."; return $true }
     $target = if ($vsix) { $vsix } else { $extId }
     if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
     $r = Invoke-HmDeElevated $cli @('--install-extension', $target, '--force')
@@ -138,17 +157,12 @@ function Install-ExtSafe($cli, $extId, $vsix) {
         $script:DeElevFailed = $true
         return $false
     }
-    if ($r.Output) { Write-Host ($r.Output.TrimEnd()) }
-    $lst = Invoke-HmDeElevated $cli @('--list-extensions')
-    if ($null -eq $lst) { $script:DeElevFailed = $true; return $false }
-    if (("$($lst.Output)") -match [regex]::Escape($extId)) { Write-Host "  ${extId}: на месте."; return $true }
+    if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте."; return $true }
     if ($vsix) {
         Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
         $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
         if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
-        if ($r2.Output) { Write-Host ($r2.Output.TrimEnd()) }
-        $lst2 = Invoke-HmDeElevated $cli @('--list-extensions')
-        if (($null -ne $lst2) -and (("$($lst2.Output)") -match [regex]::Escape($extId))) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
+        if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
     }
     Write-Host "  ${extId}: не подтвердилось."
     return $false

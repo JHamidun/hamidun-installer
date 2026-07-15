@@ -694,71 +694,148 @@ const EG_DEELEV = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_
 //        укреплённый _deelev.ps1). Ни один elevated-путь не исполняет user-writable
 //        editor-бинарь. =========================================================
 
-// _deelev.ps1: ЕДИНЫЙ укреплённый примитив де-элевации (чистый PSModulePath+PATH, абс.
-// schtasks.exe, integrity-check обёртки, fail-closed).
-ok('_deelev.ps1: shared primitive — чистый PSModulePath+PATH, абс. schtasks.exe, integrity-gate (medium SID), fail-closed $null, InteractiveToken/LeastPrivilege', () => {
+// _deelev.ps1: укреплённый примитив — НЕТ %TEMP% control-файлов, тело обёртки в
+// -EncodedCommand, PRIVATE staging-каталог (ProgramData+icacls+verify), env-литералы
+// ПЕРВЫМИ (до cmdlet), абс. whoami, gate fail-closed, аттестация по «Last Result».
+ok('_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE staging; env-литералы до cmdlet; абс. whoami; gate; Last Result; fail-closed', () => {
   const s = EG_DEELEV();
   assert(/function Invoke-HmDeElevated/.test(s), 'экспортирует Invoke-HmDeElevated');
-  // (1) отдельные системные PATH + PSModulePath (без CurrentUser).
-  assert(/\$env:PSModulePath\s*=\s*\(Join-Path \$psV1 'Modules'\)/.test(s), 'PSModulePath = ТОЛЬКО системный ...\\v1.0\\Modules');
-  assert(/\$env:Path\s*=\s*\(\$s32 \+ ';' \+ \$sysRoot \+ ';' \+ \$psV1\)/.test(s), 'PATH = ТОЛЬКО System32/SystemRoot/v1.0 (без HKCU)');
-  assert(/\$savedPath = \$env:Path/.test(s) && /\$env:Path\s+=\s+\$savedPath/.test(s), 'сохраняет и восстанавливает окружение');
-  // (2) абсолютный schtasks.exe вместо PS-модуля ScheduledTasks (module-hijack исключён).
+  // (1) НИ ОДНОГО control-файла в общем %TEMP%.
+  assert(!/GetTempPath/.test(s), 'нет [IO.Path]::GetTempPath() (никаких %TEMP% control-файлов)');
+  assert(!/env:TEMP/i.test(s) && !/env:TMP/i.test(s), 'нет $env:TEMP/$env:TMP для control-файлов');
+  assert(!/\$wrapper\b/.test(s), 'нет отдельного wrapper .ps1 (тело обёртки — в -EncodedCommand)');
+  assert(!/\.out'/.test(s) && !/\.code'/.test(s) && !/\.int'/.test(s), 'нет .out/.code/.int result-маркеров');
+  // (2) тело обёртки — в -EncodedCommand (base64 UTF-16LE), собранном родителем.
+  assert(/-EncodedCommand/.test(s), 'обёртка передаётся как -EncodedCommand (не файл)');
+  assert(/\[System\.Text\.Encoding\]::Unicode\.GetBytes/.test(s) && /ToBase64String/.test(s), 'base64 из UTF-16LE');
+  // (3) единственный транзиентный файл — task.xml в PRIVATE staging-каталоге (не %TEMP%).
+  assert(/New-HmSecureStagingDir/.test(s), 'staging-каталог создаётся укреплённым хелпером');
+  assert(/'HmDeElev-'/.test(s) && /ProgramData/.test(s), 'staging под ProgramData (не %TEMP%)');
+  assert(/SetAccessRuleProtection\(\$true/.test(s), 'protection on (без наследования Users)');
+  assert(/S-1-5-32-544/.test(s) && /S-1-5-18/.test(s), 'DACL: только Administrators + SYSTEM');
+  assert(/setowner.*S-1-5-32-544/.test(s), 'elevated: владелец -> Administrators (icacls)');
+  assert(/'task\.xml'/.test(s) && /Set-Content -LiteralPath \$xmlFile/.test(s), 'XML пишется в staging (task.xml)');
+  // (4) env-литералы ПЕРВЫМИ в теле обёртки (ни одного cmdlet/Join-Path до gate).
+  const bi = s.indexOf('$body =');
+  assert(bi !== -1, 'тело обёртки строится в $body');
+  const bh = s.slice(bi, bi + 700);
+  assert(/`\$env:PSModulePath='/.test(bh) && /`\$env:Path='/.test(bh), 'env ставится ЛИТЕРАЛАМИ (не Join-Path)');
+  const beforeGate = bh.slice(0, bh.indexOf('/groups'));
+  assert(!/Join-Path/.test(beforeGate) && !/Out-String/.test(beforeGate) && !/Get-|Set-|New-/.test(beforeGate),
+    'НЕТ Join-Path/cmdlet ДО integrity-gate (env чистится литералами ПЕРВЫМИ)');
+  // (5) integrity-self-check абсолютным System32\whoami; бинарь ТОЛЬКО при medium, иначе exit 210.
+  assert(/\$whoami\s*=\s*Join-Path \$s32 'whoami\.exe'/.test(s), 'whoami — абсолютный из System32');
+  assert(/S-1-16-8192/.test(bh), 'обёртка сверяет medium SID');
+  assert(/exit 210/.test(bh), 'НЕ medium -> exit 210 (fail-closed)');
+  // (6) абс. schtasks + /Create /XML + InteractiveToken/LeastPrivilege.
   assert(/\$schtasks = Join-Path \$s32 'schtasks\.exe'/.test(s), 'schtasks.exe — абсолютный из System32');
   assert(!/New-ScheduledTask/.test(s), 'НЕ используется PS-модуль ScheduledTasks (module-hijack исключён)');
   assert(/& \$schtasks '\/Create'.*'\/XML'/.test(s), 'задача создаётся по XML через абс. schtasks.exe');
-  assert(/InteractiveToken/.test(s) && /LeastPrivilege/.test(s), 'XML: InteractiveToken + LeastPrivilege (=/RL LIMITED = medium)');
-  // (3) integrity-check обёртки: исполнение ТОЛЬКО при medium (S-1-16-8192).
-  assert(/whoami/i.test(s) && /S-1-16-8192/.test(s), 'обёртка сверяет Mandatory Label (whoami /groups -> medium SID)');
-  assert(/if \(`\$lvl -eq 'medium'\)/.test(s), 'обёртка исполняет бинарь ТОЛЬКО при medium (fail-closed иначе)');
-  assert(/\$lvl -ne 'medium'|\$lvl -eq 'medium'\) \{[\s\S]*?\$result = \[pscustomobject\]/.test(s), 'родитель доверяет результату лишь при medium-маркере');
-  // (4) fail-closed: любой сбой -> $null; нет системного бинаря -> return $null.
+  assert(/InteractiveToken/.test(s) && /LeastPrivilege/.test(s), 'XML: InteractiveToken + LeastPrivilege (= medium)');
+  // (7) аттестация — «Last Result» задачи (не user-writable), поле #6 CSV /HRESULT.
+  assert(/\/HRESULT/.test(s) && /\/FO' 'CSV'/.test(s), 'Last Result читается локаль-независимо (CSV /HRESULT)');
+  assert(/267009/.test(s) && /267011/.test(s), 'ждём завершения по numeric Last Result');
+  // (8) fail-closed.
   assert(/return \$null/.test(s), 'fail-closed: возврат $null при сбое');
-  assert(/foreach \(\$bin in @\(\$psExe, \$schtasks, \$whoami\)\)[\s\S]*?return \$null/.test(s), 'нет системного бинаря -> fail-closed');
+  assert(/foreach \(\$bin in @\(\$psExe, \$schtasks, \$whoami, \$icacls\)\)[\s\S]*?return \$null/.test(s), 'нет системного бинаря -> fail-closed');
 });
 
-// _deelev.ps1: функциональный round-trip — реально де-элевирует и отдаёт вывод команды
-// на MEDIUM integrity (как прошлый агент проверял Invoke-DeElevated).
+// _deelev.ps1: функциональный round-trip — реально де-элевирует cmd, который пишет
+// whoami /groups в TEST-owned маркер; маркер содержит medium-SID (S-1-16-8192) -> команда
+// исполнилась на MEDIUM. Аттестация примитива — Gate=medium. NULL = fail-closed (валидно).
 if (powershellAvailable()) {
-  ok('_deelev.ps1: round-trip — Invoke-HmDeElevated исполняет whoami /groups де-элевированно и возвращает medium-SID вывод', () => {
+  ok('_deelev.ps1: round-trip — де-элевирует команду на MEDIUM (маркер содержит S-1-16-8192), Gate=medium; либо fail-closed $null', () => {
     const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+    const marker = path.join(os.tmpdir(), 'hmrt-' + Math.random().toString(36).slice(2) + '.txt');
     const cmd =
       ". '" + dot + "';" +
-      "$w=Join-Path $env:SystemRoot 'System32\\whoami.exe';" +
-      "$r=Invoke-HmDeElevated $w @('/groups');" +
+      "$cmd='C:\\Windows\\System32\\cmd.exe';" +
+      "$r=Invoke-HmDeElevated $cmd @('/c', 'whoami /groups > \"" + marker + "\" 2>&1');" +
       "if($null -eq $r){Write-Output 'NULL';exit 0};" +
-      "if(($r.Output) -match 'S-1-16-8192'){Write-Output 'MEDIUM_OK'}else{Write-Output ('OTHER:'+$r.Code)}";
+      "Write-Output ('GATE='+$r.Gate)";
     const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
       { encoding: 'utf8', timeout: 120000 });
     const out = (r.stdout || '').trim();
-    // MEDIUM_OK = уже medium (запускаем как обычный пользователь) — де-элевация отработала и
-    // отдала вывод; NULL = Task Scheduler недоступен -> fail-closed (тоже валидно, не эскалация).
-    assert(/MEDIUM_OK|NULL/.test(out), 'round-trip: medium-вывод либо fail-closed $null (не эскалация): ' + out);
+    if (/NULL/.test(out)) {
+      // fail-closed (напр. не удалось запереть staging без прав) — валидно, не эскалация.
+    } else {
+      assert(/GATE=medium/.test(out), 'де-элевация отдала Gate=medium: ' + out);
+      const marked = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '';
+      assert(/S-1-16-8192/.test(marked), 'де-элевированная команда исполнилась на MEDIUM integrity: ' + marked.slice(0, 80));
+    }
+    try { fs.unlinkSync(marker); } catch (e) { /* */ }
+  });
+
+  // _deelev.ps1: Test-HmExtInstalled — точный префикс ${extId}- + ЦИФРА, ТОЛЬКО каталоги.
+  ok('_deelev.ps1: Test-HmExtInstalled — ^${extId}-<цифра> + Directory-only (helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит)', () => {
+    const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+    const base = path.join(os.tmpdir(), 'hmext-' + Math.random().toString(36).slice(2));
+    fs.mkdirSync(path.join(base, 'anthropic.claude-code-helper-1.0'), { recursive: true });  // sibling-ext (каталог)
+    fs.writeFileSync(path.join(base, 'anthropic.claude-code-9.9'), 'x');                       // ФАЙЛ, не каталог
+    const q = (v) => "'" + v.replace(/'/g, "''") + "'";
+    const cmd = ". '" + dot + "'; if(Test-HmExtInstalled -ExtId 'anthropic.claude-code' -Dirs @(" + q(base) + ")){'PASS'}else{'FAIL'}";
+    const run = () => (spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { encoding: 'utf8', timeout: 60000 }).stdout || '').trim();
+    assert(/FAIL/.test(run()), 'ни helper-каталог, ни файл-версия не считаются установкой');
+    fs.mkdirSync(path.join(base, 'anthropic.claude-code-1.2.3-win32-x64'), { recursive: true }); // настоящее расширение
+    assert(/PASS/.test(run()), 'настоящий каталог <extId>-<ver>[-platform] проходит');
+    try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ }
+  });
+
+  // P1-2: Start-Process с вложенными кавычками -> путь с пробелом = ОДИН аргумент (не рвётся).
+  ok('P1-2 (launch quoting): -ArgumentList с вложенными кавычками -> "C:\\Users\\John Doe\\..." = ОДИН аргумент', () => {
+    const dumper = path.join(os.tmpdir(), 'hmdump-' + Math.random().toString(36).slice(2) + '.ps1');
+    const marker = path.join(os.tmpdir(), 'hmmark-' + Math.random().toString(36).slice(2) + '.txt');
+    fs.writeFileSync(dumper, "('COUNT='+$args.Count) | Set-Content -LiteralPath '" + marker + "'\r\n", 'utf8');
+    const folder = 'C:\\Users\\John Doe\\HamidunStart';
+    const cmd = "$ps='C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';" +
+      "Start-Process -FilePath $ps -ArgumentList ('-NoProfile -File \"" + dumper + "\" \"" + folder + "\"') -Wait -WindowStyle Hidden";
+    spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { encoding: 'utf8', timeout: 60000 });
+    const got = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : '';
+    assert(/COUNT=1/.test(got), 'путь с пробелом дошёл как ОДИН аргумент: ' + got);
+    try { fs.unlinkSync(dumper); fs.unlinkSync(marker); } catch (e) { /* */ }
   });
 }
 
-// P0-D (launch): редактор стартует ДЕ-ЭЛЕВИРОВАННО через АБСОЛЮТНЫЙ schtasks.exe + XML,
-// с integrity-gate; elevated НЕ spawn'ит Code.exe/Cursor.exe напрямую; fallback — АБСОЛЮТНЫЙ
-// explorer.exe ТОЛЬКО на папку.
-ok('P0-D launch (main.js): winLaunchDeElevated — абс. schtasks.exe+XML (InteractiveToken/LeastPrivilege), integrity-gate, folder-only абс. explorer; нет прямого spawn редактора', () => {
+// P0-D/P1-1 (launch): редактор стартует ДЕ-ЭЛЕВИРОВАННО; тело обёртки в -EncodedCommand
+// (нет .ps1 в %TEMP%); транзиентный task.xml — в PRIVATE staging (winMakeSecureDir); env-
+// литералы ПЕРВЫМИ; абс. whoami-gate; аттестация по «Last Result» (0 -> true, иначе folder-
+// fallback); quoting пути с пробелом; elevated НЕ spawn'ит редактор напрямую.
+ok('P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%); env-литералы; абс. whoami; gate; Last Result аттестация; folder-fallback; quoting пробела', () => {
   const s = EG_MAIN();
   const at = s.indexOf('function winLaunchDeElevated(');
   assert(at !== -1, 'де-элевирующий лаунчер объявлен');
-  const h = s.slice(at, at + 7000);
+  const h = s.slice(at, s.indexOf('// Открыть VS Code НА ПАПКЕ'));
+  // нет %TEMP%: staging — PRIVATE high-integrity каталог (winMakeSecureDir).
+  assert(!/os\.tmpdir\(\)/.test(h), 'winLaunchDeElevated НЕ пишет в %TEMP% (нет os.tmpdir)');
+  assert(/winMakeSecureDir\(\)/.test(h), 'staging — PRIVATE high-integrity каталог (winMakeSecureDir)');
+  // тело обёртки — в -EncodedCommand (base64 UTF-16LE), нет отдельного .ps1.
+  assert(/-EncodedCommand/.test(h) && /Buffer\.from\(wrapperBody, 'utf16le'\)/.test(h), 'обёртка — base64 UTF-16LE в -EncodedCommand');
+  assert(!/writeFileSync\(wrapper/.test(h), 'нет отдельного wrapper .ps1 (P0-1: нет control-файла в %TEMP%)');
+  // env-литералы ПЕРВЫМИ, абс. whoami, gate S-1-16-8192, exit 210/211/0.
+  assert(/\$env:PSModulePath='/.test(h) && /\$env:Path='/.test(h), 'env ставится ЛИТЕРАЛАМИ (P0-2)');
+  assert(/S-1-16-8192/.test(h) && /whoami/i.test(h), 'integrity-gate (абс. whoami -> medium SID)');
+  assert(/exit 210/.test(h) && /exit 211/.test(h), 'не-medium -> 210, бросок Start-Process -> 211');
+  // P1-2 quoting: путь папки в ОДНОМ аргументе с вложенными кавычками.
+  assert(/-ArgumentList '\\"/.test(h), 'путь папки обёрнут во вложенные кавычки (пробел не рвётся)');
   // schtasks — АБСОЛЮТНЫЙ (sysBin), НЕ PS-модуль ScheduledTasks.
   assert(/remoteFetch\.sysBin\('schtasks\.exe'\)/.test(h), 'schtasks.exe — абсолютный из валидированного System32');
   assert(!/New-ScheduledTask/.test(h), 'НЕ используется PS-модуль ScheduledTasks (module-hijack исключён)');
-  // XML-принципал: InteractiveToken + LeastPrivilege (=medium).
   assert(/InteractiveToken/.test(h) && /LeastPrivilege/.test(h), 'задача — InteractiveToken + LeastPrivilege (medium)');
-  // integrity-gate в обёртке: Start-Process ТОЛЬКО при medium (S-1-16-8192).
-  assert(/S-1-16-8192/.test(h) && /whoami/i.test(h), 'обёртка сверяет integrity (whoami /groups -> medium SID)');
-  assert(/\$lvl -eq 'medium'.{0,80}Start-Process/.test(h), 'редактор стартует ЛИШЬ при medium (fail-closed иначе)');
+  // P1-1: аттестация по «Last Result» (не user-writable). 0 -> true; иначе folder-fallback.
+  assert(/\/HRESULT/.test(h) && /\/FO', 'CSV'/.test(h), 'Last Result — CSV /HRESULT (не user-writable)');
+  assert(/readLastResult\(\)/.test(h), 'опрос Last Result');
+  assert(/lr === '0' \? true : folderFallback\(\)/.test(h), 'success ТОЛЬКО при Last Result 0; иначе folder-fallback (P1-1)');
   // fallback: АБСОЛЮТНЫЙ explorer.exe, ТОЛЬКО на папку (folderArg), не на exe.
   assert(/path\.join\(sysRoot, 'explorer\.exe'\)/.test(h), 'explorer.exe — абсолютный (из валидированного sysRoot)');
   assert(/spawn\(exp, \[String\(folderArg\)\]/.test(h), 'fallback открывает ТОЛЬКО папку (folderArg)');
   assert(!/spawn\(exp, \[exe\]/.test(h), 'fallback НЕ исполняет editor-exe через explorer (P0-D#4)');
-  // success только после реального /Create И /Run (P0-D#5).
-  assert(/runSchtasks\(\['\/Create'/.test(h) && /runSchtasks\(\['\/Run'/.test(h), 'true только после /Create И /Run');
+  // winMakeSecureDir: ProgramData + icacls + verify (owner=Admins, посторонних ACE нет), без %TEMP%.
+  const mi = s.indexOf('function winMakeSecureDir(');
+  assert(mi !== -1, 'winMakeSecureDir объявлена');
+  const mh = s.slice(mi, mi + 1400);
+  assert(/winProgramData\(\)/.test(mh) && /buildIcaclsArgs/.test(mh) && /verifyDirSecureWin/.test(mh),
+    'staging: ProgramData + icacls + verifyDirSecureWin (owner=Admins, посторонних ACE нет)');
+  assert(!/os\.tmpdir/.test(mh), 'winMakeSecureDir НЕ использует %TEMP%');
   // launch-vscode И launch-cursor зовут лаунчер, без прямого spawn редактора.
   const lvi = s.indexOf("ipcMain.handle('launch-vscode'");
   const lvh = s.slice(lvi, lvi + 1200);
@@ -777,46 +854,66 @@ ok('P2 (main.js): launch-vscode проверяет statSync(startDir).isDirector
   assert(/isDirectory\(\)\)\s*return false/.test(lh), 'если не директория — return false (не запускаем редактор)');
 });
 
-// P0 (install): vscode.ps1 исполняет бинарь VS Code ТОЛЬКО через shared _deelev.ps1 + реестр.
-ok('P0 install (vscode.ps1): дот-сорсит _deelev.ps1, Invoke-HmDeElevated (fail-closed) + Get-VsCodeCli (HKCU/HKLM); нет прямого elevated code.cmd', () => {
+// P0 (install): vscode.ps1 ставит расширение через shared _deelev.ps1; аттестация — ПРЯМО по
+// каталогам (Test-HmExtInstalled), НЕ через --list-extensions/вывод бинаря; fail-closed.
+ok('P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed', () => {
   const s = EG_PS1();
   assert(/_deelev\.ps1/.test(s), 'дот-сорсит единый примитив де-элевации');
-  assert(!/function Invoke-DeElevated/.test(s), 'локальный дубль де-элевации убран (вынесен в _deelev.ps1)');
+  assert(!/function Invoke-DeElevated/.test(s), 'локального дубля де-элевации нет');
   assert(/function Get-VsCodeCli/.test(s), 'доверенный сигнал установки — отдельная функция');
-  assert(/CurrentVersion\\Uninstall/.test(s), 'проверяем ключ Uninstall инсталлятора VS Code (доверенный сигнал)');
+  assert(/CurrentVersion\\Uninstall/.test(s), 'проверяем ключ Uninstall инсталлятора VS Code');
   assert(/HKCU:\\Software/.test(s) && /HKLM:\\Software/.test(s), 'и User Setup (HKCU), и System Setup (HKLM)');
-  // Установка и list-extensions идут ЧЕРЕЗ де-элевацию, а не прямым вызовом бинаря.
   assert(/Invoke-HmDeElevated \$cli @\('--install-extension'/.test(s), 'install-extension — де-элевированно');
-  assert(/Invoke-HmDeElevated \$cli @\('--list-extensions'\)/.test(s), 'list-extensions — де-элевированно');
+  // аттестация — ПРЯМО по каталогам расширений, НЕ через editor CLI и НЕ через вывод бинаря.
+  assert(!/--list-extensions/.test(s), 'НЕ запускает --list-extensions (никакого editor CLI для чтения)');
+  assert(/Test-HmExtInstalled/.test(s), 'аттестация — прямой проверкой каталога расширений');
+  assert(/\.vscode\\extensions/.test(s) && /\.vscode-oss\\extensions/.test(s), 'смотрит каталоги VS Code');
+  assert(!/\$r\.Output/.test(s) && !/\$lst\.Output/.test(s), 'вывод бинаря ($r.Output) НЕ используется как доверие');
   assert(!/& \$cli --install-extension/.test(s), 'НЕТ прямого elevated `& $cli --install-extension`');
-  assert(!/& \$cli --list-extensions/.test(s), 'НЕТ прямого elevated `& $cli --list-extensions`');
   // fail-closed: если де-элевация вернула $null — НЕ запускаем бинарь под админом.
   assert(/DeElevFailed/.test(s) && /\$null -eq \$r/.test(s), 'де-элевация недоступна -> fail-closed, а не запуск elevated');
 });
 
-// P0-A (extension.ps1): дубль установки в VS Code УБРАН; Cursor CLI — через shared де-элевацию.
-ok('P0-A (extension.ps1): нет дубля VS Code; Cursor CLI — через Invoke-HmDeElevated; нет прямого & $cli; fail-closed', () => {
+// P0-A (extension.ps1): Cursor CLI — через shared де-элевацию; аттестация по каталогу .cursor.
+ok('P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed', () => {
   const s = EG_EXT();
   assert(/_deelev\.ps1/.test(s), 'дот-сорсит единый примитив де-элевации');
-  // дубль VS Code убран: не ищет и не ставит в code.cmd VS Code.
   assert(!/\$codeCli/.test(s), 'переменная $codeCli (установка в VS Code) удалена — дубль убран');
-  assert(!/Install-Into \$codeCli/.test(s), 'НЕТ установки в VS Code из extension.ps1 (её делает vscode.ps1)');
-  // Cursor CLI — только де-элевированно.
   assert(/Invoke-HmDeElevated \$cli @\('--install-extension'/.test(s), 'Cursor install-extension — де-элевированно');
-  assert(/Invoke-HmDeElevated \$cli @\('--list-extensions'\)/.test(s), 'Cursor list-extensions — де-элевированно');
+  assert(!/--list-extensions/.test(s), 'НЕ запускает --list-extensions');
+  assert(/Test-HmExtInstalled/.test(s) && /\.cursor\\extensions/.test(s), 'аттестация — каталог .cursor напрямую');
+  assert(!/\$r\.Output/.test(s) && !/\$lst\.Output/.test(s), 'вывод бинаря НЕ используется как доверие');
   assert(!/& \$cli --install-extension/.test(s), 'НЕТ прямого elevated `& $cli --install-extension`');
-  assert(!/& \$cli --list-extensions/.test(s), 'НЕТ прямого elevated `& $cli --list-extensions`');
   assert(/DeElevFailed/.test(s) && /\$null -eq \$r/.test(s), 'fail-closed при недоступной де-элевации');
 });
 
-// P0-B (verify.ps1): проверка расширения — по КАТАЛОГАМ, НЕ через editor CLI.
-ok('P0-B (verify.ps1): расширение проверяется по каталогам .vscode/.vscode-oss/.cursor, НЕ запускает editor CLI', () => {
+// P0-B/P1-3 (verify.ps1): проверка расширения — по каталогам, точный префикс ${extId}- + ЦИФРА
+// версии (Directory-only), НЕ через editor CLI. `claude-code-helper-*` больше НЕ даёт ложный PASS.
+ok('P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI', () => {
   const s = EG_VERIFY();
   assert(!/--list-extensions/.test(s), 'НЕ запускает `--list-extensions` (никакого editor CLI)');
   assert(!/& \$cli/.test(s), 'НЕТ `& $cli` (elevated-запуск user-writable бинаря убран)');
   assert(/\.vscode\\extensions/.test(s) && /\.vscode-oss\\extensions/.test(s) && /\.cursor\\extensions/.test(s),
     'смотрит каталоги расширений VS Code (.vscode/.vscode-oss) и Cursor (.cursor)');
-  assert(/StartsWith\(\$pref\)/.test(s), 'матч по префиксу имени папки расширения (<extId>-<версия>)');
+  assert(/\$rx = '\^' \+ \[regex\]::Escape\(\$extId\) \+ '-\\d'/.test(s), 'префикс ^<extId>-<цифра> (не голый StartsWith(extId))');
+  assert(/-match \$rx/.test(s) && !/StartsWith\(\$pref\)/.test(s), 'матч по ^<extId>-<цифра>, старый StartsWith убран');
+  assert(/Get-ChildItem[^\r\n]*-Directory/.test(s), 'ТОЛЬКО каталоги (-Directory)');
+});
+
+// P1-3 (main.js detect): dirHasChildStarting — ^${extId}-<цифра> + Dirent.isDirectory().
+ok('P1-3 (main.js): dirHasChildStarting — ^${extId}-<цифра> + isDirectory(); helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит', () => {
+  const s = EG_MAIN();
+  const fi = s.indexOf('function dirHasChildStarting(');
+  assert(fi !== -1, 'dirHasChildStarting объявлена');
+  const fh = s.slice(fi, fi + 600);
+  assert(/withFileTypes: true/.test(fh) && /\.isDirectory\(\)/.test(fh), 'ТОЛЬКО каталоги (Dirent.isDirectory)');
+  assert(/'-\\\\d'/.test(fh), 'префикс ${extId}- + ЦИФРА версии в regex');
+  // Функциональная проверка ТОЙ ЖЕ regex-логики: helper/файл НЕ проходят, <extId>-<ver> проходит.
+  const rx = new RegExp('^' + 'anthropic.claude-code'.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-\\d', 'i');
+  assert(rx.test('anthropic.claude-code-1.2.3'), 'claude-code-<ver> проходит');
+  assert(rx.test('anthropic.claude-code-1.2.3-win32-x64'), 'платформенный суффикс проходит');
+  assert(!rx.test('anthropic.claude-code-helper-1.0'), 'claude-code-helper НЕ проходит (ложный PASS закрыт)');
+  assert(!rx.test('anthropic.claude-codereview-1.0'), 'claude-codereview НЕ проходит');
 });
 
 // GREP-ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution по всем 4 файлам.
@@ -832,6 +929,22 @@ ok('ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (e
   assert(!/spawn\(codeExe/.test(m), 'main.js: нет spawn(codeExe)');
   assert(!/spawn\(cexe, \[\]/.test(m), 'main.js: нет прямого spawn(cexe, [])');
   assert(!/spawn\(exp, \[exe\]/.test(m), 'main.js: explorer не исполняет editor-exe');
+});
+
+// GREP-ИНВАРИАНТ: НИ ОДНОГО user-writable control/attestation-файла в решении о доверии
+// (де-элевация PS + JS). Всё через medium-обёртку в -EncodedCommand + self-integrity-gate +
+// task.xml в PRIVATE high-integrity каталоге + аттестация по «Last Result»/FS-каталогу.
+ok('ИНВАРИАНТ: нет user-writable control/attestation-файлов в trust-пути (_deelev.ps1 + main.js launch)', () => {
+  const d = EG_DEELEV();
+  const m = EG_MAIN();
+  const lh = m.slice(m.indexOf('function winMakeSecureDir('), m.indexOf('// Открыть VS Code НА ПАПКЕ'));
+  // PS: нет %TEMP% control-файлов; тело обёртки — в -EncodedCommand; XML — в ProgramData staging.
+  assert(!/env:TEMP/i.test(d) && !/GetTempPath/.test(d), '_deelev.ps1: нет %TEMP% control-файлов');
+  assert(/-EncodedCommand/.test(d) && /New-HmSecureStagingDir/.test(d), '_deelev.ps1: -EncodedCommand + PRIVATE staging');
+  assert(/\/HRESULT/.test(d), '_deelev.ps1: аттестация по «Last Result» (не user-writable файл)');
+  // JS launch: нет os.tmpdir в trust-пути; аттестация — «Last Result» (не файл).
+  assert(!/os\.tmpdir/.test(lh), 'main.js launch: нет os.tmpdir в staging');
+  assert(/-EncodedCommand/.test(lh) && /readLastResult/.test(lh), 'main.js launch: -EncodedCommand + «Last Result» аттестация');
 });
 
 // P1 (vscode.ps1): exit 0 ТОЛЬКО когда встали ОБА расширения; отсутствующее названо.

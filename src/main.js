@@ -666,6 +666,31 @@ ipcMain.handle('launch-cursor', () => {
   return false;
 });
 
+// PRIVATE high-integrity staging-каталог под ProgramData (для транзиентного task.xml).
+// Рождается НАШИМ elevated-процессом со случайным именем (mkdirSync без recursive -> throw
+// если существует), затем icacls: владелец=Administrators + inheritance:r + доступ РОВНО
+// {SYSTEM, Administrators}. Verify (owner+DACL, SID-based) -> null при провале. Users туда
+// писать не могут -> pre-creation/tamper XML невозможны ПО КОНСТРУКЦИИ. Никакого %TEMP%.
+function winMakeSecureDir() {
+  try {
+    const pd = remoteFetch.winProgramData();
+    if (!pd || !fs.existsSync(pd)) return null;
+    const dir = path.join(pd, 'HmLaunch-' + crypto.randomBytes(9).toString('hex'));
+    if (fs.existsSync(dir)) return null;             // CREATE_NEW: занят -> fail-closed
+    fs.mkdirSync(dir);                                // без recursive: throw если существует
+    const icacls = remoteFetch.sysBin('icacls.exe');
+    const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };
+    if (!icacls) { rm(); return null; }
+    const a = remoteFetch.buildIcaclsArgs(dir);
+    try {
+      execFileSync(icacls, a.setowner, { windowsHide: true, timeout: 15000, stdio: 'ignore' });
+      execFileSync(icacls, a.grant, { windowsHide: true, timeout: 15000, stdio: 'ignore' });
+    } catch (e) { rm(); return null; }
+    if (!remoteFetch.verifyDirSecureWin(dir)) { rm(); return null; }   // owner=Admins, посторонних ACE нет
+    return dir;
+  } catch (e) { return null; }
+}
+
 // P0-D (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
 // Прямой spawn user-writable Code.exe/Cursor.exe (%LOCALAPPDATA%\…) исполнил бы ПОД АДМИНОМ
 // (high integrity) то, что medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить
@@ -673,13 +698,18 @@ ipcMain.handle('launch-cursor', () => {
 //   primary  — одноразовая scheduled task от текущего интерактивного пользователя,
 //              InteractiveToken + LeastPrivilege (= medium). Задача создаётся ТОЛЬКО через
 //              АБСОЛЮТНЫЙ %SystemRoot%\System32\schtasks.exe по XML (нет PS-модуля
-//              ScheduledTasks -> module-hijack исключён). Обёртка САМА сверяет свою
-//              integrity (whoami /groups -> Mandatory Label) и стартует редактор ЛИШЬ при
-//              medium; не medium (UAC off / Builtin Administrator / high) -> НЕ стартует.
+//              ScheduledTasks -> module-hijack исключён). Тело обёртки едет ЦЕЛИКОМ в
+//              -EncodedCommand (нет .ps1 в %TEMP%); транзиентный task.xml лежит в PRIVATE
+//              high-integrity каталоге (winMakeSecureDir) и удаляется сразу после /Create ->
+//              pre-creation/tamper XML невозможны. Обёртка ПЕРВЫМИ строками ставит чистые
+//              env-ЛИТЕРАЛЫ (ни одного cmdlet до gate), сверяет integrity абсолютным
+//              System32\whoami и стартует редактор ЛИШЬ при medium (иначе exit 210).
 //   fallback — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
 //              shell). Editor-exe в fallback НЕ исполняем (P0-D#4).
-// success (true) возвращаем ТОЛЬКО после того, как задача фактически зарегистрирована И
-// запущена (schtasks /Create и /Run вернули 0); иначе — folder-fallback (P0-D#5).
+// P0-D#5/P1-1: true возвращаем ТОЛЬКО когда задача подтвердила gate И старт — по «Last Result»
+// (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил.
+// Иначе (210 refused / 211 start-fail / нет подтверждения / любой сбой) -> folder-only fallback.
+// Возвращает Promise<boolean> (опрос неблокирующий — UI не морозим).
 function winLaunchDeElevated(exe, folderArg) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
@@ -693,6 +723,7 @@ function winLaunchDeElevated(exe, folderArg) {
     } catch (e) { /* ignore */ }
     return false;
   };
+  const done = (v) => Promise.resolve(v);
 
   let ps = null, schtasks = null, whoami = null;
   try {
@@ -700,40 +731,47 @@ function winLaunchDeElevated(exe, folderArg) {
     schtasks = remoteFetch.sysBin('schtasks.exe');
     whoami = remoteFetch.sysBin('whoami.exe');
   } catch (e) { /* fail-closed ниже */ }
-  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return folderFallback(); }
+  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return done(folderFallback()); }
 
   const s32 = path.join(sysRoot, 'System32');
-  const psV1 = path.join(s32, 'WindowsPowerShell', 'v1.0');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
-  const tmp = os.tmpdir();
-  const wrapper = path.join(tmp, tag + '.ps1');
-  const xmlFile = path.join(tmp, tag + '.xml');
+  const dir = winMakeSecureDir();
+  if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
+  const xmlFile = path.join(dir, 'task.xml');
+  function runSchtasks(args) {
+    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore' }); return true; }
+    catch (e) { return false; }
+  }
   const cleanup = () => {
-    try { fs.unlinkSync(wrapper); } catch (e) { /* */ }
-    try { fs.unlinkSync(xmlFile); } catch (e) { /* */ }
+    try { runSchtasks(['/Delete', '/TN', tag, '/F']); } catch (e) { /* */ }
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ }
   };
 
-  // Обёртка исполняется de-elevated планировщиком. Чистые PSModulePath/PATH + integrity-gate:
-  // Start-Process редактора ТОЛЬКО при medium (S-1-16-8192). Иначе — ничего (fail-closed).
-  const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без
+  // единого cmdlet/Join-Path до них). Integrity-self-check абсолютным System32\whoami.
+  // Start-Process редактора ТОЛЬКО при medium: exit 0 старт / 211 бросок / 210 не-medium.
+  // Путь папки — в ОДНОМ аргументе с вложенными кавычками (P1-2: %USERPROFILE% с пробелом не рвётся).
+  const s32Lit = s32.replace(/'/g, "''");
+  const srLit = sysRoot.replace(/'/g, "''");
+  const whoLit = whoami.replace(/'/g, "''");
+  const exeLit = String(exe).replace(/'/g, "''");
+  const folderLit = String(folderArg).replace(/'/g, "''");
   const wrapperBody =
-    "$ErrorActionPreference='Continue'\r\n" +
-    "$sr=$env:SystemRoot; if(-not $sr){$sr='C:\\Windows'}\r\n" +
-    "$s32=Join-Path $sr 'System32'\r\n" +
-    "$env:PSModulePath=Join-Path $s32 'WindowsPowerShell\\v1.0\\Modules'\r\n" +
-    "$env:Path=\"$s32;$sr;\"+(Join-Path $s32 'WindowsPowerShell\\v1.0')\r\n" +
-    "$who=Join-Path $s32 'whoami.exe'\r\n" +
-    "$lvl='unknown'\r\n" +
-    "try{ $g=& $who /groups 2>$null | Out-String; if($g -match 'S-1-16-8192'){$lvl='medium'} }catch{}\r\n" +
-    "if($lvl -eq 'medium'){ try{ Start-Process -FilePath " + psq(exe) + " -ArgumentList " + psq(String(folderArg)) + " }catch{} }\r\n";
+    "$env:PSModulePath='" + s32Lit + "\\WindowsPowerShell\\v1.0\\Modules'\n" +
+    "$env:Path='" + s32Lit + ";" + srLit + ";" + s32Lit + "\\WindowsPowerShell\\v1.0'\n" +
+    "if(@(& '" + whoLit + "' /groups 2>$null) -match 'S-1-16-8192'){\n" +
+    "try{ Start-Process -FilePath '" + exeLit + "' -ArgumentList '\"" + folderLit + "\"'; exit 0 }catch{ exit 211 }\n" +
+    "} else { exit 210 }\n";
+  const b64 = Buffer.from(wrapperBody, 'utf16le').toString('base64');
+  const wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + b64;
 
   // XML: принципал = текущий интерактивный пользователь, InteractiveToken, LeastPrivilege.
+  // Тело обёртки — ЦЕЛИКОМ в <Arguments> (нет лимита 261 как у /TR command-line).
   const xmlEsc = (s) => String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
   const userId = (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') +
     (process.env.USERNAME || (function () { try { return os.userInfo().username; } catch (e) { return ''; } })());
-  const wrapArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + wrapper + '"';
   const taskXml =
     '<?xml version="1.0" encoding="UTF-16"?>\r\n' +
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n' +
@@ -747,21 +785,42 @@ function winLaunchDeElevated(exe, folderArg) {
     '<Arguments>' + xmlEsc(wrapArgs) + '</Arguments></Exec></Actions>\r\n' +
     '</Task>\r\n';
 
-  try {
-    fs.writeFileSync(wrapper, wrapperBody, 'utf8');
-    fs.writeFileSync(xmlFile, '\uFEFF' + taskXml, 'ucs2');   // UTF-16LE + BOM (schtasks /XML)
-  } catch (e) { cleanup(); return folderFallback(); }
+  // «Last Result» задачи (поле #6 CSV /HRESULT) — локаль-независимый numeric: 267009=выполняется,
+  // 267011=ещё не запускалась, иначе=exit-код обёртки. НЕ user-writable (БД планировщика).
+  function readLastResult() {
+    try {
+      const out = execFileSync(schtasks, ['/Query', '/TN', tag, '/HRESULT', '/FO', 'CSV', '/NH', '/V'],
+        { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const line = String(out || '').split(/\r?\n/).find((l) => l.indexOf('"') !== -1);
+      if (!line) return null;
+      const fields = []; const re = /"([^"]*)"/g; let m;
+      while ((m = re.exec(line)) !== null) fields.push(m[1]);   // base64 без кавычек -> поля надёжны
+      return fields.length > 6 ? fields[6] : null;
+    } catch (e) { return null; }
+  }
 
-  const runSchtasks = (args) => {
-    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore' }); return true; }
-    catch (e) { return false; }
-  };
-  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return folderFallback(); }
-  const ran = runSchtasks(['/Run', '/TN', tag]);
-  // Отложенная очистка (не блокирует возврат; даём задаче стартовать до /Delete).
-  setTimeout(() => { runSchtasks(['/Delete', '/TN', tag, '/F']); cleanup(); }, 6000);
-  if (!ran) { return folderFallback(); }
-  return true;
+  try {
+    fs.writeFileSync(xmlFile, '\uFEFF' + taskXml, 'ucs2');   // UTF-16LE + BOM (schtasks /XML)
+  } catch (e) { cleanup(); return done(folderFallback()); }
+
+  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return done(folderFallback()); }
+  try { fs.unlinkSync(xmlFile); } catch (e) { /* определение задачи уже в БД планировщика */ }
+  if (!runSchtasks(['/Run', '/TN', tag])) { cleanup(); return done(folderFallback()); }
+
+  // Неблокирующий опрос «Last Result» (Start-Process быстр -> обычно ~1-2с; крайний срок 30с).
+  return new Promise((resolve) => {
+    const deadline = Date.now() + 30000;
+    const poll = () => {
+      const lr = readLastResult();
+      if (lr !== null && lr !== '267009' && lr !== '267011') {
+        cleanup();
+        return resolve(lr === '0' ? true : folderFallback());   // 0 = gate прошёл И старт; иначе папка
+      }
+      if (Date.now() > deadline) { cleanup(); return resolve(folderFallback()); }
+      setTimeout(poll, 400);
+    };
+    setTimeout(poll, 400);
+  });
 }
 
 // Открыть VS Code НА ПАПКЕ проекта (IDE-режим), а не в агент-чате: аналог `code "<папка>"`.
@@ -981,11 +1040,16 @@ function firstExisting(paths) {
   return '';
 }
 
-// Каталог существует и в нём есть подкаталог, имя которого начинается с prefix.
-function dirHasChildStarting(dir, prefix) {
+// Каталог расширения установлен в dir: есть ПОДКАТАЛОГ вида "<extId>-<версия>".
+// Точный префикс `${extId}-` + ЦИФРА версии (ordinal case-insensitive) + ОБЯЗАТЕЛЬНО
+// Dirent.isDirectory(): иначе `anthropic.claude-code-helper-1.0` даёт ложный PASS (он тоже
+// начинается с `anthropic.claude-code-`), а обычный ФАЙЛ не должен считаться расширением.
+// Суффикс платформы `-win32-x64` (после `-<ver>`) продолжает проходить.
+function dirHasChildStarting(dir, extId) {
   try {
-    if (!fs.existsSync(dir)) return false;
-    return fs.readdirSync(dir).some((n) => n.toLowerCase().indexOf(String(prefix).toLowerCase()) === 0);
+    const rx = new RegExp('^' + String(extId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-\\d', 'i');
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .some((d) => d.isDirectory() && rx.test(d.name));
   } catch (e) { return false; }
 }
 

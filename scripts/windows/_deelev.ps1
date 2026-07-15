@@ -6,20 +6,140 @@
 # (integrity-escalation). Поэтому редакторный CLI исполняется ТОЛЬКО через этот
 # примитив — де-элевированно (medium integrity), fail-closed.
 #
-# Укрепление (Codex regate P0-D):
-#  1) Отдельные СИСТЕМНЫЕ PATH и PSModulePath (только System32 + WindowsPowerShell\v1.0
-#     \Modules) на время работы — CurrentUser-модули НЕ подгружаются в elevated-процесс
-#     (иначе атакующий подкладывает свой модуль и он грузится high-integrity).
-#  2) Планировщик — ТОЛЬКО через абсолютный %SystemRoot%\System32\schtasks.exe. Никакого
-#     PS-модуля ScheduledTasks -> module-hijack исключён ЦЕЛИКОМ. Задача описывается XML
-#     (принципал + действие), без хрупких schtasks-кавычек в /TR.
-#  3) Обёртка САМА проверяет свою integrity (whoami /groups -> Mandatory Label SID) и
-#     исполняет целевой бинарь ТОЛЬКО при MEDIUM (S-1-16-8192). Не medium (UAC off /
-#     Builtin Administrator / high) -> бинарь НЕ запускается (/RL LIMITED не безусловен).
-#     Родитель ПОВТОРНО сверяет integrity-маркер и не доверяет результату, если не medium.
-#  4) Любой сбой (нет системного бинаря, задача не создалась/не выполнилась, integrity не
-#     medium) -> возврат $null. Вызывающий обязан трактовать $null как FAIL-CLOSED и НЕ
-#     запускать бинарь под админом.
+# Укрепление (Codex regate P0 — 3-й круг, «гонки/hijack невозможны ПО КОНСТРУКЦИИ»):
+#  1) НИКАКИХ control-файлов в общем user-writable %TEMP%. Раньше wrapper-ps1/xml/out/
+#     .code/.int лежали в %TEMP%: medium-малварь ТОГО ЖЕ юзера создаёт файл ЗАРАНЕЕ
+#     (сохраняя свой DACL), наш elevated Set-Content лишь перезаписывает СОДЕРЖИМОЕ, DACL
+#     атакующего остаётся -> он меняет RunLevel LeastPrivilege->HighestAvailable и <Command>
+#     на свой бинарь ДО /Create. ТЕПЕРЬ:
+#       - Тело обёртки едет ЦЕЛИКОМ в -EncodedCommand (base64 UTF-16LE), собранном ELEVATED-
+#         родителем с ВБИТЫМИ ЛИТЕРАЛАМИ (пути, integrity-SID, exe, аргументы). Base64 — в
+#         аргументах schtasks/XML, не в отдельном файле -> подменять нечего.
+#       - ЕДИНСТВЕННЫЙ транзиентный файл — task.xml — лежит в PRIVATE high-integrity каталоге
+#         %ProgramData%\HmDeElev-<rnd>, рождённом с DACL «SYSTEM+Administrators: FullControl,
+#         прочие: нет доступа» (New-HmSecureStagingDir). Users туда писать не могут ->
+#         pre-creation/tamper невозможны. Медиум-ребёнок XML вообще не читает (команда после
+#         /Create хранится в БД планировщика, SYSTEM-owned). XML удаляется сразу после /Create.
+#  2) ПЕРВЫЕ инструкции обёртки — простые присваивания ЛИТЕРАЛОВ (чистые PSModulePath/PATH),
+#     БЕЗ единого cmdlet/Join-Path/$env:SystemRoot ДО очистки env (иначе Windows PowerShell
+#     автолоадит команды из CurrentUser-модулей high ДО gate). Integrity-self-check — через
+#     АБСОЛЮТНЫЙ литерал System32\whoami.exe (не user-writable -> доверен).
+#  3) Обёртка исполняет целевой бинарь ТОЛЬКО при MEDIUM (S-1-16-8192); иначе exit 210
+#     (fail-closed — ловит и «RL LIMITED проигнорирован для Builtin Administrator / UAC off»:
+#     если задача пошла high, self-check видит high и бинарь НЕ запускает).
+#  4) Аттестация — НЕ через user-writable файл. Планировщик пишет exit-код обёртки в «Last
+#     Result» задачи (БД планировщика, SYSTEM-owned, НЕ user-writable). Родитель читает его
+#     локаль-независимо (schtasks /Query /HRESULT /FO CSV /NH /V, поле #6): 267009=выполняется,
+#     267011=ещё не запускалась, иначе=exit-код обёртки. Успех установки родитель/вызывающий
+#     подтверждает ПРЯМОЙ проверкой каталога расширений (Test-HmExtInstalled), не выводом бинаря.
+#  5) Любой сбой (нет системного бинаря, staging-каталог не заперт при elevated, задача не
+#     создалась/не выполнилась) -> $null. Вызывающий обязан трактовать $null как FAIL-CLOSED
+#     и НЕ запускать бинарь под админом.
+#
+# ИНВАРИАНТ: elevated-процесс НИКОГДА не исполняет user-writable editor-бинарь at high
+# integrity; НИ ОДНОГО user-writable control/attestation-файла в решении о доверии.
+
+# --- Integrity текущего (родительского) процесса через АБСОЛЮТНЫЙ whoami (не user-writable). ---
+function Get-HmSelfIntegrity {
+    param([Parameter(Mandatory = $true)][string]$WhoamiExe)
+    try {
+        $t = (& $WhoamiExe /groups 2>$null | Out-String)
+        if ($t -match 'S-1-16-8192')  { return 'medium' }
+        if ($t -match 'S-1-16-12288') { return 'high' }
+        if ($t -match 'S-1-16-16384') { return 'system' }
+        if ($t -match 'S-1-16-4096')  { return 'low' }
+    } catch { }
+    return 'unknown'   # неизвестно -> трактуем как «возможно elevated» (fail-safe у вызывающего)
+}
+
+# --- Расширение установлено: каталог "<extId>-<версия>" в одном из Dirs. Точный префикс
+#     "<extId>-" + ЦИФРА версии (иначе `anthropic.claude-code-helper-1.0` даёт ложный PASS,
+#     ведь он тоже начинается с `anthropic.claude-code-`), ordinal-регистронезависимо,
+#     ТОЛЬКО каталоги. Суффикс платформы `-win32-x64` (после `-<ver>`) продолжает проходить. ---
+function Test-HmExtInstalled {
+    param([Parameter(Mandatory = $true)][string]$ExtId,
+          [Parameter(Mandatory = $true)][string[]]$Dirs)
+    $rx = '^' + [regex]::Escape($ExtId) + '-\d'
+    foreach ($d in $Dirs) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        try {
+            $hit = Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match $rx } | Select-Object -First 1
+            if ($hit) { return $true }
+        } catch { }
+    }
+    return $false
+}
+
+# --- PRIVATE high-integrity staging-каталог под ProgramData. Рождается атомарно с DACL
+#     {SYSTEM,Administrators: FullControl}, protection on (без наследования Users). Elevated
+#     дополнительно ставит владельца = Administrators (иначе owner=self сохраняет неявный
+#     WRITE_DAC). Возвращает путь или $null (fail-closed). ---
+function New-HmSecureStagingDir {
+    param([Parameter(Mandatory = $true)][string]$ProgramData,
+          [Parameter(Mandatory = $true)][string]$Icacls,
+          [Parameter(Mandatory = $true)][bool]$Elevated)
+    try {
+        if (-not (Test-Path -LiteralPath $ProgramData)) { return $null }
+        $dir = Join-Path $ProgramData ('HmDeElev-' + [guid]::NewGuid().ToString('N'))
+        if (Test-Path -LiteralPath $dir) { return $null }   # CREATE_NEW: занят (невозможно, но fail-closed)
+
+        $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+        $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+        $allow  = @('S-1-5-18', 'S-1-5-32-544')
+        $sd = New-Object System.Security.AccessControl.DirectorySecurity
+        $sd.SetAccessRuleProtection($true, $false)   # снять наследование, НЕ копировать унаследованные
+        $sd.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $admins, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        $sd.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $system, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        if (-not $Elevated) {
+            # Родитель уже MEDIUM (нет privesc): его отфильтрованный токен НЕ может писать по
+            # Admins-ACE (Admins deny-only в medium-токене) -> даём владельцу-юзеру доступ, иначе
+            # сам примитив не запишет task.xml. При ELEVATED этого ACE НЕТ (тогда medium-атакующий
+            # ТОГО ЖЕ юзера не должен иметь записи -> tamper невозможен).
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $allow += $me.Value
+            $sd.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        # Рождаем каталог СРАЗУ с этим SD (DACL применяется атомарно при создании).
+        [void][System.IO.Directory]::CreateDirectory($dir, $sd)
+        if (-not (Test-Path -LiteralPath $dir)) { return $null }
+
+        # Отвергаем reparse-point (junction-подмена).
+        $attr = (Get-Item -LiteralPath $dir -Force).Attributes
+        if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+
+        # Elevated: владелец -> Administrators (icacls включает нужную привилегию сам).
+        if ($Elevated) { & $Icacls $dir '/setowner' '*S-1-5-32-544' '/C' '/Q' 2>&1 | Out-Null }
+
+        # Верификация: ни одного ACE вне разрешённого набора $allow (elevated -> {SYSTEM,
+        # Administrators}; medium -> плюс SID текущего юзера); при elevated ещё и владелец.
+        $acl = Get-Acl -LiteralPath $dir
+        if ($Elevated) {
+            $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if ($allow -notcontains $owner) {
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            }
+        }
+        foreach ($ace in $acl.Access) {
+            $sid = $null
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$ace.IdentityReference }
+            if ($allow -notcontains $sid) {
+                # Посторонний ACE. Elevated -> недопустимо (fail-closed). Medium -> нет privesc
+                # (родитель уже medium), но такой ACE не должен появляться при protection on.
+                if ($Elevated) {
+                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                }
+            }
+        }
+        return $dir
+    } catch { return $null }
+}
 
 function Invoke-HmDeElevated {
     param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
@@ -27,83 +147,69 @@ function Invoke-HmDeElevated {
     # --- Абсолютные системные бинари (fail-closed, если чего-то нет) ---
     $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
     $s32      = Join-Path $sysRoot 'System32'
-    $psV1   = Join-Path $s32 'WindowsPowerShell\v1.0'
+    $psV1     = Join-Path $s32 'WindowsPowerShell\v1.0'
     $psExe    = Join-Path $psV1 'powershell.exe'
     $schtasks = Join-Path $s32 'schtasks.exe'
     $whoami   = Join-Path $s32 'whoami.exe'
-    foreach ($bin in @($psExe, $schtasks, $whoami)) {
+    $icacls   = Join-Path $s32 'icacls.exe'
+    foreach ($bin in @($psExe, $schtasks, $whoami, $icacls)) {
         if (-not (Test-Path -LiteralPath $bin)) { return $null }
     }
 
-    # --- Чистые PATH / PSModulePath (анти module-hijack) на время работы примитива ---
+    # --- Чистые PATH / PSModulePath (анти module-hijack) для ПАРЕНТА на время работы примитива ---
     $savedPath = $env:Path
     $savedPsm  = $env:PSModulePath
-    $env:Path         = ($s32 + ';' + $sysRoot + ';' + $psV1)
     $env:PSModulePath = (Join-Path $psV1 'Modules')
+    $env:Path         = ($s32 + ';' + $sysRoot + ';' + $psV1)
 
-    $tag      = 'HmDeElev_' + [guid]::NewGuid().ToString('N')
-    $tmp      = [System.IO.Path]::GetTempPath()
-    $wrapper  = Join-Path $tmp ($tag + '.ps1')
-    $xmlFile  = Join-Path $tmp ($tag + '.xml')
-    $outFile  = Join-Path $tmp ($tag + '.out')
-    $codeFile = Join-Path $tmp ($tag + '.code')
-    $intFile  = Join-Path $tmp ($tag + '.int')
+    $tag = 'HmDeElev_' + [guid]::NewGuid().ToString('N')
 
+    # ProgramData на СИСТЕМНОМ диске (не %ProgramData% env вслепую): корень из $sysRoot.
+    $pdRoot   = [System.IO.Path]::GetPathRoot($sysRoot)
+    $progData = Join-Path $pdRoot 'ProgramData'
+
+    # Integrity ПАРЕНТА: только при high/system staging-каталог ОБЯЗАН быть заперт (privesc-
+    # риск существует лишь когда родитель elevated). Unknown -> трактуем как elevated (fail-safe).
+    $selfLvl  = Get-HmSelfIntegrity -WhoamiExe $whoami
+    $elevated = ($selfLvl -ne 'medium' -and $selfLvl -ne 'low')
+
+    # --- Литералы (single-quoted, '->'' экранирование) для ВБИВАНИЯ в тело обёртки ---
+    $s32Lit = ($s32   -replace "'", "''")
+    $srLit  = ($sysRoot -replace "'", "''")
+    $whoLit = ($whoami -replace "'", "''")
+    $exeLit = ($Exe    -replace "'", "''")
     $argLit = ''
     if ($Arguments.Count -gt 0) {
         $argLit = ' ' + (($Arguments | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
     }
-    $exeLit  = $Exe      -replace "'", "''"
-    $outLit  = $outFile  -replace "'", "''"
-    $codeLit = $codeFile -replace "'", "''"
-    $intLit  = $intFile  -replace "'", "''"
-    $whoLit  = $whoami   -replace "'", "''"
-    $s32Lit  = $s32      -replace "'", "''"
-    $srLit   = $sysRoot  -replace "'", "''"
 
-    # Тело обёртки. Порядок записи на диск: сперва integrity-маркер, затем (только при
-    # medium) вывод команды, code-файл — ПОСЛЕДНИМ (родитель поллит по code-файлу, поэтому
-    # к моменту его появления integrity-маркер и вывод уже на диске).
-    $body = @"
-`$ErrorActionPreference = 'Continue'
-`$env:PSModulePath = Join-Path '$s32Lit' 'WindowsPowerShell\v1.0\Modules'
-`$env:Path = '$s32Lit' + ';' + '$srLit' + ';' + (Join-Path '$s32Lit' 'WindowsPowerShell\v1.0')
-`$lvl = 'unknown'
-try {
-  `$g = & '$whoLit' /groups 2>`$null | Out-String
-  if (`$g -match 'S-1-16-8192') { `$lvl = 'medium' }
-  elseif (`$g -match 'S-1-16-12288') { `$lvl = 'high' }
-  elseif (`$g -match 'S-1-16-16384') { `$lvl = 'system' }
-  elseif (`$g -match 'S-1-16-4096') { `$lvl = 'low' }
-} catch { `$lvl = 'unknown' }
-Set-Content -LiteralPath '$intLit' -Value `$lvl -Encoding ASCII
-`$c = 1
-if (`$lvl -eq 'medium') {
-  try {
-    `$o = & '$exeLit'$argLit 2>&1 | Out-String
-    `$c = `$LASTEXITCODE; if (`$null -eq `$c) { `$c = 0 }
-    Set-Content -LiteralPath '$outLit' -Value `$o -Encoding UTF8
-  } catch {
-    Set-Content -LiteralPath '$outLit' -Value `$_.Exception.Message -Encoding UTF8
-  }
-} else {
-  Set-Content -LiteralPath '$outLit' -Value ('SKIP integrity=' + `$lvl + ' (not medium) -> refused to run elevated') -Encoding UTF8
-}
-Set-Content -LiteralPath '$codeLit' -Value ([string]`$c) -Encoding ASCII
-"@
+    # Тело обёртки. СТРОГО ПЕРВЫМИ — присваивания чистых env ЛИТЕРАЛАМИ (ни одного cmdlet до
+    # них). Затем integrity-self-check через АБСОЛЮТНЫЙ System32\whoami. Бинарь — ТОЛЬКО при
+    # medium; иначе exit 210. Exit-код обёртки станет «Last Result» задачи (доверенный сигнал).
+    $body =
+        "`$env:PSModulePath='$s32Lit\WindowsPowerShell\v1.0\Modules'`n" +
+        "`$env:Path='$s32Lit;$srLit;$s32Lit\WindowsPowerShell\v1.0'`n" +
+        "if(@(& '$whoLit' /groups 2>`$null) -match 'S-1-16-8192'){`n" +
+        "& '$exeLit'$argLit`n" +
+        "`$c=`$LASTEXITCODE; if(`$null -eq `$c){`$c=0}; exit `$c`n" +
+        "} else { exit 210 }`n"
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($body))
+    $wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $b64
 
-    $result = $null
+    $result  = $null
+    $dir     = $null
+    $xmlFile = $null
     try {
-        Set-Content -LiteralPath $wrapper -Value $body -Encoding UTF8
+        $dir = New-HmSecureStagingDir -ProgramData $progData -Icacls $icacls -Elevated $elevated
+        if (-not $dir) { return $null }   # elevated и каталог не заперт -> fail-closed
+        $xmlFile = Join-Path $dir 'task.xml'
 
-        # XML задачи: принципал = ТЕКУЩИЙ интерактивный пользователь, InteractiveToken,
-        # LeastPrivilege (= /RL LIMITED = medium). Команда/аргументы — отдельными XML-узлами
-        # (никаких вложенных кавычек в одну строку -> нет schtasks-quoting-ада).
+        # XML: принципал = текущий интерактивный пользователь, InteractiveToken, LeastPrivilege
+        # (= /RL LIMITED = medium). Тело обёртки — ЦЕЛИКОМ в <Arguments> (нет лимита 261 как у /TR).
         $userId     = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         $userXml    = [System.Security.SecurityElement]::Escape($userId)
         $psExeXml   = [System.Security.SecurityElement]::Escape($psExe)
-        $wrapArg    = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $wrapper + '"'
-        $wrapArgXml = [System.Security.SecurityElement]::Escape($wrapArg)
+        $wrapArgXml = [System.Security.SecurityElement]::Escape($wrapArgs)
         $taskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -135,36 +241,43 @@ Set-Content -LiteralPath '$codeLit' -Value ([string]`$c) -Encoding ASCII
 "@
         Set-Content -LiteralPath $xmlFile -Value $taskXml -Encoding Unicode
 
-        # Создать задачу через АБСОЛЮТНЫЙ schtasks.exe. Провал -> throw -> fail-closed.
+        # Создать задачу через АБСОЛЮТНЫЙ schtasks.exe по XML. Провал -> fail-closed.
         & $schtasks '/Create' '/TN' $tag '/XML' $xmlFile '/F' 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'schtasks /Create failed' }
+        if ($LASTEXITCODE -ne 0) { return $null }
+        # XML больше не нужен (определение задачи — в БД планировщика). Удаляем сразу.
+        Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue; $xmlFile = $null
+
         & $schtasks '/Run' '/TN' $tag 2>&1 | Out-Null
-        $runOk = ($LASTEXITCODE -eq 0)
+        if ($LASTEXITCODE -ne 0) { return $null }
 
-        if ($runOk) {
-            $deadline = (Get-Date).AddSeconds(180)
-            while (-not (Test-Path -LiteralPath $codeFile) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 400 }
-        }
-        & $schtasks '/Delete' '/TN' $tag '/F' 2>&1 | Out-Null
-
-        if ($runOk -and (Test-Path -LiteralPath $codeFile)) {
-            $lvl = ''
-            try { $lvl = (Get-Content -LiteralPath $intFile -Raw -ErrorAction SilentlyContinue).Trim() } catch { $lvl = '' }
-            if ($lvl -eq 'medium') {
-                $code = 1; $out = ''
-                try { $code = [int]((Get-Content -LiteralPath $codeFile -Raw).Trim()) } catch { $code = 1 }
-                try { $out = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue } catch { $out = '' }
-                $result = [pscustomobject]@{ Code = $code; Output = $out }
+        # Ждём завершения по ЛОКАЛЬ-НЕЗАВИСИМОМУ «Last Result» (поле #6 CSV /HRESULT):
+        # 267009=выполняется, 267011=ещё не запускалась, иначе=exit-код обёртки.
+        $lastResult = $null
+        $deadline = (Get-Date).AddSeconds(180)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 400
+            $csv = & $schtasks '/Query' '/TN' $tag '/HRESULT' '/FO' 'CSV' '/NH' '/V' 2>$null | Out-String
+            $line = ($csv -split "`r?`n" | Where-Object { $_ -match '"' } | Select-Object -First 1)
+            if (-not $line) { continue }
+            $m = [regex]::Matches($line, '"([^"]*)"')   # base64 без кавычек -> поля разбираются надёжно
+            if ($m.Count -gt 6) {
+                $lr = $m[6].Groups[1].Value
+                if ($lr -ne '267009' -and $lr -ne '267011') { $lastResult = $lr; break }
             }
-            # $lvl != 'medium' -> обёртка отработала НЕ на medium integrity -> НЕ доверяем
-            # ($result остаётся $null: вызывающий трактует как fail-closed).
         }
+
+        if ($null -eq $lastResult) { $gate = 'unknown'; $code = -1 }
+        elseif ($lastResult -eq '210') { $gate = 'refused'; $code = -1 }   # обёртка увидела НЕ medium
+        else { $gate = 'medium'; $code = 0; [void][int]::TryParse($lastResult, [ref]$code) }
+        $result = [pscustomobject]@{ Gate = $gate; Code = $code }
     } catch {
         $result = $null
     } finally {
+        & $schtasks '/Delete' '/TN' $tag '/F' 2>&1 | Out-Null
+        if ($xmlFile) { Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue }
+        if ($dir)     { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
         $env:Path         = $savedPath
         $env:PSModulePath = $savedPsm
-        Remove-Item -LiteralPath $wrapper, $xmlFile, $outFile, $codeFile, $intFile -Force -ErrorAction SilentlyContinue
     }
     return $result
 }

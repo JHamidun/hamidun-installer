@@ -68,16 +68,17 @@ $script:DeElevFailed = $false
 # P0-A (privesc): этот скрипт исполняется ELEVATED (установщик requireAdministrator).
 # Прямой запуск user-writable cursor.cmd/Cursor.exe под АДМИНОМ выполнил бы то, что
 # medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить на его место. Поэтому
-# ЛЮБОЙ вызов Cursor CLI (install + list-extensions) идёт ЧЕРЕЗ единый де-элевированный
-# примитив (Invoke-HmDeElevated, _deelev.ps1). $null -> fail-closed: под админом НЕ запускаем.
+# установка Cursor CLI идёт ЧЕРЕЗ единый де-элевированный примитив (Invoke-HmDeElevated,
+# _deelev.ps1). $null -> fail-closed: под админом НЕ запускаем. Аттестация — ПРЯМОЙ проверкой
+# каталога расширений Cursor (Test-HmExtInstalled), а НЕ через вывод editor CLI бинаря.
 
-function Test-ExtPresent($cli) {
-    # --list-extensions может лагать сразу после установки — ретраим (де-элевированно).
-    for ($k = 0; $k -lt 3; $k++) {
-        $lst = Invoke-HmDeElevated $cli @('--list-extensions')
-        if ($null -eq $lst) { $script:DeElevFailed = $true; return $false }
-        if (("$($lst.Output)") -match [regex]::Escape($extId)) { return $true }
-        Start-Sleep -Milliseconds 1500
+function Get-CursorExtDirs { @((Join-Path $env:USERPROFILE '.cursor\extensions')) }
+
+function Test-ExtPresent {
+    # каталог расширения появляется чуть позже install — ретраим (без запуска бинаря).
+    for ($k = 0; $k -lt 6; $k++) {
+        if (Test-HmExtInstalled -ExtId $extId -Dirs (Get-CursorExtDirs)) { return $true }
+        Start-Sleep -Milliseconds 1000
     }
     return $false
 }
@@ -90,6 +91,7 @@ function Install-Into($cli, $label) {
         else { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $extId --force" }
         return $true
     }
+    if (Test-HmExtInstalled -ExtId $extId -Dirs (Get-CursorExtDirs)) { Write-Host "  ${label}: уже на месте."; return $true }
     $target = if ($vsix) { $vsix } else { $extId }
     if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
     $r = Invoke-HmDeElevated $cli @('--install-extension', $target, '--force')
@@ -98,14 +100,12 @@ function Install-Into($cli, $label) {
         $script:DeElevFailed = $true
         return $false
     }
-    if ($r.Output) { Write-Host ($r.Output.TrimEnd()) }
-    if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте."; return $true }
+    if (Test-ExtPresent) { Write-Host "  ${label}: расширение на месте."; return $true }
     if ($vsix) {
         Write-Host "  ${label}: vsix не подтвердился — пробую Marketplace ($extId)..."
         $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
         if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
-        if ($r2.Output) { Write-Host ($r2.Output.TrimEnd()) }
-        if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте (Marketplace)."; return $true }
+        if (Test-ExtPresent) { Write-Host "  ${label}: расширение на месте (Marketplace)."; return $true }
     }
     Write-Host "  ${label}: расширение не подтвердилось."; return $false
 }

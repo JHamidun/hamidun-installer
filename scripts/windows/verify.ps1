@@ -132,14 +132,17 @@ if (-not (Test-Selected 'extension')) {
         (Join-Path $env:USERPROFILE '.vscode-oss\extensions'),
         (Join-Path $env:USERPROFILE '.cursor\extensions')
     )
-    $pref = $extId.ToLower()
+    # Точный префикс "<extId>-" + ЦИФРА версии (ordinal-регистронезависимо, ТОЛЬКО каталоги):
+    # иначе `anthropic.claude-code-helper-1.0` даёт ложный PASS (он тоже начинается с
+    # `anthropic.claude-code-`). Суффикс платформы `-win32-x64` (после `-<ver>`) проходит.
+    $rx = '^' + [regex]::Escape($extId) + '-\d'
     $extOk = $false
     foreach ($d in $extDirs) {
         if ($extOk) { break }
         if (-not (Test-Path -LiteralPath $d)) { continue }
         try {
             $hit = Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name.ToLower().StartsWith($pref) } | Select-Object -First 1
+                Where-Object { $_.Name -match $rx } | Select-Object -First 1
             if ($hit) { Write-Host "  расширение найдено в: $d"; $extOk = $true }
         } catch { }
     }
