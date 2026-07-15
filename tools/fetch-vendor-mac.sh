@@ -24,6 +24,10 @@ echo "[vendor-mac] Cursor (arm64 dmg)..."
 CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-arm64&releaseTrack=stable" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("downloadUrl",""))' 2>/dev/null)
 [ -n "$CUR" ] && dl "$CUR" "$APPS/cursor.dmg" || echo "  ! Cursor API недоступен"
 
+echo "[vendor-mac] VS Code (рекомендуемый редактор, darwin-universal zip — офлайн)..."
+# Редирект на актуальный .zip с 'Visual Studio Code.app' внутри; curl -L следует за ним.
+dl "https://update.code.visualstudio.com/latest/darwin-universal/stable" "$APPS/vscode.zip"
+
 echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
@@ -45,6 +49,16 @@ else
   else
     echo "  ! Marketplace недоступен — VSIX пропущен (расширение поставится онлайн при установке)"
   fi
+fi
+
+echo "[vendor-mac] Codex VSIX (openai.chatgpt из Open VSX, офлайн — Codex прямо в VS Code)..."
+CXVSIX="$APPS/chatgpt.vsix"
+if [ -f "$CXVSIX" ]; then
+  echo "  skip $(basename "$CXVSIX")"
+else
+  # Open VSX отдаёт метаданные последней версии с прямой ссылкой files.download на .vsix.
+  CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
+  if [ -n "$CXURL" ]; then dl "$CXURL" "$CXVSIX"; else echo "  ! Open VSX недоступен — Codex поставится онлайн при установке"; fi
 fi
 
 echo "[vendor-mac] JetBrains Mono Regular (шрифт, лицензия OFL)..."
@@ -243,6 +257,7 @@ chk_dir() { if [ -z "$(find "$1" -type f -size +0c 2>/dev/null | head -n 1)" ]; 
 chk_file "$APPS/python.pkg"       "apps/python.pkg"
 chk_file "$APPS/node.pkg"         "apps/node.pkg"
 chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
+chk_file "$APPS/vscode.zip"       "apps/vscode.zip (рекомендуемый редактор — иначе компонент VS Code пропустится)"
 chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
 chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшитый git — иначе CLT-диалог)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"

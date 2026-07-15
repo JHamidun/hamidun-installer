@@ -659,6 +659,29 @@ ipcMain.handle('launch-cursor', () => {
   return false;
 });
 
+// Открыть VS Code НА ПАПКЕ проекта (IDE-режим), а не в агент-чате: аналог `code "<папка>"`.
+// Папка ~/HamidunStart создаётся, если её нет, чтобы VS Code открыл реальный воркспейс
+// (пустой проект), а не безымянное окно. НАМЕРЕННО без URI вида vscode://…/open — тот
+// открыл бы панель-агент, а задача — показать новичку файлы проека (IDE).
+ipcMain.handle('launch-vscode', () => {
+  try {
+    const startDir = path.join(os.homedir(), 'HamidunStart');
+    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* ignore */ }
+    if (IS_WIN) {
+      const codeExe = firstExisting([
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
+        path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
+      ]);
+      if (codeExe) { spawn(codeExe, [startDir], { detached: true, stdio: 'ignore' }).unref(); return true; }
+    } else if (IS_MAC) {
+      // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE.
+      spawn('/usr/bin/open', ['-a', 'Visual Studio Code', startDir], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+  } catch (e) { /* ignore */ }
+  return false;
+});
+
 // ---- «Войти в Claude» — открыть терминал с командой claude -----------
 
 // The install scripts just added git/node/claude to PATH, but this (already
@@ -903,6 +926,14 @@ function detectComponents() {
                        path.join(winPF(), 'cursor', 'Cursor.exe')])
       : firstExisting(['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')]);
     out.cursor = { installed: !!p, detectedVersion: '' };
+  }
+  // vscode (приложение) — рекомендуемый редактор
+  {
+    const p = IS_WIN
+      ? firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
+                       path.join(winPF(), 'Microsoft VS Code', 'Code.exe')])
+      : firstExisting(['/Applications/Visual Studio Code.app', path.join(home, 'Applications', 'Visual Studio Code.app')]);
+    out.vscode = { installed: !!p, detectedVersion: '' };
   }
   // claude CLI
   {

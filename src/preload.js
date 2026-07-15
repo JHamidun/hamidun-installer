@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('installer', {
   saveStartHere: () => ipcRenderer.invoke('save-start-here'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
+  launchVsCode: () => ipcRenderer.invoke('launch-vscode'),
   openClaudeTerminal: () => ipcRenderer.invoke('open-claude-terminal'),
   saveCredentials: (obj) => ipcRenderer.invoke('save-credentials', obj),
   quit: () => ipcRenderer.invoke('quit')

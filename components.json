@@ -27,12 +27,24 @@
           "sizeHint": "~30 МБ"
         },
         {
-          "id": "cursor",
-          "name": "Cursor",
+          "id": "vscode",
+          "name": "VS Code — редактор (рекомендуется)",
           "version": "1.0.0",
-          "desc": "AI-редактор кода (форк VS Code).",
-          "why": "Редактор кода со встроенным ИИ. Здесь ты видишь файлы проекта и общаешься с Claude в боковой панели.",
+          "desc": "Редактор кода Microsoft. Панели Claude и Codex — внутри.",
+          "why": "Лёгкий, не просит лицензию, не блокается по РФ-IP; панель Claude — прямо внутри редактора. Рекомендуемый редактор для новичка.",
+          "recommended": true,
           "default": true,
+          "requires": [],
+          "needsAdmin": false,
+          "sizeHint": "~110 МБ"
+        },
+        {
+          "id": "cursor",
+          "name": "Cursor — редактор (опционально)",
+          "version": "1.0.0",
+          "desc": "AI-редактор кода (форк VS Code). Опционально.",
+          "why": "Если привык к Cursor; VS Code рекомендуется. Оба уживаются на одном ПК. Cursor на старте может попросить оплатить подписку и иногда недоступен из России.",
+          "default": false,
           "requires": [],
           "needsAdmin": false,
           "sizeHint": "~150 МБ"
@@ -52,10 +64,10 @@
           "id": "extension",
           "name": "Расширение Claude Code",
           "version": "1.0.0",
-          "desc": "Панель Claude Code внутри Cursor и VS Code.",
-          "why": "Кнопка Claude прямо в Cursor: графическая панель вместо терминала. Самый удобный способ для новичка.",
+          "desc": "Панель Claude Code внутри VS Code (и Cursor, если стоит).",
+          "why": "Кнопка Claude прямо в редакторе: графическая панель вместо терминала. Самый удобный способ для новичка.",
           "default": true,
-          "requires": ["cursor"],
+          "requires": ["vscode"],
           "needsAdmin": false,
           "sizeHint": "~10 МБ"
         },

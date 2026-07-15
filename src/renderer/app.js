@@ -72,8 +72,8 @@ async function init() {
 
   $('#btn-install').addEventListener('click', startInstall);
   $('#btn-finish').addEventListener('click', async () => {
-    const auto = $('#ns-autocursor');
-    if (auto && auto.checked) { await window.installer.launchCursor(); }
+    const auto = $('#ns-autovscode');
+    if (auto && auto.checked) { await window.installer.launchVsCode(); }
     window.installer.quit();
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
@@ -204,11 +204,13 @@ function renderCard(c) {
     ? `<span class="badge ok">✓ уже установлено${det.detectedVersion ? ' · ' + escapeHtml(det.detectedVersion) : ''}</span>`
     : '';
   const updBadge = updateAvail ? `<span class="badge upd">обновление доступно</span>` : '';
+  const recBadge = c.recommended ? `<span class="badge rec">рекомендуется</span>` : '';
   el.innerHTML = `
     <div class="checkbox">${CHECK_SVG}</div>
     <div class="card-body">
       <div class="card-name">
         ${c.name}
+        ${recBadge}
         ${c.why ? `<span class="info" tabindex="0" role="button" aria-label="Что это?">?<span class="tip">${c.why || c.desc}</span></span>` : ''}
         ${c.sizeHint ? `<span class="badge">${c.sizeHint}</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
@@ -749,6 +751,8 @@ function renderNextSteps(failed, skipped) {
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const isWin = STATE.platform === 'win32';
+  // Cursor опционален: кнопку «Открыть Cursor» показываем ТОЛЬКО если пользователь его выбрал.
+  const cursorSelected = !!(STATE.selected && STATE.selected.cursor);
   const relRaw = fin.credentialsRelPath || '.claude/.credentials.master.env';
   const sep = isWin ? '\\' : '/';
   const rel = isWin ? relRaw.replace(/\//g, '\\') : relRaw.replace(/\\/g, '/');
@@ -827,7 +831,8 @@ function renderNextSteps(failed, skipped) {
     ${failHtml}
     <div class="ns-actions">
       <button type="button" id="ns-claude" class="btn-sm primary">⚡ Войти в Claude сейчас</button>
-      <button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>
+      <button type="button" id="ns-vscode" class="btn-sm primary">Открыть VS Code</button>
+      ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
       <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
       ${logBtn}
       ${botBtn}
@@ -835,11 +840,13 @@ function renderNextSteps(failed, skipped) {
       ${startBtn}
     </div>
     ${keysHtml}
-    <label class="ns-auto"><input type="checkbox" id="ns-autocursor" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть Cursor при нажатии «Готово»</label>`;
+    <label class="ns-auto"><input type="checkbox" id="ns-autovscode" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть VS Code на папке проекта при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');
 
   $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
-  $('#ns-cursor').addEventListener('click', () => window.installer.launchCursor());
+  $('#ns-vscode').addEventListener('click', () => window.installer.launchVsCode());
+  const cursorBtn = $('#ns-cursor');
+  if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
   $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
   const logBtnEl = $('#ns-log');

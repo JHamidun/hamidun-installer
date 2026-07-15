@@ -34,6 +34,11 @@ foreach ($base in @('https://www.cursor.com', 'https://cursor.com')) {
 if ($curUrl) { Dl $curUrl (Join-Path $apps 'cursor-setup.exe') }
 else { Write-Host "  ! Cursor API недоступен — онлайн-фолбэк при установке" }
 
+Write-Host "[vendor] VS Code (рекомендуемый редактор, User Setup — офлайн-установка без админа)..."
+# User Setup ставится в профиль пользователя (без прав администратора) — лучший вариант для новичка.
+# URL — редирект на актуальный установщик; IWR следует за ним (-MaximumRedirection).
+Dl "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user" (Join-Path $apps 'vscode-setup.exe')
+
 Write-Host "[vendor] Python (под версию сборочной машины — чтобы wheels совпали)..."
 $pyver = (& python -c "import platform;print(platform.python_version())" 2>$null)
 if (-not $pyver) { $pyver = '3.12.10' }
@@ -86,6 +91,20 @@ if (Test-Path $vsix) {
     }
   } catch { Write-Host "  ! постобработка vsix не удалась - $($_.Exception.Message)" }
 } else { Write-Host "  ! VSIX недоступен — расширение поставится онлайн при установке" }
+
+Write-Host "[vendor] Codex VSIX (openai.chatgpt из Open VSX, офлайн — Codex прямо в VS Code)..."
+$cxvsix = Join-Path $apps 'chatgpt.vsix'
+if (Test-Path $cxvsix) {
+  Write-Host "  skip chatgpt.vsix"
+} else {
+  # Open VSX отдаёт метаданные последней версии с прямой ссылкой files.download на .vsix.
+  try {
+    $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/latest' -Headers $UA -MaximumRedirection 6
+    $cxUrl = $cxMeta.files.download
+    if ($cxUrl) { Dl $cxUrl $cxvsix }
+    else { Write-Host "  ! Open VSX не отдал ссылку на .vsix — Codex поставится онлайн при установке" }
+  } catch { Write-Host "  ! Open VSX недоступен ($($_.Exception.Message)) — Codex поставится онлайн при установке" }
+}
 
 Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
 $font = Join-Path $apps 'JetBrainsMono-Regular.ttf'
@@ -214,7 +233,7 @@ try {
 
 Write-Host "[vendor] Проверка полноты vendor..."
 $missing = @()
-foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','cursor-setup.exe','claude-code.vsix')) {
+foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','vscode-setup.exe','cursor-setup.exe','claude-code.vsix')) {
   $f = Get-Item (Join-Path $apps $name) -ErrorAction SilentlyContinue
   if (-not $f -or $f.Length -eq 0) { $missing += "apps/$name" }
 }

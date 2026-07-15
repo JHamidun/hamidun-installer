@@ -151,6 +151,7 @@ h1 {
 .badge.dep { color: var(--h-cyan); border-color: rgba(41,169,255,.3); }
 .badge.ok { color: var(--h-green); border-color: rgba(98,197,132,.4); background: rgba(98,197,132,.08); }
 .badge.upd { color: var(--h-yellow); border-color: rgba(245,213,71,.4); background: rgba(245,213,71,.08); }
+.badge.rec { color: var(--h-green); border-color: rgba(98,197,132,.5); background: rgba(98,197,132,.12); font-weight: 600; }
 
 /* ---- ряд действий для уже установленного компонента (Фаза 2) ---- */
 .card.installed { opacity: .97; }
