@@ -31,11 +31,15 @@
  * %TEMP% и запускаемый оттуда) владелец принял осознанно — см. THREAT-MODEL.md.
  *
  * Архитектурные гарантии (defense-in-depth поверх sha-пиннинга):
- *   • ADMIN-OWNED STAGING (Win): кэш/распаковка/запуск живут в
- *     %ProgramData%\HamidunSetup\cache с DACL ТОЛЬКО SYSTEM (*S-1-5-18) +
- *     Administrators (*S-1-5-32-544), /inheritance:r, владелец = Administrators,
- *     БЕЗ user-SID. ACL применяется и ПРОВЕРЯЕТСЯ (SID-based, локаль-независимо);
- *     не смогли защитить/проверить → компонент НЕ ставится (fail-closed).
+ *   • ADMIN-OWNED STAGING (Win): кэш/распаковка/запуск живут в СВЕЖЕМ random-leaf
+ *     каталоге под %ProgramData%, рождённом АТОМАРНО с owner=Administrators + DACL
+ *     {SYSTEM (*S-1-5-18), Administrators (*S-1-5-32-544)}, protection on, БЕЗ
+ *     user-SID — одной операцией [IO.Directory]::CreateDirectory($dir,$sd) в
+ *     PS-примитиве New-HmSecureStagingDir (main.js winMakeSecureDir). remote-fetch
+ *     только ПРОВЕРЯЕТ (SID-based, локаль-независимо); каталог не рождён/не прошёл
+ *     проверку → компонент НЕ ставится (fail-closed). Node create-then-icacls
+ *     ЗАПРЕЩЁН — оставлял бы окно наследования ProgramData (owner/DACL-window +
+ *     ZIP-TOCTOU на пред-созданный/удержанный <remoteId>.zip).
  *     mac/linux: uv-флоу неэлевейтед end-to-end (юзер копирует в ~/.local/bin и
  *     запускает под своим токеном) — эскалации нет; каталог 700 + проверка
  *     владельца best-effort. Полная изоляция от процессов ТОГО ЖЕ юзера без root
@@ -51,7 +55,7 @@
  *     под elevated-токеном НЕ исполняет.
  *   • sha256 ОБЯЗАТЕЛЕН и валиден (64-hex), сравнение БЕЗУСЛОВНОЕ (нет sha →
  *     не качаем и не запускаем).
- *   • Системные бинари (powershell/icacls/unzip/ditto…) — по АБСОЛЮТНЫМ путям из
+ *   • Системные бинари (powershell/unzip/ditto…) — по АБСОЛЮТНЫМ путям из
  *     ВАЛИДИРОВАННОГО System32 (не из %SystemRoot% env, который можно подменить
  *     в crafted launch env); powershell не найден → fail-closed, без короткого
  *     имени. Очищенный env (trustedEnv) на всех системных спавнах.
@@ -209,7 +213,7 @@ function winProgramData() {
 }
 
 // Минимальный env для дочерних системных бинарей: только системные каталоги в
-// PATH, чтобы powershell/unzip/ditto/icacls не подхватили подложенный бинарь.
+// PATH, чтобы powershell/unzip/ditto не подхватили подложенный бинарь.
 function trustedEnv() {
   if (process.platform === 'win32') {
     const root = winSystemRoot() || 'C:\\Windows';
@@ -224,39 +228,19 @@ function trustedEnv() {
   return { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };
 }
 
-// ---- Windows: жёсткая защита каталога (admin-owned staging, fail-closed) ----
-
-// Применить строгий DACL к каталогу: владелец → Administrators (иначе прежний
-// владелец сохраняет неявный WRITE_DAC и сможет вернуть себе доступ), затем снять
-// наследование и выдать доступ ТОЛЬКО SYSTEM + Administrators (без user-SID).
-// Возвращает true/false. По SID (well-known) — без локализации имён групп.
-function secureDirWin(dir, log) {
-  const icacls = sysBin('icacls.exe');
-  if (!icacls) { log && log('  [sec] icacls.exe не найден в System32 — не могу защитить ' + dir); return false; }
-  const env = trustedEnv();
-  // 1) владелец → Administrators (*S-1-5-32-544).
-  let r = spawnSync(icacls, [dir, '/setowner', '*S-1-5-32-544', '/C', '/Q'],
-    { encoding: 'utf8', windowsHide: true, env });
-  if (r.error || r.status !== 0) { log && log('  [sec] setowner не удался для ' + dir + ': ' + (trimOut(r) || (r.error && r.error.message) || ('exit ' + r.status))); return false; }
-  // 2) снять наследование + выдать доступ РОВНО двум: SYSTEM и Administrators.
-  r = spawnSync(icacls, [
-    dir, '/inheritance:r',
-    '/grant:r', '*S-1-5-18:(OI)(CI)F',
-    '/grant:r', '*S-1-5-32-544:(OI)(CI)F',
-    '/C', '/Q'
-  ], { encoding: 'utf8', windowsHide: true, env });
-  if (r.error || r.status !== 0) { log && log('  [sec] icacls grant не удался для ' + dir + ': ' + (trimOut(r) || (r.error && r.error.message) || ('exit ' + r.status))); return false; }
-  return true;
-}
-
-// Собрать (для лога/отчёта) АРГУМЕНТЫ icacls, которые построит secureDirWin —
-// чтобы можно было убедиться, что команда формируется корректно без запуска.
-function buildIcaclsArgs(dir) {
-  return {
-    setowner: [dir, '/setowner', '*S-1-5-32-544', '/C', '/Q'],
-    grant: [dir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/C', '/Q']
-  };
-}
+// ---- Windows: проверка защищённости secure-каталога (SID-based, fail-closed) ----
+//
+// P0 (Codex круг 6): secure-каталоги (de-elevation staging И кэш докачки) РОЖДАЮТСЯ
+// АТОМАРНО с owner=Administrators + DACL {SYSTEM,Administrators: FullControl} одной
+// операцией [IO.Directory]::CreateDirectory($dir,$sd) в PS-примитиве
+// New-HmSecureStagingDir (_deelev.ps1). Каталог кэша докачки порождает main.js
+// (winMakeSecureDir → тот же примитив) и передаёт сюда УЖЕ защищённым. Node
+// fs.mkdirSync + post-icacls (/setowner + /grant:r) ЗАПРЕЩЁН: между mkdirSync
+// (каталог наследует ACL ProgramData — Users writable) и icacls остаётся окно, в
+// котором medium-малварь ТОГО ЖЕ юзера успевает пред-создать/удержать <remoteId>.zip
+// и подменить его до распаковки (owner/DACL-window + ZIP-TOCTOU). Поэтому здесь —
+// ТОЛЬКО ПРОВЕРКА уже атомарно-защищённого каталога (verifyDirSecureWin), без
+// создания и без icacls.
 
 // Проверить (ПОСЛЕ применения ACL), что владелец — SYSTEM/Administrators и в DACL
 // нет ни одного постороннего SID (никакого user-SID, Everyone, Users,
@@ -288,50 +272,26 @@ function verifyDirSecureWin(dir, log) {
   return false;
 }
 
-// Применить DACL И ПРОВЕРИТЬ его (owner + отсутствие user-SID). icacls-успех НЕ
-// доверяем (см. verifyDirSecureWin) — авторитетна именно проверка. → true/false.
-function secureAndVerifyDirWin(dir, log) {
-  if (!secureDirWin(dir, log)) return false;
-  return verifyDirSecureWin(dir, log);
-}
-
-// Подготовить и ПРОВЕРИТЬ защищённый staging-каталог. Fail-closed: невозможно
-// защитить/проверить → { ok:false } и компонент НЕ ставится.
-//   Windows: %ProgramData%\HamidunSetup (топ, locked) → …\cache\<remoteId> (leaf,
-//   locked независимо + verify). Родитель locked → нельзя delete-child; leaf
-//   locked → нельзя писать напрямую.
-//   POSIX: mkdir + owner-check + chmod 700 (best-effort; см. модель угроз).
-function hardenAndVerifyCache(cacheDir, log) {
+// Убедиться, что кэш докачки безопасен. Fail-closed: небезопасно → { ok:false } и
+// компонент НЕ ставится.
+//   Windows: cacheDir УЖЕ рождён АТОМАРНО Admins-only (main.js winMakeSecureDir →
+//     New-HmSecureStagingDir): свежий random-leaf каталог под ProgramData, owner=
+//     Administrators + DACL {SYSTEM,Administrators}, protection on. ЗДЕСЬ — ТОЛЬКО
+//     ПРОВЕРКА (не создаём, не icacls): существует, обычный каталог (не symlink/
+//     reparse), owner=Admins и НЕТ посторонних ACE (verifyDirSecureWin, SID-based).
+//     Любой сбой проверки (в т.ч. небезопасный пред-существующий каталог) → reject,
+//     а НЕ «чиним» post-hoc. Так и .zip, и распаковка живут в Admins-only каталоге →
+//     medium-малварь ТОГО ЖЕ юзера не может ни пред-положить, ни подменить архив, ни
+//     держать write-handle между SHA-256 и ExtractToDirectory (ZIP-TOCTOU закрыт по
+//     конструкции).
+//   POSIX: mkdir + owner-check + chmod 700 (best-effort; установка uv неэлевейтед).
+function ensureCacheSecure(cacheDir, log) {
   if (process.platform === 'win32') {
-    const pd = winProgramData();
-    const top = path.join(pd, 'HamidunSetup');
-    // #2: защищаем И ПРОВЕРЯЕМ КАЖДЫЙ сегмент от top до cacheDir ВКЛЮЧАЯ промежуточный
-    // …\HamidunSetup\cache. Раньше запирались только корень и leaf — незащищённый
-    // промежуточный каталог (user-owner) сохранял бы DELETE_CHILD/WRITE_DAC и мог
-    // разлочить/подменить leaf. Строим цепочку top → … → cacheDir, но ТОЛЬКО сегменты
-    // РЕАЛЬНО под top (в проде cacheDir = top\cache\<id>). Если cacheDir не под top
-    // (произвольный путь, напр. в тестах) — защищаем top и leaf независимо, БЕЗ ухода
-    // вверх к корню диска.
-    const topR = path.resolve(top);
-    const leaf = path.resolve(cacheDir);
-    const rel = path.relative(topR, leaf);
-    const underTop = rel && !rel.startsWith('..') && !path.isAbsolute(rel);
-    const chain = [topR];
-    if (underTop) {
-      let acc = topR;
-      for (const seg of rel.split(path.sep)) { if (!seg) continue; acc = path.join(acc, seg); chain.push(acc); }
-    } else if (leaf.toLowerCase() !== topR.toLowerCase()) {
-      chain.push(leaf);
-    }
-    for (const dir of chain) {
-      try { fs.mkdirSync(dir, { recursive: true }); }
-      catch (e) { return { ok: false, error: 'не удалось создать staging-сегмент ' + dir + ': ' + e.message }; }
-      // ВАЖНО: защищаем И ПРОВЕРЯЕМ (owner+DACL) — иначе user-owner любого сегмента
-      // сохраняет WRITE_DAC/DELETE_CHILD и может разлочить/подменить вложенный кэш.
-      if (!secureAndVerifyDirWin(dir, log)) return { ok: false, error: 'не удалось защитить/проверить staging-сегмент ' + dir + ' (нужны права администратора: владелец=Administrators, посторонних ACE быть не должно)' };
-    }
+    // НЕ создаём и НЕ «чиним» icacls'ом — каталог обязан быть уже атомарно защищён.
     const st = safeLstat(cacheDir);
-    if (!st || st.isSymbolicLink() || !st.isDirectory()) return { ok: false, error: 'кэш небезопасен (симлинк/не каталог): ' + cacheDir };
+    if (!st) return { ok: false, error: 'защищённый кэш не найден (ожидался атомарно созданный Admins-only каталог): ' + cacheDir };
+    if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false, error: 'кэш небезопасен (симлинк/reparse/не каталог): ' + cacheDir };
+    if (!verifyDirSecureWin(cacheDir, log)) return { ok: false, error: 'кэш не прошёл проверку защищённости (нужен owner=Administrators без посторонних ACE): ' + cacheDir };
     return { ok: true };
   }
   // POSIX
@@ -804,11 +764,12 @@ async function fetchRemote(opts) {
   }
   const expectedSize = Number(entry.sizeBytes || 0);
 
-  // Готовим и ЗАЩИЩАЕМ staging (admin-owned DACL + verify). Fail-closed: не смогли
-  // защитить/проверить → НЕ ставим. В test-mode (транспорт подменён юнит-тестом)
-  // ACL-гейт пропускаем — подменить openStreamImpl атакующий не может.
+  // Проверяем защищённость staging (Windows: каталог УЖЕ рождён атомарно Admins-only
+  // в main.js winMakeSecureDir; здесь ТОЛЬКО verify, без create/icacls). Fail-closed:
+  // не защищён → НЕ ставим. В test-mode (транспорт подменён юнит-тестом) ACL-гейт
+  // пропускаем — подменить openStreamImpl атакующий не может (in-proc переменная).
   if (!openStreamImpl) {
-    const h = hardenAndVerifyCache(cacheDir, log);
+    const h = ensureCacheSecure(cacheDir, log);
     if (!h.ok) return { ok: false, error: 'staging-каталог не защищён — установка remote-компонента заблокирована (fail-closed): ' + h.error };
   } else {
     try { fs.mkdirSync(cacheDir, { recursive: true }); }
@@ -918,8 +879,7 @@ module.exports = {
   winPowershellPath,
   winProgramData,
   // security-хелперы (для отчёта/тестов)
-  buildIcaclsArgs,        // строит icacls-аргументы (ничего не запускает)
-  hardenAndVerifyCache,
+  ensureCacheSecure,      // Windows: проверка атомарно-защищённого кэша (без create/icacls)
   verifyDirSecureWin,     // SID-based проверка owner+DACL (Windows)
   // тест-хук: подмена транспорта openStream для детерминированных resume-тестов.
   __setOpenStreamImpl: (fn) => { openStreamImpl = fn || null; }

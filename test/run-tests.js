@@ -297,6 +297,72 @@ ok('#8 openStream: redirect res.destroy + single-settle + kill whole chain', () 
   assert(/for \(const r of chain\)/.test(fn), 'при завершении глушим ВСЮ цепочку req');
 });
 
+console.log('== P0 (Codex круг 6): remote-cache создаётся АТОМАРНО owner=Admins+DACL; нет post-hoc icacls; ZIP-TOCTOU закрыт ==');
+
+// Источник-инвариант (remote-fetch.js): create-then-icacls для secure-dir УДАЛЁН
+// полностью; кэш проверяется verify-only (ensureCacheSecure), без создания/icacls.
+ok('remote-fetch: post-hoc icacls secure-dir удалён; ensureCacheSecure — verify-only (каталог рождает атомарный New-HmSecureStagingDir)', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'remote-fetch.js'), 'utf8');
+  assert(!/function secureDirWin\(/.test(s), 'secureDirWin удалён (post-hoc /setowner+/grant запрещён)');
+  assert(!/function secureAndVerifyDirWin\(/.test(s), 'secureAndVerifyDirWin удалён');
+  assert(!/function buildIcaclsArgs\(/.test(s), 'buildIcaclsArgs удалён');
+  assert(!/function hardenAndVerifyCache\(/.test(s), 'hardenAndVerifyCache (create+icacls) заменён на verify-only ensureCacheSecure');
+  assert(!/'\/setowner'/.test(s) && !/'\/grant:r'/.test(s) && !/'\/inheritance:r'/.test(s),
+    'НЕТ icacls-аргументов secure-dir как кода (владелец+DACL атомарно в примитиве)');
+  const fn = s.slice(s.indexOf('function ensureCacheSecure('), s.indexOf('// Приватный temp-файл'));
+  assert(fn.length > 0, 'ensureCacheSecure объявлена');
+  assert(/verifyDirSecureWin\(cacheDir/.test(fn), 'win32: проверка owner+ACE через verifyDirSecureWin');
+  assert(/safeLstat\(cacheDir\)/.test(fn) && /isSymbolicLink\(\)/.test(fn), 'win32: reject symlink/reparse/не-каталог');
+  const winBranch = fn.slice(0, fn.indexOf('// POSIX'));
+  assert(!/mkdirSync/.test(winBranch), 'win32-ветка НЕ создаёт каталог (verify-only, не create-then-icacls)');
+});
+
+// Источник-инвариант (main.js): на win32 кэш докачки — СВЕЖИЙ Admins-only каталог,
+// рождённый winMakeSecureDir (New-HmSecureStagingDir), НЕ предсказуемый; HM_REMOTE_CACHE
+// = проверенный fr.path ВНУТРИ него; каталог чистится после установки.
+ok('main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only), не reuse предсказуемого; HM_REMOTE_CACHE внутри', () => {
+  const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const h = m.slice(m.indexOf("let remoteCache = ''"), m.indexOf('remoteCache = fr.path'));
+  assert(h.length > 0, 'нашли remote-ветку run-component');
+  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = winMakeSecureDir\(\)/.test(h),
+    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив)');
+  assert(/secureCacheDir = cacheDir/.test(h), 'win32: каталог помечен для очистки');
+  assert(/cacheDir = remoteCacheDir\(declared\)/.test(h), 'POSIX: remoteCacheDir (uv неэлевейтед)');
+  assert(/if \(remoteCache\) childEnv\.HM_REMOTE_CACHE = remoteCache/.test(m),
+    'HM_REMOTE_CACHE = проверенный fr.path (внутри Admins-only каталога)');
+  const closeBlk = m.slice(m.indexOf("child.on('close'"));
+  assert(/cleanupSecureCache\(\)/.test(closeBlk), 'secure-кэш чистится после установки (child close)');
+});
+
+// Источник-инвариант: .zip и распаковка ЛЕЖАТ ВНУТРИ cacheDir (Admins-only) → нет
+// окна подмены ZIP между SHA-256 и ExtractToDirectory (ZIP-TOCTOU закрыт по конструкции).
+ok('remote-fetch: .zip и распаковка ВНУТРИ cacheDir; fr.path=unpackDir (нет swap-окна ZIP-TOCTOU)', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'remote-fetch.js'), 'utf8');
+  assert(/archivePath = path\.join\(cacheDir, entry\.remoteId \+ '\.zip'\)/.test(s), '<remoteId>.zip внутри cacheDir');
+  assert(/unpackDir = path\.join\(cacheDir, 'unpacked-'/.test(s), 'распаковка внутри cacheDir');
+  assert(/return \{ ok: true, path: unpackDir/.test(s), 'fr.path = unpackDir (HM_REMOTE_CACHE указывает внутрь Admins-only каталога)');
+});
+
+// Функц. (win32): пред-существующий небезопасный каталог → REJECT (не reuse, не «чиним»
+// post-hoc); несуществующий → REJECT и НЕ создаём (verify-only). Так закрыт reuse-вектор.
+if (process.platform === 'win32') {
+  const rfSec = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+  ok('ensureCacheSecure (win32, round-trip): user-owned/наследованный каталог → REJECT (не reuse)', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cache-unsafe-'));
+    try {
+      const r = rfSec.ensureCacheSecure(d, null);
+      assert(r.ok === false, 'user-owned/наследованный каталог обязан быть отвергнут: ' + JSON.stringify(r));
+      assert(/защищённ|Administrators|небезопас|посторонн/i.test(r.error || ''), 'ошибка про защищённость: ' + r.error);
+    } finally { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+  ok('ensureCacheSecure (win32): несуществующий каталог → REJECT и НЕ создаём (verify-only)', () => {
+    const d = path.join(os.tmpdir(), 'hm-cache-nope-' + crypto.randomBytes(6).toString('hex'));
+    const r = rfSec.ensureCacheSecure(d, null);
+    assert(r.ok === false, 'несуществующий → fail-closed (verify-only, не create)');
+    assert(!fs.existsSync(d), 'каталог НЕ создан (verify-only, не мутируем ФС)');
+  });
+}
+
 // #4 (finalize) main.js: install-env строит childEnv через ИСТИННЫЙ allowlist
 // (src/install-env.js filterRendererEnv) — PATH только из admin-owned каталогов;
 // старый denylist ENV_RESOLUTION_DENY удалён.

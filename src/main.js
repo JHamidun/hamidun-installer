@@ -283,11 +283,12 @@ function loadRemoteMaps() {
   return { reg, ids, compRemote };
 }
 
-// Куда докачивать (ADMIN-OWNED STAGING, FIX-A):
-//   Windows: %ProgramData%\HamidunSetup\cache\<remoteId> — admin-owned корень,
-//            remote-fetch.fetchRemote() ужесточает и ПРОВЕРЯЕТ его DACL (SYSTEM +
-//            Administrators, /inheritance:r, без user-SID) — обычный/medium
-//            процесс пользователя туда писать НЕ может (закрывает TOCTOU-класс).
+// Куда докачивать (ADMIN-OWNED STAGING):
+//   Windows: НЕ ИСПОЛЬЗУЕТСЯ (P0 Codex круг 6). Предсказуемый %ProgramData%\HamidunSetup\
+//            cache\<remoteId> позволял medium-малвари пред-создать/удержать <id>.zip и
+//            подменить его до распаковки (owner/DACL-window + ZIP-TOCTOU). Теперь на
+//            win32 кэш — СВЕЖИЙ random-leaf каталог, рождённый АТОМАРНО Admins-only
+//            (winMakeSecureDir → New-HmSecureStagingDir) прямо в run-component.
 //   macOS/Linux: ~/Library/Caches | ~/.cache — установка uv здесь неэлевейтед
 //            end-to-end (эскалации нет); полная изоляция от процессов ТОГО ЖЕ
 //            пользователя без root на POSIX недостижима (см. remote-fetch модель угроз).
@@ -432,6 +433,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // remoteId берётся ТОЛЬКО из вшитого реестра (compRemote), не из renderer.
   // P1-8: ветвление dry-run ДО download — в dry-run НИЧЕГО не скачиваем.
   let remoteCache = '';
+  // win32: кэш докачки — СВЕЖИЙ Admins-only каталог, рождённый нами атомарно (ниже);
+  // после установки чистим (best-effort). POSIX: '' → cleanup no-op (кэш в ~/.cache).
+  let secureCacheDir = '';
+  const cleanupSecureCache = () => {
+    if (!secureCacheDir) return;
+    try { fs.rmSync(secureCacheDir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    secureCacheDir = '';
+  };
   const { reg, compRemote } = loadRemoteMaps();
   const declared = compRemote.get(id);
   if (declared && isDryRun) {
@@ -441,7 +450,24 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     if (!entry) {
       return { id, ok: false, code: -1, stage: 'fetch', error: `Нет сборки «${declared}» для платформы ${process.platform} в реестре докачки.` };
     }
-    const cacheDir = remoteCacheDir(declared);
+    // P0 (Codex круг 6): на win32 установщик ELEVATED — кэш докачки НЕ по предсказуемому
+    // %ProgramData%\HamidunSetup\cache\<id>, а СВЕЖИЙ random-leaf каталог, рождённый
+    // АТОМАРНО с owner=Administrators + DACL {SYSTEM,Administrators} (winMakeSecureDir →
+    // New-HmSecureStagingDir — тот же атомарный примитив, что и de-elevation staging).
+    // Users писать туда НЕ могут ПО КОНСТРУКЦИИ: medium-малварь ТОГО ЖЕ юзера не может ни
+    // пред-создать <id>.zip, ни держать write-handle, ни подменить содержимое между
+    // SHA-256 и распаковкой (owner/DACL-window + ZIP-TOCTOU закрыты). Пред-существующее
+    // НЕ переиспользуем. fs.mkdirSync+post-icacls запрещён (окно наследования ProgramData).
+    let cacheDir;
+    if (IS_WIN) {
+      cacheDir = winMakeSecureDir();
+      if (!cacheDir) {
+        return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось создать защищённый кэш докачки (owner=Administrators + DACL {SYSTEM,Administrators}) — нужны права администратора; установка remote-компонента заблокирована (fail-closed).' };
+      }
+      secureCacheDir = cacheDir; // чистим после установки
+    } else {
+      cacheDir = remoteCacheDir(declared);
+    }
     logLine('=== fetch-remote start (' + declared + ') ===');
     let fr;
     try {
@@ -456,10 +482,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       });
     } catch (e) {
       logLine('[ERROR] fetch-remote: ' + String(e));
+      cleanupSecureCache();
       return { id, ok: false, code: -1, stage: 'fetch', error: String(e.message || e) };
     }
     logLine('=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
     if (!fr || !fr.ok) {
+      cleanupSecureCache();
       return { id, ok: false, code: -1, stage: 'fetch', error: (fr && fr.error) || 'докачка не удалась' };
     }
     remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
@@ -509,6 +537,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // PATH-hijack воскресает; установщик elevated — это была бы эскалация).
     const ps = remoteFetch.winPowershellPath();
     if (!ps) {
+      cleanupSecureCache();
       return { id, ok: false, code: -1, error: 'PowerShell не найден в System32 — установка заблокирована (fail-closed).' };
     }
     // PowerShell 5.1 emits pipe output in the console's OEM code page (CP866 on
@@ -544,6 +573,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
       logLine('[ERROR] spawn failed: ' + String(e));
+      cleanupSecureCache();
       resolve({ id, ok: false, code: -1, error: String(e) });
       return;
     }
@@ -597,6 +627,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       } else if (skipped && !isDryRun) {
         logLine(`=== компонент «${id}» пропущен (код ${code}, нечего ставить) — маркер/манифест НЕ записаны ===`);
       }
+      // win32: удаляем СВЕЖИЙ Admins-only кэш докачки (25МБ zip+распаковка) — компонент
+      // уже отработал (из кэша запущен/скопирован), больше он не нужен. Best-effort.
+      cleanupSecureCache();
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
       resolve({ id, ok: okRun || skipped, code, skipped });
@@ -674,7 +707,9 @@ function winDeElevScript() {
   catch (e) { return null; }
 }
 
-// PRIVATE high-integrity staging-каталог под ProgramData (для транзиентного task.xml).
+// PRIVATE high-integrity staging-каталог под ProgramData. Используется ДВОЯКО: (а) для
+// транзиентного task.xml де-элевации; (б) как СВЕЖИЙ Admins-only кэш докачки remote-
+// компонента (run-component, P0 Codex круг 6) — тот же атомарный owner+DACL-примитив.
 // P0 (Codex privesc regate #4): каталог РОЖДАЕТСЯ АТОМАРНО с protected DACL
 // {SYSTEM, Administrators: FullControl} — ОДНОЙ операцией [System.IO.Directory]::
 // CreateDirectory($dir, $sd) через УЖЕ УКРЕПЛЁННЫЙ PS-примитив New-HmSecureStagingDir
