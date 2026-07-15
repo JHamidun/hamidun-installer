@@ -103,7 +103,13 @@ function New-HmSecureStagingDir {
             $sd.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
                 $me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
         }
-        # Рождаем каталог СРАЗУ с этим SD (DACL применяется атомарно при создании).
+        # Владелец -> Administrators АТОМАРНО в SD (elevated). БЕЗ этого CreateDirectory ставит
+        # owner = создатель (user по Object-Creator-политике), а ВЛАДЕЛЕЦ имеет implicit WRITE_DAC:
+        # medium-атакующий ТОГО ЖЕ юзера открыл бы WRITE_DAC по владению, временно добавил себе ACE,
+        # создал/удержал task.xml, восстановил DACL под проверки и подменил XML до /Create -> HIGH exec.
+        # Ставить владельца ПОСЛЕ (icacls) = окно уязвимости. Здесь — в момент создания.
+        if ($Elevated) { $sd.SetOwner($admins) }
+        # Рождаем каталог СРАЗУ с этим SD (DACL + владелец применяются атомарно при создании).
         [void][System.IO.Directory]::CreateDirectory($dir, $sd)
         if (-not (Test-Path -LiteralPath $dir)) { return $null }
 
@@ -113,15 +119,13 @@ function New-HmSecureStagingDir {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
 
-        # Elevated: владелец -> Administrators (icacls включает нужную привилегию сам).
-        if ($Elevated) { & $Icacls $dir '/setowner' '*S-1-5-32-544' '/C' '/Q' 2>&1 | Out-Null }
-
-        # Верификация: ни одного ACE вне разрешённого набора $allow (elevated -> {SYSTEM,
-        # Administrators}; medium -> плюс SID текущего юзера); при elevated ещё и владелец.
+        # Владелец УЖЕ задан атомарно в SD выше (не post-icacls — иначе окно с owner=user + WRITE_DAC).
+        # Проверка владельца ниже — fail-closed, если атомарное применение владельца не сработало
+        # (owner != Administrators -> каталог мог иметь окно -> отбрасываем).
         $acl = Get-Acl -LiteralPath $dir
         if ($Elevated) {
             $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-            if ($allow -notcontains $owner) {
+            if ($owner -ne 'S-1-5-32-544') {
                 Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
             }
         }

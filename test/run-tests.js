@@ -713,7 +713,7 @@ ok('_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE st
   assert(/'HmDeElev-'/.test(s) && /ProgramData/.test(s), 'staging под ProgramData (не %TEMP%)');
   assert(/SetAccessRuleProtection\(\$true/.test(s), 'protection on (без наследования Users)');
   assert(/S-1-5-32-544/.test(s) && /S-1-5-18/.test(s), 'DACL: только Administrators + SYSTEM');
-  assert(/setowner.*S-1-5-32-544/.test(s), 'elevated: владелец -> Administrators (icacls)');
+  assert(/\$sd\.SetOwner\(\$admins\)/.test(s), 'elevated: владелец -> Administrators АТОМАРНО в SD (не post-icacls)');
   assert(/'task\.xml'/.test(s) && /Set-Content -LiteralPath \$xmlFile/.test(s), 'XML пишется в staging (task.xml)');
   // (4) env-литералы ПЕРВЫМИ в теле обёртки (ни одного cmdlet/Join-Path до gate).
   const bi = s.indexOf('$body =');
@@ -859,6 +859,15 @@ ok('P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::Cre
     '_deelev.ps1: каталог рождается [IO.Directory]::CreateDirectory($dir,$sd) — SD атомарно при создании');
   assert(/SetAccessRuleProtection\(\$true/.test(d), 'protection on (наследование ProgramData/Users снято)');
   assert(/S-1-5-32-544/.test(d) && /S-1-5-18/.test(d), 'DACL: Administrators + SYSTEM (FullControl)');
+  // P0 regate#5: ВЛАДЕЛЕЦ задаётся АТОМАРНО в SD ДО CreateDirectory (иначе owner=user+WRITE_DAC окно).
+  const iSetOwner = d.indexOf('$sd.SetOwner($admins)');
+  const iCreate = d.indexOf('[System.IO.Directory]::CreateDirectory($dir, $sd)');
+  assert(iSetOwner !== -1 && iCreate !== -1 && iSetOwner < iCreate,
+    '$sd.SetOwner($admins) стоит ДО CreateDirectory (владелец атомарен, не post-icacls)');
+  assert(!/&\s*\$Icacls\s+\$dir\s+'\/setowner'/.test(d) && !/setowner.*S-1-5-32-544/.test(d),
+    'НЕТ post-icacls /setowner (окно owner=user устранено)');
+  assert(/\$owner -ne 'S-1-5-32-544'/.test(d),
+    'verify владельца строго == Administrators, fail-closed если атомарный owner не применился');
   // fail-closed на уже существующий каталог (CREATE_NEW-семантика) и на reparse-point (junction).
   assert(/if \(Test-Path -LiteralPath \$dir\) \{ return \$null \}/.test(d), 'fail на ERROR_ALREADY_EXISTS (каталог занят)');
   assert(/ReparsePoint/.test(d) && /Remove-Item -LiteralPath \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
