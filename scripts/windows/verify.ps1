@@ -119,23 +119,28 @@ if (-not (Test-Selected 'config')) {
     }
 }
 
-# --- Расширение Claude Code (через НАСТОЯЩИЕ CLI Cursor / VS Code, не code-шим) ---
+# --- Расширение Claude Code — проверяем КАТАЛОГИ расширений НАПРЯМУЮ. НЕ запускаем
+#     editor CLI: этот verify исполняется ELEVATED, а запуск user-writable
+#     code.cmd/cursor.cmd под админом был бы privilege-escalation (P0-B). Имя папки
+#     расширения = "<extId>-<версия>" -> матчим по ПРЕФИКСУ id (регистронезависимо). ---
 if (-not (Test-Selected 'extension')) {
     Write-Host "CHECK skip Расширение"
 } else {
     $extId = if ($env:HM_CLAUDE_EXT_ID) { $env:HM_CLAUDE_EXT_ID } else { 'anthropic.claude-code' }
+    $extDirs = @(
+        (Join-Path $env:USERPROFILE '.vscode\extensions'),
+        (Join-Path $env:USERPROFILE '.vscode-oss\extensions'),
+        (Join-Path $env:USERPROFILE '.cursor\extensions')
+    )
+    $pref = $extId.ToLower()
     $extOk = $false
-    $clis = @()
-    $cc = Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'
-    if (Test-Path $cc) { $clis += $cc }
-    foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) {
-        if (Test-Path $p) { $clis += $p; break }
-    }
-    foreach ($cli in $clis) {
+    foreach ($d in $extDirs) {
         if ($extOk) { break }
+        if (-not (Test-Path -LiteralPath $d)) { continue }
         try {
-            $list = & $cli --list-extensions 2>$null
-            if (("$list") -match [regex]::Escape($extId)) { Write-Host "  расширение найдено через: $cli"; $extOk = $true }
+            $hit = Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name.ToLower().StartsWith($pref) } | Select-Object -First 1
+            if ($hit) { Write-Host "  расширение найдено в: $d"; $extOk = $true }
         } catch { }
     }
     if ($extOk) { Write-Host "CHECK ok Расширение" } else { Write-Host "CHECK fail Расширение" }

@@ -1,6 +1,10 @@
-﻿# Claude Code extension (Cursor + VS Code) — Windows
+﻿# Claude Code extension (ТОЛЬКО Cursor) — Windows
+# ВНИМАНИЕ: оба VS Code-расширения (anthropic.claude-code + openai.chatgpt) ставит
+# vscode.ps1 (де-элевированно). Здесь — ТОЛЬКО Cursor (опциональный редактор), чтобы не
+# было ДУБЛЯ установки в VS Code (P0-A: убран второй elevated-путь к user-writable code.cmd).
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -59,10 +63,20 @@ if (-not $DRY) {
     }
 }
 
+$script:DeElevFailed = $false
+
+# P0-A (privesc): этот скрипт исполняется ELEVATED (установщик requireAdministrator).
+# Прямой запуск user-writable cursor.cmd/Cursor.exe под АДМИНОМ выполнил бы то, что
+# medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить на его место. Поэтому
+# ЛЮБОЙ вызов Cursor CLI (install + list-extensions) идёт ЧЕРЕЗ единый де-элевированный
+# примитив (Invoke-HmDeElevated, _deelev.ps1). $null -> fail-closed: под админом НЕ запускаем.
+
 function Test-ExtPresent($cli) {
-    # --list-extensions может лагать сразу после установки — ретраим.
+    # --list-extensions может лагать сразу после установки — ретраим (де-элевированно).
     for ($k = 0; $k -lt 3; $k++) {
-        try { $list = & $cli --list-extensions 2>$null; if (("$list") -match [regex]::Escape($extId)) { return $true } } catch { }
+        $lst = Invoke-HmDeElevated $cli @('--list-extensions')
+        if ($null -eq $lst) { $script:DeElevFailed = $true; return $false }
+        if (("$($lst.Output)") -match [regex]::Escape($extId)) { return $true }
         Start-Sleep -Milliseconds 1500
     }
     return $false
@@ -70,20 +84,29 @@ function Test-ExtPresent($cli) {
 
 function Install-Into($cli, $label) {
     if (-not $cli) { return $false }
-    Write-Host "Ставлю расширение в $label..."
+    Write-Host "Ставлю расширение в $label (от имени пользователя, без прав администратора)..."
     if ($DRY) {
-        if ($vsix) { Write-Host "  [dry-run] WOULD: $cli --install-extension $vsix --force" }
-        else { Write-Host "  [dry-run] WOULD: $cli --install-extension $extId --force" }
+        if ($vsix) { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $vsix --force" }
+        else { Write-Host "  [dry-run] WOULD (de-elevated): $cli --install-extension $extId --force" }
         return $true
     }
-    if ($vsix) {
-        Write-Host "  из вшитого vsix (офлайн): $vsix"
-        & $cli --install-extension $vsix --force 2>&1 | Out-Host
-        if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте."; return $true }
-        Write-Host "  ${label}: vsix не подтвердился — пробую Marketplace ($extId)..."
+    $target = if ($vsix) { $vsix } else { $extId }
+    if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
+    $r = Invoke-HmDeElevated $cli @('--install-extension', $target, '--force')
+    if ($null -eq $r) {
+        Write-Host "  ${label}: не удалось безопасно (де-элевированно) установить — пропускаю (fail-closed, НЕ запускаю под админом)."
+        $script:DeElevFailed = $true
+        return $false
     }
-    & $cli --install-extension $extId --force 2>&1 | Out-Host
+    if ($r.Output) { Write-Host ($r.Output.TrimEnd()) }
     if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте."; return $true }
+    if ($vsix) {
+        Write-Host "  ${label}: vsix не подтвердился — пробую Marketplace ($extId)..."
+        $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
+        if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
+        if ($r2.Output) { Write-Host ($r2.Output.TrimEnd()) }
+        if (Test-ExtPresent $cli) { Write-Host "  ${label}: расширение на месте (Marketplace)."; return $true }
+    }
     Write-Host "  ${label}: расширение не подтвердилось."; return $false
 }
 
@@ -97,12 +120,10 @@ $cursorCands = @(
 )
 foreach ($p in $cursorCands) { if (Test-Path $p) { $cursorCli = $p; break } }
 if (-not $cursorCli) { $g = Get-Command cursor -ErrorAction SilentlyContinue; if ($g) { $cursorCli = $g.Source } }
-if (Install-Into $cursorCli 'Cursor') { $installed = $true } elseif (-not $cursorCli) { Write-Host "Cursor CLI не найден — пропускаю Cursor." }
+if (Install-Into $cursorCli 'Cursor') { $installed = $true } elseif (-not $cursorCli) { Write-Host "Cursor не установлен — пропускаю (панель Claude Code в VS Code ставит компонент vscode)." }
 
-# Настоящий VS Code (НЕ курсоровский code-шим, который отдаёт VS Code 1.67.1)
-$codeCli = $null
-foreach ($p in @("$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd", "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd")) { if (Test-Path $p) { $codeCli = $p; break } }
-if ($codeCli) { if (Install-Into $codeCli 'VS Code') { $installed = $true } }
+# ПРИМЕЧАНИЕ: установку в VS Code здесь УБРАЛИ (P0-A) — оба VS Code-расширения ставит
+# vscode.ps1 (де-элевированно). Дубль под elevated к user-writable code.cmd исключён.
 
 # --- вшитый шрифт JetBrains Mono (пер-юзерно, БЕЗ админа) ---
 $fontSrc = ''
@@ -156,9 +177,18 @@ if (-not $installed -and -not $DRY -and $userCursorSpared -and (Get-Process Curs
     Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
     if (Install-Into $cursorCli 'Cursor') { $installed = $true }
-    if ($codeCli -and -not $installed) { if (Install-Into $codeCli 'VS Code') { $installed = $true } }
 }
 
-if ($installed) { Write-Host "OK: расширение установлено."; exit 0 }
-Write-Host "Расширение не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
+if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; exit 0 }
+# Cursor нет вообще — делать нечего (панель Claude в VS Code ставит компонент vscode). Не провал.
+if (-not $cursorCli) {
+    Write-Host "Cursor не установлен — пропускаю. Панель Claude Code уже в VS Code (компонент vscode)."
+    exit 0
+}
+# Cursor есть, но расширение не встало.
+if ($script:DeElevFailed) {
+    Write-Host "Не удалось безопасно (де-элевированно) поставить расширение в Cursor. Открой Cursor -> панель расширений -> найди '$extId' -> Install."
+} else {
+    Write-Host "Расширение в Cursor не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
+}
 exit 1

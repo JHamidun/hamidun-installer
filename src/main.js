@@ -650,8 +650,14 @@ ipcMain.handle('reveal-path', (_e, p) => { try { if (p) shell.showItemInFolder(p
 ipcMain.handle('launch-cursor', () => {
   try {
     if (IS_WIN) {
+      // P0-C: Cursor.exe лежит в user-writable %LOCALAPPDATA% — из elevated-процесса
+      // spawn'ить его напрямую нельзя (integrity-escalation). Запускаем ДЕ-ЭЛЕВИРОВАННО
+      // тем же укреплённым лаунчером, что и VS Code (см. winLaunchDeElevated).
+      const startDir = path.join(os.homedir(), 'HamidunStart');
+      try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
+      try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
       const cexe = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe');
-      if (fs.existsSync(cexe)) { spawn(cexe, [], { detached: true, stdio: 'ignore' }).unref(); return true; }
+      if (fs.existsSync(cexe)) { return winLaunchDeElevated(cexe, startDir); }
     } else if (IS_MAC) {
       spawn('/usr/bin/open', ['-a', 'Cursor'], { detached: true, stdio: 'ignore' }).unref();
       return true;
@@ -660,50 +666,102 @@ ipcMain.handle('launch-cursor', () => {
   return false;
 });
 
-// P0 (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
-// Прямой spawn user-writable Code.exe (%LOCALAPPDATA%\…\Code.exe) исполнил бы ПОД АДМИНОМ
+// P0-D (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
+// Прямой spawn user-writable Code.exe/Cursor.exe (%LOCALAPPDATA%\…) исполнил бы ПОД АДМИНОМ
 // (high integrity) то, что medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить
-// на его место — integrity-escalation. Поэтому редактор запускаем ДЕ-ЭЛЕВИРОВАННО, от
-// текущего интерактивного пользователя (medium integrity):
-//   1) primary — одноразовая scheduled task с /RL LIMITED (сохраняет аргумент-папку);
-//   2) fallback — explorer.exe (наследует medium-integrity токен уже запущенного shell).
-// Из ЭТОГО elevated-процесса Code.exe напрямую НЕ spawn'им никогда.
-// Остаточный риск: путь к Code.exe берём из user-writable каталога, но т.к. запуск идёт
-// de-elevated (medium integrity), подмена бинаря НЕ даёт эскалации (та же граница, что уже
-// доступна малвари). Folder-open в fallback-ветке — best-effort (explorer не форвардит
-// аргумент папки; редактор всё равно откроется де-элевированно).
+// на его место — integrity-escalation. Поэтому редактор запускаем ДЕ-ЭЛЕВИРОВАННО:
+//   primary  — одноразовая scheduled task от текущего интерактивного пользователя,
+//              InteractiveToken + LeastPrivilege (= medium). Задача создаётся ТОЛЬКО через
+//              АБСОЛЮТНЫЙ %SystemRoot%\System32\schtasks.exe по XML (нет PS-модуля
+//              ScheduledTasks -> module-hijack исключён). Обёртка САМА сверяет свою
+//              integrity (whoami /groups -> Mandatory Label) и стартует редактор ЛИШЬ при
+//              medium; не medium (UAC off / Builtin Administrator / high) -> НЕ стартует.
+//   fallback — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
+//              shell). Editor-exe в fallback НЕ исполняем (P0-D#4).
+// success (true) возвращаем ТОЛЬКО после того, как задача фактически зарегистрирована И
+// запущена (schtasks /Create и /Run вернули 0); иначе — folder-fallback (P0-D#5).
 function winLaunchDeElevated(exe, folderArg) {
-  const windir = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-  const explorerFallback = () => {
+  const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
+  const folderFallback = () => {
     try {
-      const exp = path.join(windir, 'explorer.exe');
-      if (fs.existsSync(exp)) { spawn(exp, [exe], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); return true; }
+      const exp = path.join(sysRoot, 'explorer.exe');
+      if (folderArg && fs.existsSync(exp)) {
+        spawn(exp, [String(folderArg)], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+        return true;
+      }
     } catch (e) { /* ignore */ }
     return false;
   };
+
+  let ps = null, schtasks = null, whoami = null;
   try {
-    const ps = remoteFetch.winPowershellPath(); // абсолютный, из валидированного System32
-    if (!ps) return explorerFallback();
-    const tag = 'HmLaunchVSCode_' + crypto.randomBytes(6).toString('hex');
-    const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";          // PS single-quote
-    const argD = '"' + String(folderArg).replace(/"/g, '""') + '"';      // dq-аргумент для Code.exe
-    const psCmd =
-      "$ErrorActionPreference='Stop';" +
-      'try{' +
-        '$a=New-ScheduledTaskAction -Execute ' + q(exe) + ' -Argument ' + q(argD) + ';' +
-        '$p=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited;' +
-        'Register-ScheduledTask -TaskName ' + q(tag) + ' -InputObject (New-ScheduledTask -Action $a -Principal $p) -Force | Out-Null;' +
-        'Start-ScheduledTask -TaskName ' + q(tag) + ';' +
-        'Start-Sleep -Seconds 3;' +
-        'Unregister-ScheduledTask -TaskName ' + q(tag) + ' -Confirm:$false;' +
-      '}catch{' +
-        'Start-Process explorer.exe -ArgumentList ' + q('"' + exe + '"') + ';' +
-      '}';
-    const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', psCmd],
-      { detached: true, stdio: 'ignore', windowsHide: true });
-    child.unref();
-    return true;
-  } catch (e) { return explorerFallback(); }
+    ps = remoteFetch.winPowershellPath();     // абсолютный powershell.exe (валидир. System32)
+    schtasks = remoteFetch.sysBin('schtasks.exe');
+    whoami = remoteFetch.sysBin('whoami.exe');
+  } catch (e) { /* fail-closed ниже */ }
+  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return folderFallback(); }
+
+  const s32 = path.join(sysRoot, 'System32');
+  const psV1 = path.join(s32, 'WindowsPowerShell', 'v1.0');
+  const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
+  const tmp = os.tmpdir();
+  const wrapper = path.join(tmp, tag + '.ps1');
+  const xmlFile = path.join(tmp, tag + '.xml');
+  const cleanup = () => {
+    try { fs.unlinkSync(wrapper); } catch (e) { /* */ }
+    try { fs.unlinkSync(xmlFile); } catch (e) { /* */ }
+  };
+
+  // Обёртка исполняется de-elevated планировщиком. Чистые PSModulePath/PATH + integrity-gate:
+  // Start-Process редактора ТОЛЬКО при medium (S-1-16-8192). Иначе — ничего (fail-closed).
+  const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const wrapperBody =
+    "$ErrorActionPreference='Continue'\r\n" +
+    "$sr=$env:SystemRoot; if(-not $sr){$sr='C:\\Windows'}\r\n" +
+    "$s32=Join-Path $sr 'System32'\r\n" +
+    "$env:PSModulePath=Join-Path $s32 'WindowsPowerShell\\v1.0\\Modules'\r\n" +
+    "$env:Path=\"$s32;$sr;\"+(Join-Path $s32 'WindowsPowerShell\\v1.0')\r\n" +
+    "$who=Join-Path $s32 'whoami.exe'\r\n" +
+    "$lvl='unknown'\r\n" +
+    "try{ $g=& $who /groups 2>$null | Out-String; if($g -match 'S-1-16-8192'){$lvl='medium'} }catch{}\r\n" +
+    "if($lvl -eq 'medium'){ try{ Start-Process -FilePath " + psq(exe) + " -ArgumentList " + psq(String(folderArg)) + " }catch{} }\r\n";
+
+  // XML: принципал = текущий интерактивный пользователь, InteractiveToken, LeastPrivilege.
+  const xmlEsc = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+  const userId = (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') +
+    (process.env.USERNAME || (function () { try { return os.userInfo().username; } catch (e) { return ''; } })());
+  const wrapArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + wrapper + '"';
+  const taskXml =
+    '<?xml version="1.0" encoding="UTF-16"?>\r\n' +
+    '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n' +
+    '  <RegistrationInfo><Description>Hamidun launch one-shot (de-elevated)</Description></RegistrationInfo>\r\n' +
+    '  <Principals><Principal id="Author"><UserId>' + xmlEsc(userId) + '</UserId>' +
+    '<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n' +
+    '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate>' +
+    '<StartWhenAvailable>false</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden>' +
+    '<AllowStartOnDemand>true</AllowStartOnDemand><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings>\r\n' +
+    '  <Actions Context="Author"><Exec><Command>' + xmlEsc(ps) + '</Command>' +
+    '<Arguments>' + xmlEsc(wrapArgs) + '</Arguments></Exec></Actions>\r\n' +
+    '</Task>\r\n';
+
+  try {
+    fs.writeFileSync(wrapper, wrapperBody, 'utf8');
+    fs.writeFileSync(xmlFile, '\uFEFF' + taskXml, 'ucs2');   // UTF-16LE + BOM (schtasks /XML)
+  } catch (e) { cleanup(); return folderFallback(); }
+
+  const runSchtasks = (args) => {
+    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore' }); return true; }
+    catch (e) { return false; }
+  };
+  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return folderFallback(); }
+  const ran = runSchtasks(['/Run', '/TN', tag]);
+  // Отложенная очистка (не блокирует возврат; даём задаче стартовать до /Delete).
+  setTimeout(() => { runSchtasks(['/Delete', '/TN', tag, '/F']); cleanup(); }, 6000);
+  if (!ran) { return folderFallback(); }
+  return true;
 }
 
 // Открыть VS Code НА ПАПКЕ проекта (IDE-режим), а не в агент-чате: аналог `code "<папка>"`.

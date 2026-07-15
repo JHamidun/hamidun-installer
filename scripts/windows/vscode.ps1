@@ -1,6 +1,7 @@
 ﻿# VS Code (рекомендуемый редактор) + расширения Claude Code и Codex — Windows
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH.
@@ -104,61 +105,9 @@ function Get-VsCodeCli {
     return ''
 }
 
-# Де-элевированный запуск <Exe> <Args> от ТЕКУЩЕГО интерактивного пользователя с medium
-# integrity (одноразовая scheduled task, /RL LIMITED). Возвращает @{ Code; Output } или
-# $null, если де-элевацию выполнить не удалось (FAIL-CLOSED — вызывающий НЕ должен
-# запускать бинарь elevated).
-function Invoke-DeElevated {
-    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
-    $tag = 'HmDeElev_' + [guid]::NewGuid().ToString('N')
-    $tmp = [System.IO.Path]::GetTempPath()
-    $wrapper  = Join-Path $tmp ($tag + '.ps1')
-    $outFile  = Join-Path $tmp ($tag + '.out')
-    $codeFile = Join-Path $tmp ($tag + '.code')
-    $argLit = ''
-    if ($Arguments.Count -gt 0) {
-        $argLit = ' ' + (($Arguments | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
-    }
-    $exeLit  = $Exe -replace "'", "''"
-    $outLit  = $outFile -replace "'", "''"
-    $codeLit = $codeFile -replace "'", "''"
-    $body = @"
-`$ErrorActionPreference = 'Continue'
-`$c = 1
-try {
-  `$o = & '$exeLit'$argLit 2>&1 | Out-String
-  `$c = `$LASTEXITCODE; if (`$null -eq `$c) { `$c = 0 }
-  Set-Content -LiteralPath '$outLit' -Value `$o -Encoding UTF8
-} catch {
-  Set-Content -LiteralPath '$outLit' -Value `$_.Exception.Message -Encoding UTF8
-}
-Set-Content -LiteralPath '$codeLit' -Value ([string]`$c) -Encoding ASCII
-"@
-    try { Set-Content -LiteralPath $wrapper -Value $body -Encoding UTF8 } catch { return $null }
-    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $started = $false
-    try {
-        $act  = New-ScheduledTaskAction -Execute $psExe -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $wrapper + '"')
-        $prin = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $tag -InputObject (New-ScheduledTask -Action $act -Principal $prin) -Force -ErrorAction Stop | Out-Null
-        Start-ScheduledTask -TaskName $tag -ErrorAction Stop
-        $started = $true
-    } catch { $started = $false }
-    $result = $null
-    if ($started) {
-        $deadline = (Get-Date).AddSeconds(180)
-        while (-not (Test-Path -LiteralPath $codeFile) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 400 }
-        if (Test-Path -LiteralPath $codeFile) {
-            $code = 1; $out = ''
-            try { $code = [int]((Get-Content -LiteralPath $codeFile -Raw).Trim()) } catch { $code = 1 }
-            try { $out = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue } catch { $out = '' }
-            $result = [pscustomobject]@{ Code = $code; Output = $out }
-        }
-    }
-    try { Unregister-ScheduledTask -TaskName $tag -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
-    Remove-Item -LiteralPath $wrapper, $outFile, $codeFile -Force -ErrorAction SilentlyContinue
-    return $result
-}
+# Де-элевация вынесена в ЕДИНЫЙ укреплённый примитив scripts/windows/_deelev.ps1
+# (Invoke-HmDeElevated): чистый PSModulePath+PATH, абсолютный schtasks.exe (нет
+# module-hijack), integrity-check обёртки (fail-closed при не-medium). Дот-сорсится выше.
 
 # Вшитый .vsix (офлайн). vsix исполняется как код внутри VS Code -> целостность ДО установки (fail-closed).
 function Get-Vsix($name) {
@@ -183,22 +132,22 @@ function Install-ExtSafe($cli, $extId, $vsix) {
     }
     $target = if ($vsix) { $vsix } else { $extId }
     if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
-    $r = Invoke-DeElevated $cli @('--install-extension', $target, '--force')
+    $r = Invoke-HmDeElevated $cli @('--install-extension', $target, '--force')
     if ($null -eq $r) {
         Write-Host "  Не удалось безопасно (де-элевированно) выполнить установку — пропускаю (fail-closed, НЕ запускаю под админом)."
         $script:DeElevFailed = $true
         return $false
     }
     if ($r.Output) { Write-Host ($r.Output.TrimEnd()) }
-    $lst = Invoke-DeElevated $cli @('--list-extensions')
+    $lst = Invoke-HmDeElevated $cli @('--list-extensions')
     if ($null -eq $lst) { $script:DeElevFailed = $true; return $false }
     if (("$($lst.Output)") -match [regex]::Escape($extId)) { Write-Host "  ${extId}: на месте."; return $true }
     if ($vsix) {
         Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
-        $r2 = Invoke-DeElevated $cli @('--install-extension', $extId, '--force')
+        $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
         if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
         if ($r2.Output) { Write-Host ($r2.Output.TrimEnd()) }
-        $lst2 = Invoke-DeElevated $cli @('--list-extensions')
+        $lst2 = Invoke-HmDeElevated $cli @('--list-extensions')
         if (($null -ne $lst2) -and (("$($lst2.Output)") -match [regex]::Escape($extId))) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
     }
     Write-Host "  ${extId}: не подтвердилось."
