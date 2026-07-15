@@ -5,7 +5,7 @@ $DRY = [bool]$env:HM_DRY_RUN
 
 # Вшитый артефакт (Windows-only; кладёт tools/fetch-vendor.ps1 из локальной сборки claude-mascot)
 $src = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\claude-mascot\claude-mascot.exe' } else { '' }
-if (-not ($src -and (Test-Path $src))) { Write-Host "Скрепка не найдена в сборке ($src) — компонент вшивается только в Windows-издание."; exit 1 }
+if (-not ($src -and (Test-Path $src))) { Write-Host "Скрепка (косметический помощник) не вошла в эту сборку — пропускаю. Claude Code и всё остальное работают без неё."; exit 120 }
 
 $destDir = Join-Path $env:LOCALAPPDATA 'Programs\ClaudeMascot'
 $dest    = Join-Path $destDir 'claude-mascot.exe'

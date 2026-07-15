@@ -20,8 +20,11 @@ PY="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
 MASCOT_DIR="${HM_VENDOR:-}/apps/claude-mascot"
 APP="$(find "$MASCOT_DIR" -maxdepth 1 -type d -name '*.app' 2>/dev/null | head -n1)"
 if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-  echo "Скрепка не найдена в сборке ($MASCOT_DIR) — компонент собирается из подписанной mac-сборки; пересобери установщик с fetch-vendor-mac."
-  exit 1
+  # Скрепка — косметика (живой помощник поверх окон). Если подписанная .app не вошла
+  # в эту сборку — это НЕ ошибка установки: пропускаем (exit 120), всё остальное работает.
+  # Чтобы скрепка появилась — пересобери установщик с fetch-vendor-mac (релиз claude-mascot-macos-ci).
+  echo "Скрепка (косметический помощник) не вошла в эту сборку — пропускаю. Claude Code и всё остальное работают без неё."
+  exit 120
 fi
 APP_NAME="$(basename "$APP")"
 # Главный бинарь — ИМЕННО CFBundleExecutable из Info.plist, а не «первый файл в
