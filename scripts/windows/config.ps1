@@ -112,8 +112,59 @@ $preserveDir   = Join-Path $env:USERPROFILE '.hamidun-setup\preserve'
 # base install.ps1 делает Move-Item ВСЕГО ~/.claude, без снапшота они исчезали навсегда.
 $preserveFiles = @('.credentials.master.env', '.credentials.json', 'settings.local.json', 'MEMORY.md',
                    'chats.db', 'chats.db-wal', 'chats.db-shm', 'chats.db-journal',
-                   'tg_session.session', 'tg_session.session-journal')
+                   'tg_session.session', 'tg_session.session-wal', 'tg_session.session-shm', 'tg_session.session-journal')
 $preserveDirs  = @('memory', 'projects', 'todos', 'shell-snapshots')
+
+# P1: SHA-256 считаем через .NET напрямую (штатный PS-командлет хэширования файлов при
+# унаследованном PSModulePath, где модули PowerShell 7 идут раньше 5.1, может не найтись, и
+# корректный restore падал бы exit 1 со снапшотом на диске). FileShare.ReadWrite — считаем
+# хэш даже если файл открыт другим процессом.
+function Get-Sha256Hex($p) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($p, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $hash = $sha.ComputeHash($fs)
+        return ([System.BitConverter]::ToString($hash)).Replace('-', '')
+    } catch { return $null } finally { if ($fs) { $fs.Dispose() }; $sha.Dispose() }
+}
+# P0-2: отпечаток источника (размер+mtime) — для детекции конкурентной модификации во
+# время копирования (работающий Claude/SQLite пишет в chats.db того же/иного размера).
+function Get-FileFingerprint($p) {
+    try {
+        $it = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+        return "$($it.Length):$($it.LastWriteTimeUtc.Ticks)"
+    } catch { return $null }
+}
+# P0-2: стабильный манифест дерева (относительный путь|размер|mtime по каждому файлу).
+function Get-DirManifest($root) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    try {
+        Get-ChildItem -LiteralPath $root -Recurse -Force -File -ErrorAction Stop | ForEach-Object {
+            $lines.Add("$($_.FullName.Substring($root.Length))|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)")
+        }
+    } catch { return $null }
+    $arr = $lines.ToArray(); [Array]::Sort($arr)
+    return ($arr -join "`n")
+}
+# P0-1: конфликт stale-снапшота с живым ~/.claude. Прерванный прошлый прогон мог оставить
+# снапшот с РЕАЛЬНЫМИ ключами, а install.ps1 успеть положить ШАБЛОН поверх живого файла.
+# MissingOnly не тронет живой (он существует) → реальные ключи потерялись бы под зелёным
+# рапортом. Если живой preserve-файл ОТЛИЧАЕТСЯ от снапшота (или не сравнить — каталог) →
+# конфликт: $true (fail-closed, не даём шаблону перезаписать реальные ключи).
+function Test-StaleSnapshotConflict($src) {
+    foreach ($f in $preserveFiles) {
+        $ss = Join-Path $src $f
+        $lv = Join-Path $claudeHome $f
+        if ((Test-Path -LiteralPath $ss) -and (Test-Path -LiteralPath $lv)) {
+            if (-not (Test-Path -LiteralPath $lv -PathType Leaf)) { return $true }
+            $hs = Get-Sha256Hex $ss
+            $hl = Get-Sha256Hex $lv
+            if ((-not $hs) -or (-not $hl) -or ($hs -ne $hl)) { return $true }
+        }
+    }
+    return $false
+}
 
 # H2/H3: снапшот с ПРОВЕРКОЙ полноты. Возвращает $true только если КАЖДЫЙ существующий
 # в ~/.claude preserve-элемент реально лёг в снапшот (файлы — существование + размер;
@@ -126,29 +177,56 @@ function Snapshot-UserData($dst) {
         $s = Join-Path $claudeHome $f
         if (Test-Path -LiteralPath $s) {
             $t = Join-Path $dst $f
-            try { Copy-Item -LiteralPath $s -Destination $t -Force -ErrorAction Stop } catch { $ok = $false; continue }
-            if (-not (Test-Path -LiteralPath $t)) { $ok = $false; continue }
-            try {
-                $srcLen = (Get-Item -LiteralPath $s -Force -ErrorAction Stop).Length
-                $dstLen = (Get-Item -LiteralPath $t -Force -ErrorAction Stop).Length
-                if ($dstLen -ne $srcLen) { $ok = $false }
-            } catch { $ok = $false }
+            # P0-2: копия должна быть КОНСИСТЕНТНОЙ — источник не меняется во время копии.
+            # До 3 попыток: отпечаток источника ДО, копия, сверка размера, отпечаток ПОСЛЕ.
+            # Работающий Claude/SQLite мог переписать chats.db во время копирования —
+            # рассинхрон размера/mtime → повтор; несходимость за 3 попытки → снапшот неполон.
+            $copied = $false
+            for ($attempt = 1; ($attempt -le 3) -and (-not $copied); $attempt++) {
+                $fpBefore = Get-FileFingerprint $s
+                if (-not $fpBefore) { break }
+                try { Copy-Item -LiteralPath $s -Destination $t -Force -ErrorAction Stop } catch { continue }
+                if (-not (Test-Path -LiteralPath $t)) { continue }
+                $srcLen = $null; $dstLen = $null
+                try {
+                    $srcLen = (Get-Item -LiteralPath $s -Force -ErrorAction Stop).Length
+                    $dstLen = (Get-Item -LiteralPath $t -Force -ErrorAction Stop).Length
+                } catch { continue }
+                if ($dstLen -ne $srcLen) { continue }
+                $fpAfter = Get-FileFingerprint $s
+                if (-not ($fpAfter -and ($fpAfter -eq $fpBefore))) { continue }
+                # финальная сверка СОДЕРЖИМОГО: копия побайтно равна ТЕКУЩЕМУ источнику
+                # (аналог cmp в config.sh — ловит подмену тем же размером во время копии).
+                $hSrc = Get-Sha256Hex $s
+                $hDst = Get-Sha256Hex $t
+                if ($hSrc -and $hDst -and ($hSrc -eq $hDst)) { $copied = $true }
+            }
+            if (-not $copied) { $ok = $false }
         }
     }
     foreach ($d in $preserveDirs) {
         $s = Join-Path $claudeHome $d
         if (Test-Path -LiteralPath $s) {
             $t = Join-Path $dst $d
-            if (Test-Path -LiteralPath $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }
-            # M7: robocopy — projects/ регулярно содержит пути >260 символов (PS 5.1 не осилит).
-            robocopy $s $t /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-            if ($LASTEXITCODE -ge 8) { $ok = $false }
-            $global:LASTEXITCODE = 0
-            $srcN = (Get-ChildItem -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
-            $dstN = 0
-            if (Test-Path -LiteralPath $t) { $dstN = (Get-ChildItem -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count }
-            elseif ($srcN -gt 0) { $ok = $false }
-            if ($dstN -lt $srcN) { $ok = $false }
+            # P0-2: манифест дерева (относит.путь|размер|mtime) ДО и ПОСЛЕ копии — расхождение
+            # = конкурентная запись во время снапшота; до 3 попыток, иначе снапшот неполон.
+            $done = $false
+            for ($attempt = 1; ($attempt -le 3) -and (-not $done); $attempt++) {
+                if (Test-Path -LiteralPath $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }
+                $manBefore = Get-DirManifest $s
+                if ($null -eq $manBefore) { break }
+                # M7: robocopy — projects/ регулярно содержит пути >260 символов (PS 5.1 не осилит).
+                robocopy $s $t /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+                $robocopyFailed = ($LASTEXITCODE -ge 8)
+                $global:LASTEXITCODE = 0
+                if ($robocopyFailed) { continue }
+                $manAfter = Get-DirManifest $s
+                $srcN = (Get-ChildItem -LiteralPath $s -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count
+                $dstN = 0
+                if (Test-Path -LiteralPath $t) { $dstN = (Get-ChildItem -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object).Count }
+                if (($null -ne $manAfter) -and ($manAfter -eq $manBefore) -and ($dstN -ge $srcN)) { $done = $true }
+            }
+            if (-not $done) { $ok = $false }
         }
     }
     return $ok
@@ -167,9 +245,9 @@ function Restore-UserData($src) {
             $t = Join-Path $claudeHome $f
             try { Copy-Item -LiteralPath $s -Destination $t -Force -ErrorAction Stop } catch { $ok = $false; continue }
             try {
-                $hs = (Get-FileHash -LiteralPath $s -Algorithm SHA256 -ErrorAction Stop).Hash
-                $ht = (Get-FileHash -LiteralPath $t -Algorithm SHA256 -ErrorAction Stop).Hash
-                if ($hs -ne $ht) { $ok = $false }
+                $hs = Get-Sha256Hex $s
+                $ht = Get-Sha256Hex $t
+                if ((-not $hs) -or (-not $ht) -or ($hs -ne $ht)) { $ok = $false }
             } catch { $ok = $false }
         }
     }
@@ -247,9 +325,9 @@ if ($ADDITIVE) {
         # существующие любой версии (кастомизации юзера, settings.json) НЕ трогаем.
         # /XF/XD дополнительно защищают ключи, память, историю сессий.
         # H4: канонический список user-data — тот же состав, что $preserveFiles clean-режима.
-        $excludeNames = @('.credentials.master.env', '.credentials.json', 'MEMORY.md',
-                          'chats.db', 'chats.db-journal', 'chats.db-wal', 'chats.db-shm',
-                          'tg_session.session', 'tg_session.session-journal', 'settings.local.json')
+        $excludeNames = @('.credentials.master.env', '.credentials.json', 'settings.local.json', 'MEMORY.md',
+                          'chats.db', 'chats.db-wal', 'chats.db-shm', 'chats.db-journal',
+                          'tg_session.session', 'tg_session.session-wal', 'tg_session.session-shm', 'tg_session.session-journal')
         $excludeDirs  = @((Join-Path $claudeHome 'memory'), (Join-Path $claudeHome 'projects'),
                           (Join-Path $claudeHome 'todos'), (Join-Path $claudeHome 'shell-snapshots'))
         Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
@@ -294,6 +372,19 @@ if ($ADDITIVE) {
     # (краш между wipe и restore — файлы пропали → вернутся; живые файлы НЕ трогаем),
     # затем откладываем его в rescue-папку (не удаляем: там может быть единственная копия).
     if ((Test-Path $preserveDir) -and (Get-ChildItem $preserveDir -Force -ErrorAction SilentlyContinue)) {
+        # P0-1: если stale-снапшот КОНФЛИКТУЕТ с живым деревом (живой preserve-файл есть, но
+        # ОТЛИЧАЕТСЯ от снапшота — напр. живой = шаблон install.ps1, снапшот = реальные ключи) —
+        # НЕ продолжаем. Иначе MissingOnly пропустит существующий файл, реальные ключи из
+        # снапшота потеряются, а финальный restore отрапортует успех на шаблоне. Fail-closed:
+        # не вайпим, снапшот сохраняем НА МЕСТЕ, требуем ручного разбора конфликта.
+        if (Test-StaleSnapshotConflict $preserveDir) {
+            Write-Host "ВНИМАНИЕ: снапшот прерванной установки КОНФЛИКТУЕТ с текущим ~/.claude."
+            Write-Host "  В снапшоте могут лежать твои РЕАЛЬНЫЕ ключи/данные, а в ~/.claude — шаблон"
+            Write-Host "  от прерванного прошлого прогона. Автозамена ОТМЕНЕНА, чтобы не потерять реальные ключи."
+            Write-Host "  Снапшот сохранён здесь: $preserveDir"
+            Write-Host "  Разбери вручную (скопируй нужные значения из снапшота в ~/.claude), удали снапшот и повтори."
+            exit 1
+        }
         Write-Host "Обнаружен снапшот прерванной установки — возвращаю только НЕДОСТАЮЩИЕ файлы..."
         Restore-UserDataMissingOnly $preserveDir
         $rescue = Join-Path $env:USERPROFILE ('.hamidun-setup\preserve-rescue-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))

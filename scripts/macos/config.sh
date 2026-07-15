@@ -80,35 +80,84 @@ PRESERVE_DIR="$HOME/.hamidun-setup/preserve"
 # --exclude / hm_copy_missing ниже). chats.db* — история чатов (FTS5, ~30МБ),
 # tg_session.session* — Telegram-авторизация: base install.sh делает mv ВСЕГО ~/.claude,
 # без снапшота они исчезали навсегда.
-PRESERVE_FILES=".credentials.master.env .credentials.json settings.local.json MEMORY.md chats.db chats.db-wal chats.db-shm chats.db-journal tg_session.session tg_session.session-journal"
+PRESERVE_FILES=".credentials.master.env .credentials.json settings.local.json MEMORY.md chats.db chats.db-wal chats.db-shm chats.db-journal tg_session.session tg_session.session-wal tg_session.session-shm tg_session.session-journal"
 PRESERVE_DIRS="memory projects todos shell-snapshots"
 
 # Размер файла в байтах (portable: macOS/Linux/Git Bash).
 hm_fsize() { wc -c < "$1" 2>/dev/null | tr -d '[:space:]'; }
+# mtime в секундах (portable: GNU stat -c, BSD/macOS stat -f). P0-2: часть отпечатка
+# источника для детекции конкурентной модификации во время копирования.
+hm_fmtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+# P0-2: стабильный манифест дерева (относит.путь|размер|mtime по каждому файлу, sort).
+hm_dir_manifest() {
+  ( cd "$1" 2>/dev/null && find . -type f 2>/dev/null | while IFS= read -r rel; do
+      printf '%s|%s|%s\n' "$rel" "$(hm_fsize "$rel")" "$(hm_fmtime "$rel")"
+    done | LC_ALL=C sort )
+}
+# P0-1: конфликт stale-снапшота с живым ~/.claude. Прерванный прошлый прогон мог оставить
+# снапшот с РЕАЛЬНЫМИ ключами, а install.sh успеть положить ШАБЛОН поверх живого файла.
+# Если preserve-файл есть И в снапшоте, И в живом дереве, но содержимое РАЗЛИЧАЕТСЯ (или не
+# сравнить — живой не обычный файл) → конфликт rc=0 (fail-closed: шаблон не затрёт реальные).
+stale_snapshot_conflict() {
+  local src="$1" f s l
+  for f in $PRESERVE_FILES; do
+    s="$src/$f"; l="$CLAUDE_HOME/$f"
+    { [ -f "$s" ] && [ -e "$l" ]; } || continue
+    [ -f "$l" ] || return 0
+    if command -v cmp >/dev/null 2>&1; then
+      cmp -s "$s" "$l" || return 0
+    else
+      [ "$(hm_fsize "$s")" = "$(hm_fsize "$l")" ] || return 0
+    fi
+  done
+  return 1
+}
 
 # H2/H3: снапшот с ПРОВЕРКОЙ полноты — rc каждого cp + сверка (файлы: существование и
 # размер; каталоги: число элементов не меньше). Возвращает 0 только если КАЖДЫЙ
 # существующий preserve-элемент реально лёг в снапшот. Неполный снапшот перед wipe
 # (install.sh --backup = mv всего ~/.claude) = невосстановимая потеря ключей/памяти.
 snapshot_user_data() {
-  local dst="$1" rc=0 f d s src_sz dst_sz src_n dst_n
+  local dst="$1" rc=0 f d s src_sz dst_sz src_n dst_n attempt stable fp_before fp_after man_before man_after
   mkdir -p "$dst" || return 1
   for f in $PRESERVE_FILES; do
     s="$CLAUDE_HOME/$f"
     [ -f "$s" ] || continue
-    cp -f "$s" "$dst/$f" || { rc=1; continue; }
-    [ -f "$dst/$f" ] || { rc=1; continue; }
-    src_sz="$(hm_fsize "$s")"; dst_sz="$(hm_fsize "$dst/$f")"
-    { [ -n "$src_sz" ] && [ "$src_sz" = "$dst_sz" ]; } || rc=1
+    # P0-2: копия должна быть КОНСИСТЕНТНОЙ — источник не меняется во время копии. До 3
+    # попыток: отпечаток (размер:mtime) ДО, копия, сверка размера, отпечаток ПОСЛЕ + cmp
+    # источника с копией. Работающий Claude/SQLite мог переписать chats.db в момент копии.
+    stable=0
+    for attempt in 1 2 3; do
+      fp_before="$(hm_fsize "$s"):$(hm_fmtime "$s")"
+      cp -f "$s" "$dst/$f" || { rc=1; continue; }
+      [ -f "$dst/$f" ] || { rc=1; continue; }
+      src_sz="$(hm_fsize "$s")"; dst_sz="$(hm_fsize "$dst/$f")"
+      { [ -n "$src_sz" ] && [ "$src_sz" = "$dst_sz" ]; } || continue
+      fp_after="$(hm_fsize "$s"):$(hm_fmtime "$s")"
+      if [ "$fp_before" = "$fp_after" ] && { ! command -v cmp >/dev/null 2>&1 || cmp -s "$s" "$dst/$f"; }; then
+        stable=1; break
+      fi
+    done
+    [ "$stable" -eq 1 ] || rc=1
   done
   for d in $PRESERVE_DIRS; do
     s="$CLAUDE_HOME/$d"
     [ -d "$s" ] || continue
-    rm -rf "$dst/$d"
-    cp -R "$s" "$dst/$d" || rc=1
-    src_n=$(find "$s" 2>/dev/null | wc -l | tr -d ' ')
-    dst_n=$(find "$dst/$d" 2>/dev/null | wc -l | tr -d ' ')
-    [ "${dst_n:-0}" -ge "${src_n:-0}" ] || rc=1
+    # P0-2: манифест дерева (относит.путь|размер|mtime) ДО и ПОСЛЕ копии — расхождение =
+    # конкурентная запись во время снапшота; до 3 попыток, иначе снапшот считаем неполным.
+    stable=0
+    for attempt in 1 2 3; do
+      rm -rf "$dst/$d"
+      man_before="$(hm_dir_manifest "$s")"
+      cp -R "$s" "$dst/$d" || continue
+      man_after="$(hm_dir_manifest "$s")"
+      src_n=$(find "$s" 2>/dev/null | wc -l | tr -d ' ')
+      dst_n=$(find "$dst/$d" 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$man_before" = "$man_after" ] && [ "${dst_n:-0}" -ge "${src_n:-0}" ]; then
+        stable=1; break
+      fi
+    done
+    [ "$stable" -eq 1 ] || rc=1
   done
   return $rc
 }
@@ -279,6 +328,19 @@ else
   # (краш между wipe и restore — файлы пропали → вернутся; живые НЕ трогаем),
   # затем откладываем его в rescue-папку (не удаляем: там может быть единственная копия).
   if [ -d "$PRESERVE_DIR" ] && [ -n "$(ls -A "$PRESERVE_DIR" 2>/dev/null)" ]; then
+    # P0-1: если stale-снапшот КОНФЛИКТУЕТ с живым деревом (живой preserve-файл есть, но
+    # ОТЛИЧАЕТСЯ от снапшота — напр. живой = шаблон install.sh, снапшот = реальные ключи) —
+    # НЕ продолжаем. Иначе MissingOnly пропустит существующий файл, реальные ключи из
+    # снапшота потеряются, а финальный restore отрапортует успех на шаблоне. Fail-closed:
+    # не вайпим, снапшот сохраняем НА МЕСТЕ, требуем ручного разбора конфликта.
+    if stale_snapshot_conflict "$PRESERVE_DIR"; then
+      echo "ВНИМАНИЕ: снапшот прерванной установки КОНФЛИКТУЕТ с текущим ~/.claude."
+      echo "  В снапшоте могут лежать твои РЕАЛЬНЫЕ ключи/данные, а в ~/.claude — шаблон"
+      echo "  от прерванного прошлого прогона. Автозамена ОТМЕНЕНА, чтобы не потерять реальные ключи."
+      echo "  Снапшот сохранён здесь: $PRESERVE_DIR"
+      echo "  Разбери вручную (скопируй нужные значения из снапшота в ~/.claude), удали снапшот и повтори."
+      exit 1
+    fi
     echo "Обнаружен снапшот прерванной установки — возвращаю только НЕДОСТАЮЩИЕ файлы..."
     restore_user_data_missing_only "$PRESERVE_DIR"
     RESCUE="$HOME/.hamidun-setup/preserve-rescue-$(date +%Y%m%d-%H%M%S)"
