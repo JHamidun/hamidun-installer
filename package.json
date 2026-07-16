@@ -3,7 +3,7 @@
   "productName": "Hamidun Setup",
   "version": "0.1.0",
   "description": "One-click installer for a fully configured Claude Code environment (Cursor, Claude Code, Git, Node.js, Hamidun config)",
-  "author": "Zhemal Khamidun <hamidunjemal@gmail.com>",
+  "author": "Zhemal Khamidun (https://hamidun.com)",
   "license": "MIT",
   "main": "src/main.js",
   "scripts": {
