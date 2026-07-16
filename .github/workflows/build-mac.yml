@@ -26,6 +26,10 @@ jobs:
         run: npm run fetch:config
 
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
+        env:
+          # Приватный репо Nomad-агента (JHamidun/nomad) — клонируется на раннере с токеном
+          # из секрета. Без него компонент Nomad делает graceful skip (dmg без агента).
+          NOMAD_AGENT_GIT_URL: ${{ secrets.NOMAD_AGENT_GIT_URL }}
         run: bash tools/fetch-vendor-mac.sh
 
       - name: Validate bundled git (dugite)

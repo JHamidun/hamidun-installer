@@ -27,6 +27,13 @@
       "sora.com", "higgsfield.ai"]
   },
   "claudeCodeExtensionId": "anthropic.claude-code",
+  "course": {
+    "_comment": "Курс-симулятор (объединён в базовую сборку, раздаётся всем бесплатно). targetDirDefault — куда распаковать; globalInstall — ставить ли наставника глобально в ~/.claude; beaconUrl — эндпоинт академии для сигнала о завершении трека (пусто = маяк выключен).",
+    "targetDirDefault": "%USERPROFILE%\\HamidunCourse",
+    "globalInstall": false,
+    "beaconUrl": "https://academy.hamidun.com/api/course-completion",
+    "shortcutName": "Курс вайбкодинг (Claude Code)"
+  },
   "finish": {
     "autoOpenCursorDefault": true,
     "credentialsRelPath": ".claude/.credentials.master.env",

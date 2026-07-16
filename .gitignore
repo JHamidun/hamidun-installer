@@ -2,8 +2,11 @@ node_modules/
 release/
 release-mac/
 # vendor (в т.ч. приватный vendor/nomad-src — код агента) вшивается фетчером
-# на сборке (tools/fetch-vendor*); в git НЕ коммитим.
-vendor/
+# на сборке (tools/fetch-vendor*); в git НЕ коммитим — КРОМЕ архива курса.
+# vendor/* (содержимое), чтобы git заходил внутрь и мог re-include course ниже.
+vendor/*
+# Исключение: курс-симулятор (лёгкий ~275КБ) трекается в git — раздаётся всем бесплатно.
+!vendor/course/
 *.log
 *.dmg
 *.exe

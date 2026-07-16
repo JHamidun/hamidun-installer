@@ -333,6 +333,20 @@ if ($missing.Count -gt 0) {
   Write-Host "[vendor] OK: все ключевые артефакты на месте."
 }
 
+# Курс-симулятор (объединён в базовую сборку, раздаётся всем бесплатно): архив ОБЯЗАН
+# быть в vendor\course — без него компонент «Курс интенсива» падает у КАЖДОГО. Валим
+# сборку сразу. Архив лёгкий (~275 КБ) и трекается в git (см. !vendor/course/ в .gitignore).
+$componentsRawC = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
+if ($componentsRawC -and $componentsRawC -match '"course"') {
+  $courseZip = Join-Path $root 'vendor\course\vibecoding-course.zip'
+  $cz = Get-Item $courseZip -ErrorAction SilentlyContinue
+  if (-not $cz -or $cz.Length -eq 0) {
+    Write-Host "[vendor] FATAL: нет vendor\course\vibecoding-course.zip — курс-симулятор не попадёт в сборку. Проверь, что архив закоммичен (!vendor/course/)."
+    exit 1
+  }
+  Write-Host "[vendor] OK: курс-симулятор на месте (vendor\course\vibecoding-course.zip)."
+}
+
 # uv: вшитый ОФЛАЙН-компонент БЕЗ онлайн-фолбэка (uv.ps1 ставит только из vendor).
 # Если компонент «uv» объявлен в components.json — ОБА бинаря (uv.exe И uvx.exe) обязаны
 # лежать непустыми (P1 Codex: не только uv.exe — полу-извлечённый каталог протащил бы
