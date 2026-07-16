@@ -310,6 +310,39 @@ h1 {
 .ns-auto { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
 .ns-auto input { width: 15px; height: 15px; }
 
+/* ---- доступ к нейросети (CJM: разблокировка «скачал → Claude заработал») ---- */
+.ns-access { margin: 0 0 12px; }
+.ns-access-title { font-family: var(--h-font-head); font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+.ns-access-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 560px) { .ns-access-grid { grid-template-columns: 1fr; } }
+.ns-access-card {
+  border: 1px solid rgba(128,128,128,.28);
+  border-radius: var(--h-r-lg); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+  background: rgba(128,128,128,.06);
+}
+.ns-access-card--hl {
+  border-color: rgba(41,169,255,.55);
+  background: linear-gradient(135deg, rgba(41,169,255,.12), rgba(45,47,232,.12));
+}
+.ns-access-h { font-family: var(--h-font-head); font-weight: 700; font-size: 14px; }
+.ns-access-t { color: var(--text-muted); font-size: 12.5px; line-height: 1.45; flex: 1 1 auto; }
+.ns-access-btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.ns-access-btn {
+  font-family: var(--h-font-head); font-weight: 700; font-size: 13px;
+  border: 1px solid rgba(128,128,128,.4); border-radius: var(--h-r-pill);
+  padding: 9px 16px; color: inherit; cursor: pointer;
+  background: rgba(128,128,128,.1);
+  transition: transform .05s, filter .15s;
+}
+.ns-access-btn.primary {
+  border: none; color: #fff;
+  background: linear-gradient(135deg, var(--h-cyan), var(--h-primary));
+  box-shadow: 0 8px 24px rgba(41,169,255,.4);
+}
+.ns-access-btn:hover { filter: brightness(1.1); }
+.ns-access-btn:active { transform: translateY(1px); }
+
 /* ---- skill packs ---- */
 #packs-wrap { margin-top: 6px; transition: opacity .15s; }
 #packs-wrap.disabled { opacity: .4; pointer-events: none; }

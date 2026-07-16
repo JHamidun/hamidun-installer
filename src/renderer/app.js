@@ -862,14 +862,44 @@ function renderNextSteps(failed, skipped) {
     ? `<li><b>Если что-то не получается</b> — не разбирайся в одиночку. Жми на кнопку бота ниже: он ответит и проведёт по шагам.</li>`
     : `<li><b>Если что-то не получается</b> — открой памятку «Что дальше» ниже: в ней ответы на весь первый день.</li>`;
 
+  // ── Доступ к нейросети (CJM: главный барьер воронки «скачал → Claude заработал») ──
+  // Два пути: своя подписка Claude ИЛИ Nomad для РФ (без VPN/зарубежной карты, рубли).
+  // Карту Nomad показываем ТОЛЬКО если агент реально установлен (на Mac пока skip).
+  const nomadOk = !!(STATE.selected && STATE.selected.nomad);
+  const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
+  const claudeUrl = links.claude || 'https://claude.ai/login';
+  const nomadCard = (nomadOk && cloud.registerUrl)
+    ? `<div class="ns-access-card ns-access-card--hl">
+         <div class="ns-access-h">🇷🇺 Из России — через Nomad</div>
+         <div class="ns-access-t">Без VPN и без зарубежной карты, оплата в рублях. Зарегистрируйся в кабинете, получи ключ — и Claude заработает через облако Nomad (уже встроено в установщик).</div>
+         <div class="ns-access-btns">
+           <button type="button" class="ns-access-btn primary" data-ext="${cloud.registerUrl}">Регистрация в кабинете</button>
+           ${cloud.keysUrl ? `<button type="button" class="ns-access-btn" data-ext="${cloud.keysUrl}">Получить ключ</button>` : ''}
+         </div>
+       </div>`
+    : '';
+  const accessHtml = `
+    <div class="ns-access">
+      <div class="ns-access-title">Осталось подключить нейросеть — без неё Claude не ответит. Выбери, как удобно:</div>
+      <div class="ns-access-grid">
+        <div class="ns-access-card">
+          <div class="ns-access-h">💳 Своя подписка Claude</div>
+          <div class="ns-access-t">Если есть зарубежная карта — оформи Claude Pro или Max. При первом запросе Claude сам попросит войти.</div>
+          <div class="ns-access-btns"><button type="button" class="ns-access-btn" data-ext="${claudeUrl}">Войти на claude.ai</button></div>
+        </div>
+        ${nomadCard}
+      </div>
+    </div>`;
+
   const ns = $('#next-steps');
   ns.innerHTML = `
     <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
       <li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>.</li>
-      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». При первом запуске Claude попросит войти в подписку (Pro/Max) — просто следуй подсказкам.</li>
+      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». При первом запросе Claude попросит подключить нейросеть — как это сделать (своя подписка или Nomad для РФ), смотри в блоке ниже.</li>
       ${step3}
     </ol>
+    ${accessHtml}
     ${checksHtml}
     ${failHtml}
     <div class="ns-actions">
