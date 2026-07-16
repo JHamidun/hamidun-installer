@@ -827,8 +827,8 @@ ok('claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl 
   assert(!/if command -v spctl/.test(s), 'НЕТ conditional "if command -v spctl" (это был fail-OPEN)');
   assert(/"\$CODESIGN" --verify --deep --strict/.test(s), 'проверяет подпись бандла (абсолютный codesign)');
   assert(/"\$SPCTL" --assess --type execute/.test(s), 'нотаризация ОБЯЗАТЕЛЬНА (spctl вызывается всегда)');
-  assert(/Q6L2SF6YDW/.test(s) && /TeamIdentifier/.test(s), 'пин Team ID Anthropic (крипто-пин, не подстрока authority)');
-  assert(/com\.anthropic\.claudefordesktop/.test(s) && /Identifier=/.test(s), 'пин bundle identifier');
+  assert(/Q6L2SF6YDW/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'пин Team ID Anthropic через нативный designated requirement (certificate leaf[subject.OU], не -dv парсинг)');
+  assert(/com\.anthropic\.claudefordesktop/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
   assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
     'подпись проверяется ДО установки (ditto)');
   assert(/curl -fsSL --proto '=https'/.test(s), 'скачивание только по HTTPS (без http-downgrade)');
@@ -846,8 +846,8 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
   assert(!/if command -v spctl/.test(s), 'НЕТ conditional spctl (был fail-OPEN)');
   assert(/"\$CODESIGN" --verify --deep --strict/.test(s), 'проверяет подпись (абсолютный codesign)');
   assert(/"\$SPCTL" --assess --type execute/.test(s), 'нотаризация ОБЯЗАТЕЛЬНА (spctl всегда)');
-  assert(/2DC432GLL2/.test(s) && /TeamIdentifier/.test(s), 'ТОЧНЫЙ Team ID OpenAI (крипто-пин команды-издателя)');
-  assert(/com\.openai\.chat/.test(s) && /Identifier=/.test(s), 'пин bundle identifier');
+  assert(/2DC432GLL2/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'ТОЧНЫЙ Team ID OpenAI через нативный designated requirement (не -dv парсинг)');
+  assert(/com\.openai\.chat/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
   assert(!/grep -q "Authority=Developer ID Application: \$PUBLISHER"/.test(s),
     'НЕТ authority-substring как контроля (любой Dev ID с «OpenAI» иначе прошёл бы)');
   assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
@@ -891,7 +891,7 @@ ok('6b: нет spoofable substring-пина подписи + есть прове
   });
   // --- macOS: точный Team ID пин + require spctl (нет fail-open) ---
   [DT_CLAUDE_SH(), DT_CHATGPT_SH()].forEach((s) => {
-    assert(/TeamIdentifier=/.test(s) && /(Q6L2SF6YDW|2DC432GLL2)/.test(s), 'mac: точный Team ID пин (крипто, не authority-подстрока)');
+    assert(/(Q6L2SF6YDW|2DC432GLL2)/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'mac: Team ID+bundle пин через нативный designated requirement -R (codesign оценивает крипто, не парсинг -dv)');
     assert(!/if command -v spctl/.test(s), 'mac: spctl НЕ conditional (нет fail-OPEN при отсутствии spctl)');
     assert(/\[ ! -x "\$SPCTL" \]/.test(s), 'mac: отсутствие spctl → fail-CLOSED (require -x)');
     assert(/"\$SPCTL" --assess/.test(s), 'mac: spctl --assess вызывается всегда (обязательная нотаризация)');

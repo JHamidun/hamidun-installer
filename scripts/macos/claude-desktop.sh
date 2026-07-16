@@ -94,19 +94,14 @@ verify_desktop_app() {
   if [ ! -x "$SPCTL" ]; then
     echo "БЕЗОПАСНОСТЬ: $SPCTL недоступен/не исполняемый — не могу проверить нотаризацию. Пропускаю Claude Desktop (fail-closed)."; return 1
   fi
-  if ! "$CODESIGN" --verify --deep --strict "$app" >/dev/null 2>&1; then
-    echo "БЕЗОПАСНОСТЬ: подпись .app не прошла codesign --verify (подменён/повреждён): $app. Пропускаю (fail-closed)."; return 1
-  fi
-  local info; info="$("$CODESIGN" -dv --verbose=4 "$app" 2>&1)"
-  # (b) ТОЧНЫЙ TeamIdentifier (крипто-пин команды-издателя, НЕ подстрока authority).
-  local team; team="$(printf '%s\n' "$info" | sed -n 's/^TeamIdentifier=//p' | head -n1)"
-  if [ "$team" != "$CLAUDE_TEAM_ID" ]; then
-    echo "БЕЗОПАСНОСТЬ: .app подписан НЕ ожидаемым Team ID (TeamIdentifier='${team:-нет}', ожидался $CLAUDE_TEAM_ID): $app. Пропускаю (fail-closed)."; return 1
-  fi
-  # + ТОЧНЫЙ bundle identifier.
-  local ident; ident="$(printf '%s\n' "$info" | sed -n 's/^Identifier=//p' | head -n1)"
-  if [ "$ident" != "$CLAUDE_BUNDLE_ID" ]; then
-    echo "БЕЗОПАСНОСТЬ: bundle identifier ('${ident:-нет}') != ожидаемого ($CLAUDE_BUNDLE_ID): $app. Пропускаю (fail-closed)."; return 1
+  # (a)+(b) Подпись валидна И удовлетворяет НАТИВНОМУ designated requirement:
+  # anchor apple generic (Developer ID от Apple) + точный identifier + точный Team ID
+  # (certificate leaf[subject.OU] = Team ID). codesign оценивает КРИПТОГРАФИЧЕСКИ по самой
+  # подписи — это НЕ парсинг человекочитаемого -dv, поэтому инъекция Team ID через переводы
+  # строк в CFBundleExecutable/-dv (Codex round-4 P1) невозможна.
+  local req="anchor apple generic and identifier \"$CLAUDE_BUNDLE_ID\" and certificate leaf[subject.OU] = \"$CLAUDE_TEAM_ID\""
+  if ! "$CODESIGN" --verify --deep --strict -R "=$req" "$app" >/dev/null 2>&1; then
+    echo "БЕЗОПАСНОСТЬ: .app не удовлетворяет designated requirement (подпись невалидна ИЛИ не тот издатель/Team $CLAUDE_TEAM_ID/bundle $CLAUDE_BUNDLE_ID): $app. Пропускаю (fail-closed)."; return 1
   fi
   # (c) Нотаризация ОБЯЗАТЕЛЬНА (spctl вызывается ВСЕГДА; любой non-zero → fail-closed).
   if ! "$SPCTL" --assess --type execute -vv "$app" >/dev/null 2>&1; then
