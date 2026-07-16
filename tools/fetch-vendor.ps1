@@ -147,6 +147,74 @@ if (Test-Path $font) {
   else { Write-Host "  ! шрифт не скачался — extension поставится без шрифта (не критично)" }
 }
 
+Write-Host "[vendor] uv (Astral, Windows x64) — вшитый офлайн-компонент..."
+# Официальный источник — GitHub releases astral-sh/uv (latest/download — стабильный
+# URL без API). Распаковываем uv.exe + uvx.exe в apps\uv\ — checksums.json (ниже,
+# -Recurse) захеширует их автоматически; uv.ps1 проверит fail-closed (Confirm-HmArtifact).
+# Валиден ли уже разложенный vendor-uv: ОБА бинаря (uv.exe + uvx.exe) на месте и непустые.
+function Test-HmUvVendorValid([string]$dir) {
+  $e = Get-Item (Join-Path $dir 'uv.exe')  -ErrorAction SilentlyContinue
+  $x = Get-Item (Join-Path $dir 'uvx.exe') -ErrorAction SilentlyContinue
+  return ($e -and $e.Length -gt 0 -and $x -and $x.Length -gt 0)
+}
+$uvDir = Join-Path $apps 'uv'
+$uvExe = Join-Path $uvDir 'uv.exe'
+# P1 (Codex): skip доверяем ТОЛЬКО валидному существующему каталогу (те же проверки,
+# что при свежей закачке: оба exe непустые). Полу-извлечённый uv.exe без uvx.exe (или
+# пустой) от прерванного fetch → НЕ skip: удаляем каталог и качаем заново (иначе он
+# прошёл бы size-only FATAL-гейт → сломанный uv).
+$uvNeedFetch = $true
+if (Test-Path $uvExe) {
+  if (Test-HmUvVendorValid $uvDir) {
+    Write-Host "  skip uv\uv.exe (uv.exe + uvx.exe на месте)"
+    $uvNeedFetch = $false
+  } else {
+    Write-Host "  ! существующий vendor\apps\uv битый/неполный (нет uvx.exe или пустой) — перекачиваю"
+    Remove-Item -Recurse -Force $uvDir -ErrorAction SilentlyContinue
+  }
+}
+if ($uvNeedFetch) {
+  # P1-B: качаем zip во ВРЕМЕННЫЙ .part и раскладываем uv.exe/uvx.exe в apps\uv ТОЛЬКО
+  # после того, как zip открылся И содержит ОБА бинаря — распаковываем в _stage и делаем
+  # atomic-move в apps\uv. Иначе сбой докачки оставил бы частичный/битый zip или
+  # полу-распакованный каталог, который прошёл бы FATAL-гейт по размеру → сломанный exe.
+  $uvZip   = Join-Path $apps '_uv.zip.part'
+  $uvStage = Join-Path $apps '_uv-stage'
+  Remove-Item $uvZip -Force -ErrorAction SilentlyContinue
+  if (Test-Path $uvStage) { Remove-Item -Recurse -Force $uvStage -ErrorAction SilentlyContinue }
+  $uvOk = $false
+  try {
+    Write-Host "  GET  uv-x86_64-pc-windows-msvc.zip"
+    Invoke-WebRequest "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip" -OutFile $uvZip -MaximumRedirection 6 -UseBasicParsing
+  } catch { Write-Host "  ! uv не скачался: $($_.Exception.Message)"; Remove-Item $uvZip -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $uvZip) {
+    try {
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      New-Item -ItemType Directory -Force $uvStage | Out-Null
+      $za = [IO.Compression.ZipFile]::OpenRead($uvZip)   # битый zip → бросит здесь
+      try {
+        foreach ($n in @('uv.exe', 'uvx.exe')) {
+          $entry = $za.Entries | Where-Object { $_.Name -eq $n } | Select-Object -First 1
+          if ($entry) { [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $uvStage $n), $true) }
+        }
+      } finally { $za.Dispose() }
+      # Требуем ОБА бинаря непустыми (та же проверка, что для skip) — иначе не публикуем.
+      if (Test-HmUvVendorValid $uvStage) { $uvOk = $true }
+      else { Write-Host "  ! в архиве uv нет uv.exe/uvx.exe (или пустые) — не публикую" }
+    } catch { Write-Host "  ! uv не распаковался - $($_.Exception.Message)" }
+    Remove-Item $uvZip -Force -ErrorAction SilentlyContinue
+  }
+  if ($uvOk) {
+    # atomic-ish: убираем возможный старый каталог и переносим проверенный _stage на место.
+    if (Test-Path $uvDir) { Remove-Item -Recurse -Force $uvDir -ErrorAction SilentlyContinue }
+    Move-Item -Force $uvStage $uvDir
+    Write-Host "  ok uv\uv.exe (+uvx.exe)"
+  } else {
+    if (Test-Path $uvStage) { Remove-Item -Recurse -Force $uvStage -ErrorAction SilentlyContinue }
+    Write-Host "  ! uv не вшит — компонент uv не попадёт в сборку (FATAL-гейт ниже)"
+  }
+}
+
 Write-Host "[vendor] Python wheels (под локальный Python = bundled Python, без кросс-флагов)..."
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 $req = Join-Path $root 'vendor\config-pack\requirements.txt'
@@ -263,6 +331,19 @@ if ($missing.Count -gt 0) {
   Write-Host "[vendor] Установка на этих компонентах уйдёт в онлайн-фолбэк или упадёт."
 } else {
   Write-Host "[vendor] OK: все ключевые артефакты на месте."
+}
+
+# uv: вшитый ОФЛАЙН-компонент БЕЗ онлайн-фолбэка (uv.ps1 ставит только из vendor).
+# Если компонент «uv» объявлен в components.json — ОБА бинаря (uv.exe И uvx.exe) обязаны
+# лежать непустыми (P1 Codex: не только uv.exe — полу-извлечённый каталог протащил бы
+# сломанный компонент). Валим сборку сразу с понятным сообщением, а не пользователя.
+$componentsRawU = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
+if ($componentsRawU -and $componentsRawU -match '"uv"') {
+  if (-not (Test-HmUvVendorValid (Join-Path $apps 'uv'))) {
+    Write-Host "[vendor] FATAL: vendor\apps\uv неполон — нужны ОБА непустых uv.exe и uvx.exe. Удали каталог и перезапусти fetch-vendor, либо убери компонент uv из components.json."
+    exit 1
+  }
+  Write-Host "[vendor] OK: uv на месте и валиден (vendor\apps\uv\uv.exe + uvx.exe)."
 }
 
 # Скрепка: exe попадает в vendor только с машины с локальной сборкой маскота. Если компонент

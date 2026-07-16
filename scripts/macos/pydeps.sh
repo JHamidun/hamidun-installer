@@ -2,12 +2,24 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
+# Пин подписи python.pkg ДО root-запуска installer (fail-closed, THREAT-MODEL round-4):
+# /tmp-загрузку мог подменить процесс того же пользователя. Требуем Developer ID
+# Installer с ТОЧНЫМ Team ID Python Software Foundation. Подтверждено сетью (2026-07):
+# начиная с Python 3.11.4/3.12.0b1 установщики python.org подписаны сертификатами PSF
+# c Apple Developer ID BMM5U3QVKW (python.org/downloads + docs.python.org/3/using/mac.html;
+# мы ставим 3.12.7 > 3.11.4). Не подтвердится — fail-closed стоп.
+PYTHON_TEAM_ID='BMM5U3QVKW'
+
 # Предпочитаем bundled Python 3.12 (под него собраны wheels).
 PY312="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
 if [ ! -x "$PY312" ] && [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/python.pkg" ]; then
   echo "Python 3.12 из встроенного pkg (офлайн)..."
   verify_artifact "$HM_VENDOR/apps/python.pkg"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
-  admin_run "installer -pkg '$HM_VENDOR/apps/python.pkg' -target /"
+  # verify + install атомарно под root на staged копии (Codex P1); пин подписи и для
+  # вшитого pkg (defense-in-depth поверх SHA-256). Путь и Team ID — позиционные.
+  if ! admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" hm_pkg_install "$HM_VENDOR/apps/python.pkg" "$PYTHON_TEAM_ID"; then
+    echo "Python: подпись .pkg не подтверждена или установка не удалась (fail-closed)."; exit 1
+  fi
 fi
 if [ -x "$PY312" ]; then PY="$PY312"
 else
@@ -20,7 +32,11 @@ else
   else
     echo "Скачиваю Python с python.org..."
     PKG="/tmp/python.pkg"; dl "https://www.python.org/ftp/python/3.12.7/python-3.12.7-macos11.pkg" "$PKG"
-    admin_run "installer -pkg '$PKG' -target /"
+    # verify + install атомарно под root на staged копии (Codex P1) — окна подмены /tmp
+    # между verify и install нет (PSF Team ID, fail-closed) — см. PYTHON_TEAM_ID выше.
+    if ! admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" hm_pkg_install "$PKG" "$PYTHON_TEAM_ID"; then
+      echo "Python: подпись .pkg не подтверждена или установка не удалась (fail-closed)."; exit 1
+    fi
     PY="$PY312"
   fi
 fi

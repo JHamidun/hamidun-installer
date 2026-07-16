@@ -10,6 +10,11 @@ DRY="${HM_DRY_RUN:-}"
 
 # Пин издателя: скрепка обязана быть подписана ИМЕННО нашим Developer ID (Apple Team ID).
 MASCOT_TEAM_ID="3VN93XA9DY"
+# Инструменты проверки — АБСОЛЮТНЫЕ пути + require наличия (THREAT-MODEL round-4:
+# `if command -v codesign/spctl` был fail-OPEN — нет инструмента в PATH -> проверка
+# молча пропускалась; теперь нет/не исполняемый -> fail-CLOSED, не ставим).
+CODESIGN='/usr/bin/codesign'
+SPCTL='/usr/sbin/spctl'
 
 # python3 нужен ТОЛЬКО для безопасной правки settings.json (валидация JSON + literal
 # replace). Если его нет — правку пропускаем, скрепка пропишет хуки сама при запуске.
@@ -61,38 +66,41 @@ fi
 
 # 1. Целостность — fail-closed вентили (эквивалент Confirm-HmArtifact + Gatekeeper):
 #    (a) SHA-256 главного бинаря против vendor/checksums.json (как на Windows);
-#    (b) codesign --verify --deep --strict всего бандла — целостность ПОДПИСИ (и только её);
-#    (c) пин издателя: TeamIdentifier обязан быть нашим ($MASCOT_TEAM_ID);
-#    (d) нотаризация: spctl --assess --type execute (вердикт Gatekeeper; есть на любой
-#        macOS) или staple-тикет (xcrun stapler validate). codesign сам по себе
-#        нотаризацию НЕ подтверждает — потому оба вентиля (c)+(d) обязательны.
+#    (b)+(c) codesign --verify --deep --strict -R "=<designated requirement>" — целостность
+#        подписи И пин издателя (anchor apple generic + ТОЧНЫЙ Team ID через
+#        certificate leaf[subject.OU]); codesign оценивает КРИПТОГРАФИЧЕСКИ по самой
+#        подписи, НЕ парсинг человекочитаемого -dv (инъекция «TeamIdentifier=...»
+#        через переводы строк невозможна);
+#    (d) нотаризация ОБЯЗАТЕЛЬНА: spctl --assess --type execute вызывается ВСЕГДА
+#        (есть на любой macOS; АБСОЛЮТНЫЙ путь, require -x); любой non-zero ->
+#        fail-closed. codesign сам по себе нотаризацию НЕ подтверждает — потому
+#        оба вентиля (b/c)+(d) обязательны. Fallback'ов (stapler) нет.
 verify_artifact "$APP_BIN_PATH"   # сам делает exit 1 при несовпадении/отсутствии манифеста
 
 # Полная проверка бандла (подпись + издатель + нотаризация). Вызывается для исходника
 # ДО установки и для результата в ~/Applications ПЕРЕД снятием карантина.
 verify_app_bundle() {
   local app="$1"
-  if ! command -v codesign >/dev/null 2>&1; then
-    echo "БЕЗОПАСНОСТЬ: codesign недоступен — не могу проверить подпись скрепки. Установка остановлена."; exit 1
+  # Инструменты по АБСОЛЮТНЫМ путям + require: нет/не исполняемый -> fail-CLOSED
+  # (НЕ fail-open: раньше отсутствие codesign/spctl в PATH молча пропускало проверку).
+  if [ ! -x "$CODESIGN" ]; then
+    echo "БЕЗОПАСНОСТЬ: $CODESIGN недоступен/не исполняемый — не могу проверить подпись скрепки. Установка остановлена (fail-closed)."; exit 1
   fi
-  if ! codesign --verify --deep --strict "$app" >/dev/null 2>&1; then
-    echo "БЕЗОПАСНОСТЬ: подпись .app не прошла проверку (codesign --verify): $app — файл подменён/повреждён. Установка остановлена."; exit 1
+  if [ ! -x "$SPCTL" ]; then
+    echo "БЕЗОПАСНОСТЬ: $SPCTL недоступен/не исполняемый — не могу проверить нотаризацию скрепки. Установка остановлена (fail-closed)."; exit 1
   fi
-  # TeamID сравниваем ТОЧНО (извлекаем значение), не подстрокой: grep -q поймал бы
-  # и TeamIdentifier=3VN93XA9DYEVIL.
-  local actual_team
-  actual_team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -n1)"
-  if [ "$actual_team" != "$MASCOT_TEAM_ID" ]; then
-    echo "БЕЗОПАСНОСТЬ: .app подписан НЕ нашим Developer ID (TeamIdentifier='${actual_team:-нет}', ожидался $MASCOT_TEAM_ID): $app. Установка остановлена."; exit 1
+  # Подпись валидна И удовлетворяет designated requirement: anchor apple generic
+  # (Developer ID от Apple) + ТОЧНЫЙ Team ID (certificate leaf[subject.OU]).
+  # Крипто-оценка самой подписи — НЕ извлечение TeamIdentifier из -dv-вывода.
+  local req="anchor apple generic and certificate leaf[subject.OU] = \"$MASCOT_TEAM_ID\""
+  if ! "$CODESIGN" --verify --deep --strict -R "=$req" "$app" >/dev/null 2>&1; then
+    echo "БЕЗОПАСНОСТЬ: .app не удовлетворяет designated requirement (подпись невалидна/повреждена ИЛИ не наш Developer ID, ожидался Team ID $MASCOT_TEAM_ID): $app. Установка остановлена (fail-closed)."; exit 1
   fi
-  # Основной вентиль нотаризации — spctl (есть всегда); запасной — staple-тикет.
-  if command -v spctl >/dev/null 2>&1 && spctl --assess --type execute -vv "$app" >/dev/null 2>&1; then
-    return 0
+  # Нотаризация ОБЯЗАТЕЛЬНА: spctl вызывается ВСЕГДА; любой non-zero -> fail-closed.
+  if ! "$SPCTL" --assess --type execute -vv "$app" >/dev/null 2>&1; then
+    echo "БЕЗОПАСНОСТЬ: нотаризация .app не подтверждена (spctl --assess не прошёл): $app. Установка остановлена (fail-closed)."; exit 1
   fi
-  if command -v xcrun >/dev/null 2>&1 && xcrun stapler validate "$app" >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "БЕЗОПАСНОСТЬ: нотаризация .app не подтверждена (spctl --assess и stapler validate не прошли): $app. Установка остановлена."; exit 1
+  return 0
 }
 verify_app_bundle "$APP"
 echo "  Подпись Developer ID ($MASCOT_TEAM_ID) и нотаризация подтверждены (codesign + spctl)."

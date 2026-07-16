@@ -1,54 +1,62 @@
-﻿# uv — быстрый менеджер Python (Astral). REMOTE-компонент: бинарь НЕ вшит, а
-# докачан установщиком из CDN, проверен по SHA-256 и разложен в admin-owned
-# $env:HM_REMOTE_CACHE (%ProgramData%\HamidunSetup\… — DACL SYSTEM+Admins,
-# см. main.js / remote-fetch.js). Оттуда его БЕЗОПАСНО запускать даже elevated.
+﻿# uv — быстрый менеджер Python (Astral). ВШИТЫЙ компонент (100% офлайн, BUNDLED-ONLY):
+# бинарь едет внутри установщика (vendor/apps/uv — кладёт tools/fetch-vendor.ps1 из
+# GitHub releases astral-sh/uv) и проверяется fail-closed по SHA-256 против
+# vendor/checksums.json (Confirm-HmArtifact). Сеть при установке НЕ нужна.
+#
+# БЕЗОПАСНОСТЬ (P1-A): легаси-фолбэк на HM_REMOTE_CACHE УБРАН полностью — он позволял
+# запустить НЕпроверенный uv из унаследованного окружения. Единственный источник uv =
+# $HM_VENDOR/apps/uv с fail-closed SHA. Нет vendor → graceful skip (exit 120), НЕ фолбэк.
 #
 # БЕЗОПАСНОСТЬ (FIX-D/FIX-G): проверку версии делаем ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО
-# КЭША (не из будущей user-writable копии), затем копируем в %LOCALAPPDATA%\Programs\uv
+# ИСТОЧНИКА (vendor после SHA-проверки), затем копируем в %LOCALAPPDATA%\Programs\uv
 # для PATH пользователя, но копию под elevated-токеном НЕ запускаем (это была бы
 # TOCTOU-гонка: medium-integrity процесс юзера мог бы подменить exe между copy и run).
 # Успех — ТОЛЬКО при exit-коде 0 И валидном формате вывода `uv --version`. Honor HM_DRY_RUN.
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 $DRY = [bool]$env:HM_DRY_RUN
 
-# P1-8: dry-run ветвится ДО проверки кэша — в dry-run main НИЧЕГО не докачивает,
-# поэтому HM_REMOTE_CACHE легитимно отсутствует; никаких обращений к сети/диску.
+# P1-8: dry-run ветвится ДО проверки vendor — никаких обращений к диску.
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: докачать uv из CDN (SHA-256), проверить запуском ИЗ ЗАЩИЩЁННОГО кэша, скопировать в %LOCALAPPDATA%\Programs\uv, добавить в PATH (копию НЕ запускать)"
+    Write-Host "  [dry-run] WOULD: проверить SHA-256 вшитого uv (vendor\apps\uv), проверить запуском ИЗ ЗАЩИЩЁННОГО источника, скопировать в %LOCALAPPDATA%\Programs\uv, добавить в PATH (копию НЕ запускать)"
     exit 0
 }
 
-$cache = $env:HM_REMOTE_CACHE
-if (-not $cache -or -not (Test-Path -LiteralPath $cache)) {
-    Write-Host "ОШИБКА: HM_REMOTE_CACHE не задан или не существует — докачка uv не выполнена."
+# 0) Источник бинарей — ТОЛЬКО вшитый vendor (bundled-only). Reparse-point
+#    (симлинк/junction) в роли источника отвергаем. Нет vendor → graceful skip.
+$vendorUv = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\uv\uv.exe' } else { '' }
+if (-not ($vendorUv -and (Test-Path -LiteralPath $vendorUv -PathType Leaf))) {
+    Write-Host "uv не вошёл в эту сборку (нет vendor\apps\uv\uv.exe) — пропускаю. Всё остальное работает без него."
+    exit 120
+}
+$vit = Get-Item -LiteralPath $vendorUv -Force
+if ($vit.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    Write-Host "ОШИБКА: вшитый uv.exe — reparse-point (отклонено)."
     exit 1
 }
-
-# Ищем uv.exe в защищённом кэше. Отвергаем reparse-point (симлинк/junction).
-$src = Get-ChildItem -Path $cache -Filter 'uv.exe' -Recurse -File -ErrorAction SilentlyContinue |
-       Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
-       Select-Object -First 1
-if (-not $src) {
-    Write-Host "ОШИБКА: uv.exe не найден в защищённом кэше ($cache)."
-    exit 1
+Write-Host "Ставлю uv из встроенного пакета (офлайн, без обращений к сети)..."
+# Целостность вшитых бинарей — fail-closed (при несовпадении SHA-256 exit 1 сам)
+Confirm-HmArtifact $vendorUv
+$srcUv = $vendorUv
+$srcUvxPath = ''
+$vendorUvx = Join-Path $env:HM_VENDOR 'apps\uv\uvx.exe'
+if (Test-Path -LiteralPath $vendorUvx -PathType Leaf) {
+    $vxi = Get-Item -LiteralPath $vendorUvx -Force
+    if (-not ($vxi.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        Confirm-HmArtifact $vendorUvx
+        $srcUvxPath = $vendorUvx
+    }
 }
-$srcUv = $src.FullName
-if (-not (Test-Path -LiteralPath $srcUv -PathType Leaf)) {
-    Write-Host "ОШИБКА: источник uv.exe — не файл (Leaf)."
-    exit 1
-}
-$srcUvx = Get-ChildItem -Path $cache -Filter 'uvx.exe' -Recurse -File -ErrorAction SilentlyContinue |
-          Where-Object { -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) } |
-          Select-Object -First 1
 
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\uv'
 
-# 1) ПРОВЕРКА ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО ИСТОЧНИКА (admin-owned кэш), НЕ из user-writable
-#    места. Требуем exit 0 И вывод формата 'uv <версия>' (не просто подстроку 'uv').
+# 1) ПРОВЕРКА ЗАПУСКОМ ИЗ ЗАЩИЩЁННОГО ИСТОЧНИКА (vendor после SHA-проверки),
+#    НЕ из user-writable места. Требуем exit 0 И вывод формата 'uv <версия>'
+#    (не просто подстроку 'uv').
 $ver = ''
 try { $ver = (& $srcUv --version 2>&1 | Select-Object -First 1) }
 catch {
-    Write-Host "ОШИБКА: uv.exe из кэша не запустился — $($_.Exception.Message)"
+    Write-Host "ОШИБКА: uv.exe из источника не запустился — $($_.Exception.Message)"
     exit 1
 }
 if ($LASTEXITCODE -ne 0 -or ("$ver" -notmatch '^uv\s+\d')) {
@@ -80,7 +88,7 @@ $target = Join-Path $dest 'uv.exe'
 try {
     New-Item -ItemType Directory -Force $dest -ErrorAction Stop | Out-Null
     Copy-Item -Force -LiteralPath $srcUv $target -ErrorAction Stop
-    if ($srcUvx) { Copy-Item -Force -LiteralPath $srcUvx.FullName (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
+    if ($srcUvxPath) { Copy-Item -Force -LiteralPath $srcUvxPath (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
 } catch {
     Write-Host "ОШИБКА: не удалось скопировать uv в $dest — $($_.Exception.Message)"
     exit 1
@@ -111,5 +119,5 @@ try {
 Write-Host "HM-RECEIPT path $dest"
 if ($pathEntryOurs) { Write-Host "HM-RECEIPT pathentry $dest" }
 
-Write-Host "OK: uv установлен ($ver) — проверен из защищённого кэша, скопирован в $dest."
+Write-Host "OK: uv установлен ($ver) — целостность подтверждена (SHA-256), скопирован в $dest."
 exit 0

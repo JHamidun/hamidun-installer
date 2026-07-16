@@ -17,6 +17,7 @@
   "components": [
     {
       "remoteId": "uv",
+      "note": "СПЯЩИЙ онлайн-фолбэк: uv теперь ВШИТ в vendor/apps (fetch-vendor*.{ps1,sh}) и в components.json больше НЕ объявлен remote:true — main эту запись не использует. Оставлена намеренно: вернуть облачную докачку можно одним remote:true+remoteId в components.json.",
       "name": "uv (Astral, Windows x64)",
       "sizeBytes": 25568726,
       "sha256": "0a23463216d09c6a72ff80ef5dc5a795f07dc1575cb84d24596c2f124a441b7b",

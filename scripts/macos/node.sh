@@ -23,8 +23,19 @@ else
   dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"
 fi
 [ "$BUNDLED" = 1 ] && verify_artifact "$PKG"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
+# verify + install АТОМАРНО под root на root-owned staged копии (Codex round-4 P1):
+# подпись .pkg проверяется тем же root-процессом, что и ставит, на staged pkg — окна
+# подмены /tmp между verify и install больше нет. Требуем Developer ID Installer с
+# ТОЧНЫМ Team ID Node.js Foundation. Подтверждено сетью (2026-07): официальные сборки
+# Node.js подписаны "Node.js Foundation (HX7739G8FX)", TeamIdentifier=HX7739G8FX
+# (github.com/Homebrew/homebrew-core/issues/117452 — codesign output официального
+# бинаря; Team ID един для Application/Installer сертификатов одного Apple-аккаунта).
+# Не подтвердится — fail-closed (installer не запустится). Путь и Team ID — позиционные.
+NODE_TEAM_ID='HX7739G8FX'
 echo "Устанавливаю (потребуется пароль администратора)..."
-admin_run "installer -pkg '$PKG' -target /"
+if ! admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" hm_pkg_install "$PKG" "$NODE_TEAM_ID"; then
+  echo "Node.js: подпись .pkg не подтверждена или установка не удалась (fail-closed)."; exit 1
+fi
 
 if have node || [ -x /usr/local/bin/node ]; then echo "OK: Node.js установлен."; exit 0; fi
 echo "Node.js не обнаружен после установки."; exit 1

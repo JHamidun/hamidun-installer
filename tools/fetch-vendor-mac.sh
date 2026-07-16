@@ -146,6 +146,51 @@ cat > "$ROOT/vendor/licenses/git-dugite-NOTICE.txt" <<'NOTICE'
 Полный текст GPL-2.0: https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 NOTICE
 
+echo "[vendor-mac] uv (Astral) — вшитый офлайн-компонент (arm64 + x64 tar.gz)..."
+# Официальный источник — GitHub releases astral-sh/uv (latest/download — стабильный
+# URL без API). Архивы кладём в apps/ с УНИКАЛЬНЫМИ именами (checksums.json ключуется
+# по basename — два бинаря `uv` разных архитектур коллидировали бы), распаковка на
+# установке (uv.sh) ПОСЛЕ fail-closed verify_artifact по архиву.
+# Валиден ли uv-tarball: gzip-tar читается И содержит ОБА бинаря (uv + uvx).
+# basename uv/uvx — префикс-каталог астраловского архива допускаем (^|/)uv$ / uvx$.
+uv_tarball_valid() {
+  local f="$1" listing
+  [ -s "$f" ] || return 1
+  listing="$(tar -tzf "$f" 2>/dev/null)" || return 1
+  printf '%s\n' "$listing" | grep -qE '(^|/)uv$'  || return 1
+  printf '%s\n' "$listing" | grep -qE '(^|/)uvx$' || return 1
+  return 0
+}
+uv_get() {
+  # $1=наш тег арх (arm64|x64) $2=triple ассета релиза astral-sh/uv
+  # P1-B: качаем во ВРЕМЕННЫЙ .part и делаем atomic mv ТОЛЬКО после того, как tarball
+  # валиден И содержит оба бинаря (uv + uvx). Иначе сбой curl оставил бы непустой
+  # partial/corrupt архив, который прошёл бы FATAL-гейт по размеру → сломанный DMG.
+  local arch="$1" triple="$2"
+  local out="$APPS/uv-macos-$arch.tar.gz"
+  local part="$out.part"
+  # P1 (Codex): skip доверяем ТОЛЬКО валидному существующему архиву (те же проверки,
+  # что при свежей закачке). Непустой, но битый/полу-извлечённый partial от прерванного
+  # fetch → НЕ skip: удаляем и качаем заново (иначе он прошёл бы size-only FATAL-гейт).
+  if [ -f "$out" ]; then
+    if uv_tarball_valid "$out"; then echo "  skip $(basename "$out")"; return; fi
+    echo "  ! существующий $(basename "$out") битый/неполный (нет uv/uvx или tar не читается) — перекачиваю"
+    rm -f "$out"
+  fi
+  rm -f "$part"
+  echo "  GET uv-$triple"
+  if ! curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-$triple.tar.gz" -o "$part"; then
+    rm -f "$part"; echo "  ! uv-$triple не скачался — компонент uv не попадёт в сборку (FATAL-гейт ниже)"; return
+  fi
+  if ! uv_tarball_valid "$part"; then
+    rm -f "$part"; echo "  ! uv-$triple: битый tarball или нет uv/uvx — удалил .part"; return
+  fi
+  mv -f "$part" "$out"
+  echo "  ok $(basename "$out")"
+}
+uv_get arm64 "aarch64-apple-darwin"
+uv_get x64   "x86_64-apple-darwin"
+
 echo "[vendor-mac] Скрепка Claude (маскот, arm64 .app — подписан + нотаризован)..."
 # Тянем ПОДПИСАННУЮ+НОТАРИЗОВАННУЮ .app-сборку скрепки из публичного релиза
 # claude-mascot-macos-ci (репозиторий public → без токена). URL переопределяется через
@@ -267,6 +312,8 @@ chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
 chk_file "$APPS/vscode.zip"       "apps/vscode.zip (рекомендуемый редактор — иначе компонент VS Code пропустится)"
 chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
 chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшитый git — иначе CLT-диалог)"
+chk_file "$APPS/uv-macos-arm64.tar.gz"  "apps/uv-macos-arm64.tar.gz (вшитый uv — офлайн, без фолбэка)"
+chk_file "$APPS/uv-macos-x64.tar.gz"    "apps/uv-macos-x64.tar.gz (вшитый uv — офлайн, без фолбэка)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
@@ -287,6 +334,24 @@ if grep -q '"course"' "$ROOT/components.json" 2>/dev/null; then
     exit 1
   fi
   echo "[vendor-mac] OK: курс-симулятор на месте (vendor/course/vibecoding-course.zip)."
+fi
+
+# uv: вшитый ОФЛАЙН-компонент БЕЗ онлайн-фолбэка (uv.sh ставит только из vendor).
+# Если компонент «uv» объявлен в components.json — оба арх-архива обязаны лежать в
+# vendor И быть ВАЛИДНЫМИ (P1 Codex: не size-only — tar читается И содержит uv+uvx,
+# иначе прерванный fetch протащил бы битый архив). Валим сборку сразу, а не пользователя.
+if grep -q '"uv"' "$ROOT/components.json" 2>/dev/null; then
+  for UVA in arm64 x64; do
+    if [ ! -s "$APPS/uv-macos-$UVA.tar.gz" ]; then
+      echo "[vendor-mac] FATAL: нет vendor/apps/uv-macos-$UVA.tar.gz — компонент uv (вшитый, офлайн) не попадёт в сборку. Проверь скачивание с github.com/astral-sh/uv или убери компонент uv из components.json."
+      exit 1
+    fi
+    if ! uv_tarball_valid "$APPS/uv-macos-$UVA.tar.gz"; then
+      echo "[vendor-mac] FATAL: vendor/apps/uv-macos-$UVA.tar.gz битый/неполный (tar не читается ИЛИ нет обоих uv+uvx). Удали его и перезапусти fetch-vendor-mac."
+      exit 1
+    fi
+  done
+  echo "[vendor-mac] OK: uv на месте и валиден (uv-macos-arm64.tar.gz + uv-macos-x64.tar.gz, оба содержат uv+uvx)."
 fi
 
 # Скрепка: если компонент «mascot» объявлен в components.json — .app ОБЯЗАНА лежать в

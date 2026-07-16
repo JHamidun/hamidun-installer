@@ -496,6 +496,11 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
   // подменяемых command-resolution переменных). rendererEnv уже без HM_REMOTE_CACHE.
   const childEnv = buildInstallEnv(rendererEnv);
+  // P1-A: POSIX buildInstallEnv наследует process.env целиком → HM_REMOTE_CACHE из
+  // окружения самого установщика мог бы протечь в компонент и запустить НЕпроверенный
+  // бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из sha-проверенного
+  // remoteCache (для оставшихся/будущих remote-компонентов).
+  delete childEnv.HM_REMOTE_CACHE;
   // Paths to assets baked into the installer at build time (offline sources).
   const vroot = vendorRoot();
   childEnv.HM_VENDOR = vroot;
