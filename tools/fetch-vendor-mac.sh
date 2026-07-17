@@ -44,7 +44,9 @@ echo "[vendor-mac] Claude Code VSIX (расширение для VSCode/Cursor, 
 # claude-code-$(arch_tag).vsix. universal-vsix у Marketplace нет — потому два файла.
 claude_vsix_get() {
   # $1 = targetPlatform (darwin-arm64|darwin-x64) $2 = наш тег арх (arm64|x64)
-  local tp="$1" tag="$2" out="$APPS/claude-code-$tag.vsix"
+  # РАЗДЕЛЬНЫЕ local: под set -u forward-ссылка на $tag в одном local падает (unbound).
+  local tp="$1" tag="$2"
+  local out="$APPS/claude-code-$tag.vsix"
   if [ -f "$out" ]; then echo "  skip $(basename "$out")"; return; fi
   local ver
   ver=$(curl -fsSL -m 60 -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" -H "Content-Type: application/json" -d '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":1}' | "$PY" -c "import sys,json;vs=json.load(sys.stdin)['results'][0]['extensions'][0]['versions'];m=[v['version'] for v in vs if v.get('targetPlatform')=='$tp'];print(m[0] if m else '')" 2>/dev/null)
@@ -66,7 +68,9 @@ echo "[vendor-mac] Codex VSIX (openai.chatgpt из Open VSX, офлайн — О
 # → vscode.sh выбирает chatgpt-$(arch_tag).vsix. Non-fatal: Codex опционален (online-фолбэк).
 codex_vsix_get() {
   # $1 = targetPlatform (darwin-arm64|darwin-x64) $2 = наш тег арх (arm64|x64)
-  local tp="$1" tag="$2" out="$APPS/chatgpt-$tag.vsix"
+  # РАЗДЕЛЬНЫЕ local: под set -u forward-ссылка на $tag в одном local падает (unbound).
+  local tp="$1" tag="$2"
+  local out="$APPS/chatgpt-$tag.vsix"
   if [ -f "$out" ]; then echo "  skip $(basename "$out")"; return; fi
   local url
   url=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/$tp/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
