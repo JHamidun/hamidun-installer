@@ -39,6 +39,7 @@
       { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [{ "target": "portable", "arch": ["x64"] }],
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
@@ -52,6 +53,7 @@
     },
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
+      "icon": "build/icon.png",
       "target": [{ "target": "dmg", "arch": ["universal"] }],
       "category": "public.app-category.developer-tools",
       "artifactName": "Hamidun-Setup-Mac.${ext}",
