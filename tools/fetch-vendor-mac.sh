@@ -10,6 +10,15 @@ mkdir -p "$APPS"
 
 dl() { if [ -f "$2" ]; then echo "  skip $(basename "$2")"; return; fi; echo "  GET $1"; curl -fsSL "$1" -o "$2" || echo "  ! не скачалось $(basename "$2")"; }
 
+# Вызов api.github.com С аутентификацией, если задан GITHUB_TOKEN (в CI = github.token).
+# Анонимный GitHub API на shared-IP раннера жёстко лимитируется → транзиентные 403
+# (маскот/шрифт «не нашлись» → FATAL). С токеном — лимит 1000-5000/ч. bash 3.2 + set -u
+# safe: без разворота пустых массивов. Пустой токен → анонимный вызов (локальная сборка).
+gh_api() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then curl -fsSL -m 60 -H "Authorization: Bearer $GITHUB_TOKEN" "$1"
+  else curl -fsSL -m 60 "$1"; fi
+}
+
 echo "[vendor-mac] Python 3.12.7 (universal2 pkg) — ставим на раннер, чтобы wheels совпали..."
 PYPKG="$APPS/python.pkg"
 dl "https://www.python.org/ftp/python/3.12.7/python-3.12.7-macos11.pkg" "$PYPKG"
@@ -85,7 +94,7 @@ if [ -s "$FONT" ]; then
   echo "  skip $(basename "$FONT")"
 else
   # Официальный релиз JetBrains/JetBrainsMono — zip с fonts/ttf/*.ttf внутри.
-  JBURL=$(curl -fsSL https://api.github.com/repos/JetBrains/JetBrainsMono/releases/latest | "$PY" -c 'import sys,json;A=[x["browser_download_url"] for x in json.load(sys.stdin).get("assets",[]) if x["name"].startswith("JetBrainsMono-") and x["name"].endswith(".zip")];print(A[0] if A else "")' 2>/dev/null)
+  JBURL=$(gh_api https://api.github.com/repos/JetBrains/JetBrainsMono/releases/latest | "$PY" -c 'import sys,json;A=[x["browser_download_url"] for x in json.load(sys.stdin).get("assets",[]) if x["name"].startswith("JetBrainsMono-") and x["name"].endswith(".zip")];print(A[0] if A else "")' 2>/dev/null)
   if [ -n "$JBURL" ]; then
     JBZIP="$APPS/_jbmono.zip"
     JBTMP="$APPS/_jbmono_extract"
@@ -224,7 +233,7 @@ else
   mkdir -p "$MASCOT_DIR"
   MURL="${HM_MASCOT_MAC_URL:-}"
   if [ -z "$MURL" ]; then
-    MURL=$(curl -fsSL -m 60 "https://api.github.com/repos/JHamidun/claude-mascot-macos-ci/releases?per_page=15" \
+    MURL=$(gh_api "https://api.github.com/repos/JHamidun/claude-mascot-macos-ci/releases?per_page=15" \
       | "$PY" -c 'import sys,json
 u=""
 try:

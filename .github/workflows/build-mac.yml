@@ -30,6 +30,9 @@ jobs:
           # Приватный репо Nomad-агента (JHamidun/nomad) — клонируется на раннере с токеном
           # из секрета. Без него компонент Nomad делает graceful skip (dmg без агента).
           NOMAD_AGENT_GIT_URL: ${{ secrets.NOMAD_AGENT_GIT_URL }}
+          # Аутентификация к api.github.com (маскот-релизы, шрифт): анонимный лимит на
+          # shared-IP раннера → транзиентные 403 → FATAL. С токеном лимит на порядки выше.
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash tools/fetch-vendor-mac.sh
 
       - name: Validate bundled git (dugite)
