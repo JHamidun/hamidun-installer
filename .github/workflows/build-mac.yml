@@ -112,7 +112,17 @@ jobs:
           ln -s /Applications "$ST/Applications"
           OUT="release/Hamidun-Setup-Mac.dmg"; rm -f "$OUT"
           echo "=== hdiutil create (том сам под размер контента) ==="
-          hdiutil create -volname "Hamidun Setup" -srcfolder "$ST" -fs HFS+ -format UDZO -ov "$OUT"
+          # hdiutil периодически падает "Resource busy" на свежескопированном 2.7ГБ vendor
+          # (Spotlight/индексация держит ресурс) — ретраим с detach стейл-маунтов + паузой.
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Hamidun Setup" -srcfolder "$ST" -fs HFS+ -format UDZO -ov "$OUT"; then
+              echo "hdiutil create OK (попытка $attempt)"; break
+            fi
+            echo "hdiutil create failed (попытка $attempt: Resource busy?) — detach + пауза"
+            hdiutil detach "/Volumes/Hamidun Setup" -force 2>/dev/null || true
+            rm -f "$OUT"; sync; sleep 15
+            [ "$attempt" = 5 ] && { echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; }
+          done
           echo "=== подпись dmg Developer ID ==="
           codesign --force --timestamp --sign "Developer ID Application: Jemal Mohamed Lemine (3VN93XA9DY)" --keychain "$KC" "$OUT"
           codesign --verify --verbose "$OUT"
