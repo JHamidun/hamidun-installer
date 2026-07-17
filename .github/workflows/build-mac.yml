@@ -132,7 +132,9 @@ jobs:
         run: |
           set -e
           ls -la release/*.dmg
-          python3 -m pip install --quiet boto3
+          # macOS-раннер: системный python3 externally-managed (PEP 668) → нужен
+          # --break-system-packages. Ставим boto3 только если его нет.
+          python3 -c "import boto3" 2>/dev/null || python3 -m pip install --quiet --break-system-packages boto3
           python3 - <<'PY'
           import os, boto3
           from boto3.s3.transfer import TransferConfig
