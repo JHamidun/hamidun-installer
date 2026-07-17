@@ -52,7 +52,7 @@
     },
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "target": [{ "target": "dmg", "arch": ["universal"] }],
       "category": "public.app-category.developer-tools",
       "artifactName": "Hamidun-Setup-Mac.${ext}",
       "hardenedRuntime": true,

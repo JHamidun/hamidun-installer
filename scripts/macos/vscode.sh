@@ -112,8 +112,8 @@ if [ ! -x "$CODE_CLI" ]; then
   exit 1
 fi
 
-resolve_vsix claude-code.vsix; CLAUDE_VSIX="$VSIX_OUT"
-resolve_vsix chatgpt.vsix;     CODEX_VSIX="$VSIX_OUT"
+resolve_vsix "claude-code-$(arch_tag).vsix"; CLAUDE_VSIX="$VSIX_OUT"
+resolve_vsix "chatgpt-$(arch_tag).vsix";     CODEX_VSIX="$VSIX_OUT"
 
 EXT_OK_CLAUDE=0
 EXT_OK_CODEX=0

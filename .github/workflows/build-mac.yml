@@ -59,7 +59,7 @@ jobs:
           echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
           echo "APPLE_API_KEY=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
 
-      - name: Build .dmg (Developer ID signed + notarized, arm64 full-offline)
+      - name: Build .dmg (Developer ID signed + notarized, universal full-offline)
         env:
           # Подпись: electron-builder возьмёт .p12 из CSC_LINK (base64) + пароль.
           CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
@@ -68,7 +68,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --mac --arm64 --publish never
+        run: npx electron-builder --mac --universal --publish never
 
       # electron-builder нотаризовал+застейплил ЧИСТЫЙ .app (без vendor — иначе notary
       # ругается на неподписанные .so в .whl). Финальный dmg с офлайн-vendor собираем
@@ -81,8 +81,15 @@ jobs:
           APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
         run: |
           set -e
-          APP="release/mac-arm64/Hamidun Setup.app"
+          APP="release/mac-universal/Hamidun Setup.app"
           [ -d "$APP" ] || { echo "нет .app от electron-builder"; exit 1; }
+          echo "=== lipo -archs на Electron-бинаре (MUST быть arm64 + x86_64) ==="
+          EXEBIN="$APP/Contents/MacOS/Hamidun Setup"
+          [ -f "$EXEBIN" ] || EXEBIN="$(ls "$APP/Contents/MacOS/" | head -n1 | sed "s#^#$APP/Contents/MacOS/#")"
+          EXEARCHS=$(lipo -archs "$EXEBIN" || echo "?")
+          echo "archs: $EXEARCHS"
+          echo "$EXEARCHS" | grep -q arm64  || { echo "FATAL: нет arm64 слайса"; exit 1; }
+          echo "$EXEARCHS" | grep -q x86_64 || { echo "FATAL: нет x86_64 слайса — .app не universal"; exit 1; }
           echo "=== staple нотаризации на .app ==="
           xcrun stapler validate "$APP" && echo "STAPLED OK" || echo "WARN: staple не подтверждён (app всё равно нотаризован в БД Apple)"
           # keychain для подписи dmg (кейчейн electron-builder уже мог быть удалён)

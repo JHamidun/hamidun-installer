@@ -59,9 +59,11 @@ else
   echo "Библиотеки из PyPI (онлайн)..."
   "$PY" -m pip install --user --break-system-packages -r "$REQ" || { echo "Часть библиотек не установилась."; exit 1; }
 fi
-PWB="${HM_VENDOR:-}/playwright-browsers"
+# Arch-специфичный Chromium: вшит только под arm64 (раннер). На Intel папки
+# playwright-browsers-x64 нет → уходим в онлайн-докачку ниже (единственный не-офлайн шаг на x64).
+PWB="${HM_VENDOR:-}/playwright-browsers-$(arch_tag)"
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$PWB" ]; then
-  echo "Встроенные браузеры Playwright (офлайн)..."
+  echo "Встроенные браузеры Playwright (офлайн, $(arch_tag))..."
   mkdir -p "$HOME/Library/Caches/ms-playwright"
   # cp БЕЗ `|| true`: молчаливый сбой копирования раньше давал ложный OK, а потом
   # браузерные скиллы падали без следа. Ловим код возврата и честно фолбэчимся в онлайн.

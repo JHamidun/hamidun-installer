@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build-time (на macOS-раннере): качает Mac-бинари в vendor/ для ПОЛНОГО офлайна (arm64).
+# Build-time (на macOS-раннере): качает Mac-бинари в vendor/ для ПОЛНОГО офлайна.
+# UNIVERSAL: движки universal2 (Python/Node/VS Code/Claude Desktop), git+uv+VSIX едут
+# ОБА arch (arm64 + x64), install-скрипты выбирают по $(arch_tag); Cursor+маскот universal.
 # set -u, НЕ -e: нативные тулзы пишут в stderr. Запуск: bash tools/fetch-vendor-mac.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,8 +22,10 @@ echo "[vendor-mac] Node.js LTS (universal2 pkg)..."
 VER=$(curl -fsSL https://nodejs.org/dist/index.json | "$PY" -c 'import sys,json;print(next(x["version"] for x in json.load(sys.stdin) if x["lts"]))')
 dl "https://nodejs.org/dist/$VER/node-$VER.pkg" "$APPS/node.pkg"
 
-echo "[vendor-mac] Cursor (arm64 dmg)..."
-CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-arm64&releaseTrack=stable" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("downloadUrl",""))' 2>/dev/null)
+echo "[vendor-mac] Cursor (darwin-universal dmg — один файл, оба arch)..."
+# Cursor раздаёт universal-сборку (arm64 + x86_64 в одном .app) → один cursor.dmg
+# работает и на Apple Silicon, и на Intel. Онлайн-фолбэк в cursor.sh тоже universal.
+CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-universal&releaseTrack=stable" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("downloadUrl",""))' 2>/dev/null)
 [ -n "$CUR" ] && dl "$CUR" "$APPS/cursor.dmg" || echo "  ! Cursor API недоступен"
 
 echo "[vendor-mac] VS Code (рекомендуемый редактор, darwin-universal zip — офлайн)..."
@@ -33,40 +37,43 @@ CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
 rm -rf "$TMP"
 
-echo "[vendor-mac] Claude Code VSIX (расширение для VSCode/Cursor, офлайн)..."
-VSIX="$APPS/claude-code.vsix"
-if [ -f "$VSIX" ]; then
-  echo "  skip $(basename "$VSIX")"
-else
-  # Расширение платформо-специфичное: latest/vspackage БЕЗ targetPlatform отдаёт чужую платформу (linux-x64).
-  # Резолвим последнюю версию под darwin-arm64 и качаем versioned URL.
-  VSIXVER=$(curl -fsSL -m 60 -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" -H "Content-Type: application/json" -d '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":1}' | "$PY" -c 'import sys,json;vs=json.load(sys.stdin)["results"][0]["extensions"][0]["versions"];m=[v["version"] for v in vs if v.get("targetPlatform")=="darwin-arm64"];print(m[0] if m else "")' 2>/dev/null)
-  if [ -n "$VSIXVER" ]; then
-    VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/$VSIXVER/vspackage?targetPlatform=darwin-arm64"
-    echo "  GET $VSIX_URL"
+echo "[vendor-mac] Claude Code VSIX (расширение для VSCode/Cursor, офлайн — ОБА arch)..."
+# Расширение платформо-специфичное (нативные бинари внутри): latest/vspackage БЕЗ
+# targetPlatform отдаёт чужую платформу (linux-x64). Резолвим версию под каждый
+# darwin-arch и качаем versioned URL. Оба .vsix → extension.sh/vscode.sh выбирают
+# claude-code-$(arch_tag).vsix. universal-vsix у Marketplace нет — потому два файла.
+claude_vsix_get() {
+  # $1 = targetPlatform (darwin-arm64|darwin-x64) $2 = наш тег арх (arm64|x64)
+  local tp="$1" tag="$2" out="$APPS/claude-code-$tag.vsix"
+  if [ -f "$out" ]; then echo "  skip $(basename "$out")"; return; fi
+  local ver
+  ver=$(curl -fsSL -m 60 -X POST "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1" -H "Content-Type: application/json" -d '{"filters":[{"criteria":[{"filterType":7,"value":"anthropic.claude-code"}]}],"flags":1}' | "$PY" -c "import sys,json;vs=json.load(sys.stdin)['results'][0]['extensions'][0]['versions'];m=[v['version'] for v in vs if v.get('targetPlatform')=='$tp'];print(m[0] if m else '')" 2>/dev/null)
+  if [ -n "$ver" ]; then
+    local url="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/$ver/vspackage?targetPlatform=$tp"
+    echo "  GET claude-code $tp v$ver"
     # Marketplace отдаёт vspackage с Content-Encoding: gzip — --compressed распаковывает в валидный .vsix.
-    curl -fsSL --compressed "$VSIX_URL" -o "$VSIX" || { rm -f "$VSIX"; echo "  ! VSIX недоступен — расширение поставится онлайн при установке"; }
+    curl -fsSL --compressed "$url" -o "$out" || { rm -f "$out"; echo "  ! VSIX $tp недоступен — расширение поставится онлайн при установке"; }
   else
-    echo "  ! Marketplace недоступен — VSIX пропущен (расширение поставится онлайн при установке)"
+    echo "  ! Marketplace: версия под $tp не найдена (расширение поставится онлайн)"
   fi
-fi
+}
+claude_vsix_get darwin-arm64 arm64
+claude_vsix_get darwin-x64   x64
 
-echo "[vendor-mac] Codex VSIX (openai.chatgpt из Open VSX, офлайн — Codex прямо в VS Code)..."
-CXVSIX="$APPS/chatgpt.vsix"
-if [ -f "$CXVSIX" ]; then
-  echo "  skip $(basename "$CXVSIX")"
-else
-  # Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
-  # платформы отдаёт чужую платформу → офлайн-install на macOS упадёт. Резолвим darwin-arm64
-  # (как claude-code.vsix; GitHub Actions mac-раннеры arm64); нет цели → generic /latest
-  # (online-фолбэк в vscode.sh спасёт). Non-fatal: Codex опционален.
-  CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/darwin-arm64/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
-  if [ -z "$CXURL" ]; then
-    CXURL=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
-    [ -n "$CXURL" ] && echo "  darwin-arm64-цель не найдена — беру generic (офлайн может не встать, online-фолбэк)"
-  fi
-  if [ -n "$CXURL" ]; then dl "$CXURL" "$CXVSIX"; else echo "  ! Open VSX недоступен — Codex поставится онлайн при установке"; fi
-fi
+echo "[vendor-mac] Codex VSIX (openai.chatgpt из Open VSX, офлайн — ОБА arch)..."
+# Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
+# платформы отдаёт чужую платформу → офлайн-install упадёт. Тянем под каждый darwin-arch
+# → vscode.sh выбирает chatgpt-$(arch_tag).vsix. Non-fatal: Codex опционален (online-фолбэк).
+codex_vsix_get() {
+  # $1 = targetPlatform (darwin-arm64|darwin-x64) $2 = наш тег арх (arm64|x64)
+  local tp="$1" tag="$2" out="$APPS/chatgpt-$tag.vsix"
+  if [ -f "$out" ]; then echo "  skip $(basename "$out")"; return; fi
+  local url
+  url=$(curl -fsSL -m 60 "https://open-vsx.org/api/openai/chatgpt/$tp/latest" | "$PY" -c 'import sys,json;print(json.load(sys.stdin).get("files",{}).get("download",""))' 2>/dev/null)
+  if [ -n "$url" ]; then dl "$url" "$out"; else echo "  ! Open VSX: цель $tp не найдена — Codex($tag) поставится онлайн"; fi
+}
+codex_vsix_get darwin-arm64 arm64
+codex_vsix_get darwin-x64   x64
 
 echo "[vendor-mac] JetBrains Mono Regular (шрифт, лицензия OFL)..."
 FONT="$APPS/JetBrainsMono-Regular.ttf"
@@ -101,17 +108,27 @@ else
   fi
 fi
 
-echo "[vendor-mac] Python wheels (macosx, под bundled python 3.12)..."
+echo "[vendor-mac] Python wheels (macosx, под bundled python 3.12 — arm64 + x86_64)..."
 WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
 REQ="$ROOT/vendor/config-pack/requirements.txt"
 if [ -f "$REQ" ]; then
+  # 1) Host-arch (arm64 раннер): pip тянет arm64-колёса + pure-python py3-none-any (годятся везде).
   "$PY" -m pip download pip setuptools wheel -d "$WH" >/dev/null 2>&1 || true
   "$PY" -m pip download -r "$REQ" pystray pillow -d "$WH" 2>&1 | tail -2
+  # 2) x86_64-колёса для НАТИВНЫХ пакетов, чтобы офлайн-install встал на Intel (--find-links
+  #    выберет колесо по тегу хоста). --platform требует --only-binary; pure-python уже выше.
+  #    pillow — известный нативный (pystray = py3-none-any). Полный req — best-effort сверху.
+  "$PY" -m pip download --only-binary=:all: --platform macosx_10_13_x86_64 --python-version 3.12 pillow -d "$WH" 2>&1 | tail -1 || true
+  "$PY" -m pip download --only-binary=:all: --platform macosx_10_13_x86_64 --python-version 3.12 -r "$REQ" -d "$WH" 2>&1 | tail -1 || true
   echo "  wheels/sdists: $(ls "$WH" 2>/dev/null | wc -l | tr -d ' ')"
 fi
 
-echo "[vendor-mac] Playwright Chromium (mac)..."
-PW="$ROOT/vendor/playwright-browsers"; mkdir -p "$PW"
+echo "[vendor-mac] Playwright Chromium (mac, host-arch = arm64 раннер)..."
+# Chromium — host-arch (playwright тянет только под текущую арх раннера = arm64). Кладём в
+# arch-теговую директорию; pydeps.sh берёт playwright-browsers-$(arch_tag). На Intel такой
+# папки нет → pydeps.sh уходит в онлайн-докачку chromium (единственный не-офлайн шаг на x64;
+# кросс-скачать x64-Chromium на arm64-раннере playwright штатно не умеет).
+PW="$ROOT/vendor/playwright-browsers-arm64"; mkdir -p "$PW"
 "$PY" -m pip install --quiet playwright >/dev/null 2>&1 || true
 PLAYWRIGHT_BROWSERS_PATH="$PW" "$PY" -m playwright install chromium >/dev/null 2>&1 || true
 
@@ -310,8 +327,10 @@ chk_file "$APPS/python.pkg"       "apps/python.pkg"
 chk_file "$APPS/node.pkg"         "apps/node.pkg"
 chk_file "$APPS/cursor.dmg"       "apps/cursor.dmg"
 chk_file "$APPS/vscode.zip"       "apps/vscode.zip (рекомендуемый редактор — иначе компонент VS Code пропустится)"
-chk_file "$APPS/claude-code.vsix" "apps/claude-code.vsix"
+chk_file "$APPS/claude-code-arm64.vsix" "apps/claude-code-arm64.vsix"
+chk_file "$APPS/claude-code-x64.vsix"   "apps/claude-code-x64.vsix (Intel — иначе расширение онлайн)"
 chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшитый git — иначе CLT-диалог)"
+chk_file "$APPS/git-macos-x64.tar.gz"   "apps/git-macos-x64.tar.gz (Intel — иначе CLT-диалог)"
 chk_file "$APPS/uv-macos-arm64.tar.gz"  "apps/uv-macos-arm64.tar.gz (вшитый uv — офлайн, без фолбэка)"
 chk_file "$APPS/uv-macos-x64.tar.gz"    "apps/uv-macos-x64.tar.gz (вшитый uv — офлайн, без фолбэка)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
@@ -405,6 +424,13 @@ sys.exit(0 if ok else 1)
   fi
   if ! file "$GATE_BIN_PATH" 2>/dev/null | grep -q "Mach-O"; then
     mascot_fatal "главный бинарь не является Mach-O (Contents/MacOS/$GATE_BIN)"
+  fi
+  # UNIVERSAL: главный бинарь ОБЯЗАН содержать оба слайса (arm64 + x86_64) — иначе на Intel
+  # скрепка не запустится. lipo -archs на раннере есть; отсутствие любого слайса = FATAL.
+  if command -v lipo >/dev/null 2>&1; then
+    GATE_ARCHS="$(lipo -archs "$GATE_BIN_PATH" 2>/dev/null || echo '')"
+    echo "$GATE_ARCHS" | grep -q arm64  || mascot_fatal "нет arm64-слайса в скрепке (lipo: '${GATE_ARCHS:-нет}')"
+    echo "$GATE_ARCHS" | grep -q x86_64 || mascot_fatal "нет x86_64-слайса в скрепке — не universal (lipo: '${GATE_ARCHS:-нет}'); пересобери claude-mascot-macos-ci с universal2"
   fi
   # Подпись цела (codesign проверяет ТОЛЬКО подпись — нотаризацию подтверждаем отдельно ниже).
   if ! codesign --verify --deep --strict "$GATE_APP" >/dev/null 2>&1; then

@@ -7,8 +7,9 @@ EXT="${HM_CLAUDE_EXT_ID:-anthropic.claude-code}"
 # Вшитый vsix (полный офлайн) — кладёт build-задача в HM_VENDOR/apps/claude-code.vsix.
 # vsix исполняется как код внутри Cursor/VS Code -> сверяем целостность ДО установки (fail-closed).
 VSIX=""
-if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/claude-code.vsix" ]; then
-  VSIX="$HM_VENDOR/apps/claude-code.vsix"
+# Arch-специфичный vsix: claude-code-<arch>.vsix (arm64/x64) — внутри нативные бинари.
+if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/claude-code-$(arch_tag).vsix" ]; then
+  VSIX="$HM_VENDOR/apps/claude-code-$(arch_tag).vsix"
   verify_artifact "$VSIX"
 fi
 
