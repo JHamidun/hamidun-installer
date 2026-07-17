@@ -115,16 +115,46 @@ jobs:
           codesign --verify --verbose "$OUT"
           ls -la "$OUT"
 
-      # Публикуем в Release, НЕ в artifacts: гиговые dmg выбивают квоту хранилища
-      # Actions (пересчёт раз в 6-12ч). Release-ассеты квоту не тратят.
-      - name: Upload installer to release
+      # Universal dmg ~2.7 ГБ > 2 GiB — лимит ассета GitHub Release (HTTP 422). Заливаем
+      # напрямую в Reg.ru S3 (без лимита, основное RU-зеркало). boto3 upload_file = multipart
+      # (как медиа лендинга через _deploy_vibe.put — проверено на Reg.ru). GitHub Release
+      # остаётся как УКАЗАТЕЛЬ на S3-ссылку (сам dmg туда не влезает).
+      - name: Upload universal dmg to Reg.ru S3
+        env:
+          REGRU_S3_ACCESS_KEY: ${{ secrets.REGRU_S3_ACCESS_KEY }}
+          REGRU_S3_SECRET_KEY: ${{ secrets.REGRU_S3_SECRET_KEY }}
+          REGRU_S3_ENDPOINT: ${{ secrets.REGRU_S3_ENDPOINT }}
+          REGRU_S3_BUCKET: ${{ secrets.REGRU_S3_BUCKET }}
+          REGRU_S3_REGION: ${{ secrets.REGRU_S3_REGION }}
+        run: |
+          set -e
+          ls -la release/*.dmg
+          python3 -m pip install --quiet boto3
+          python3 - <<'PY'
+          import os, boto3
+          from boto3.s3.transfer import TransferConfig
+          s3 = boto3.client('s3', endpoint_url=os.environ['REGRU_S3_ENDPOINT'],
+              aws_access_key_id=os.environ['REGRU_S3_ACCESS_KEY'],
+              aws_secret_access_key=os.environ['REGRU_S3_SECRET_KEY'],
+              region_name=os.environ['REGRU_S3_REGION'])
+          key = 'vibecoding/downloads/Hamidun-Setup-Mac.dmg'
+          cfg = TransferConfig(multipart_threshold=64*1024*1024, multipart_chunksize=64*1024*1024, use_threads=True)
+          s3.upload_file('release/Hamidun-Setup-Mac.dmg', os.environ['REGRU_S3_BUCKET'], key,
+              ExtraArgs={'ACL': 'public-read', 'ContentType': 'application/x-apple-diskimage'}, Config=cfg)
+          print('S3 OK:', os.environ['REGRU_S3_ENDPOINT'] + '/' + os.environ['REGRU_S3_BUCKET'] + '/' + key)
+          PY
+
+      - name: Publish GitHub Release pointer (S3 link)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          ls -la release/*.dmg
           TAG="mac-build-${{ github.run_number }}"
-          gh release create "$TAG" release/*.dmg \
-            --title "Hamidun-Setup-Mac (run ${{ github.run_number }})" \
-            --notes "Автосборка dmg из workflow run ${{ github.run_id }}" \
-            || gh release upload "$TAG" release/*.dmg --clobber
+          URL="https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Mac.dmg"
+          NOTES="Universal (arm64 + x86_64) macOS installer — работает нативно на Apple Silicon и Intel.
+
+          Скачать: $URL
+
+          (Сам .dmg ~2.7 ГБ живёт на Reg.ru S3 — превышает лимит ассета GitHub Release 2 GiB.)"
+          gh release create "$TAG" --title "Hamidun-Setup-Mac universal (run ${{ github.run_number }})" --notes "$NOTES" \
+            || gh release edit "$TAG" --title "Hamidun-Setup-Mac universal (run ${{ github.run_number }})" --notes "$NOTES"
