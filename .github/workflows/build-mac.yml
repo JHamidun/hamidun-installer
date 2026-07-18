@@ -56,10 +56,14 @@ jobs:
           echo "ВШИТЫЙ GIT РАБОТАЕТ на $(uname -m)"
 
       # Записываем App Store Connect API-ключ (.p8) из secret в файл для notarytool.
+      # Секрет — через env-блок, НЕ интерполяцией в run-текст (анти-паттерн: значение
+      # попадает в сгенерированный скрипт шага; при set -x/ошибке шаблона риск утечки).
       - name: Prepare notarization API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           mkdir -p "$RUNNER_TEMP/asc"
-          echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
           echo "APPLE_API_KEY=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
 
       - name: Build .dmg (Developer ID signed + notarized, universal full-offline)
@@ -166,9 +170,15 @@ jobs:
           set -e
           TAG="mac-build-${{ github.run_number }}"
           URL="https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Mac.dmg"
+          # sha256 dmg в notes: пользователю есть чем проверить 2.7 ГБ загрузку с S3.
+          DMG_SHA256=$(shasum -a 256 "release/Hamidun-Setup-Mac.dmg" | awk '{print $1}')
+          echo "dmg sha256: $DMG_SHA256"
           NOTES="Universal (arm64 + x86_64) macOS installer — работает нативно на Apple Silicon и Intel.
 
           Скачать: $URL
+
+          SHA-256: \`$DMG_SHA256\`
+          Проверка после скачивания: \`shasum -a 256 Hamidun-Setup-Mac.dmg\` — хеш обязан совпасть.
 
           (Сам .dmg ~2.7 ГБ живёт на Reg.ru S3 — превышает лимит ассета GitHub Release 2 GiB.)"
           gh release create "$TAG" --title "Hamidun-Setup-Mac universal (run ${{ github.run_number }})" --notes "$NOTES" \

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Курс-симулятор «Вайбкодинг с Claude Code» — macOS
 set +e
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$DIR/_lib.sh"
 
 DRY="${HM_DRY_RUN:-}"
 ZIP="${HM_VENDOR:-}/course/vibecoding-course.zip"
@@ -26,6 +27,12 @@ if [ -n "$DRY" ]; then
   echo "  [dry-run] WOULD: создать ярлык запуска на рабочем столе"
   exit 0
 fi
+
+# Fail-closed целостность архива курса (SHA-256 против vendor/checksums.json —
+# запись кладёт tools/fetch-vendor-mac.sh). Контент курса исполняется Claude Code
+# как скиллы — до этого фикса был единственным исполняемым-по-смыслу vendor-артефактом
+# без SHA-гейта. Несовпадение/нет манифеста → exit 1, распаковки НЕТ.
+verify_artifact "$ZIP"
 
 echo "Распаковываю курс-симулятор в $TARGET ..."
 mkdir -p "$TARGET"

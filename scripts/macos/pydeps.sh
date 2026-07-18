@@ -53,7 +53,15 @@ echo "Использую Python: $PY"
 WH="${HM_VENDOR:-}/pywheels"
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$WH" ]; then
   echo "Библиотеки из встроенных wheels (офлайн)..."
-  "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" -r "$REQ" || { echo "Часть библиотек не установилась."; exit 1; }
+  # Провал офлайн-ветки (типовой случай — Intel: x86_64-колёса нативных пакетов
+  # качаются на сборке best-effort и могли не вшиться) — НЕ жёсткий exit 1, а
+  # честный онлайн-фолбэк, как у Chromium-ветки ниже: --find-links оставляем,
+  # чтобы вшитые колёса всё равно использовались, сеть докачивает только дыры.
+  if ! "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" -r "$REQ"; then
+    echo "  ВНИМАНИЕ: офлайн-установка из встроенных wheels не удалась (часть колёс под эту архитектуру не вшита) — докачиваю недостающее из PyPI (онлайн)..."
+    "$PY" -m pip install --user --break-system-packages --upgrade pip >/dev/null 2>&1 || true
+    "$PY" -m pip install --user --break-system-packages --find-links "$WH" -r "$REQ" || { echo "Часть библиотек не установилась (офлайн и онлайн). Проверь сеть и повтори установку этого компонента."; exit 1; }
+  fi
 else
   "$PY" -m pip install --user --break-system-packages --upgrade pip >/dev/null 2>&1 || true
   echo "Библиотеки из PyPI (онлайн)..."

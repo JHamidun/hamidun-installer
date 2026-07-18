@@ -8,6 +8,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPS="$ROOT/vendor/apps"
 mkdir -p "$APPS"
 
+# Общие функции install-скриптов (нужен hm_tree_sha256 — ЕДИНЫЙ рецепт хеша дерева
+# nomad-src на сборке и на установке). dl() ниже НАМЕРЕННО переопределяет _lib-шный
+# (наш добавляет skip-по-наличию и не валит скрипт при сбое).
+. "$ROOT/scripts/macos/_lib.sh"
+
 dl() { if [ -f "$2" ]; then echo "  skip $(basename "$2")"; return; fi; echo "  GET $1"; curl -fsSL "$1" -o "$2" || echo "  ! не скачалось $(basename "$2")"; }
 
 # Вызов api.github.com С аутентификацией, если задан GITHUB_TOKEN (в CI = github.token).
@@ -124,16 +129,37 @@ fi
 echo "[vendor-mac] Python wheels (macosx, под bundled python 3.12 — arm64 + x86_64)..."
 WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
 REQ="$ROOT/vendor/config-pack/requirements.txt"
+# Honest-репорт Intel-паритета (см. итоговую сводку ниже) — init до if (set -u).
+ARM64_NATIVE_COUNT=0; X64_NATIVE_COUNT=0; X64_NATIVE_MISSING=""
 if [ -f "$REQ" ]; then
   # 1) Host-arch (arm64 раннер): pip тянет arm64-колёса + pure-python py3-none-any (годятся везде).
   "$PY" -m pip download pip setuptools wheel -d "$WH" >/dev/null 2>&1 || true
   "$PY" -m pip download -r "$REQ" pystray pillow -d "$WH" 2>&1 | tail -2
   # 2) x86_64-колёса для НАТИВНЫХ пакетов, чтобы офлайн-install встал на Intel (--find-links
   #    выберет колесо по тегу хоста). --platform требует --only-binary; pure-python уже выше.
-  #    pillow — известный нативный (pystray = py3-none-any). Полный req — best-effort сверху.
+  #    pillow — известный нативный (pystray = py3-none-any). Полный req — best-effort сверху
+  #    (ОСТАВЛЕН best-effort сознательно: pip download --platform падает ЦЕЛИКОМ, если хоть
+  #    один пакет не отдаёт совместимый x86_64-wheel), но результат считаем и честно
+  #    репортим в WARNING-сводке ниже — молчаливого «|| true» больше нет.
   "$PY" -m pip download --only-binary=:all: --platform macosx_10_13_x86_64 --python-version 3.12 pillow -d "$WH" 2>&1 | tail -1 || true
   "$PY" -m pip download --only-binary=:all: --platform macosx_10_13_x86_64 --python-version 3.12 -r "$REQ" -d "$WH" 2>&1 | tail -1 || true
-  echo "  wheels/sdists: $(ls "$WH" 2>/dev/null | wc -l | tr -d ' ')"
+  # Подсчёт: каждый нативный arm64-wheel обязан иметь x86_64/universal2-пару того же
+  # пакета — иначе офлайн-install на Intel по нему провалится (pydeps.sh уйдёт в
+  # онлайн-фолбэк). Имя пакета в wheel-имени нормализовано ('-'→'_') → первый '-'
+  # отделяет имя (PEP 427). bash 3.2-safe: без массивов.
+  for w in "$WH"/*.whl; do
+    [ -e "$w" ] || continue
+    case "$(basename "$w")" in
+      *macosx*arm64*)
+        ARM64_NATIVE_COUNT=$((ARM64_NATIVE_COUNT+1))
+        WPKG="$(basename "$w" | cut -d- -f1)"
+        if ! ls "$WH/$WPKG"-*macosx*x86_64*.whl >/dev/null 2>&1 && ! ls "$WH/$WPKG"-*macosx*universal2*.whl >/dev/null 2>&1; then
+          case " $X64_NATIVE_MISSING " in *" $WPKG "*) : ;; *) X64_NATIVE_MISSING="$X64_NATIVE_MISSING $WPKG" ;; esac
+        fi ;;
+      *macosx*x86_64*|*macosx*universal2*) X64_NATIVE_COUNT=$((X64_NATIVE_COUNT+1)) ;;
+    esac
+  done
+  echo "  wheels/sdists: $(ls "$WH" 2>/dev/null | wc -l | tr -d ' ') (нативных arm64: $ARM64_NATIVE_COUNT, x86_64/universal2: $X64_NATIVE_COUNT)"
 fi
 
 echo "[vendor-mac] Playwright Chromium (mac, host-arch = arm64 раннер)..."
@@ -268,6 +294,75 @@ print(u)' 2>/dev/null)
   fi
 fi
 
+# --- Экспорт-фильтр nomad-src (гигиена раздаваемого dmg) -------------------------
+# В dmg уезжает ВСЁ дерево vendor/nomad-src каждому покупателю. Репо агента НЕ трогаем —
+# фильтруем ТОЛЬКО экспортированную копию после git archive/clone: внутренние
+# dev-артефакты (.superpowers/, docs/plans|superpowers/, deploy/, *report*-отчёты)
+# вырезаем, деанон/секрет-паттерны гейтуем. FATAL — только если паттерн остаётся
+# в коде, НУЖНОМ для установки (py/toml пакетных директорий + pyproject.toml);
+# остальное чистим сами с логом — билд не падает по мелочи.
+NOMAD_LEAK_RE='95\.179\.242\.167|transform-ai\.online|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+nomad_src_is_critical() {
+  # $1 = путь ОТНОСИТЕЛЬНО корня nomad-src. Код, нужный `uv tool install`:
+  # pyproject.toml + *.py/*.toml пакетных дир (pyproject [tool.setuptools.packages.find]
+  # include: agent, tools, nomad_cli, gateway, tui_gateway, cron, acp_adapter, plugins,
+  # providers) + top-level py-modules (cli.py, run_agent.py, ...). В bash-case `*`
+  # матчит и `/` — покрывает любую вложенность.
+  case "$1" in
+    pyproject.toml) return 0 ;;
+    agent/*.py|tools/*.py|nomad_cli/*.py|gateway/*.py|tui_gateway/*.py|cron/*.py|acp_adapter/*.py|plugins/*.py|providers/*.py) return 0 ;;
+    */*) return 1 ;;
+    *.py|*.toml) return 0 ;;
+  esac
+  return 1
+}
+nomad_src_sanitize() {
+  local S="$1" rel f removed=0
+  echo "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
+  # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
+  for rel in .superpowers docs/plans docs/superpowers deploy; do
+    if [ -e "$S/$rel" ]; then rm -rf "$S/$rel"; echo "    - удалил $rel/"; fi
+  done
+  # 2) Внутренние *report*-отчёты: top-level (PHASE1_*_REPORT.md), docs/, scripts/.
+  #    Продуктовые файлы, матчащие глоб (agent/lsp/reporter.py, шаблоны skills/
+  #    bug-report.md и т.п.), НЕ трогаем — они часть агента.
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    rm -f "$f"; echo "    - удалил ${f#$S/}"
+  done < <(find "$S" -maxdepth 1 -type f -iname '*report*' 2>/dev/null; \
+           find "$S/docs" "$S/scripts" -type f -iname '*report*' 2>/dev/null)
+  # 3) Файлы с деанон/секрет-паттернами: НЕ нужные установке — удаляем (с логом);
+  #    install-critical py/toml — скрабим IP/домен (текстовая замена безопасна и в
+  #    комментарии, и в строковом литерале). Токен-паттерн в критическом коде
+  #    скрабить нельзя (меняет семантику) → останется до гейта ниже → FATAL.
+  while IFS= read -r f; do
+    rel="${f#$S/}"
+    if nomad_src_is_critical "$rel"; then
+      /usr/bin/perl -pi -e 's/95\.179\.242\.167/REDACTED-IP/g; s/transform-ai\.online/redacted.example/g' "$f"
+      echo "    ~ скраб IP/домена в $rel (install-critical, файл сохранён)"
+    else
+      rm -f "$f"; removed=$((removed+1)); echo "    - удалил $rel (деанон/секрет-паттерн)"
+    fi
+  done < <(grep -rIlE "$NOMAD_LEAK_RE" "$S" 2>/dev/null)
+  # 4) Жёсткий grep-гейт: после чистки паттернов быть НЕ должно НИГДЕ. Сюда доходит
+  #    только несводимое (токен в install-critical коде / непокрытый скраб) → FATAL
+  #    с перечислением файлов.
+  local LEFT
+  LEFT="$(grep -rIlE "$NOMAD_LEAK_RE" "$S" 2>/dev/null || true)"
+  if [ -n "$LEFT" ]; then
+    echo "[vendor-mac] FATAL: в vendor/nomad-src остались деанон/секрет-паттерны (IP/домен/токены) в файлах:"
+    printf '%s\n' "$LEFT" | sed "s|^$S/|  - |"
+    echo "[vendor-mac] Вычисти их в репо агента (или расширь экспорт-фильтр) и перезапусти сборку."
+    return 1
+  fi
+  # Санити: структура пакета для `uv tool install` не сломана.
+  if [ ! -f "$S/pyproject.toml" ]; then
+    echo "[vendor-mac] FATAL: экспорт-фильтр повредил nomad-src (нет pyproject.toml)"; return 1
+  fi
+  echo "  [nomad-src] фильтр ок (файлов с паттернами удалено: $removed)"
+  return 0
+}
+
 echo "[vendor-mac] Исходник Nomad → vendor/nomad-src (git archive, БЕЗ .git; vendor-only установка)..."
 # Компонент Nomad объявлен? На локальной машине: git archive из HM_NOMAD_AGENT_REPO.
 # На GitHub-раннере (нет локального репо): git clone --depth 1 из NOMAD_AGENT_GIT_URL
@@ -279,6 +374,8 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
   NOMAD_REF="${HM_NOMAD_REF:-main}"
   GITURL="${NOMAD_AGENT_GIT_URL:-}"
   SRCOUT="$ROOT/vendor/nomad-src"
+  # Стейл-манифест дерева не должен пережить перевыкачку (nomad.sh сверяет fail-closed).
+  rm -f "$ROOT/vendor/nomad-src.sha256"
   rm -rf "$SRCOUT"; mkdir -p "$SRCOUT"
   if [ -d "$AGENT_REPO/.git" ]; then
     echo "  git archive $NOMAD_REF из локального репо $AGENT_REPO"
@@ -297,9 +394,15 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
     echo "  ! нет локального репо ($AGENT_REPO) и не задан NOMAD_AGENT_GIT_URL — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
   fi
   if [ -f "$SRCOUT/pyproject.toml" ]; then
-    echo "  ok vendor/nomad-src (pyproject.toml на месте)"
+    # Экспорт-фильтр + гейт (FATAL внутри при несводимых паттернах), затем манифест
+    # дерева: nomad.sh пересчитает hm_tree_sha256 и сверит fail-closed перед установкой.
+    nomad_src_sanitize "$SRCOUT" || exit 1
+    hm_tree_sha256 "$SRCOUT" > "$ROOT/vendor/nomad-src.sha256"
+    echo "  ok vendor/nomad-src (pyproject.toml на месте; фильтр пройден; nomad-src.sha256 записан)"
   else
-    echo "  ! в vendor/nomad-src нет pyproject.toml — компонент Nomad у пользователя выполнит graceful skip."
+    # Пустое/битое дерево не оставляем: иначе оно уехало бы в dmg как есть.
+    rm -rf "$SRCOUT"
+    echo "  ! в vendor/nomad-src нет pyproject.toml — дерево убрано, компонент Nomad у пользователя выполнит graceful skip."
   fi
 else
   echo "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"
@@ -325,6 +428,14 @@ CHK="$ROOT/vendor/checksums.json"
     # Главный бинарь скрепки лежит ВНУТРИ .app — Confirm/verify_artifact ищет по basename,
     # путь не важен (как -Recurse в Windows-манифесте).
     find "$APPS/claude-mascot" -type f -path '*/Contents/MacOS/*' 2>/dev/null
+    # Курс-симулятор: архив исполняется Claude Code как скиллы → course.sh делает
+    # verify_artifact (fail-closed) — запись обязана быть в манифесте.
+    find "$ROOT/vendor/course" -maxdepth 1 -type f 2>/dev/null
+    # Nomad: pyproject.toml (точечный пин) + nomad-src.sha256 (манифест ДЕРЕВА —
+    # nomad.sh сверяет его сначала против checksums.json, затем пересчитывает
+    # hm_tree_sha256 всего дерева). Ключи-basename уникальны в vendor.
+    find "$ROOT/vendor/nomad-src" -maxdepth 1 -type f -name 'pyproject.toml' 2>/dev/null
+    find "$ROOT/vendor" -maxdepth 1 -type f -name 'nomad-src.sha256' 2>/dev/null
   )
   printf '\n  }\n}\n'
 } > "$CHK"
@@ -349,6 +460,12 @@ chk_file "$APPS/uv-macos-x64.tar.gz"    "apps/uv-macos-x64.tar.gz (вшитый 
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
+# Honest-репорт Intel-паритета wheels (best-effort скачивание x86_64 выше — НЕ гейт,
+# но и НЕ молчит): сколько нативных колёс есть и каким пакетам не хватает x64-пары.
+echo "[vendor-mac] Intel-паритет wheels: нативных arm64=$ARM64_NATIVE_COUNT, x86_64/universal2=$X64_NATIVE_COUNT, без x64-пары:${X64_NATIVE_MISSING:- нет}"
+if [ -n "$X64_NATIVE_MISSING" ]; then
+  add_missing "pywheels: нет x86_64-колёс для:$X64_NATIVE_MISSING — офлайн-паритет Intel неполный (pydeps.sh на Intel уйдёт в онлайн-фолбэк по этим пакетам)"
+fi
 if [ -n "$MISSING" ]; then
   echo ""
   echo "[vendor-mac] WARNING: неполный vendor — отсутствуют/пустые артефакты:$MISSING"

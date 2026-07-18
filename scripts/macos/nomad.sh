@@ -39,11 +39,53 @@ if [ "$SRC_TRUSTED" != "1" ]; then
   exit 120
 fi
 
-# 2. uv — менеджер Python
+# 1b. Целостность вшитого nomad-src — fail-closed ДО любого использования $SRC
+#     (тот же принцип, что verify_artifact для vendor/apps): (а) манифест дерева
+#     vendor/nomad-src.sha256 сам закреплён в checksums.json; (б) детерминированный
+#     SHA-256 ДЕРЕВА $SRC (hm_tree_sha256, рецепт общий с fetch-vendor-mac.sh)
+#     обязан совпасть с манифестом; (в) pyproject.toml дополнительно закреплён в
+#     checksums.json. Несовпадение/нет манифеста → exit 1, uv tool install НЕ идёт.
+if [ -z "$DRY" ]; then
+  TREE_SHA_FILE="${HM_VENDOR:-}/nomad-src.sha256"
+  if [ -z "${HM_VENDOR:-}" ] || [ ! -f "$TREE_SHA_FILE" ]; then
+    echo "БЕЗОПАСНОСТЬ: нет манифеста целостности nomad-src (vendor/nomad-src.sha256) — отказываюсь ставить Nomad из непроверенного дерева. Пересобери установщик (tools/fetch-vendor-mac.sh). Установка остановлена."
+    exit 1
+  fi
+  verify_artifact "$TREE_SHA_FILE"      # сам манифест — против checksums.json
+  verify_artifact "$SRC/pyproject.toml" # точечный пин главного файла пакета
+  TREE_WANT="$(tr -d '[:space:]' < "$TREE_SHA_FILE" | tr 'A-Z' 'a-z')"
+  TREE_GOT="$(hm_tree_sha256 "$SRC")"
+  if [ -z "$TREE_WANT" ] || [ "$TREE_GOT" != "$TREE_WANT" ]; then
+    echo "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 дерева nomad-src — vendor подменён/повреждён. Установка Nomad остановлена."
+    echo "  ожидалось: ${TREE_WANT:-<пусто>}"
+    echo "  получено:  $TREE_GOT"
+    exit 1
+  fi
+  echo "  Целостность подтверждена (SHA-256 дерева): vendor/nomad-src"
+fi
+
+# 2. uv — менеджер Python. БЕЗ curl|sh (P1-фикс: неверифицированный сетевой
+#    инсталлер ломал инвариант uv.sh P1-A «uv только из vendor c fail-closed SHA»).
+#    Единственный источник uv = вшитый vendor-архив uv-macos-$(arch_tag).tar.gz —
+#    пере-используем scripts/macos/uv.sh (verify_artifact + распаковка + проверка
+#    запуском из источника), НЕ дублируем. Нет vendor-архива (uv.sh exit 120) →
+#    честный graceful skip компонента: сначала выбери компонент uv.
 if ! have uv; then
-  echo "Устанавливаю uv..."
-  [ -z "$DRY" ] && curl -fsSL https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  echo "uv не найден — ставлю из вшитого vendor-архива (fail-closed SHA-256, без сети)..."
+  if bash "$DIR/uv.sh"; then UV_RC=0; else UV_RC=$?; fi
+  if [ "$UV_RC" = "120" ]; then
+    echo "Компонент Nomad требует uv, а vendor-архив uv не вшит в эту сборку — сначала выбери компонент uv (или пересобери установщик с uv). Пропускаю Nomad."
+    [ -n "$DRY" ] && exit 0
+    exit 120
+  elif [ "$UV_RC" != "0" ]; then
+    echo "ОШИБКА: установка uv из вшитого архива не удалась (код $UV_RC) — Nomad не устанавливаю (fail-closed)."
+    exit "$UV_RC"
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  if [ -z "$DRY" ] && ! have uv; then
+    echo "ОШИБКА: uv не появился в PATH после установки — Nomad не устанавливаю."
+    exit 1
+  fi
 fi
 
 # 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nmd/nomad-agent/nomad-acp).

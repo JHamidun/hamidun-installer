@@ -145,6 +145,17 @@ verify_artifact_soft() {
   [ "$actual" = "$expected" ]
 }
 
+# Детерминированный SHA-256 ДЕРЕВА каталога: sha256 от списка "sha256  ./путь"
+# всех файлов в стабильном порядке (LC_ALL=C sort по путям). Используется с двух
+# сторон ОДНИМ рецептом: build-time (tools/fetch-vendor-mac.sh пишет
+# vendor/nomad-src.sha256) и install-time (nomad.sh сверяет fail-closed перед
+# `uv tool install`). shasum есть на каждом macOS (/usr/bin/shasum, perl).
+# Несуществующий каталог -> хеш пустого ввода -> закономерный mismatch (fail-closed).
+hm_tree_sha256() {
+  ( cd "$1" 2>/dev/null && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 2>/dev/null ) \
+    | shasum -a 256 | awk '{print $1}'
+}
+
 # ---- Атомарные root-скрипты: verify + install под ОДНИМ admin_run (fail-closed) ----
 # ЗАКРЫВАЕТ TOCTOU verify(medium)->install(root) (Codex round-4 P1). Раньше подпись
 # проверялась medium-процессом СНАРУЖИ admin_run, а installer/cp шёл root'ом ВНУТРИ:
