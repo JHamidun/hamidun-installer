@@ -1,7 +1,9 @@
 ﻿# Nomad Agent — Windows (Python CLI via uv)
 # Continue (не Stop): нативные команды (git/uv/python) пишут в stderr → под Stop = NativeCommandError и падение.
 $ErrorActionPreference = 'Continue'
-# irm|iex ниже тянет ОФИЦИАЛЬНЫЙ установщик uv (astral.sh) по HTTPS (доверие = TLS). Форсим TLS 1.2.
+# irm|iex (ПОСЛЕДНИЙ онлайн-фолбэк в секции 2) тянет ОФИЦИАЛЬНЫЙ установщик uv (astral.sh)
+# по HTTPS (доверие = TLS). Форсим TLS 1.2. Основной путь — офлайн: уже установленный uv
+# или вшитый vendor-uv через uv.ps1 (SHA-256 fail-closed).
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
@@ -27,8 +29,12 @@ function Update-Path {
 }
 
 # uv/nomad живут в user-профиле (~/.local\bin) и НЕ в elevated-PATH (см. Update-Path #4).
-# Резолвим uv по абсолютному пути: Get-Command (если вдруг в Machine-PATH) → ~/.local\bin.
+# Резолвим uv по абсолютному пути. ПЕРВЫМ — офлайн-каталог нашего компонента uv
+# (%LOCALAPPDATA%\Programs\uv — туда его кладёт uv.ps1), затем Get-Command (если вдруг
+# в Machine-PATH) → ~/.local\bin → WinGet Links.
 function Resolve-UvExe {
+    $ours = Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe'
+    if (Test-Path -LiteralPath $ours -PathType Leaf) { return $ours }
     $c = Get-Command uv -ErrorAction SilentlyContinue
     if ($c -and $c.Source) { return $c.Source }
     foreach ($p in @((Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
@@ -81,11 +87,38 @@ if ($DRY -and (-not $srcTrusted)) {
     Write-Host "  [dry-run] Источник Nomad (vendor) не вшит — продолжаю dry-run preview секций 2/3/4."
 }
 
-# 2. uv — менеджер Python (в user-профиле; резолвим по abs-пути, не через PATH)
+# 2. uv — менеджер Python (в user-профиле; резолвим по abs-пути, не через PATH).
+#    Порядок источников (GAP-фикс ревью: nomad идёт РАНЬШЕ компонента uv в порядке
+#    установки, поэтому надеяться на «uv уже поставлен» нельзя):
+#      (a) uv уже установлен (Programs\uv / Machine-PATH / ~/.local/bin / WinGet) → используем;
+#      (b) uv нет, но в сборку вшит vendor-uv (vendor\apps\uv) → ставим ЧЕРЕЗ uv.ps1 —
+#          та же SHA-256 fail-closed логика, что у компонента uv (переиспользуем скрипт,
+#          НЕ дублируем небезопасно);
+#      (c) ничего из этого нет → онлайн astral.sh — ПОСЛЕДНИЙ фолбэк, честно пишем в лог.
 $uv = Resolve-UvExe
+$uvPlannedOffline = $false   # dry-run: uv будет поставлен из vendor — онлайн-фолбэк не превьюим
 if (-not $uv) {
-    Write-Host "Устанавливаю uv..."
-    if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://astral.sh/uv/install.ps1 | iex" }
+    $uvScript    = Join-Path $PSScriptRoot 'uv.ps1'
+    $vendorUvExe = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\uv\uv.exe' } else { '' }
+    if ($vendorUvExe -and (Test-Path -LiteralPath $vendorUvExe -PathType Leaf) -and (Test-Path -LiteralPath $uvScript -PathType Leaf)) {
+        Write-Host "uv не найден — ставлю вшитый офлайн-uv (vendor\apps\uv, SHA-256 fail-closed, через uv.ps1)..."
+        if ($DRY) {
+            Write-Host "  [dry-run] WOULD: установить uv из vendor через uv.ps1 (офлайн, без сети)"
+            $uvPlannedOffline = $true
+        } else {
+            # exit N внутри дочернего .ps1 возвращает управление сюда с $LASTEXITCODE=N.
+            & $uvScript
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  [warn] вшитый uv не установился (код $LASTEXITCODE) — попробую онлайн-фолбэк."
+            }
+            Update-Path
+            $uv = Resolve-UvExe
+        }
+    }
+}
+if (-not $uv -and -not $uvPlannedOffline) {
+    Write-Host "uv не найден, офлайн-источник (vendor\apps\uv) недоступен — ставлю uv ОНЛАЙН с astral.sh (нужен интернет; это последний фолбэк)..."
+    if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://astral.sh/uv/install.ps1 | iex (онлайн-фолбэк)" }
     else {
         try { Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression }
         catch { Write-Host "uv не установился: $($_.Exception.Message)"; exit 1 }

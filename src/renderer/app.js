@@ -667,14 +667,14 @@ async function runComponents(ids, env) {
 const TIPS = [
   '<kbd>Esc</kbd> мгновенно останавливает Claude. Писать «стой» в чат бесполезно — сообщение просто встанет в очередь.',
   'Испортил файл? <code>/rewind</code> откатит правки: Claude сам делает точку сохранения перед каждым изменением.',
-  'Открывая папку, Cursor спросит «Do you trust the authors?» — жми <b>Yes</b>, иначе панель Claude молча не заработает.',
-  'В Cursor два ИИ-чата. Встроенный (<kbd>Ctrl</kbd>+<kbd>L</kbd>) — отдельный платный продукт Cursor. Твой — панель со значком <b>✳</b>.',
-  '<kbd>Ctrl</kbd>+<kbd>Esc</kbd> открывает панель Claude из любого места Cursor.',
+  'Открывая папку, VS Code (или Cursor) спросит «Do you trust the authors?» — жми <b>Yes</b>, иначе панель Claude молча не заработает.',
+  'Твой чат — панель Claude со значком <b>✳</b>. В Cursor не перепутай с его встроенным чатом (<kbd>Ctrl</kbd>+<kbd>L</kbd>) — это отдельный платный продукт.',
+  '<kbd>Ctrl</kbd>+<kbd>Esc</kbd> открывает панель Claude из любого места VS Code (и Cursor).',
   'Квота подписки общая: переписка на claude.ai и работа в Claude Code тратят один лимит. Остаток покажет <code>/usage</code>.',
   '«Limit reached» — не поломка. Время сброса написано прямо в сообщении, ничего не теряется.',
   'Скриншот в чат: Windows — <kbd>Alt</kbd>+<kbd>V</kbd>, Mac — <kbd>Ctrl</kbd>+<kbd>V</kbd>. Или перетащи файл, зажав <kbd>Shift</kbd>.',
   'Одна задача — один разговор. Закончил — <code>/clear</code>, и следующая задача пойдёт быстрее и точнее.',
-  'Правый клик по файлу → <b>Open Timeline</b>: Cursor хранит прошлые версии каждого файла, даже без git.',
+  'Правый клик по файлу → <b>Open Timeline</b>: VS Code хранит прошлые версии каждого файла, даже без git.',
   'Claude спрашивает разрешение перед каждой правкой. Это твоя страховка — не отключай её.',
   'Claude «только рассказывает», но не делает? Ты случайно включил режим плана — нажми <kbd>Shift</kbd>+<kbd>Tab</kbd>.',
   'Что-то сломалось — набери <code>/doctor</code>: он сам проверит установку и предложит починить.',
@@ -864,14 +864,24 @@ function renderNextSteps(failed, skipped) {
 
   // ── Доступ к нейросети (CJM: главный барьер воронки «скачал → Claude заработал») ──
   // Два пути: своя подписка Claude ИЛИ Nomad для РФ (без VPN/зарубежной карты, рубли).
-  // Карту Nomad показываем ТОЛЬКО если агент реально установлен (на Mac пока skip).
-  const nomadOk = !!(STATE.selected && STATE.selected.nomad);
+  // Карту Nomad показываем ВСЕГДА: это способ подключить нейросеть, а не отчёт об
+  // установке. Меняется только ТЕКСТ — по РЕАЛЬНОМУ статусу установки (не по галочке
+  // выбора): компонент прошёл успешно в этом прогоне ИЛИ уже стоял на машине (детект)
+  // → «уже установлен»; упал / пропущен (exit 120, lite-сборка) / не выбирался →
+  // честное «можно доустановить» (повторный запуск установщика с галочкой Nomad).
+  const nomadInstalled =
+    (!!(STATE.selected && STATE.selected.nomad) &&
+      !failed.includes('nomad') && !skipped.includes('nomad')) ||
+    !!(STATE.detected && STATE.detected.nomad && STATE.detected.nomad.installed);
   const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
   const claudeUrl = links.claude || 'https://claude.ai/login';
-  const nomadCard = (nomadOk && cloud.registerUrl)
+  const nomadText = nomadInstalled
+    ? 'Без VPN и без зарубежной карты, оплата в рублях. Агент Nomad уже установлен: зарегистрируйся в кабинете, получи ключ и вставь его — Claude заработает через облако Nomad.'
+    : 'Без VPN и без зарубежной карты, оплата в рублях. Агент Nomad не установлен — можно доустановить: запусти установщик ещё раз и отметь компонент Nomad. Зарегистрироваться в кабинете и получить ключ можно уже сейчас.';
+  const nomadCard = cloud.registerUrl
     ? `<div class="ns-access-card ns-access-card--hl">
          <div class="ns-access-h">🇷🇺 Из России — через Nomad</div>
-         <div class="ns-access-t">Без VPN и без зарубежной карты, оплата в рублях. Зарегистрируйся в кабинете, получи ключ — и Claude заработает через облако Nomad (уже встроено в установщик).</div>
+         <div class="ns-access-t">${nomadText}</div>
          <div class="ns-access-btns">
            <button type="button" class="ns-access-btn primary" data-ext="${cloud.registerUrl}">Регистрация в кабинете</button>
            ${cloud.keysUrl ? `<button type="button" class="ns-access-btn" data-ext="${cloud.keysUrl}">Получить ключ</button>` : ''}

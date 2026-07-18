@@ -289,7 +289,7 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
   Write-Host "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"
 }
 
-Write-Host "[vendor] checksums.json — SHA-256 всех файлов vendor/apps (целостность/доверие)..."
+Write-Host "[vendor] checksums.json — SHA-256 файлов vendor/apps + архива курса (целостность/доверие)..."
 try {
   # Чистый .NET (Get-FileHash недоступен в powershell electron-builder-сборки —
   # модуль Utility не подхватывается; ConvertTo-Json тоже избегаем).
@@ -297,7 +297,13 @@ try {
   $entries = New-Object System.Collections.ArrayList
   # -Recurse: артефакты в подпапках (apps\claude-mascot\claude-mascot.exe) тоже в манифест —
   # Confirm-HmArtifact ищет запись по ИМЕНИ файла, путь не важен.
-  Get-ChildItem $apps -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 } | Sort-Object Name | ForEach-Object {
+  $toHash = @(Get-ChildItem $apps -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 0 })
+  # Вшитый архив курса — тоже в манифест: course.ps1 проверяет его fail-closed
+  # (Confirm-HmArtifact), как остальные вшитые артефакты. Имя vibecoding-course.zip
+  # уникально — коллизий по базовому имени (ключ манифеста) нет.
+  $courseZipChk = Get-Item (Join-Path $root 'vendor\course\vibecoding-course.zip') -ErrorAction SilentlyContinue
+  if ($courseZipChk -and $courseZipChk.Length -gt 0) { $toHash += $courseZipChk }
+  $toHash | Sort-Object Name | ForEach-Object {
     $fs = [IO.File]::OpenRead($_.FullName)
     try { $hb = $sha.ComputeHash($fs) } finally { $fs.Dispose() }
     $hex = ([BitConverter]::ToString($hb) -replace '-', '').ToLower()

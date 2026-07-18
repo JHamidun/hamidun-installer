@@ -1,5 +1,6 @@
 ﻿# Курс-симулятор «Вайбкодинг с Claude Code» — Windows
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -42,6 +43,12 @@ if ($DRY) {
     Write-Host "  [dry-run] WOULD: создать ярлык на рабочем столе"
     exit 0
 }
+
+# Целостность вшитого архива курса — fail-closed по SHA-256 против vendor/checksums.json,
+# как у остальных вшитых артефактов (uv/mascot). Несовпадение / нет записи в манифесте /
+# нет манифеста → Confirm-HmArtifact сам делает exit 1 (распаковка НЕ выполняется).
+# В dry-run сюда не доходим (ветка выше) — дисковых проверок в превью нет (паттерн P1-8).
+Confirm-HmArtifact $zip
 
 Write-Host "Распаковываю курс-симулятор в $target ..."
 New-Item -ItemType Directory -Force $target | Out-Null

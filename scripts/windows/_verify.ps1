@@ -33,8 +33,8 @@ function Get-HmChecksumEntry {
 
 # Главный вентиль. Проверяет $Path против vendor/checksums.json ($env:HM_VENDOR).
 # Успех -> печатает подтверждение и возвращает управление. Провал -> exit 1 (fail-closed).
-# Вызывать ТОЛЬКО для ВШИТЫХ артефактов (vendor/apps/*), НЕ для онлайн-загрузок
-# (у них другая версия -> хэш законно не совпадёт).
+# Вызывать ТОЛЬКО для ВШИТЫХ артефактов (vendor/apps/* и vendor/course/vibecoding-course.zip),
+# НЕ для онлайн-загрузок (у них другая версия -> хэш законно не совпадёт).
 function Confirm-HmArtifact {
     param([string]$Path)
 
