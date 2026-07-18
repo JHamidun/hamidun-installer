@@ -708,6 +708,12 @@ function stopTips() {
 async function startInstall() {
   const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
+  // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
+  // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
+  // как и было бы по умолчанию).
+  STATE.installStartedAt = Date.now();
+  const telOpt = $('#telemetry-opt');
+  STATE.telemetryConsent = !telOpt || !!telOpt.checked;
   $('#view-select').classList.add('hidden');
   $('#view-progress').classList.remove('hidden');
   buildSteps(order);
@@ -750,7 +756,7 @@ function finishInstall(res) {
   let title, sub;
   if (okAll) {
     title = 'Готово!';
-    sub = 'Всё установлено. Ниже — три простых шага до первого результата.';
+    sub = 'Всё установлено. Ниже — три простых шага до первого результата, или нажми кнопку бота — он поведёт дальше.';
   } else if (failed.length === 0 && skipped.length === 0) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
@@ -768,7 +774,30 @@ function finishInstall(res) {
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
   renderNextSteps(failed, skipped);
+  sendInstallTelemetry(failed, okAll);
   $('#btn-finish').classList.remove('hidden');
+}
+
+// Анонимная телеметрия установки: ОДИН POST по завершении (повторные финиши после
+// «Повторить неустановленное» не шлют — guard telemetrySent). Opt-out — чекбоксом
+// на экране выбора. БЕЗ uid и ПД: только исход, id упавших компонентов и длительность.
+// Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
+// renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
+// телеметрии не зависит ни в каком исходе.
+function sendInstallTelemetry(failed, okAll) {
+  if (STATE.telemetrySent || STATE.telemetryConsent === false) return;
+  STATE.telemetrySent = true;
+  const durationSec = STATE.installStartedAt
+    ? Math.max(0, Math.round((Date.now() - STATE.installStartedAt) / 1000))
+    : 0;
+  try {
+    const p = window.installer.sendTelemetry({
+      ok: !!okAll,
+      failed: (failed || []).slice(),
+      durationSec,
+    });
+    if (p && p.catch) p.catch(() => { /* молча */ });
+  } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
 function renderNextSteps(failed, skipped) {
@@ -796,12 +825,11 @@ function renderNextSteps(failed, skipped) {
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @HamidunAcademyBot.</div></div>` + skipHtml
     : '';
 
-  // Deeplink в бота: payload кодирует результат (_f/_ok) и платформу (w/m), ≤64 символов.
-  const basePayload = fin.botStartPayload || 'installed';
-  const startPayload = (basePayload +
-    ((failed.length || skipped.length) ? '_f' : '_ok') +
-    '_' + (isWin ? 'w' : 'm')).slice(0, 64);
-  const botUrl = links.bot ? links.bot + '?start=' + encodeURIComponent(startPayload) : '';
+  // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
+  // с тестами): всё ок → ?start=installed_win|installed_mac; есть упавшие компоненты →
+  // ?start=failed_<первый-упавший-id>_win|_mac (напр. failed_cursor_win).
+  const startPayload = window.HMFinishLink.botStartPayload(failed, isWin, fin.botStartPayload || 'installed');
+  const botUrl = window.HMFinishLink.botUrl(links.bot || '', startPayload);
   // Заметная CTA-карточка бота академии: новичок должен сразу видеть, куда бежать
   // за помощью. Открытие ссылки — через тот же механизм data-ext → openExternal,
   // что и остальные внешние кнопки (обработчик вешается ниже одним querySelectorAll).
@@ -859,7 +887,7 @@ function renderNextSteps(failed, skipped) {
 
   // Третий шаг ведёт на бота; если ссылки на бота в конфиге нет — на памятку.
   const step3 = botUrl
-    ? `<li><b>Если что-то не получается</b> — не разбирайся в одиночку. Жми на кнопку бота ниже: он ответит и проведёт по шагам.</li>`
+    ? `<li><b>Если что-то не получается</b> — не разбирайся в одиночку: нажми кнопку «Бот-помощник» рядом с «Открыть VS Code» — бот ответит и проведёт по шагам.</li>`
     : `<li><b>Если что-то не получается</b> — открой памятку «Что дальше» ниже: в ней ответы на весь первый день.</li>`;
 
   // ── Доступ к нейросети (CJM: главный барьер воронки «скачал → Claude заработал») ──
@@ -914,6 +942,7 @@ function renderNextSteps(failed, skipped) {
     ${failHtml}
     <div class="ns-actions">
       <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code</button>
+      ${botUrl ? `<button type="button" class="btn-sm ns-bot-main" data-ext="${botUrl}">💬 ${window.HMFinishLink.botButtonLabel(failed)}</button>` : ''}
       ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
       <button type="button" id="ns-claude" class="btn-sm">⚡ Войти в Claude через терминал</button>
       <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>

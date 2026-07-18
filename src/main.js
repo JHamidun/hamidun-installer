@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const https = require('https');
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
@@ -643,6 +644,46 @@ ipcMain.handle('run-component', async (_evt, payload) => {
 });
 
 ipcMain.handle('open-external', (_e, url) => { if (url) shell.openExternal(url); return true; });
+
+// ---- анонимная телеметрия установки (opt-out чекбоксом на экране выбора) ----
+// БЕЗ uid и ПД: только событие, платформа, исход, id упавших компонентов и
+// длительность. URL берём ТОЛЬКО из вшитого config.json (renderer URL задать не
+// может — иначе IPC превращается в произвольный POST-прокси), поля санитизируем
+// здесь же. Fire-and-forget: таймаут 5с, ЛЮБЫЕ ошибки глотаем молча — установка
+// от телеметрии не зависит ни в каком исходе.
+ipcMain.handle('send-telemetry', (_e, payload) => {
+  try {
+    const cfg = readJson('config.json', {});
+    const url = String((cfg.telemetry && cfg.telemetry.url) || '');
+    if (!/^https:\/\//i.test(url)) return { ok: false }; // пустой url = выключено
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    // failed: только компонентные id (латиница/цифры/_/-), ≤20 штук, ≤64 символа.
+    const failed = Array.isArray(p.failed)
+      ? p.failed.slice(0, 20).map((s) => String(s).slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'))
+      : [];
+    const body = JSON.stringify({
+      event: 'installed',
+      platform: IS_WIN ? 'win' : 'mac',
+      ok: !!p.ok,
+      failed,
+      // duration_sec клампим в [0, 24ч] — мусорные значения не улетают.
+      duration_sec: Math.max(0, Math.min(86400, Math.round(Number(p.durationSec) || 0))),
+    });
+    const u = new URL(url);
+    const req = https.request({
+      hostname: u.hostname,
+      port: u.port || 443,
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 5000,
+    }, (res) => { res.resume(); }); // ответ не важен — просто дренируем сокет
+    req.on('timeout', () => { try { req.destroy(); } catch (e) { /* ignore */ } });
+    req.on('error', () => { /* молча: телеметрия не должна ломать установку */ });
+    req.end(body);
+  } catch (e) { /* swallow — see above */ }
+  return { ok: true };
+});
 
 // shell.openPath резолвится СТРОКОЙ: пустая = успех, непустая = текст ошибки.
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.

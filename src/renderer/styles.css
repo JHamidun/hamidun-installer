@@ -203,6 +203,10 @@ h1 {
   gap: 16px; padding-top: 14px; border-top: 1px solid var(--border);
 }
 .summary { color: var(--text-muted); font-size: 13px; }
+/* Левая колонка футера выбора: сводка + чекбокс телеметрии друг под другом. */
+.actions-left { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.telemetry-opt { font-size: 11.5px; }
+.telemetry-opt input { width: 13px; height: 13px; flex: 0 0 auto; }
 .btn {
   font-family: var(--h-font-head); font-weight: 600; font-size: 15px;
   border: none; border-radius: var(--h-r-pill);
@@ -309,6 +313,20 @@ h1 {
 .ns-bot-btn:active { transform: translateY(1px); }
 .ns-auto { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); cursor: pointer; }
 .ns-auto input { width: 15px; height: 15px; }
+
+/* Заметная кнопка «Бот-помощник» на финише — рядом с «Открыть VS Code»,
+   в фирменных цветах бот-CTA (deep-link t.me открывается через data-ext). */
+.btn-sm.ns-bot-main {
+  border: none; color: #fff;
+  font-family: var(--h-font-head); font-weight: 700; font-size: 13.5px;
+  background: linear-gradient(135deg, var(--h-cyan), var(--h-primary));
+  box-shadow: 0 8px 24px rgba(41,169,255,.4);
+}
+.btn-sm.ns-bot-main:hover {
+  background: linear-gradient(135deg, var(--h-cyan), var(--h-primary));
+  border-color: transparent; filter: brightness(1.12);
+}
+.btn-sm.ns-bot-main:active { transform: translateY(1px); }
 
 /* ---- доступ к нейросети (CJM: разблокировка «скачал → Claude заработал») ---- */
 .ns-access { margin: 0 0 12px; }

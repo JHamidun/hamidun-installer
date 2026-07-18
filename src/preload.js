@@ -29,5 +29,8 @@ contextBridge.exposeInMainWorld('installer', {
   launchVsCode: () => ipcRenderer.invoke('launch-vscode'),
   openClaudeTerminal: () => ipcRenderer.invoke('open-claude-terminal'),
   saveCredentials: (obj) => ipcRenderer.invoke('save-credentials', obj),
+  // Анонимная телеметрия установки ({ok, failed[], durationSec}) — URL зашит в
+  // config.json на стороне main; ошибки там глотаются, ответ не важен.
+  sendTelemetry: (payload) => ipcRenderer.invoke('send-telemetry', payload),
   quit: () => ipcRenderer.invoke('quit')
 });

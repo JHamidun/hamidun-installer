@@ -37,7 +37,16 @@
     </div>
 
     <footer class="actions">
-      <div class="summary" id="summary">Выбрано: 0</div>
+      <div class="actions-left">
+        <div class="summary" id="summary">Выбрано: 0</div>
+        <!-- Анонимная телеметрия установки (opt-out). Согласие снимается в момент
+             нажатия «Установить» (app.js/startInstall); POST один, без uid и ПД. -->
+        <label class="ns-auto telemetry-opt"
+               title="Один анонимный отчёт после установки: платформа, успех/упавшие компоненты, длительность. Без имени, почты и каких-либо личных данных.">
+          <input type="checkbox" id="telemetry-opt" checked />
+          Отправлять анонимную статистику установки (помогает чинить ошибки)
+        </label>
+      </div>
       <button type="button" id="btn-install" class="btn btn-primary">Установить</button>
     </footer>
   </main>
@@ -80,6 +89,7 @@
   </main>
 
   <script src="deps.js"></script>
+  <script src="finish-link.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

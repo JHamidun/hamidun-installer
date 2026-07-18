@@ -34,6 +34,10 @@
     "beaconUrl": "https://academy.hamidun.com/api/course-completion",
     "shortcutName": "Курс вайбкодинг (Claude Code)"
   },
+  "telemetry": {
+    "_comment": "Анонимная статистика установки (opt-out чекбоксом на экране выбора). Один POST по завершении: {event, platform, ok, failed[], duration_sec} — БЕЗ uid и ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
+    "url": "https://academy.hamidun.com/api/lead"
+  },
   "finish": {
     "autoOpenCursorDefault": true,
     "credentialsRelPath": ".claude/.credentials.master.env",
