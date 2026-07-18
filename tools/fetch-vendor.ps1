@@ -251,6 +251,100 @@ if (Test-Path $mascotSrc) {
   Write-Host "  ! исходник скрепки не найден ($mascotSrc) — компонент «Скрепка» не попадёт в сборку."
 }
 
+# --- Экспорт-фильтр nomad-src (гигиена раздаваемого exe; порт 1:1 из fetch-vendor-mac.sh) ---
+# В exe уезжает ВСЁ дерево vendor\nomad-src каждому покупателю. Репо агента НЕ трогаем —
+# фильтруем ТОЛЬКО экспортированную копию после git archive: внутренние dev-артефакты
+# (.superpowers/, docs/plans|superpowers/, deploy/, *report*-отчёты) вырезаем,
+# деанон/секрет-паттерны гейтуем. FATAL — только если паттерн остаётся в коде, НУЖНОМ
+# для установки (py/toml пакетных директорий + pyproject.toml + README/LICENSE);
+# остальное чистим сами с логом — билд не падает по мелочи.
+$NOMAD_LEAK_RE = '95\.179\.242\.167|transform-ai\.online|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+
+function Test-NomadSrcCritical {
+  # $Rel = путь ОТНОСИТЕЛЬНО корня nomad-src, разделители '/'. Код, нужный `uv tool install`:
+  # pyproject.toml + README/LICENSE/MANIFEST.in (pyproject ссылается: readme=/license-files= —
+  # удаление молча сломало бы install у покупателя) + *.py пакетных дир (pyproject
+  # [tool.setuptools.packages.find] include: agent, tools, nomad_cli, gateway, tui_gateway,
+  # cron, acp_adapter, plugins, providers; любая вложенность) + top-level *.py/*.toml.
+  param([string]$Rel)
+  if ($Rel -eq 'pyproject.toml') { return $true }
+  if ($Rel -in @('README.md', 'LICENSE', 'MANIFEST.in')) { return $true }
+  if ($Rel -match '^(agent|tools|nomad_cli|gateway|tui_gateway|cron|acp_adapter|plugins|providers)/.*\.py$') { return $true }
+  if ($Rel -match '/') { return $false }
+  if ($Rel -match '\.(py|toml)$') { return $true }
+  return $false
+}
+
+function Invoke-NomadSrcSanitize {
+  # Возвращает $true = фильтр пройден; $false = FATAL (несводимые паттерны / битая структура).
+  param([string]$Src)
+  Write-Host "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
+  # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
+  foreach ($rel in @('.superpowers', 'docs\plans', 'docs\superpowers', 'deploy')) {
+    $p = Join-Path $Src $rel
+    if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')/" }
+  }
+  # 2) Внутренние *report*-отчёты: top-level (PHASE1_*_REPORT.md), docs\, scripts\.
+  #    Продуктовые файлы, матчащие глоб (agent/lsp/reporter.py, шаблоны skills/bug-report.md
+  #    и т.п.), НЕ трогаем — они часть агента.
+  $reportFiles = @(Get-ChildItem $Src -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
+  foreach ($d in @('docs', 'scripts')) {
+    $dp = Join-Path $Src $d
+    if (Test-Path $dp) {
+      $reportFiles += @(Get-ChildItem $dp -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
+    }
+  }
+  foreach ($f in $reportFiles) {
+    $rel = $f.FullName.Substring($Src.Length + 1) -replace '\\', '/'
+    Remove-Item -Force $f.FullName
+    Write-Host "    - удалил $rel"
+  }
+  # 3) Файлы с деанон/секрет-паттернами: НЕ нужные установке — удаляем (с логом);
+  #    install-critical — скрабим IP/домен (текстовая замена безопасна и в комментарии,
+  #    и в строковом литерале). Токен-паттерн в критическом коде скрабить нельзя
+  #    (меняет семантику) → останется до гейта ниже → FATAL.
+  $removed = 0
+  $matched = @(Get-ChildItem $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { Select-String -Path $_.FullName -Pattern $NOMAD_LEAK_RE -Quiet -ErrorAction SilentlyContinue })
+  foreach ($f in $matched) {
+    $rel = $f.FullName.Substring($Src.Length + 1) -replace '\\', '/'
+    if (Test-NomadSrcCritical $rel) {
+      $txt = [IO.File]::ReadAllText($f.FullName)
+      $txt = $txt -replace '95\.179\.242\.167', 'REDACTED-IP' -replace 'transform-ai\.online', 'redacted.example'
+      [IO.File]::WriteAllText($f.FullName, $txt)
+      Write-Host "    ~ скраб IP/домена в $rel (install-critical, файл сохранён)"
+    } else {
+      Remove-Item -Force $f.FullName; $removed++
+      Write-Host "    - удалил $rel (деанон/секрет-паттерн)"
+    }
+  }
+  # 4) Жёсткий гейт: после чистки паттернов быть НЕ должно НИГДЕ. Сюда доходит только
+  #    несводимое (токен в install-critical коде / непокрытый скраб) → FATAL со списком.
+  $left = @(Get-ChildItem $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { Select-String -Path $_.FullName -Pattern $NOMAD_LEAK_RE -Quiet -ErrorAction SilentlyContinue })
+  if ($left.Count -gt 0) {
+    Write-Host "[vendor] FATAL: в vendor\nomad-src остались деанон/секрет-паттерны (IP/домен/токены) в файлах:"
+    foreach ($f in $left) { Write-Host ("  - " + ($f.FullName.Substring($Src.Length + 1) -replace '\\', '/')) }
+    Write-Host "[vendor] Вычисти их в репо агента (или расширь экспорт-фильтр) и перезапусти сборку."
+    return $false
+  }
+  # Санити: структура пакета для `uv tool install` не сломана.
+  if (-not (Test-Path (Join-Path $Src 'pyproject.toml'))) {
+    Write-Host "[vendor] FATAL: экспорт-фильтр повредил nomad-src (нет pyproject.toml)"; return $false
+  }
+  # Файлы, на которые ссылается pyproject (readme=/license-files=), обязаны пережить фильтр —
+  # иначе `uv tool install` падает у покупателя на install-time без сигнала в сборке.
+  $pyprojTxt = Get-Content -Raw (Join-Path $Src 'pyproject.toml') -ErrorAction SilentlyContinue
+  foreach ($rel in @('README.md', 'LICENSE')) {
+    if ($pyprojTxt -and ($pyprojTxt -match [regex]::Escape($rel)) -and -not (Test-Path (Join-Path $Src $rel))) {
+      Write-Host "[vendor] FATAL: экспорт-фильтр удалил $rel, на который ссылается pyproject.toml"; return $false
+    }
+  }
+  Write-Host "  [nomad-src] фильтр ок (файлов с паттернами удалено: $removed)"
+  return $true
+}
+# --- /Экспорт-фильтр nomad-src ---
+
 Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive merged-кода, БЕЗ .git; vendor-only установка)..."
 # Компонент Nomad объявлен? Друзьям не нужен доступ к репозиторию: код едет офлайн внутри
 # установщика. nomad-src приватный, в git НЕ коммитится (.gitignore vendor/). Нет
@@ -276,8 +370,10 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
       & "$env:SystemRoot\System32\tar.exe" -x -f "$tmpTar" -C "$srcOut"
       Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue
       if (Test-Path (Join-Path $srcOut 'pyproject.toml')) {
+        # Экспорт-фильтр + гейт: несводимые деанон/секрет-паттерны в раздаваемом exe → FATAL.
+        if (-not (Invoke-NomadSrcSanitize $srcOut)) { exit 1 }
         $mbn = [math]::Round(((Get-ChildItem $srcOut -Recurse -File | Measure-Object Length -Sum).Sum)/1MB, 0)
-        Write-Host "  ok vendor\nomad-src ($mbn МБ, pyproject.toml на месте)"
+        Write-Host "  ok vendor\nomad-src ($mbn МБ, pyproject.toml на месте; фильтр пройден)"
       } else {
         Write-Host "  ! в vendor\nomad-src нет pyproject.toml — архив пустой/битый (компонент Nomad → graceful skip)."
       }

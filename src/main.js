@@ -1246,14 +1246,27 @@ function detectComponents() {
       path.join(cd, '.claude', 'skills', 'course-driver', 'SKILL.md')]);
     out.course = { installed: !!found, detectedVersion: '' };
   }
-  // nomad (бинарь или клон исходников)
+  // nomad — наш агент: шимы nmd/nomad-agent/nomad-acp (их кладёт `uv tool install` в
+  // ~/.local/bin, см. scripts/*/nomad.*) либо каталог uv-тула nomad-agent, либо
+  // легаси-клон исходников. Голое имя `nomad`/`nomad.exe` НЕ детектим — это HashiCorp
+  // Nomad (ложный позитив снимал бы галку компонента и врал «уже установлен»).
   {
-    const bin = resolveExecutable(IS_WIN ? ['nomad.exe'] : ['nomad'],
-      [path.join(home, '.local', 'bin')]);
+    const shimDir = path.join(home, '.local', 'bin');
+    const bin = resolveExecutable(
+      IS_WIN ? ['nmd.exe', 'nmd', 'nomad-agent.exe', 'nomad-agent', 'nomad-acp.exe', 'nomad-acp']
+             : ['nmd', 'nomad-agent', 'nomad-acp'],
+      [shimDir]);
+    // P1-4: uv-тул называется по pyproject [project].name = nomad-agent.
+    const uvTools = IS_WIN
+      ? firstExisting([
+          path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'uv', 'tools', 'nomad-agent'),
+          path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')
+        ])
+      : firstExisting([path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')]);
     const src = IS_WIN
       ? firstExisting([path.join(winLocalAppData(), 'nomad-src', 'pyproject.toml')])
       : firstExisting([path.join(home, '.nomad-src', 'pyproject.toml')]);
-    out.nomad = { installed: !!(bin || src), detectedVersion: '' };
+    out.nomad = { installed: !!(bin || uvTools || src), detectedVersion: '' };
   }
   // uv
   {

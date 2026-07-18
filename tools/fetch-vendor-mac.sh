@@ -310,6 +310,9 @@ nomad_src_is_critical() {
   # матчит и `/` — покрывает любую вложенность.
   case "$1" in
     pyproject.toml) return 0 ;;
+    # pyproject ссылается на них (readme=/license-files=): удаление молча сломало бы
+    # `uv tool install` у каждого покупателя → скрабим, а не удаляем.
+    README.md|LICENSE|MANIFEST.in) return 0 ;;
     agent/*.py|tools/*.py|nomad_cli/*.py|gateway/*.py|tui_gateway/*.py|cron/*.py|acp_adapter/*.py|plugins/*.py|providers/*.py) return 0 ;;
     */*) return 1 ;;
     *.py|*.toml) return 0 ;;
@@ -359,6 +362,13 @@ nomad_src_sanitize() {
   if [ ! -f "$S/pyproject.toml" ]; then
     echo "[vendor-mac] FATAL: экспорт-фильтр повредил nomad-src (нет pyproject.toml)"; return 1
   fi
+  # Файлы, на которые ссылается pyproject (readme=/license-files=), обязаны пережить фильтр —
+  # иначе `uv tool install` падает у покупателя на install-time без сигнала в сборке.
+  for rel in README.md LICENSE; do
+    if grep -q "$rel" "$S/pyproject.toml" 2>/dev/null && [ ! -f "$S/$rel" ]; then
+      echo "[vendor-mac] FATAL: экспорт-фильтр удалил $rel, на который ссылается pyproject.toml"; return 1
+    fi
+  done
   echo "  [nomad-src] фильтр ок (файлов с паттернами удалено: $removed)"
   return 0
 }
