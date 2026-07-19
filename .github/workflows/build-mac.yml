@@ -162,9 +162,12 @@ jobs:
           # QuotaExceeded. Поэтому: (1) abort брошенных multipart-частей (едят квоту
           # невидимо), (2) удалить старый dmg, (3) залить новый. Окно недоступности
           # ~3 мин приемлемо (есть зеркало Я.Диск в fallback-ссылках лендинга).
+          # abort ТОЛЬКО orphan'ы своего ключа — чтобы не убить in-flight multipart
+          # параллельной заливки (напр. Windows exe) в тот же бакет (root cause гонки).
           for u in s3.list_multipart_uploads(Bucket=bucket).get('Uploads', []):
-              s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
-              print('aborted orphan multipart:', u['Key'])
+              if u['Key'] == key:
+                  s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
+                  print('aborted orphan multipart:', u['Key'])
           s3.delete_object(Bucket=bucket, Key=key)
           print('old dmg deleted')
           cfg = TransferConfig(multipart_threshold=64*1024*1024, multipart_chunksize=64*1024*1024, use_threads=True)
