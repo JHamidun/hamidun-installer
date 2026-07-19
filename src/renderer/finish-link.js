@@ -19,12 +19,14 @@
   // okBase: база успешного payload (config.finish.botStartPayload, деф. 'installed').
   function botStartPayload(failed, isWin, okBase) {
     var plat = isWin ? 'win' : 'mac';
+    var suffix = '_' + plat;
     var list = Array.isArray(failed) ? failed.filter(Boolean) : [];
     if (!list.length) {
-      return (sanitizeId(okBase || 'installed') + '_' + plat).slice(0, MAX_PAYLOAD);
+      // Клампим базу, суффикс дописываем ПОСЛЕ — платформа никогда не срезается.
+      var base = sanitizeId(okBase || 'installed').slice(0, Math.max(1, MAX_PAYLOAD - suffix.length));
+      return base + suffix;
     }
     var prefix = 'failed_';
-    var suffix = '_' + plat;
     var room = Math.max(1, MAX_PAYLOAD - prefix.length - suffix.length);
     return prefix + sanitizeId(list[0]).slice(0, room) + suffix;
   }
