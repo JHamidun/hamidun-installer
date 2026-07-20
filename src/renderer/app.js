@@ -72,8 +72,14 @@ async function init() {
   renderVendorBlock();
   renderProgressBotBanner();
   refreshDerived();
+  // Приветственный экран показываем ПЕРВЫМ — но только после renderVendorBlock,
+  // чтобы стоп-экран App-Translocation имел приоритет (STATE.vendorBlocked уже выставлен).
+  showInitialScreen();
 
   $('#btn-install').addEventListener('click', startInstall);
+  $('#btn-welcome-go').addEventListener('click', goToSelect);
+  const wcWhatBtn = $('#btn-wc-what');
+  if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
   const whatBtn = $('#btn-what-installs');
   if (whatBtn) whatBtn.addEventListener('click', showWhatInstalls);
   const nextBtn = $('#btn-what-next');
@@ -152,6 +158,33 @@ function setupMascots() {
     });
     img.addEventListener('animationend', () => img.classList.remove('jump'));
   });
+}
+
+// ---- screen navigation (welcome → select → progress) ---------------
+
+// Какой экран показать при старте. Приветствие (view-welcome) — первым, ДО выбора
+// компонентов. Исключение и приоритет: App-Translocation / оторванный офлайн-vendor
+// (STATE.vendorBlocked, решает main). В этом случае приветствие пропускаем и сразу
+// показываем экран выбора — поверх него renderVendorBlock уже поднял блокирующее
+// окно-стоп («Установить» погашен), и бодрый welcome под ним был бы неуместен.
+function showInitialScreen() {
+  const welcome = $('#view-welcome');
+  const select = $('#view-select');
+  if (STATE.vendorBlocked) {
+    if (welcome) welcome.classList.add('hidden');
+    if (select) select.classList.remove('hidden');
+    return;
+  }
+  if (welcome) welcome.classList.remove('hidden');
+  if (select) select.classList.add('hidden');
+}
+
+// Кнопка «Поехали →» — переход с приветствия на экран выбора компонентов.
+function goToSelect() {
+  const welcome = $('#view-welcome');
+  const select = $('#view-select');
+  if (welcome) welcome.classList.add('hidden');
+  if (select) select.classList.remove('hidden');
 }
 
 // ---- selection / dependency logic ----------------------------------

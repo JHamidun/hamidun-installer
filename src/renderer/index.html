@@ -9,8 +9,83 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="h-frame">
+  <!-- ============ STEP 0: WELCOME ============ -->
+  <!-- Первый экран для живого новичка: что это, зачем и как пройдёт установка.
+       Показывается ПЕРВЫМ (app.js/showInitialScreen). Приоритет у App-Translocation
+       стоп-экрана: при неполном офлайн-vendor приветствие пропускается. -->
+  <main id="view-welcome" class="view">
+    <header class="hero">
+      <div class="brand">
+        <div class="hmark">H</div>
+        <div>
+          <h1>Hamidun Setup</h1>
+          <p class="lead">Рабочее место для вайбкодинга — под ключ</p>
+        </div>
+      </div>
+      <img class="mascot" src="mascot/watching.webp" alt="Омлетон — маскот Hamidun" title="Омлетон поможет всё поставить">
+    </header>
+
+    <div class="scroll">
+      <section class="wc">
+        <h2 class="wc-headline">За час у тебя будет готовое рабочее место для вайбкодинга</h2>
+        <p class="wc-sub">
+          Этот установщик сам поставит и настроит всё, что нужно: <b>Claude Code</b> — твоего ИИ-помощника,
+          редактор <b>VS Code</b>, а ещё <b>Node.js, Git и Python</b> и <b>личный конфиг Жемала</b>.
+          Чтобы ты не воевал с настройками, а сразу писал программы и сайты обычными словами — по-русски.
+        </p>
+
+        <div class="wc-steps">
+          <div class="wc-steps-title">Как пройдёт установка</div>
+          <ol class="wc-flow">
+            <li class="wc-step">
+              <div class="wc-step-ico" aria-hidden="true">🧩</div>
+              <div class="wc-step-body">
+                <div class="wc-step-h">1. Выберешь, что поставить</div>
+                <div class="wc-step-t">А проще — просто оставь как есть: по умолчанию уже собрано всё нужное для старта. Выбирать ничего не обязательно.</div>
+              </div>
+            </li>
+            <li class="wc-step">
+              <div class="wc-step-ico" aria-hidden="true">⏳</div>
+              <div class="wc-step-body">
+                <div class="wc-step-h">2. Нажмёшь «Установить»</div>
+                <div class="wc-step-t">Дальше можно спокойно заниматься своими делами: установка идёт сама, примерно час, а прогресс виден на экране.</div>
+              </div>
+            </li>
+            <li class="wc-step">
+              <div class="wc-step-ico" aria-hidden="true">🎯</div>
+              <div class="wc-step-body">
+                <div class="wc-step-h">3. Покажем, с чего начать</div>
+                <div class="wc-step-t">В конце будет три простых шага до первого результата. Ничего искать и гуглить не придётся.</div>
+              </div>
+            </li>
+            <li class="wc-step">
+              <div class="wc-step-ico" aria-hidden="true">🤖</div>
+              <div class="wc-step-body">
+                <div class="wc-step-h">4. Застрял? Поможет бот</div>
+                <div class="wc-step-t">Бот-помощник <b>@vibecodeguidebot</b> проведёт за руку — даже если ты никогда раньше не общался с ИИ.</div>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="wc-trust">
+          <span class="wc-trust-ico" aria-hidden="true">🔒</span>
+          <span class="wc-trust-text">
+            Всё — известный открытый софт, ничего скрытого и никакой рекламы. Полный список — на следующем экране.
+            <button type="button" id="btn-wc-what" class="linkbtn">Что именно установится?</button>
+          </span>
+        </div>
+      </section>
+    </div>
+
+    <footer class="actions wc-foot">
+      <div class="summary">Занимает около часа. Прерваться и продолжить позже можно в любой момент.</div>
+      <button type="button" id="btn-welcome-go" class="btn btn-primary">Поехали →</button>
+    </footer>
+  </main>
+
   <!-- ============ STEP 1: SELECT ============ -->
-  <main id="view-select" class="view">
+  <main id="view-select" class="view hidden">
     <header class="hero">
       <div class="brand">
         <div class="hmark">H</div>

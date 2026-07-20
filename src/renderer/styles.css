@@ -518,6 +518,76 @@ h1 {
   100% { transform: translateY(0); }
 }
 
+/* ---- welcome (первый экран: что это, зачем, как пройдёт установка) ---- */
+.wc { max-width: 720px; margin: 0 auto; padding: 4px 2px 8px; }
+.wc-headline {
+  font-family: var(--h-font-head);
+  font-weight: 800; letter-spacing: -0.02em;
+  font-size: 27px; line-height: 1.2;
+  margin: 4px 0 12px;
+}
+.wc-sub {
+  font-size: 16px; line-height: 1.6;
+  color: var(--text-muted);
+  margin: 0 0 22px;
+}
+.wc-sub b { color: var(--text); font-weight: 600; }
+
+.wc-steps { margin: 0 0 18px; }
+.wc-steps-title {
+  font-family: var(--h-font-mono);
+  font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--text-subtle);
+  margin: 0 0 10px 2px;
+}
+.wc-flow { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.wc-step {
+  display: flex; align-items: flex-start; gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--h-r-md);
+  padding: 14px 16px;
+}
+.wc-step-ico {
+  flex: 0 0 auto;
+  width: 42px; height: 42px; border-radius: 12px;
+  display: grid; place-items: center;
+  font-size: 22px; line-height: 1;
+  background: linear-gradient(135deg, rgba(45,47,232,.18), rgba(41,169,255,.18));
+  border: 1px solid var(--border-strong);
+}
+.wc-step-body { min-width: 0; }
+.wc-step-h {
+  font-family: var(--h-font-head);
+  font-weight: 700; font-size: 16px;
+  margin-bottom: 3px;
+}
+.wc-step-t { color: var(--text-muted); font-size: 14px; line-height: 1.5; }
+.wc-step-t b { color: var(--text); font-weight: 600; }
+
+.wc-trust {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: linear-gradient(135deg, rgba(98,197,132,.10), rgba(41,169,255,.08));
+  border: 1px solid rgba(98,197,132,.32);
+  border-radius: var(--h-r-md);
+  padding: 12px 15px;
+  font-size: 14px; line-height: 1.55; color: var(--text);
+}
+.wc-trust-ico { font-size: 16px; line-height: 1.4; flex: 0 0 auto; }
+.wc-trust-text { flex: 1 1 auto; }
+.wc-trust .linkbtn { font-size: 14px; font-weight: 600; margin-left: 4px; white-space: nowrap; }
+
+/* Приветственный футер: подпись слева, крупная CTA справа. */
+.wc-foot .summary { font-size: 13.5px; }
+.wc-foot .btn-primary { font-size: 16px; padding: 12px 32px; }
+
+@media (max-width: 560px) {
+  .wc-headline { font-size: 23px; }
+  .wc-sub { font-size: 15px; }
+  .wc-foot { flex-direction: column; align-items: stretch; gap: 10px; }
+  .wc-foot .btn-primary { width: 100%; }
+}
+
 /* ---- help-row на экране выбора (Что скачается / Что дальше) ---- */
 .help-row { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 12px; }
 .help-row .linkbtn { font-size: 13px; font-weight: 600; }
