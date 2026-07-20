@@ -1312,10 +1312,10 @@ ok('P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED филь
 });
 
 // Задача 3 (тестер-фидбек): finish-экран ведёт новичка — заметная CTA бота, 3 шага, приоритет VS Code.
-ok('Задача 3 (app.js): finish-экран — CTA @HamidunAcademyBot (data-ext), 3 шага, приоритет Открыть VS Code', () => {
+ok('Задача 3 (app.js): finish-экран — CTA @vibecodeguidebot (data-ext), 3 шага, приоритет Открыть VS Code', () => {
   const s = EG_APP();
   assert(/class="ns-bot"/.test(s), 'CTA-карточка бота .ns-bot присутствует');
-  assert(/@HamidunAcademyBot/.test(s), 'кнопка ведёт на @HamidunAcademyBot');
+  assert(/@vibecodeguidebot/.test(s), 'кнопка ведёт на @vibecodeguidebot');
   assert(/class="ns-bot-btn" data-ext=/.test(s), 'кнопка бота — через data-ext (переиспользован openExternal, без нового IPC)');
   assert(/Что дальше — три простых шага/.test(s), 'блок «что дальше — три простых шага»');
   assert(/const step3 = botUrl/.test(s), '3-й шаг ведёт на бота (fallback на памятку при пустом links.bot)');

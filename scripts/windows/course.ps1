@@ -26,10 +26,14 @@ Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
 
 # --- источник: вшитый архив курса ---
+# Курс — вшитый офлайн-компонент. Нет архива (lite-сборка ИЛИ оторванный vendor) →
+# осознанный graceful skip (exit 120), как nomad/uv/mascot: «нечего устанавливать —
+# пропускаю», а НЕ падение «код 1» (курс не должен ронять установку). В dry-run — 0.
 $zip = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'course\vibecoding-course.zip' } else { '' }
 if (-not $zip -or -not (Test-Path $zip)) {
-    Write-Host "Архив курса не найден во вшитых ресурсах (vendor\course\vibecoding-course.zip) — пересобери установщик покупательского издания."
-    exit 1
+    Write-Host "Курс-симулятор не вошёл в эту сборку (нет vendor\course\vibecoding-course.zip) — пропускаю. Всё остальное работает без него."
+    if ($DRY) { exit 0 }
+    exit 120
 }
 
 # --- целевая папка (zip содержит верхнюю папку vibecoding-course\) ---

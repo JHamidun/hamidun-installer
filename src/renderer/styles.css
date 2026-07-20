@@ -517,3 +517,56 @@ h1 {
   78% { transform: translateY(-5px); }
   100% { transform: translateY(0); }
 }
+
+/* ---- help-row на экране выбора (Что скачается / Что дальше) ---- */
+.help-row { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 12px; }
+.help-row .linkbtn { font-size: 13px; font-weight: 600; }
+
+/* ---- модальные окна (App-Translocation стоп + инфо-попапы) ---- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(2, 3, 18, .72);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  animation: modalFade .18s ease;
+}
+@keyframes modalFade { from { opacity: 0; } to { opacity: 1; } }
+.modal-card {
+  width: 100%; max-width: 480px; max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--h-r-lg);
+  padding: 26px 26px 22px; text-align: center;
+  box-shadow: 0 24px 64px rgba(0,0,0,.55);
+}
+.modal-emoji { font-size: 40px; line-height: 1; margin-bottom: 10px; }
+.modal-title {
+  font-family: var(--h-font-head); font-weight: 700; font-size: 20px;
+  margin: 0 0 12px;
+}
+.modal-body { color: var(--text-muted); font-size: 14px; line-height: 1.55; text-align: left; }
+.modal-body p { margin: 0 0 10px; }
+.modal-body b { color: var(--text); }
+.modal-actions { margin-top: 18px; display: flex; justify-content: center; }
+
+/* «Что скачается» — список компонентов из components.json */
+.wi-lead { color: var(--text-muted); font-size: 13px; margin: 0 0 14px; }
+.wi-list { list-style: none; margin: 0; padding: 0; text-align: left; }
+.wi-list li { padding: 9px 0; border-top: 1px solid var(--border); }
+.wi-list li:first-child { border-top: none; }
+.wi-name { font-family: var(--h-font-head); font-weight: 600; font-size: 14px; color: var(--text); }
+.wi-size { font-family: var(--h-font-body); font-weight: 500; font-size: 12px; color: var(--text-subtle); margin-left: 6px; }
+.wi-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.45; margin-top: 1px; }
+
+/* ---- плашка помощи-бота на экране прогресса/финиша ---- */
+.progress-bot {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 11px 14px;
+  background: linear-gradient(135deg, rgba(41,169,255,.14), rgba(45,47,232,.14));
+  border: 1px solid var(--border-strong); border-radius: var(--h-r-md);
+}
+.progress-bot-ico { font-size: 18px; line-height: 1; }
+.progress-bot-text { flex: 1 1 220px; font-size: 13px; color: var(--text); font-weight: 600; }
+.progress-bot-btn { flex: 0 0 auto; }

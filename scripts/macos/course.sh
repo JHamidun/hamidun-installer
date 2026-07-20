@@ -5,9 +5,14 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$DIR/_lib.sh"
 
 DRY="${HM_DRY_RUN:-}"
 ZIP="${HM_VENDOR:-}/course/vibecoding-course.zip"
+# Курс — вшитый офлайн-компонент. Нет архива (lite-сборка ИЛИ оторванный
+# translocation-vendor) → осознанный graceful skip (exit 120), как nomad/uv/mascot:
+# «нечего устанавливать — пропускаю», а НЕ падение «код 1» (курс не должен ронять
+# установку). В dry-run — 0. main НЕ пишет маркер установки при skip.
 if [ ! -f "$ZIP" ]; then
-  echo "Архив курса не найден во вшитых ресурсах (vendor/course/vibecoding-course.zip) — пересобери установщик покупательского издания."
-  exit 1
+  echo "Курс-симулятор не вошёл в эту сборку (нет vendor/course/vibecoding-course.zip) — пропускаю. Всё остальное работает без него."
+  [ -n "$DRY" ] && exit 0
+  exit 120
 fi
 
 TARGET="${HM_COURSE_TARGET:-$HOME/HamidunCourse}"

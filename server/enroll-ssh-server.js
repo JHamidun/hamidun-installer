@@ -162,7 +162,7 @@ const server = http.createServer((req, res) => {
 
     // Срок жизни токена (если задан ботом при регистрации).
     if (t.expiresAt && Date.now() > new Date(t.expiresAt).getTime()) {
-      return json(res, 403, { error: 'bridgeToken expired — renew the subscription in the bot (@HamidunAcademyBot)' });
+      return json(res, 403, { error: 'bridgeToken expired — renew the subscription in the bot (@vibecodeguidebot)' });
     }
 
     // Приватный ключ читаем ДО учёта устройства: серверная мисконфигурация
@@ -177,7 +177,7 @@ const server = http.createServer((req, res) => {
       console.error('enroll: token has no sshKeyPath configured');
     }
     if (!sshKey.trim()) {
-      return json(res, 500, { error: 'server misconfiguration: SSH key for this token is missing or unreadable — contact support (@HamidunAcademyBot)' });
+      return json(res, 500, { error: 'server misconfiguration: SSH key for this token is missing or unreadable — contact support (@vibecodeguidebot)' });
     }
 
     // Привязка устройств: до maxDevices (спека: 5) устройств на один токен.

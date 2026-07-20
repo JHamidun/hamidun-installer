@@ -46,6 +46,8 @@ async function init() {
   STATE.resourcesRoot = boot.resourcesRoot || '';
   STATE.userWarning = boot.userWarning || '';
   STATE.vendorAvailable = boot.vendorAvailable !== false;
+  STATE.vendorBlock = boot.vendorBlock || { blocked: false };
+  STATE.vendorBlocked = !!STATE.vendorBlock.blocked;
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -67,10 +69,15 @@ async function init() {
   renderPacks();
   renderPreflight();
   renderUserWarning();
-  renderVendorWarning();
+  renderVendorBlock();
+  renderProgressBotBanner();
   refreshDerived();
 
   $('#btn-install').addEventListener('click', startInstall);
+  const whatBtn = $('#btn-what-installs');
+  if (whatBtn) whatBtn.addEventListener('click', showWhatInstalls);
+  const nextBtn = $('#btn-what-next');
+  if (nextBtn) nextBtn.addEventListener('click', () => openStartHereMemo());
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
     if (auto && auto.checked) { await window.installer.launchVsCode(); }
@@ -434,6 +441,27 @@ function renderUserWarning() {
   if (hero) hero.insertAdjacentElement('afterend', el);
 }
 
+// macOS App Translocation / оторванный sibling-vendor (main решает авторитетно —
+// vendorBlock.blocked). Жёсткий стоп ДО установки: блокирующее окно (не warning),
+// «Установить» гасится (refreshDerived видит STATE.vendorBlocked). Если не заблокировано
+// — обычная мягкая подсветка renderVendorWarning (dev / config-pack отсутствует).
+function renderVendorBlock() {
+  const vb = STATE.vendorBlock || {};
+  if (!vb.blocked) { renderVendorWarning(); return; }
+  STATE.vendorBlocked = true;
+  openModal({
+    id: 'vendor-block',
+    emoji: '⚠️',
+    title: 'Запусти установщик из окна DMG',
+    bodyHtml:
+      '<p>macOS переместил приложение в защищённую область, поэтому офлайн-компоненты недоступны.</p>' +
+      '<p>Закрой это окно и запусти установщик <b>двойным кликом прямо в открытом окне DMG</b> ' +
+      '(<b>не</b> из «Программ»). Если уже перетащил в «Программы» — удали оттуда и запусти из образа.</p>',
+    closeLabel: 'Понятно',
+    blocking: true,
+  });
+}
+
 // На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
 // перетащили в /Applications и запустили без dmg — vendor не найден: жёсткое
 // предупреждение запускать из окна установщика (иначе офлайн-установка не сработает).
@@ -449,6 +477,121 @@ function renderVendorWarning() {
     'не подхватятся и установка может не пройти.';
   const hero = document.querySelector('#view-select .hero');
   if (hero) hero.insertAdjacentElement('afterend', el);
+}
+
+// ---- модальные окна (блокирующий стоп + инфо-попапы) ----------------
+// Универсальное модальное окно поверх всего экрана. blocking=true → закрыть можно
+// только кнопкой (App-Translocation стоп); иначе — ещё и кликом по затемнённому фону.
+// title — доверенный литерал; bodyHtml собирается вызывающим (пользовательские
+// значения экранируются на его стороне).
+function openModal(opts) {
+  const id = opts.id;
+  if (id && document.getElementById(id)) return null;
+  const ov = document.createElement('div');
+  if (id) ov.id = id;
+  ov.className = 'modal-overlay';
+  ov.innerHTML =
+    '<div class="modal-card" role="' + (opts.blocking ? 'alertdialog' : 'dialog') + '" aria-modal="true">' +
+      (opts.emoji ? '<div class="modal-emoji" aria-hidden="true">' + opts.emoji + '</div>' : '') +
+      '<h2 class="modal-title">' + opts.title + '</h2>' +
+      '<div class="modal-body">' + opts.bodyHtml + '</div>' +
+      '<div class="modal-actions">' +
+        '<button type="button" class="btn btn-primary modal-close">' +
+          escapeHtml(opts.closeLabel || 'Понятно') + '</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  const btn = ov.querySelector('.modal-close');
+  if (btn) btn.addEventListener('click', close);
+  if (!opts.blocking) {
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  }
+  return ov;
+}
+
+// Task 3 (страх вируса): попап «Что скачается на мой ПК» — реальный список из
+// components.json (имя + описание + примерный размер sizeHint). Служебные (hidden,
+// напр. verify) не показываем. Ничего не выдумываем — только данные конфига.
+function showWhatInstalls() {
+  const rows = [];
+  (STATE.groups || []).forEach((g) => {
+    (g.components || []).forEach((c) => {
+      if (!c || c.hidden) return;
+      const size = c.sizeHint ? ' <span class="wi-size">' + escapeHtml(c.sizeHint) + '</span>' : '';
+      rows.push(
+        '<li><div class="wi-name">' + escapeHtml(c.name) + size + '</div>' +
+        '<div class="wi-desc">' + escapeHtml(c.desc || '') + '</div></li>'
+      );
+    });
+  });
+  const body =
+    '<p class="wi-lead">Всё ставится офлайн из самого установщика и только с твоего выбора — ' +
+    'ничего постороннего из интернета не тянется.</p>' +
+    '<ul class="wi-list">' + rows.join('') + '</ul>';
+  openModal({
+    id: 'what-installs',
+    emoji: '📦',
+    title: 'Что скачается на мой ПК',
+    bodyHtml: body,
+    closeLabel: 'Закрыть',
+    blocking: false,
+  });
+}
+
+// Task 4: памятка «Что дальше» (START-HERE.html) — общий вход для кнопки на экране
+// выбора, прогресса и финиша. Вшита в ресурсы; на финише копируется на рабочий стол.
+// Копию кэшируем в STATE.startHerePath только при успехе; при неудаче открываем
+// вшитую из ресурсов. Повторный клик во время открытия игнорируем (memoBusy).
+async function openStartHereMemo() {
+  const fin = (STATE.config && STATE.config.finish) || {};
+  const startHtmlRel = fin.startHtmlRelPath || '';
+  if (!startHtmlRel) return false;
+  const isWin = STATE.platform === 'win32';
+  const sep = isWin ? '\\' : '/';
+  const startRel = isWin ? startHtmlRel.replace(/\//g, '\\') : startHtmlRel.replace(/\\/g, '/');
+  const resPath = STATE.resourcesRoot ? STATE.resourcesRoot + sep + startRel : '';
+  if (STATE.memoBusy) return false;
+  STATE.memoBusy = true;
+  try {
+    let dest = STATE.startHerePath || '';
+    if (!dest) {
+      try {
+        const r = await window.installer.saveStartHere();
+        if (r && r.ok && r.dest) { dest = r.dest; STATE.startHerePath = r.dest; }
+      } catch (e) { /* копия на стол не удалась — откроем вшитую */ }
+    }
+    const target = dest || resPath;
+    if (target) {
+      const r = await window.installer.openPath(target);
+      if (r && r.ok) return true;
+      if (target === STATE.startHerePath) STATE.startHerePath = '';
+    }
+    if (resPath && resPath !== target) {
+      const r2 = await window.installer.openPath(resPath);
+      return !!(r2 && r2.ok);
+    }
+    return false;
+  } finally {
+    STATE.memoBusy = false;
+  }
+}
+
+// Task 4b: заметная плашка «Не едет? Напиши боту…» на экране прогресса (и финиша —
+// это тот же view). Ссылка ведёт на бота-спутника из config.links.bot.
+function renderProgressBotBanner() {
+  const el = $('#progress-bot-banner');
+  if (!el) return;
+  const links = (STATE.config && STATE.config.links) || {};
+  const botBase = links.bot || '';
+  if (!botBase) return; // нет бота в конфиге — плашку не показываем
+  el.innerHTML =
+    '<span class="progress-bot-ico" aria-hidden="true">💬</span>' +
+    '<span class="progress-bot-text">Не едет? Напиши боту, кинь скриншот — проведёт за руку.</span>' +
+    '<button type="button" class="btn-sm progress-bot-btn" data-ext="' + escapeHtml(botBase) + '">Написать боту</button>';
+  el.classList.remove('hidden');
+  const btn = el.querySelector('[data-ext]');
+  if (btn) btn.addEventListener('click', () => window.installer.openExternal(btn.dataset.ext));
 }
 
 function refreshDerived() {
@@ -467,7 +610,9 @@ function refreshDerived() {
   $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}`;
   // P0-1: кнопка выключена, пока детекция установленного не завершилась — чтобы
   // установка не стартовала с недодетектированным состоянием (режим/галки).
-  $('#btn-install').disabled = n === 0 || !STATE.detectDone;
+  // App-Translocation / оторванный vendor (STATE.vendorBlocked) — жёсткий стоп:
+  // «Установить» не даём, пока офлайн-vendor неполон (main решает авторитетно).
+  $('#btn-install').disabled = n === 0 || !STATE.detectDone || !!STATE.vendorBlocked;
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
@@ -706,6 +851,9 @@ function stopTips() {
 }
 
 async function startInstall() {
+  // Жёсткий стоп при App-Translocation / оторванном vendor: даже если кнопку как-то
+  // нажали — установку не начинаем, повторно показываем блокирующее окно.
+  if (STATE.vendorBlocked) { renderVendorBlock(); return; }
   const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
@@ -822,7 +970,7 @@ function renderNextSteps(failed, skipped) {
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
          <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
-         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @HamidunAcademyBot.</div></div>` + skipHtml
+         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @vibecodeguidebot.</div></div>` + skipHtml
     : '';
 
   // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
@@ -840,7 +988,7 @@ function renderNextSteps(failed, skipped) {
            <div class="ns-bot-title">Застрял или что-то непонятно?</div>
            <div class="ns-bot-text">Спроси бота академии — он ответит и проведёт по шагам. Это нормально в первый день.</div>
          </div>
-         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота @HamidunAcademyBot</button>
+         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота @vibecodeguidebot</button>
        </div>`
     : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
@@ -965,48 +1113,13 @@ function renderNextSteps(failed, skipped) {
   if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
   const startBtnEl = $('#ns-start');
   if (startBtnEl && startHtmlRel) {
-    // Фолбэк-путь к вшитой памятке в ресурсах (если копия на стол не удалась).
-    const startRel = isWin ? startHtmlRel.replace(/\//g, '\\') : startHtmlRel.replace(/\\/g, '/');
-    const resPath = STATE.resourcesRoot ? STATE.resourcesRoot + sep + startRel : '';
-    // Кэшируем путь копии ТОЛЬКО при успехе — иначе следующий клик повторит
-    // попытку копирования (OneDrive/антивирус могли отпустить файл).
-    const ensureSaved = async () => {
-      if (STATE.startHerePath) return STATE.startHerePath;
-      try {
-        const r = await window.installer.saveStartHere();
-        if (r && r.ok && r.dest) STATE.startHerePath = r.dest;
-        return STATE.startHerePath || '';
-      } catch (e) { return ''; }
-    };
-    // Открываем копию на столе; если не вышло (файл удалили, сломана
-    // ассоциация .html) — открываем вшитую из ресурсов. Пропавшую копию
-    // забываем: следующий клик пересоздаст её через ensureSaved.
-    const openMemo = async (target) => {
-      if (target) {
-        const r = await window.installer.openPath(target);
-        if (r && r.ok) return true;
-        if (target === STATE.startHerePath) STATE.startHerePath = '';
-      }
-      if (resPath && target !== resPath) {
-        const r2 = await window.installer.openPath(resPath);
-        return !!(r2 && r2.ok);
-      }
-      return false;
-    };
-    // Один общий вход для авто-открытия и клика: пока операция в полёте,
-    // повторный клик игнорируем — иначе память откроется двумя вкладками.
-    let memoBusy = false;
-    const saveAndOpen = async () => {
-      if (memoBusy) return;
-      memoBusy = true;
-      try { await openMemo((await ensureSaved()) || resPath); }
-      finally { memoBusy = false; }
-    };
+    // Открытие памятки — через общий openStartHereMemo (тот же вход, что у кнопки
+    // «Что будет дальше?» на экране выбора): save-на-стол + фолбэк на вшитую копию.
     if (!STATE.startHereOpened) {
       STATE.startHereOpened = true;
-      saveAndOpen(); // авто-открытие после установки + копия на рабочий стол
+      openStartHereMemo(); // авто-открытие после установки + копия на рабочий стол
     }
-    startBtnEl.addEventListener('click', saveAndOpen);
+    startBtnEl.addEventListener('click', () => openStartHereMemo());
   }
   const saveKeysBtn = $('#ns-save-keys');
   if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);

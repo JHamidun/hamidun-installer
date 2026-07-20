@@ -20,4 +20,4 @@
 
 Больше эта команда не понадобится: она нужна один раз после скачивания.
 
-Вопросы — в Telegram: @HamidunAcademyBot
+Вопросы — в Telegram: @vibecodeguidebot

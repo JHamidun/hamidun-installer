@@ -23,6 +23,12 @@
     </header>
 
     <div class="scroll">
+      <!-- Снимаем страх «а не вирус ли» + показываем маршрут ДО установки. -->
+      <div class="help-row">
+        <button type="button" id="btn-what-installs" class="linkbtn">📦 Что скачается на мой ПК?</button>
+        <button type="button" id="btn-what-next" class="linkbtn">🧭 Что будет дальше?</button>
+      </div>
+
       <section id="groups" class="groups"></section>
 
       <section id="packs-wrap">
@@ -63,6 +69,10 @@
       </div>
       <img class="mascot" src="mascot/loading.webp" alt="Омлетон готовит окружение">
     </header>
+
+    <!-- Заметная плашка помощи: заполняется renderProgressBotBanner, видна во время
+         установки и на финише (это тот же view). -->
+    <div id="progress-bot-banner" class="progress-bot hidden"></div>
 
     <section class="progress-layout">
       <ul id="step-list" class="step-list"></ul>

@@ -45,6 +45,56 @@ function vendorAvailable() {
   try { return fs.existsSync(path.join(vendorRoot(), 'config-pack')); } catch (e) { return false; }
 }
 
+// macOS App Translocation: когда .app перетащили в /Программы и запустили ОТТУДА без
+// снятия карантина, Gatekeeper исполняет копию из read-only
+// /private/var/folders/.../AppTranslocation/<rand>/d/Hamidun Setup.app. Тогда
+// sibling-vendor из dmg (он лежит РЯДОМ с .app, не внутри) отрывается — vendorRoot()
+// найдёт лишь частичный Contents/Resources/vendor без uv/nomad/course/mascot, и
+// офлайн-компоненты падают «код 1». Определяем по пути exe/__dirname.
+function isTranslocated() {
+  if (process.platform !== 'darwin') return false;
+  try {
+    return /\/AppTranslocation\//.test(process.execPath || '')
+        || /\/AppTranslocation\//.test(__dirname || '');
+  } catch (e) { return false; }
+}
+
+// Есть ли в подпапке vendor файл, удовлетворяющий предикату (glob-lite без зависимостей).
+function vendorDirHas(sub, test) {
+  try { return fs.readdirSync(path.join(vendorRoot(), sub)).some(test); }
+  catch (e) { return false; }
+}
+
+// Полнота офлайн-vendor покупательского издания: помимо config-pack (база) должны
+// быть КЛЮЧЕВЫЕ офлайн-архивы, которые translocation отрывает от .app — архив uv
+// (vendor/apps/uv-macos-<arch>.tar.gz) и архив курса (vendor/course/*.zip). Оба
+// всегда едут в mac-сборке (fetch-vendor-mac + трекнутый курс); их отсутствие рядом
+// с частичным Resources/vendor = верный признак оторванного sibling-vendor.
+function vendorComplete() {
+  if (!vendorAvailable()) return false;
+  const hasUv = vendorDirHas('apps', (f) => /^uv-macos-.*\.tar\.gz$/i.test(f));
+  const hasCourse = vendorDirHas('course', (f) => /\.zip$/i.test(f));
+  return hasUv && hasCourse;
+}
+
+// Жёсткий стоп ДО установки (только упакованный mac-.app): translocation ИЛИ
+// оторванный/неполный sibling-vendor. blocked=true → renderer показывает
+// блокирующий экран и НЕ даёт нажать «Установить». В dev (не packaged) и на Windows
+// translocation невозможен — не блокируем.
+function vendorBlockInfo() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return { blocked: false };
+  const translocated = isTranslocated();
+  const complete = vendorComplete();
+  if (translocated || !complete) {
+    return {
+      blocked: true,
+      translocated,
+      reason: translocated ? 'translocation' : 'incomplete-vendor'
+    };
+  }
+  return { blocked: false };
+}
+
 function readJson(name, fallback) {
   try {
     return JSON.parse(fs.readFileSync(path.join(resourceRoot(), name), 'utf8'));
@@ -204,6 +254,9 @@ ipcMain.handle('bootstrap', () => {
     // перетащили в /Applications без dmg — vendor не найдётся: офлайн-установка
     // невозможна, компоненты уйдут в онлайн-фолбэк или упадут. UI это подсветит.
     vendorAvailable: vendorAvailable(),
+    // macOS App Translocation / оторванный sibling-vendor: жёсткий стоп ДО установки.
+    // blocked=true → renderer перекрывает экран блокирующим окном и гасит «Установить».
+    vendorBlock: vendorBlockInfo(),
     // Non-empty when we can tell the installer runs under a different user than
     // the interactive one (files would land in the wrong profile).
     userWarning: detectForeignUserWarning()
