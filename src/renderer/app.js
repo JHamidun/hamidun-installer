@@ -36,6 +36,14 @@ function escapeHtml(s) {
   ));
 }
 
+// Хэндл бота-спутника из конфига (links.bot = https://t.me/<handle>) — ЕДИНЫЙ источник,
+// без хардкода «@vibecodeguidebot» по коду. Пустой конфиг → нейтральный фолбэк.
+function botHandle() {
+  const bot = (STATE.config && STATE.config.links && STATE.config.links.bot) || '';
+  const m = String(bot).match(/t\.me\/([A-Za-z0-9_]+)/i);
+  return m ? '@' + m[1] : 'бота-помощника';
+}
+
 async function init() {
   const boot = await window.installer.bootstrap();
   STATE.platform = boot.platform;
@@ -65,6 +73,9 @@ async function init() {
     })
   );
 
+  // Хэндл бота на приветственном экране — из конфига (без хардкода в статике).
+  const wcBot = $('#wc-bot-handle');
+  if (wcBot) wcBot.textContent = botHandle();
   renderGroups();
   renderPacks();
   renderPreflight();
@@ -559,8 +570,9 @@ function showWhatInstalls() {
     });
   });
   const body =
-    '<p class="wi-lead">Всё ставится офлайн из самого установщика и только с твоего выбора — ' +
-    'ничего постороннего из интернета не тянется.</p>' +
+    '<p class="wi-lead">Ставится только то, что ты выбрал. Основное — офлайн из самого ' +
+    'установщика; компоненты с пометкой «онлайн» докачиваются с официальных источников ' +
+    'с проверкой целостности.</p>' +
     '<ul class="wi-list">' + rows.join('') + '</ul>';
   openModal({
     id: 'what-installs',
@@ -754,7 +766,12 @@ async function runComponents(ids, env) {
     appendLog(line);
   });
   const failed = [];
-  const skipped = [];
+  // Два РАЗНЫХ вида пропуска (см. ветки ниже):
+  //   depSkipped      — не встала ЗАВИСИМОСТЬ (это проблема: идёт в retry, ломает okAll);
+  //   gracefulSkipped — осознанный exit 120 «нечего ставить / не входит в сборку»
+  //                     (это НЕ ошибка: не идёт в retry, НЕ ломает okAll, не шлётся в ok:false).
+  const depSkipped = [];
+  const gracefulSkipped = [];
   const bad = new Set();
   // Компоненты, пропущенные В ХОДЕ прогона (dep-провал ИЛИ осознанный exit-120-skip).
   // Их убираем из HM_SELECTED перед verify, иначе verify нарисует по ним красный крест.
@@ -766,11 +783,11 @@ async function runComponents(ids, env) {
     const broken = firstBrokenDep(id, bad);
     if (broken) {
       setStep(id, 'skipped');
-      skipped.push(id);
+      depSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
-      $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+      $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
@@ -818,7 +835,7 @@ async function runComponents(ids, env) {
       // в bad, чтобы зависимые (extension requires vscode) не запускались красным впустую,
       // а тоже грациозно пропускались. Из HM_SELECTED для verify компонент уже убираем.
       setStep(id, 'skipped');
-      skipped.push(id);
+      gracefulSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
@@ -834,10 +851,10 @@ async function runComponents(ids, env) {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }
     }
-    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
   }
   off && off();
-  return { failed, skipped };
+  return { failed, depSkipped, gracefulSkipped };
 }
 
 // Карусель советов на время установки: то, что спасает новичка в первый день
@@ -927,18 +944,22 @@ async function retryFailed(ids) {
 function finishInstall(res) {
   stopTips();
   const failed = res.failed || [];
-  const skipped = res.skipped || [];
+  // depSkipped (упала зависимость) = проблема; gracefulSkipped (exit 120, «не входит
+  // в сборку») = НЕ проблема и на исход установки не влияет.
+  const depSkipped = res.depSkipped || [];
+  const gracefulSkipped = res.gracefulSkipped || [];
   // Независимая проверка (verify) может найти проблему, даже когда все шаги
   // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
   const checkFailed = (STATE.checks || []).some(
     (c) => (c.status || (c.ok ? 'ok' : 'fail')) === 'fail'
   );
-  const okAll = failed.length === 0 && skipped.length === 0 && !checkFailed;
+  // Осознанный exit-120-skip НЕ ломает okAll — компонент просто не входит в эту сборку.
+  const okAll = failed.length === 0 && depSkipped.length === 0 && !checkFailed;
   let title, sub;
   if (okAll) {
     title = 'Готово!';
     sub = 'Всё установлено. Ниже — три простых шага до первого результата, или нажми кнопку бота — он поведёт дальше.';
-  } else if (failed.length === 0 && skipped.length === 0) {
+  } else if (failed.length === 0 && depSkipped.length === 0) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
     sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
@@ -954,8 +975,8 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, skipped);
-  sendInstallTelemetry(failed, okAll);
+  renderNextSteps(failed, depSkipped, gracefulSkipped);
+  sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
 
@@ -965,27 +986,32 @@ function finishInstall(res) {
 // Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
 // renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
 // телеметрии не зависит ни в каком исходе.
-function sendInstallTelemetry(failed, okAll) {
+function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
   if (STATE.telemetrySent || STATE.telemetryConsent === false) return;
   STATE.telemetrySent = true;
   const durationSec = STATE.installStartedAt
     ? Math.max(0, Math.round((Date.now() - STATE.installStartedAt) / 1000))
     : 0;
   try {
+    // gracefulSkipped едет отдельным полем (симметрично тому, как main санитизирует
+    // failed) — и НЕ влияет на ok: осознанный «не входит в сборку» это не провал.
     const p = window.installer.sendTelemetry({
       ok: !!okAll,
       failed: (failed || []).slice(),
+      skipped: (gracefulSkipped || []).slice(),
       durationSec,
     });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, skipped) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped) {
   failed = failed || [];
-  skipped = skipped || [];
+  depSkipped = depSkipped || [];
+  gracefulSkipped = gracefulSkipped || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
+  const botH = botHandle();
   const isWin = STATE.platform === 'win32';
   // Cursor опционален: кнопку «Открыть Cursor» показываем ТОЛЬКО если пользователь его выбрал.
   const cursorSelected = !!(STATE.selected && STATE.selected.cursor);
@@ -994,16 +1020,20 @@ function renderNextSteps(failed, skipped) {
   const rel = isWin ? relRaw.replace(/\//g, '\\') : relRaw.replace(/\\/g, '/');
   const credPath = STATE.homedir ? STATE.homedir + sep + rel : rel;
 
-  // Retry both the real failures and anything skipped because a dep failed
-  // (retrying the dep may unblock them).
-  const retryList = failed.concat(skipped);
-  const skipHtml = skipped.length
-    ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${skipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
+  // Retry только реальные провалы и dep-skip (перезапуск зависимости может их
+  // разблокировать). gracefulSkipped (exit 120) в retry НЕ идёт — там нечего ставить.
+  const retryList = failed.concat(depSkipped);
+  const depSkipHtml = depSkipped.length
+    ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${depSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
          <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
-         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @vibecodeguidebot.</div></div>` + skipHtml
+         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
+    : '';
+  // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
+  const gracefulSkipHtml = gracefulSkipped.length
+    ? `<div class="ns-note">Не входит в эту сборку — пропущено (это не ошибка): <b>${gracefulSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
 
   // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
@@ -1021,7 +1051,7 @@ function renderNextSteps(failed, skipped) {
            <div class="ns-bot-title">Застрял или что-то непонятно?</div>
            <div class="ns-bot-text">Спроси бота академии — он ответит и проведёт по шагам. Это нормально в первый день.</div>
          </div>
-         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота @vibecodeguidebot</button>
+         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота ${botH}</button>
        </div>`
     : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
@@ -1080,7 +1110,8 @@ function renderNextSteps(failed, skipped) {
   // честное «можно доустановить» (повторный запуск установщика с галочкой Nomad).
   const nomadInstalled =
     (!!(STATE.selected && STATE.selected.nomad) &&
-      !failed.includes('nomad') && !skipped.includes('nomad')) ||
+      !failed.includes('nomad') && !depSkipped.includes('nomad') &&
+      !gracefulSkipped.includes('nomad')) ||
     !!(STATE.detected && STATE.detected.nomad && STATE.detected.nomad.installed);
   const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
   const claudeUrl = links.claude || 'https://claude.ai/login';
@@ -1121,6 +1152,7 @@ function renderNextSteps(failed, skipped) {
     ${accessHtml}
     ${checksHtml}
     ${failHtml}
+    ${gracefulSkipHtml}
     <div class="ns-actions">
       <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code</button>
       ${botUrl ? `<button type="button" class="btn-sm ns-bot-main" data-ext="${botUrl}">💬 ${window.HMFinishLink.botButtonLabel(failed)}</button>` : ''}

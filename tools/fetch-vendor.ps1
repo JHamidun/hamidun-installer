@@ -475,5 +475,24 @@ if ($componentsRawM -and $componentsRawM -match '"mascot"') {
   Write-Host "[vendor] OK: скрепка на месте (vendor\apps\claude-mascot\claude-mascot.exe)."
 }
 
+# Маркер издания: этот артефакт заявлен ПОЛНОСТЬЮ ОФЛАЙНОВЫМ (прошли completeness/FATAL-гейты
+# выше). Пишем offlineEdition:true в bundled config.json — main.js по нему жёстко блокирует
+# запуск офлайн-издания без vendor (translocation/оторванный sibling). Онлайн/lite-издание
+# (fetch-vendor НЕ запускался → ключа нет → main видит online) при отсутствии vendor лишь
+# мягко предупреждает. Текстовая вставка (не ConvertTo-Json) — сохраняет формат/комментарии.
+$cfgPath = Join-Path $root 'config.json'
+try {
+  $enc = New-Object System.Text.UTF8Encoding($false)   # UTF-8 без BOM
+  $raw = [IO.File]::ReadAllText($cfgPath, $enc)
+  if ($raw -match '"offlineEdition"') {
+    $raw = [regex]::Replace($raw, '"offlineEdition"\s*:\s*(true|false)', '"offlineEdition": true')
+  } else {
+    # Вставляем ключ сразу после ПЕРВОЙ '{' (верх объекта), count=1.
+    $raw = [regex]::new('\{').Replace($raw, "{`n  `"offlineEdition`": true,", 1)
+  }
+  [IO.File]::WriteAllText($cfgPath, $raw, $enc)
+  Write-Host "[vendor] config.json: offlineEdition=true (издание заявлено офлайн-полным)."
+} catch { Write-Host "  ! offlineEdition в config.json не записан - $($_.Exception.Message)" }
+
 $total = (Get-ChildItem -Recurse -File (Join-Path $root 'vendor') | Measure-Object Length -Sum).Sum
 Write-Host ("[vendor] ГОТОВО — vendor\ весит {0:N0} МБ" -f ($total/1MB))

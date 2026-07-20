@@ -28,12 +28,19 @@ npm start            # запустить GUI локально
 ```bash
 npm run dist:win        # ПОЛНЫЙ ОФЛАЙН: тянет конфиг + всё ПО в vendor/ и вшивает (~1 ГБ exe)
 npm run dist:win:lite   # ГИБРИД: вшит только конфиг, приложения качаются при установке (~75 МБ)
-npm run dist:mac        # macOS .dmg (запускать на Mac; офлайн-vendor пока только Windows)
+npm run dist:mac        # macOS .dmg ОНЛАЙН-издание: вшит только конфиг, ПО докачивается при установке
 ```
+
+Полностью офлайновый **mac**-.dmg собирается на macOS-раннере (CI): перед `electron-builder --mac`
+запусти `bash tools/fetch-vendor-mac.sh` — он качает universal-бинари в `vendor/` и ставит в
+`config.json` маркер `offlineEdition:true`. По этому маркеру приложение отличает офлайн-издание
+(запуск без vendor из-за translocation/оторванного sibling → жёсткий стоп) от онлайн-издания
+(отсутствие vendor — норма, мягкое предупреждение). `dist:mac` этот шаг НЕ выполняет → выходит
+онлайн-издание.
 
 На выходе один файл `release/Hamidun-Setup-Windows.exe` — portable, сам запрашивает админа.
 
-**Офлайн-сборка** (`dist:win`) перед упаковкой качает в `vendor/`:
+**Офлайн-сборка** (`dist:win`; на macOS — `tools/fetch-vendor-mac.sh`) перед упаковкой качает в `vendor/`:
 - `config-pack/` — свежий конфиг с GitHub (`tools/fetch-config.js`);
 - `apps/` — установщики Git, Node, Cursor, Python 3.12 + скрепка (`claude-mascot/claude-mascot.exe`);
 - `npm-cache/` — Claude Code CLI для офлайн `npm i -g`;

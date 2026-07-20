@@ -1299,8 +1299,8 @@ ok('P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED филь
   const bi = s.indexOf('if (res && res.skipped)');
   assert(bi !== -1, 'res.skipped обрабатывается отдельной веткой');
   const bh = s.slice(bi, bi + 500);
-  assert(/skipped\.push\(id\)/.test(bh) && /bad\.add\(id\)/.test(bh) && /runtimeSkipped\.add\(id\)/.test(bh),
-    'skipped -> в skipped, в bad (пропуск dependents), в runtimeSkipped');
+  assert(/gracefulSkipped\.push\(id\)/.test(bh) && /bad\.add\(id\)/.test(bh) && /runtimeSkipped\.add\(id\)/.test(bh),
+    'gracefulSkipped -> в gracefulSkipped, в bad (пропуск dependents), в runtimeSkipped');
   assert(/setStep\(id, 'skipped'\)/.test(bh), 'шаг помечается skipped (не error/красный)');
   // firstBrokenDep-ветка тоже кормит runtimeSkipped.
   const fi = s.indexOf('const broken = firstBrokenDep(id, bad)');
@@ -4174,6 +4174,34 @@ async function asyncTests() {
 
   try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 }
+
+// m6: finish-link deep-link payload (pure-логика, UMD — тот же модуль, что грузит renderer).
+console.log('== finish-link deep-link ==');
+const HMFinish = require(path.join(ROOT, 'src', 'renderer', 'finish-link.js'));
+ok('finish-link: успех -> installed_<plat>, платформа не срезается', () => {
+  assert.strictEqual(HMFinish.botStartPayload([], true, 'installed'), 'installed_win');
+  assert.strictEqual(HMFinish.botStartPayload([], false, 'installed'), 'installed_mac');
+});
+ok('finish-link: провал -> failed_<первый-id>_<plat>', () => {
+  assert.strictEqual(HMFinish.botStartPayload(['cursor'], true, 'installed'), 'failed_cursor_win');
+  assert.strictEqual(HMFinish.botStartPayload(['nomad', 'git'], false, 'installed'), 'failed_nomad_mac');
+});
+ok('finish-link: payload <=64, платформенный суффикс НИКОГДА не срезается', () => {
+  const long = 'x'.repeat(200);
+  const pf = HMFinish.botStartPayload([long], true, 'installed');
+  assert(pf.length <= 64, 'failed-payload в пределах лимита Telegram (64)');
+  assert(pf.startsWith('failed_') && pf.endsWith('_win'), 'префикс failed_ и суффикс _win целы');
+  const po = HMFinish.botStartPayload([], false, long);
+  assert(po.length <= 64 && po.endsWith('_mac'), 'ok-payload: лимит соблюдён, суффикс _mac цел');
+});
+ok('finish-link: не-Telegram-символы в id гасятся в -', () => {
+  assert.strictEqual(HMFinish.botStartPayload(['a b/c.d'], true, 'installed'), 'failed_a-b-c-d_win');
+});
+ok('finish-link: botUrl пустой без базы/пейлоада, иначе ?start=', () => {
+  assert.strictEqual(HMFinish.botUrl('', 'installed_win'), '');
+  assert.strictEqual(HMFinish.botUrl('https://t.me/bot', ''), '');
+  assert.strictEqual(HMFinish.botUrl('https://t.me/bot', 'installed_win'), 'https://t.me/bot?start=installed_win');
+});
 
 asyncTests().then(() => {
   console.log(`\nИТОГ: ${pass} прошло, ${fail} упало`);

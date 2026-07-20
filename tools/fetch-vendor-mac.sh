@@ -596,4 +596,22 @@ sys.exit(0 if ok else 1)
   echo "[vendor-mac] OK: скрепка на месте ($(basename "$GATE_APP") — подпись Developer ID $MASCOT_TEAM_ID + нотаризация подтверждены)."
 fi
 
+# Маркер издания: этот артефакт заявлен ПОЛНОСТЬЮ ОФЛАЙНОВЫМ (прошли completeness/FATAL-гейты
+# выше). Пишем offlineEdition:true в bundled config.json — main.js по нему жёстко блокирует
+# запуск офлайн-издания без vendor (translocation/оторванный sibling). Онлайн/lite-издание
+# (fetch-vendor-mac НЕ запускался → ключа нет) при отсутствии vendor лишь мягко предупреждает.
+# Текстовая вставка (perl, слёрп -0777, первое вхождение) — сохраняет формат/комментарии.
+echo "[vendor-mac] config.json: offlineEdition=true (издание заявлено офлайн-полным)..."
+CFG="$ROOT/config.json"
+if [ -f "$CFG" ]; then
+  if grep -q '"offlineEdition"' "$CFG"; then
+    /usr/bin/perl -0777 -pi -e 's/"offlineEdition"\s*:\s*(?:true|false)/"offlineEdition": true/' "$CFG"
+  else
+    /usr/bin/perl -0777 -pi -e 's/\{/\{\n  "offlineEdition": true,/' "$CFG"
+  fi
+  echo "  ok config.json offlineEdition=true"
+else
+  echo "  ! config.json не найден ($CFG) — offlineEdition не записан"
+fi
+
 echo "[vendor-mac] ГОТОВО: vendor = $(du -sh "$ROOT/vendor" 2>/dev/null | cut -f1)"

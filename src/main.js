@@ -77,20 +77,32 @@ function vendorComplete() {
   return hasUv && hasCourse;
 }
 
-// Жёсткий стоп ДО установки (только упакованный mac-.app): translocation ИЛИ
-// оторванный/неполный sibling-vendor. blocked=true → renderer показывает
-// блокирующий экран и НЕ даёт нажать «Установить». В dev (не packaged) и на Windows
-// translocation невозможен — не блокируем.
+// Издание заявлено «полностью офлайновым»? Маркер offlineEdition:true в bundled
+// config.json пишет fetch-vendor (оба фетчера) на сборке. Онлайн/lite-издание
+// (dist:mac / dist:win:lite — fetch-vendor НЕ запускался) маркера НЕ имеет, поэтому
+// отсутствие vendor у него — норма (онлайн-фолбэк), а не дефект. config.json едет
+// ВНУТРИ .app/Contents/Resources → доступен даже когда sibling-vendor оторван.
+function isOfflineEdition() {
+  try { return readJson('config.json', {}).offlineEdition === true; }
+  catch (e) { return false; }
+}
+
+// Жёсткий стоп ДО установки (только упакованный mac-.app):
+//   • translocation — Gatekeeper исполняет .app из read-only AppTranslocation, sibling-
+//     vendor оторван: заведомо сломанный офлайн-запуск → блок ВСЕГДА (не зависит от
+//     издания — офлайн-компоненты недостижимы физически);
+//   • неполный/отсутствующий vendor БЕЗ translocation → блок ТОЛЬКО если издание
+//     заявлено офлайн-полным (offlineEdition). Онлайн/lite-издание при отсутствующем
+//     vendor работает штатно через онлайн-фолбэк → мягкое renderVendorWarning в
+//     renderer, НЕ жёсткий стоп (иначе легитимная mac-сборка без офлайн-vendor = кирпич).
+// В dev (не packaged) и на Windows translocation невозможен — не блокируем.
 function vendorBlockInfo() {
   if (process.platform !== 'darwin' || !app.isPackaged) return { blocked: false };
-  const translocated = isTranslocated();
-  const complete = vendorComplete();
-  if (translocated || !complete) {
-    return {
-      blocked: true,
-      translocated,
-      reason: translocated ? 'translocation' : 'incomplete-vendor'
-    };
+  if (isTranslocated()) {
+    return { blocked: true, translocated: true, reason: 'translocation' };
+  }
+  if (!vendorComplete() && isOfflineEdition()) {
+    return { blocked: true, translocated: false, reason: 'incomplete-vendor' };
   }
   return { blocked: false };
 }
@@ -441,6 +453,14 @@ function buildInstallEnv(rendererEnv) {
 // проверенного пути; (б) вклиниться между verify и run — второго IPC нет.
 ipcMain.handle('run-component', async (_evt, payload) => {
   const { id } = payload || {};
+
+  // m1 (defense-in-depth): renderer гасит «Установить» при vendorBlock, но MAIN —
+  // единственный авторитет запуска. Заблокировано (translocation / оторванный офлайн-
+  // vendor у офлайн-издания) → НЕ запускаем ни один компонент, даже если IPC как-то дошёл.
+  const vb = vendorBlockInfo();
+  if (vb.blocked) {
+    return { id, ok: false, code: -1, error: 'офлайн-ресурсы недоступны (translocation/оторванный vendor) — установка заблокирована' };
+  }
 
   // Allowlist check: reject unknown/traversal ids before building any path.
   if (!id || !VALID_COMPONENT_IDS.has(id)) {
