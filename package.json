@@ -24,6 +24,7 @@
   "build": {
     "appId": "com.hamidun.setup",
     "productName": "Hamidun Setup",
+    "compression": "maximum",
     "directories": { "output": "release" },
     "files": [
       "src/**/*"

@@ -235,6 +235,15 @@ if ($py) {
     & $py -m pip install --quiet playwright 2>&1 | Out-Null
     $env:PLAYWRIGHT_BROWSERS_PATH = $pw
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
+    # Drop chromium_headless_shell (~254 MB): it is a SEPARATE headless-only
+    # chromium build, redundant with the full chromium above (which also runs
+    # headless). Windows `portable` target embeds the whole payload as ONE .7z,
+    # and 32-bit makensis can't mmap a >2 GiB archive — keeping the shell pushes
+    # the exe over that hard limit (build aborts with "failed creating mmap").
+    # Removing it keeps the offline installer under 2 GiB. Nothing offline uses
+    # browser-headless (the repo's «headless» is the tray-less bridge agent).
+    Get-ChildItem -Path $pw -Directory -Filter 'chromium_headless_shell-*' -ErrorAction SilentlyContinue |
+      ForEach-Object { Remove-Item -Recurse -Force $_.FullName; Write-Host "  срезан $($_.Name) (254M, дубль под 2 GiB-лимит NSIS)" }
   } catch { Write-Host "  (playwright browsers пропущены: $($_.Exception.Message))" }
 }
 
