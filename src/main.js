@@ -167,6 +167,24 @@ function killChildren() {
   CHILDREN.clear();
 }
 
+// Force the installer window above whatever the user was doing (browser, IDE).
+// Тестер-фидбек: окно установки открывалось/уходило ЗА браузером — «просидел 30
+// минут, думал ничего не устанавливается». На Windows свежесозданное окно часто
+// не выходит на передний план, а после UAC-элевации фокус не возвращается.
+function bringToFront() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.moveTop();
+    mainWindow.setAlwaysOnTop(true);   // кратко форсим поверх чужих окон…
+    mainWindow.focus();
+    setTimeout(() => {                 // …и снимаем, чтобы не мешать поверх всего
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(false); } catch (_) {}
+    }, 600);
+  } catch (_) {}
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 920,
@@ -174,6 +192,7 @@ function createWindow() {
     minWidth: 820,
     minHeight: 600,
     backgroundColor: '#070926',
+    show: false,                       // показываем на ready-to-show — сразу поверх
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default',
     autoHideMenuBar: true,
     webPreferences: {
@@ -184,6 +203,7 @@ function createWindow() {
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.once('ready-to-show', bringToFront);
 }
 
 app.whenReady().then(() => {
@@ -466,6 +486,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   if (!id || !VALID_COMPONENT_IDS.has(id)) {
     return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
   }
+
+  // Тестер-фидбек: если окно установщика ушло ЗА браузер (или потеряло фокус
+  // после UAC-элевации), вернём его на передний план — иначе прогресс не виден и
+  // кажется, что «ничего не устанавливается». Только когда окно НЕ в фокусе, чтобы
+  // не воровать фокус, если пользователь уже смотрит на установщик.
+  try { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) bringToFront(); } catch (_) {}
 
   // BUG #11 (defense-in-depth): компонент, не предназначенный для этой платформы,
   // не запускаем — даже если renderer его как-то прислал (в UI он отфильтрован).
