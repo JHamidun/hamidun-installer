@@ -345,6 +345,18 @@ h1 {
   border-color: rgba(41,169,255,.55);
   background: linear-gradient(135deg, rgba(41,169,255,.12), rgba(45,47,232,.12));
 }
+/* Явный вход в курс-симулятор (не авто-открытие) */
+.ns-course {
+  margin: 0 0 12px; padding: 12px 14px;
+  border: 1px solid rgba(204,115,87,.45); border-radius: var(--h-r-lg);
+  background: linear-gradient(135deg, rgba(204,115,87,.10), rgba(41,169,255,.08));
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ns-course-h { font-family: var(--h-font-head); font-weight: 700; font-size: 14px; }
+.ns-course-t { color: var(--text-muted); font-size: 12.5px; line-height: 1.45; }
+.ns-course-steps { margin: 2px 0 4px; padding-left: 18px; font-size: 12.5px; line-height: 1.55; }
+.ns-course-steps li { margin-bottom: 3px; }
+.ns-course button { align-self: flex-start; }
 .ns-access-h { font-family: var(--h-font-head); font-weight: 700; font-size: 14px; }
 .ns-access-t { color: var(--text-muted); font-size: 12.5px; line-height: 1.45; flex: 1 1 auto; }
 .ns-access-btns { display: flex; flex-wrap: wrap; gap: 8px; }

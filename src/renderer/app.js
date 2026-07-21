@@ -1141,6 +1141,29 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
       </div>
     </div>`;
 
+  // Явный (НЕ автоматический) вход в курс-симулятор. Тестер-фидбек + решение
+  // Жемала: по умолчанию симулятор не открывается, но должен быть чёткий путь и
+  // команда активации. Показываем блок только если курс реально установлен.
+  // Курс-симулятор бандлится всегда (не всегда попадает в STATE.selected). Блок
+  // показываем, если курс в этой сборке НЕ упал и НЕ пропущен (exit 120 у
+  // lite/partial-сборки без vendor/course-архива); финальную гарантию — что папка
+  // курса реально на месте — даёт main-хендлер launch-course (иначе no-op).
+  const courseInstalled =
+    !failed.includes('course') &&
+    !depSkipped.includes('course') &&
+    !gracefulSkipped.includes('course');
+  const courseHtml = courseInstalled
+    ? `<div class="ns-course">
+         <div class="ns-course-h">🎓 Хочешь учиться по шагам? Включи курс-симулятор</div>
+         <div class="ns-course-t">Отдельный режим: ИИ-наставник ведёт тебя за руку по миссиям на ТВОём проекте. Сам по себе не открывается — включаешь так:</div>
+         <ol class="ns-course-steps">
+           <li>Нажми «Открыть курс-симулятор» ниже — папка курса откроется в VS Code.</li>
+           <li>В панели Claude (значок <b>✳</b>) напиши <b>«начать»</b> — наставник поздоровается и поведёт по первой миссии.</li>
+         </ol>
+         <button type="button" id="ns-course" class="btn-sm">🎓 Открыть курс-симулятор</button>
+       </div>`
+    : '';
+
   const ns = $('#next-steps');
   ns.innerHTML = `
     <div class="ns-title">Что дальше — три простых шага</div>
@@ -1150,6 +1173,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
       ${step3}
     </ol>
     ${accessHtml}
+    ${courseHtml}
     ${checksHtml}
     ${failHtml}
     ${gracefulSkipHtml}
@@ -1170,6 +1194,8 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
 
   $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
   $('#ns-vscode').addEventListener('click', () => window.installer.launchVsCode());
+  const courseBtn = $('#ns-course');
+  if (courseBtn) courseBtn.addEventListener('click', () => window.installer.launchCourse());
   const cursorBtn = $('#ns-cursor');
   if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.

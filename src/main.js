@@ -1043,28 +1043,47 @@ function winLaunchDeElevated(exe, folderArg) {
 // Папка ~/HamidunStart создаётся, если её нет, чтобы VS Code открыл реальный воркспейс
 // (пустой проект), а не безымянное окно. НАМЕРЕННО без URI вида vscode://…/open — тот
 // открыл бы панель-агент, а задача — показать новичку файлы проека (IDE).
-ipcMain.handle('launch-vscode', () => {
+// Open a folder in VS Code (de-elevated on Windows; `open -a` on macOS). Shared
+// by the default finish button (HamidunStart sandbox) and the explicit course
+// launcher below.
+function launchVsCodeOn(dir, { create = true } = {}) {
   try {
-    const startDir = path.join(os.homedir(), 'HamidunStart');
-    // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
-    // редактор получил бы путь к файлу/несуществующему — подтверждаем, что это директория.
-    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
-    try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
+    if (create) {
+      // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
+      // редактор получил бы путь к файлу/несуществующему — подтверждаем, что это директория.
+      try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
+    }
+    try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
     if (IS_WIN) {
       const codeExe = firstExisting([
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
         path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
       ]);
       // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
-      if (codeExe) { return winLaunchDeElevated(codeExe, startDir); }
+      if (codeExe) { return winLaunchDeElevated(codeExe, dir); }
     } else if (IS_MAC) {
       // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE. `open` запускает
       // цель от имени пользователя (macOS не эскалирует integrity как Windows).
-      spawn('/usr/bin/open', ['-a', 'Visual Studio Code', startDir], { detached: true, stdio: 'ignore' }).unref();
+      spawn('/usr/bin/open', ['-a', 'Visual Studio Code', dir], { detached: true, stdio: 'ignore' }).unref();
       return true;
     }
   } catch (e) { /* ignore */ }
   return false;
+}
+
+ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart')));
+
+// Explicit «open the course-simulator» — NOT auto-opened; the finish screen
+// offers it as a labelled choice. Opens the course folder in VS Code so Claude
+// Code picks up the mentor CLAUDE.md; the user then types «начать» to activate
+// the course-driver. Only if the course actually installed (folder exists) —
+// we never create an empty course dir.
+ipcMain.handle('launch-course', () => {
+  const cfg = readJson('config.json', {});
+  const raw = (cfg.course && cfg.course.targetDirDefault) || '%USERPROFILE%\\HamidunCourse';
+  const dir = raw.replace(/%USERPROFILE%/gi, os.homedir()).replace(/\$HOME/g, os.homedir());
+  try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
+  return launchVsCodeOn(dir, { create: false });
 });
 
 // ---- «Войти в Claude» — открыть терминал с командой claude -----------
