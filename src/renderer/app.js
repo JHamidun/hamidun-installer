@@ -1049,7 +1049,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
          <div class="ns-bot-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M21.5 3.6 2.9 10.8c-1 .4-1 1.8.1 2.1l4.6 1.5 1.7 5.2c.3 1 1.6 1.2 2.2.4l2.4-2.9 4.7 3.4c.8.6 2 .2 2.2-.9l2.5-14.2c.2-1.1-.8-2-1.8-1.6Z" fill="#fff"/></svg></div>
          <div class="ns-bot-body">
            <div class="ns-bot-title">Застрял или что-то непонятно?</div>
-           <div class="ns-bot-text">Спроси бота академии — он ответит и проведёт по шагам. Это нормально в первый день.</div>
+           <div class="ns-bot-text">Спроси бота-помощника — живого ИИ в Telegram: пиши своими словами, он ответит и проведёт по шагам. Это нормально в первый день.</div>
          </div>
          <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота ${botH}</button>
        </div>`
@@ -1130,11 +1130,11 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
     : '';
   const accessHtml = `
     <div class="ns-access">
-      <div class="ns-access-title">Осталось подключить нейросеть — без неё Claude не ответит. Выбери, как удобно:</div>
+      <div class="ns-access-title">Шаг 2 сам попросит войти в нейросеть — это нормально. Сначала открой VS Code и напиши запрос; когда Claude попросит доступ — выбери способ:</div>
       <div class="ns-access-grid">
         <div class="ns-access-card">
           <div class="ns-access-h">💳 Своя подписка Claude</div>
-          <div class="ns-access-t">Если есть зарубежная карта — оформи Claude Pro или Max. При первом запросе Claude сам попросит войти.</div>
+          <div class="ns-access-t">Понадобится зарубежная карта. Подписка платная — Claude Pro от $20/мес (для старта хватит). Заранее платить не нужно: Claude сам попросит войти при первом запросе.</div>
           <div class="ns-access-btns"><button type="button" class="ns-access-btn" data-ext="${claudeUrl}">Войти на claude.ai</button></div>
         </div>
         ${nomadCard}
@@ -1155,7 +1155,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
   const courseHtml = courseInstalled
     ? `<div class="ns-course">
          <div class="ns-course-h">🎓 Хочешь учиться по шагам? Включи курс-симулятор</div>
-         <div class="ns-course-t">Отдельный режим: ИИ-наставник ведёт тебя за руку по миссиям на ТВОём проекте. Сам по себе не открывается — включаешь так:</div>
+         <div class="ns-course-t">Отдельный режим: ИИ-наставник ведёт тебя за руку по миссиям на ТВОём проекте. Не знаешь, с чего начать — начни отсюда, это самый простой первый час. Есть своя задача — иди по шагам 1–2 выше, курс никуда не денется. Сам по себе не открывается — включаешь так:</div>
          <ol class="ns-course-steps">
            <li>Нажми «Открыть курс-симулятор» ниже — папка курса откроется в VS Code.</li>
            <li>В панели Claude (значок <b>✳</b>) напиши <b>«начать»</b> — наставник поздоровается и поведёт по первой миссии.</li>
@@ -1178,16 +1178,21 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
     ${failHtml}
     ${gracefulSkipHtml}
     <div class="ns-actions">
-      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code</button>
-      ${botUrl ? `<button type="button" class="btn-sm ns-bot-main" data-ext="${botUrl}">💬 ${window.HMFinishLink.botButtonLabel(failed)}</button>` : ''}
-      ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
-      <button type="button" id="ns-claude" class="btn-sm">⚡ Войти в Claude через терминал</button>
-      <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
-      ${logBtn}
+      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>
       ${videoBtn}
-      ${startBtn}
+      ${failed.length ? logBtn : ''}
     </div>
     ${botCta}
+    <details class="ns-more">
+      <summary>Ещё инструменты ▾</summary>
+      <div class="ns-actions ns-actions-more">
+        ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
+        <button type="button" id="ns-claude" class="btn-sm">Запустить Claude в терминале (для продвинутых)</button>
+        <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
+        ${startBtn}
+        ${failed.length ? '' : logBtn}
+      </div>
+    </details>
     ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autovscode" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть VS Code на папке проекта при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');
@@ -1195,7 +1200,21 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
   $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
   $('#ns-vscode').addEventListener('click', () => window.installer.launchVsCode());
   const courseBtn = $('#ns-course');
-  if (courseBtn) courseBtn.addEventListener('click', () => window.installer.launchCourse());
+  if (courseBtn) courseBtn.addEventListener('click', async () => {
+    // M2: не молчим на false — папки курса нет (не входил в сборку / снесли).
+    let ok = false;
+    try { ok = await window.installer.launchCourse(); } catch (_) {}
+    if (!ok) {
+      let hint = courseBtn.parentElement.querySelector('.ns-course-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err';
+        courseBtn.parentElement.appendChild(hint);
+      }
+      hint.textContent = 'Папка курса не найдена — курс не входил в эту сборку или папку удалили. ' +
+        'Запусти установщик ещё раз с компонентом «Курс», либо спроси бота-помощника.';
+    }
+  });
   const cursorBtn = $('#ns-cursor');
   if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.

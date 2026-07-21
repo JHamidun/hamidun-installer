@@ -171,6 +171,7 @@ function killChildren() {
 // Тестер-фидбек: окно установки открывалось/уходило ЗА браузером — «просидел 30
 // минут, думал ничего не устанавливается». На Windows свежесозданное окно часто
 // не выходит на передний план, а после UAC-элевации фокус не возвращается.
+let _onTopTimer = null;
 function bringToFront() {
   try {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -178,8 +179,13 @@ function bringToFront() {
     if (!mainWindow.isVisible()) mainWindow.show();
     mainWindow.moveTop();
     mainWindow.setAlwaysOnTop(true);   // кратко форсим поверх чужих окон…
+    // macOS: focus() поднимает окно, но не активирует приложение, когда активен
+    // чужой app — клавфокус остаётся там. app.focus({steal}) реально активирует.
+    if (IS_MAC) { try { app.focus({ steal: true }); } catch (_) {} }
     mainWindow.focus();
-    setTimeout(() => {                 // …и снимаем, чтобы не мешать поверх всего
+    if (_onTopTimer) clearTimeout(_onTopTimer);  // один handle — не плодим таймеры
+    _onTopTimer = setTimeout(() => {             // …и снимаем on-top, чтобы не мешать
+      _onTopTimer = null;
       try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(false); } catch (_) {}
     }, 600);
   } catch (_) {}
@@ -204,7 +210,16 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', bringToFront);
+  // M1: когда юзер сам вернулся в окно — разрешаем следующий однократный подъём
+  // (например после следующего UAC) и гасим мигание таскбара.
+  mainWindow.on('focus', () => {
+    _frontedForInstall = false;
+    try { mainWindow.flashFrame(false); } catch (_) {}
+  });
 }
+// M1: подняли ли окно на передний план в текущем «эпизоде» ухода фокуса — чтобы
+// не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
+let _frontedForInstall = false;
 
 app.whenReady().then(() => {
   createWindow();
@@ -487,11 +502,17 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
   }
 
-  // Тестер-фидбек: если окно установщика ушло ЗА браузер (или потеряло фокус
-  // после UAC-элевации), вернём его на передний план — иначе прогресс не виден и
-  // кажется, что «ничего не устанавливается». Только когда окно НЕ в фокусе, чтобы
-  // не воровать фокус, если пользователь уже смотрит на установщик.
-  try { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) bringToFront(); } catch (_) {}
+  // Тестер-фидбек: окно установщика уходило ЗА браузер (или теряло фокус после
+  // UAC) → прогресс не виден, кажется «ничего не ставится». Поднимаем ОДИН раз за
+  // эпизод ухода фокуса; дальше — мигаем в таскбаре, чтобы не вырывать окно у
+  // юзера, который намеренно ушёл в браузер (M1: без 8-12 рывков за прогон).
+  // Флаг сбрасывается, когда юзер сам вернулся в окно (mainWindow 'focus').
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) {
+      if (!_frontedForInstall) { _frontedForInstall = true; bringToFront(); }
+      else { try { mainWindow.flashFrame(true); } catch (_) {} }
+    }
+  } catch (_) {}
 
   // BUG #11 (defense-in-depth): компонент, не предназначенный для этой платформы,
   // не запускаем — даже если renderer его как-то прислал (в UI он отфильтрован).
@@ -1080,9 +1101,18 @@ ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'Ha
 // we never create an empty course dir.
 ipcMain.handle('launch-course', () => {
   const cfg = readJson('config.json', {});
-  const raw = (cfg.course && cfg.course.targetDirDefault) || '%USERPROFILE%\\HamidunCourse';
-  const dir = raw.replace(/%USERPROFILE%/gi, os.homedir()).replace(/\$HOME/g, os.homedir());
-  try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
+  const raw = (cfg.course && cfg.course.targetDirDefault) || '';
+  // resolveCourseTarget зеркалит course.ps1/course.sh: expand %USERPROFILE% на Win,
+  // защита от Windows-пути на macOS (иначе `/Users/x\HamidunCourse` — папки нет, B1).
+  const target = uninstallTargets.resolveCourseTarget(raw, os.homedir(), process.platform);
+  // Курс распаковывается в <target>/vibecoding-course/ — именно там CLAUDE.md
+  // наставника (course.ps1:87). Открываем ЕЁ, а не родителя, иначе «начать»
+  // подхватит ванильный Claude без наставника (B2). CLAUDE.md — финальный признак.
+  const dir = path.join(target, 'vibecoding-course');
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+    if (!fs.existsSync(path.join(dir, 'CLAUDE.md'))) return false;
+  } catch (e) { return false; }
   return launchVsCodeOn(dir, { create: false });
 });
 
