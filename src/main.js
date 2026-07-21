@@ -1347,6 +1347,21 @@ function findClaudeBinary() {
 }
 
 // Детектор на компонент: { installed:bool, detectedVersion:string }.
+// macOS: установлены ли Xcode Command Line Tools. `xcode-select -p` возвращает
+// путь если да, ошибку если нет — и, в отличие от `git`/`xcode-select --install`,
+// САМ диалог установки НЕ открывает. Кэшируем: за детекцию состояние не меняется.
+let _cltPresent = null;
+function xcodeCltPresent() {
+  if (!IS_MAC) return true;
+  if (_cltPresent !== null) return _cltPresent;
+  try {
+    const r = spawnSync('/usr/bin/xcode-select', ['-p'],
+      { timeout: 4000, stdio: ['ignore', 'ignore', 'ignore'] });
+    _cltPresent = r.status === 0;
+  } catch (_) { _cltPresent = false; }
+  return _cltPresent;
+}
+
 function detectComponents() {
   const home = os.homedir();
   const claudeHome = path.join(home, '.claude');
@@ -1356,7 +1371,13 @@ function detectComponents() {
   {
     const bin = resolveExecutable(IS_WIN ? ['git.exe'] : ['git'],
       IS_WIN ? [path.join(winPF(), 'Git', 'cmd'), path.join(winPF(), 'Git', 'bin'), path.join(winPF86(), 'Git', 'cmd')] : []);
-    const v = probeVersion(bin, ['--version'], /(\d+\.\d+(?:\.\d+)?)/);
+    // macOS-ГОЧА: /usr/bin/git — это Apple-шим; его вызов на чистом маке БЕЗ
+    // Command Line Tools САМ открывает системный диалог «установить инструменты
+    // разработчика» (тестер упёрся в него в фазе детекции). Не пробим версию
+    // такого шима — считаем git не установленным; git.sh поставит вшитый
+    // портативный dugite-git без окон Apple.
+    const macShim = IS_MAC && bin === '/usr/bin/git' && !xcodeCltPresent();
+    const v = (bin && !macShim) ? probeVersion(bin, ['--version'], /(\d+\.\d+(?:\.\d+)?)/) : '';
     out.git = { installed: !!(bin && v), detectedVersion: v };
   }
   // node
