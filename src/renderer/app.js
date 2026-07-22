@@ -513,15 +513,16 @@ function renderVendorBlock() {
     emoji: '⚠️',
     title: 'Запусти установщик из окна DMG',
     bodyHtml:
-      '<p>macOS поставил приложению «карантин» и переместил его в защищённую область — офлайн-компоненты недоступны, установка заблокирована.</p>' +
-      '<p><b>Как починить (важно: просто «запустить из окна DMG» часто НЕ спасает — карантин на самом .dmg):</b></p>' +
+      '<p>macOS поставил приложению «карантин» и запускает его из защищённой копии — офлайн-компоненты рядом с ним недоступны, установка заблокирована.</p>' +
+      '<p><b>Почему «просто открыть из окна DMG» часто НЕ помогает:</b> если образ уже смонтирован, снятие карантина на него не подействует — образ надо ЗАКРЫТЬ (отмонтировать) и открыть заново. Команда ниже делает всё это сама.</p>' +
       '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
-      '<li>Закрой это окно и окно DMG. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
-      '<li>Открой <b>Терминал</b> (⌘+Пробел → набери «Терминал» → Enter) и выполни команду (сними карантин с dmg):<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:12px">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg</code></li>' +
-      '<li>Снова открой .dmg и запусти установщик <b>двойным кликом прямо в окне DMG</b> (не из «Программ»).</li>' +
+      '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
+      '<li>Открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter). Вставь <b>ОДНОЙ строкой</b> и Enter:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code>' +
+      '<br><span style="font-size:12px;opacity:.82">Она снимет карантин, ЗАКРОЕТ старый образ и откроет свежий — это ключевой шаг.</span></li>' +
+      '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
       '</ol>' +
-      '<p style="font-size:12px;opacity:.82">Если dmg не в «Загрузках» — после команды поставь пробел и перетащи файл dmg в окно Терминала, путь подставится сам. Застрял — напиши боту-помощнику, пришли скрин.</p>',
+      '<p style="font-size:12px;opacity:.82">Если dmg не в «Загрузках» — напиши боту-помощнику, пришли скрин. Застрял — @vibecodeguidebot.</p>',
     closeLabel: 'Понятно',
     blocking: true,
   });
@@ -534,9 +535,9 @@ function renderVendorBlock() {
     b.id = 'vendorblock-banner';
     b.className = 'preflight-warn';
     b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
-    b.innerHTML = '🛑 Установка заблокирована: macOS поместил приложение в карантин. ' +
-      'Сними карантин с dmg и запусти установщик из окна DMG:<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:12px">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
+    b.innerHTML = '🛑 Установка заблокирована: macOS запускает приложение из карантинной копии. ' +
+      'Выполни ОДНОЙ строкой (снимет карантин + перемонтирует образ) и запусти из СВЕЖЕГО окна DMG:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
       '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
     const hero = document.querySelector('#view-select .hero');
     if (hero) hero.insertAdjacentElement('afterend', b);
