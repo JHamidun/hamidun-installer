@@ -1295,7 +1295,7 @@ ok('P1 (main.js): detectComponents.vscode = приложение И оба ра�
 // runtime-skipped исключаются из HM_SELECTED перед verify.
 ok('P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify', () => {
   const s = EG_APP();
-  assert(/const runtimeSkipped = new Set\(\)/.test(s), 'отдельный набор runtime-skipped');
+  assert(/const runtimeSkipped = STATE\.skippedEver/.test(s), 'runtime-skipped = кумулятивный STATE.skippedEver (живёт через retry-прогоны, сброс в startInstall)');
   const bi = s.indexOf('if (res && res.skipped)');
   assert(bi !== -1, 'res.skipped обрабатывается отдельной веткой');
   const bh = s.slice(bi, bi + 500);
