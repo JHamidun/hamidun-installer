@@ -387,7 +387,9 @@ Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive me
 $componentsRawN = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
 if ($componentsRawN -and $componentsRawN -match '"nomad"') {
   $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO } else { 'C:\Vibecode\hamidun-agent' }
-  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'main' }
+  # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (зеркало
+  # fetch-vendor-mac.sh). Бамп = сменить тег здесь и в fetch-vendor-mac.sh, либо env HM_NOMAD_REF.
+  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'v2026.7.22' }
   $srcOut    = Join-Path $root 'vendor\nomad-src'
   if (-not (Test-Path (Join-Path $agentRepo '.git'))) {
     Write-Host "  ! репозиторий Nomad не найден ($agentRepo) — задай HM_NOMAD_AGENT_REPO. nomad-src НЕ вшит (компонент Nomad → graceful skip)."
