@@ -18,8 +18,24 @@ SPCTL='/usr/sbin/spctl'
 
 # python3 нужен ТОЛЬКО для безопасной правки settings.json (валидация JSON + literal
 # replace). Если его нет — правку пропускаем, скрепка пропишет хуки сама при запуске.
-PY="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
-[ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || true)"
+# ГОЧА (как в bridge.sh:35): bare `[ -x "$PY" ]` был мёртвым guard'ом — CLT-шим
+# /usr/bin/python3 ВСЕГДА существует и исполним на чистом маке, а его запуск открывает
+# системный GUI-диалог Apple «установить Command Line Tools» ПОСРЕДИ установки скрепки.
+PY=""
+for CAND in \
+  "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
+  "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"; do
+  [ -x "$CAND" ] && { PY="$CAND"; break; }
+done
+if [ -z "$PY" ]; then
+  P3="$(command -v python3 2>/dev/null || true)"
+  # Принимаем python3 из PATH ТОЛЬКО если это НЕ CLT-шим /usr/bin/python3 без CLT
+  # (реальный интерпретатор Homebrew/framework — или сам /usr/bin/python3, но лишь
+  # когда CLT уже стоят: xcode-select -p проходит) — иначе всплывёт диалог Apple.
+  if [ -n "$P3" ] && [ -x "$P3" ] && { [ "$P3" != "/usr/bin/python3" ] || xcode-select -p >/dev/null 2>&1; }; then
+    PY="$P3"
+  fi
+fi
 
 # Вшитый артефакт: подписанная .app-сборка скрепки (кладёт tools/fetch-vendor-mac.sh).
 MASCOT_DIR="${HM_VENDOR:-}/apps/claude-mascot"

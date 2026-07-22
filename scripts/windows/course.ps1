@@ -120,18 +120,23 @@ if ($env:HM_COURSE_GLOBAL -eq '1') {
     $skillsDst  = Join-Path $claudeHome 'skills'
     if (Test-Path $skillsSrc) {
         New-Item -ItemType Directory -Force $skillsDst | Out-Null
-        Get-ChildItem -Directory $skillsSrc | ForEach-Object {
-            $t = Join-Path $skillsDst $_.Name
+        # foreach (НЕ ForEach-Object): единый скоуп, флаг $skFail виден после цикла.
+        # Без него финальное «установлены» печаталось даже когда навык не встал (папка занята).
+        $skFail = $false
+        foreach ($d in (Get-ChildItem -Directory $skillsSrc)) {
+            $t = Join-Path $skillsDst $d.Name
             if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }
             if (Test-Path $t) {
                 # Папка занята (антивирус/редактор): копирование поверх создало бы вложенный
                 # дубль course-driver/course-driver, а грузился бы старый навык.
-                Write-Host "Не удалось обновить навык $($_.Name): папка занята. Закрой программы, использующие ~/.claude/skills, и запусти установку ещё раз."
+                Write-Host "Не удалось обновить навык $($d.Name): папка занята. Закрой программы, использующие ~/.claude/skills, и запусти установку ещё раз."
+                $skFail = $true
             } else {
-                Copy-Item -Recurse -Force $_.FullName $t
+                Copy-Item -Recurse -Force $d.FullName $t
             }
         }
-        Write-Host "Навыки курса установлены глобально в ~/.claude/skills."
+        # Успех печатаем ТОЛЬКО если ни один навык не провалился (как skfail в course.sh).
+        if (-not $skFail) { Write-Host "Навыки курса установлены глобально в ~/.claude/skills." }
     }
     # защищённый блок в ~/.claude/CLAUDE.md (идемпотентно, с бэкапом)
     $claudeMd = Join-Path $claudeHome 'CLAUDE.md'

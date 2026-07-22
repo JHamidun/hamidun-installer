@@ -43,6 +43,23 @@ function Resolve-UvExe {
     }
     return $null
 }
+
+# Быстрая проба сети для секции 1b: TCP-коннект на 443 с коротким таймаутом (3 с),
+# без скачиваний. github.com — оттуда `uv python install` тянет CPython
+# (python-build-standalone), pypi.org — оттуда `uv tool install` резолвит зависимости.
+# Достаточно ЛЮБОГО ответившего хоста (цель — отсечь полностью офлайн-машину).
+function Test-NomadNetwork {
+    foreach ($nomadHost in @('github.com', 'pypi.org')) {
+        try {
+            $tcp = New-Object Net.Sockets.TcpClient
+            $iar = $tcp.BeginConnect($nomadHost, 443, $null, $null)
+            $ok  = $iar.AsyncWaitHandle.WaitOne(3000, $false)
+            if ($ok -and $tcp.Connected) { $tcp.Close(); return $true }
+            $tcp.Close()
+        } catch {}
+    }
+    return $false
+}
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -85,6 +102,20 @@ if (-not $DRY -and -not $srcTrusted) {
 }
 if ($DRY -and (-not $srcTrusted)) {
     Write-Host "  [dry-run] Источник Nomad (vendor) не вшит — продолжаю dry-run preview секций 2/3/4."
+}
+
+# 1b. Честная проверка сети (vendor-honesty): вшит только ИСХОДНИК Nomad —
+#     `uv python install` тянет CPython с GitHub, а `uv tool install` резолвит
+#     зависимости из PyPI (плюс возможный онлайн-фолбэк uv в секции 2). Полностью
+#     офлайн-машина падала бы криптичной ошибкой uv → вместо этого осознанный skip 120
+#     (НЕ красный крест): Nomad можно поставить позже при подключении.
+#     В dry-run сеть не пробуем — превьюим секции дальше.
+if (-not $DRY) {
+    if (-not (Test-NomadNetwork)) {
+        Write-Host "Nomad требует интернет (Python + библиотеки, ~300 МБ) — сеть недоступна. Поставь позже при подключении к интернету. Пропускаю."
+        exit 120
+    }
+    Write-Host "Nomad докачивает Python и библиотеки из интернета (~300 МБ) — это займёт время..."
 }
 
 # 2. uv — менеджер Python (в user-профиле; резолвим по abs-пути, не через PATH).

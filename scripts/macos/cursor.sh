@@ -12,16 +12,18 @@ else
   echo "Скачиваю Cursor (darwin-$(arch_tag))..."
   # Парсим downloadUrl без python (bare python3 без CLT дёргает GUI-диалог).
   # Берём первую пару "downloadUrl": "..." и снимаем возможное JSON-экранирование \/.
-  CUR=$(curl -fsSL "https://www.cursor.com/api/download?platform=darwin-$(arch_tag)&releaseTrack=stable" \
+  # Таймауты обязательны: curl без --max-time на РФ-DPI виснет молча навсегда.
+  CUR=$(curl -fsSL --connect-timeout 20 --max-time 900 --retry 3 --retry-connrefused "https://www.cursor.com/api/download?platform=darwin-$(arch_tag)&releaseTrack=stable" \
     | grep -o '"downloadUrl"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 \
     | sed -e 's/.*:[[:space:]]*"\([^"]*\)".*/\1/' -e 's#\\/#/#g' || true)
   DMG="/tmp/cursor.dmg"
   # Сносим протухший /tmp/cursor.dmg от прерванного прежнего запуска — иначе при
   # неудачном парсинге URL (CUR пуст, dl пропущен) старый битый файл прошёл бы проверку ниже.
   rm -f "$DMG"
-  [ -n "$CUR" ] && dl "$CUR" "$DMG"
+  # set -e здесь нет — без явного чека провал скачивания молча дошёл бы до attach/установки.
+  if [ -n "$CUR" ]; then dl "$CUR" "$DMG" || exit 1; fi
 fi
-[ -f "$DMG" ] || { echo "Cursor: установщик недоступен."; exit 1; }
+[ -f "$DMG" ] || { echo "Cursor: установщик недоступен (сеть недоступна или очень медленная — повтори установку этого компонента)."; exit 1; }
 [ "$BUNDLED" = 1 ] && verify_artifact "$DMG"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
 
 MNT="/tmp/hm_cursor_mnt"

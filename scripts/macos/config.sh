@@ -319,6 +319,9 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 if [ "$DEPLOYED" -eq 1 ]; then
+  # #19: маркер завершённости (зеркало config.ps1) — детекция в main.js смотрит на него,
+  # а не на одну папку skills, чтобы оборванная установка не выглядела завершённой.
+  : > "$CLAUDE_HOME/.hamidun-config-complete" 2>/dev/null || true
   echo "OK: конфиг развёрнут. Заполни ~/.claude/.credentials.master.env"
   exit 0
 fi

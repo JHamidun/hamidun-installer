@@ -44,9 +44,16 @@ if ($local -and (Test-Path $local)) {
 } else {
     Write-Host "winget не найден — качаю Cursor напрямую..."
     if (-not $DRY) {
-        $api = Invoke-RestMethod 'https://www.cursor.com/api/download?platform=win32-x64-user&releaseTrack=stable' -Headers @{ 'User-Agent' = 'hamidun-setup' }
-        $inst = Join-Path $env:TEMP 'cursor-setup.exe'
-        Invoke-WebRequest $api.downloadUrl -OutFile $inst -MaximumRedirection 6
+        # СЕТЬ: дефолтный TimeoutSec=0 (бесконечно) недопустим, а прогресс-бар в PS5.1 в разы замедляет скачивание.
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $api = Invoke-RestMethod 'https://www.cursor.com/api/download?platform=win32-x64-user&releaseTrack=stable' -Headers @{ 'User-Agent' = 'hamidun-setup' } -UseBasicParsing -TimeoutSec 60
+            $inst = Join-Path $env:TEMP 'cursor-setup.exe'
+            Invoke-WebRequest $api.downloadUrl -OutFile $inst -MaximumRedirection 6 -UseBasicParsing -TimeoutSec 600
+        } catch {
+            Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
+            exit 1
+        }
     }
 }
 

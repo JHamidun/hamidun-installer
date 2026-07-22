@@ -77,20 +77,32 @@ function vendorComplete() {
   return hasUv && hasCourse;
 }
 
-// Жёсткий стоп ДО установки (только упакованный mac-.app): translocation ИЛИ
-// оторванный/неполный sibling-vendor. blocked=true → renderer показывает
-// блокирующий экран и НЕ даёт нажать «Установить». В dev (не packaged) и на Windows
-// translocation невозможен — не блокируем.
+// Издание заявлено «полностью офлайновым»? Маркер offlineEdition:true в bundled
+// config.json пишет fetch-vendor (оба фетчера) на сборке. Онлайн/lite-издание
+// (dist:mac / dist:win:lite — fetch-vendor НЕ запускался) маркера НЕ имеет, поэтому
+// отсутствие vendor у него — норма (онлайн-фолбэк), а не дефект. config.json едет
+// ВНУТРИ .app/Contents/Resources → доступен даже когда sibling-vendor оторван.
+function isOfflineEdition() {
+  try { return readJson('config.json', {}).offlineEdition === true; }
+  catch (e) { return false; }
+}
+
+// Жёсткий стоп ДО установки (только упакованный mac-.app):
+//   • translocation — Gatekeeper исполняет .app из read-only AppTranslocation, sibling-
+//     vendor оторван: заведомо сломанный офлайн-запуск → блок ВСЕГДА (не зависит от
+//     издания — офлайн-компоненты недостижимы физически);
+//   • неполный/отсутствующий vendor БЕЗ translocation → блок ТОЛЬКО если издание
+//     заявлено офлайн-полным (offlineEdition). Онлайн/lite-издание при отсутствующем
+//     vendor работает штатно через онлайн-фолбэк → мягкое renderVendorWarning в
+//     renderer, НЕ жёсткий стоп (иначе легитимная mac-сборка без офлайн-vendor = кирпич).
+// В dev (не packaged) и на Windows translocation невозможен — не блокируем.
 function vendorBlockInfo() {
   if (process.platform !== 'darwin' || !app.isPackaged) return { blocked: false };
-  const translocated = isTranslocated();
-  const complete = vendorComplete();
-  if (translocated || !complete) {
-    return {
-      blocked: true,
-      translocated,
-      reason: translocated ? 'translocation' : 'incomplete-vendor'
-    };
+  if (isTranslocated()) {
+    return { blocked: true, translocated: true, reason: 'translocation' };
+  }
+  if (!vendorComplete() && isOfflineEdition()) {
+    return { blocked: true, translocated: false, reason: 'incomplete-vendor' };
   }
   return { blocked: false };
 }
@@ -155,6 +167,30 @@ function killChildren() {
   CHILDREN.clear();
 }
 
+// Force the installer window above whatever the user was doing (browser, IDE).
+// Тестер-фидбек: окно установки открывалось/уходило ЗА браузером — «просидел 30
+// минут, думал ничего не устанавливается». На Windows свежесозданное окно часто
+// не выходит на передний план, а после UAC-элевации фокус не возвращается.
+let _onTopTimer = null;
+function bringToFront() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.moveTop();
+    mainWindow.setAlwaysOnTop(true);   // кратко форсим поверх чужих окон…
+    // macOS: focus() поднимает окно, но не активирует приложение, когда активен
+    // чужой app — клавфокус остаётся там. app.focus({steal}) реально активирует.
+    if (IS_MAC) { try { app.focus({ steal: true }); } catch (_) {} }
+    mainWindow.focus();
+    if (_onTopTimer) clearTimeout(_onTopTimer);  // один handle — не плодим таймеры
+    _onTopTimer = setTimeout(() => {             // …и снимаем on-top, чтобы не мешать
+      _onTopTimer = null;
+      try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(false); } catch (_) {}
+    }, 600);
+  } catch (_) {}
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 920,
@@ -162,6 +198,7 @@ function createWindow() {
     minWidth: 820,
     minHeight: 600,
     backgroundColor: '#070926',
+    show: false,                       // показываем на ready-to-show — сразу поверх
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default',
     autoHideMenuBar: true,
     webPreferences: {
@@ -172,7 +209,17 @@ function createWindow() {
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.once('ready-to-show', bringToFront);
+  // M1: когда юзер сам вернулся в окно — разрешаем следующий однократный подъём
+  // (например после следующего UAC) и гасим мигание таскбара.
+  mainWindow.on('focus', () => {
+    _frontedForInstall = false;
+    try { mainWindow.flashFrame(false); } catch (_) {}
+  });
 }
+// M1: подняли ли окно на передний план в текущем «эпизоде» ухода фокуса — чтобы
+// не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
+let _frontedForInstall = false;
 
 app.whenReady().then(() => {
   createWindow();
@@ -211,18 +258,53 @@ function detectForeignUserWarning() {
       }
       return '';
     }
-    // Windows: there is no reliable pure-Node/Electron way to learn the
-    // INTERACTIVE session's user from inside a process launched under a
-    // different account. Ordinary UAC elevation keeps the SAME user (nothing to
-    // warn about); only "Запуск от имени другого пользователя" / runas /user
-    // swaps the token, and that leaves NO trace of the original interactive user
-    // in this process's environment.
-    // TODO(reliability): detecting that case needs a native call — e.g. compare
-    // this process's token SID against the owner of the interactive shell
-    // (explorer.exe) via WTSQuerySessionInformation + OpenProcessToken. Until a
-    // native helper exists we deliberately return '' instead of guessing and
-    // scaring users with a false banner.
-    return '';
+    // Windows «over-the-shoulder UAC»: у реального юзера СТАНДАРТНАЯ учётка, а установщик
+    // требует админа (requireAdministrator) → UAC просит пароль ДРУГОГО (админского)
+    // аккаунта → весь процесс идёт от имени админа, и ~/.claude, курс, ярлык, claude,
+    // PATH, креды уезжают в ЧУЖОЙ профиль; де-элевация тоже ломается. Обычная UAC-
+    // элевация ТЕМ ЖЕ аккаунтом токен-юзера не меняет — предупреждать не о чем.
+    // Определяем интерактивного (консольного) пользователя как владельца explorer.exe
+    // (оболочка запущена интерактивным входом даже когда наш процесс — под другим
+    // аккаунтом) и сравниваем с пользователем нашего токена. Fail-OPEN: любая
+    // ошибка/таймаут/неоднозначность → '' (НИКОГДА не пугаем ложным баннером).
+    const tokenUser = String(process.env.USERNAME || '').trim().toLowerCase();
+    if (!tokenUser) return '';
+    const tasklist = remoteFetch.sysBin('tasklist.exe'); // абсолютный System32 (как reg/cmd)
+    if (!tasklist) return '';
+    let out = '';
+    try {
+      out = execFileSync(tasklist,
+        ['/v', '/fi', 'imagename eq explorer.exe', '/fo', 'csv', '/nh'],
+        { encoding: 'utf8', windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (e) { return ''; } // tasklist недоступен/таймаут — молчим
+    // Собираем владельцев ВСЕХ explorer.exe (при fast-user-switching их несколько).
+    // Реальный владелец ВСЕГДА в формате DOMAIN\user — это локале-НЕзависимый признак
+    // «резолв удался»: «N/A» англ., «Н/Д» рус. и любая локаль НЕ содержат '\' → отбрасываем
+    // (иначе на рус. Windows «Н/Д» дало бы ложный баннер — инвариант fail-open нарушился бы).
+    const short = (s) => s.split('\\').pop().trim().toLowerCase();
+    const owners = String(out || '').split(/\r?\n/)
+      .filter((l) => /explorer\.exe/i.test(l))
+      .map((row) => (row.match(/"([^"]*)"/g) || []).map((s) => s.replace(/^"|"$/g, '')))
+      .map((f) => (f[6] || '').trim())
+      .filter((full) => full.includes('\\'));
+    if (!owners.length) return ''; // владельца определить не удалось — молчим
+    // Наш токен-юзер интерактивен (есть его explorer) → файлы уедут в ЕГО профиль, всё ок.
+    // Покрывает и обычную UAC-элевацию тем же аккаунтом, и семейный ПК с фоновой 2-й сессией
+    // (fast user switching): если хоть один explorer — наш, предупреждать не о чем.
+    if (owners.some((o) => short(o) === tokenUser)) return '';
+    // Токен-юзер НЕ интерактивен. Предупреждаем ТОЛЬКО при однозначности: ВСЕ интерактивные
+    // сессии принадлежат ОДНОМУ и тому же чужому юзеру (истинный over-the-shoulder — админ
+    // ввёл пароль, но интерактивно не залогинен). 2+ разных владельца = неоднозначность → молчим.
+    const distinct = Array.from(new Set(owners.map(short)));
+    if (distinct.length !== 1) return '';
+    const interactiveFull = owners.find((o) => short(o) === distinct[0]);
+    const tokenDisplay = process.env.USERNAME || tokenUser;
+    return 'Установщик запущен с правами другой учётки («' + tokenDisplay + '»), а в Windows ' +
+      'вы вошли как «' + interactiveFull + '». Из-за этого всё — курс, ярлык на рабочем столе, ' +
+      'настройки, Claude — установится в профиль «' + tokenDisplay + '», а не в ваш, и у вас ' +
+      'этого не будет. Решение: сделайте вашу учётку «' + interactiveFull + '» администратором ' +
+      '(Параметры → Учётные записи → Семья и другие пользователи), затем запустите установщик ' +
+      'заново — тогда всё встанет в ваш профиль.';
   } catch (e) {
     return '';
   }
@@ -257,10 +339,17 @@ ipcMain.handle('bootstrap', () => {
     // macOS App Translocation / оторванный sibling-vendor: жёсткий стоп ДО установки.
     // blocked=true → renderer перекрывает экран блокирующим окном и гасит «Установить».
     vendorBlock: vendorBlockInfo(),
-    // Non-empty when we can tell the installer runs under a different user than
-    // the interactive one (files would land in the wrong profile).
-    userWarning: detectForeignUserWarning()
+    // userWarning считается ОТДЕЛЬНЫМ async-IPC (detect-user-warning), а НЕ здесь:
+    // на Windows детект гоняет tasklist /v (0.5–2с, до 4с на машине с AV) и синхронно
+    // морозил бы стартовый экран. Пусто в bootstrap → renderer дорисует баннер позже.
+    userWarning: ''
   };
+});
+
+// Отдельный (после первой отрисовки) детект «запущен под другим пользователем» —
+// чтобы медленный tasklist на Windows не тормозил стартовый экран (см. bootstrap).
+ipcMain.handle('detect-user-warning', () => {
+  try { return detectForeignUserWarning(); } catch (e) { return ''; }
 });
 
 // Resolve the platform-specific script path for a component id.
@@ -442,10 +531,30 @@ function buildInstallEnv(rendererEnv) {
 ipcMain.handle('run-component', async (_evt, payload) => {
   const { id } = payload || {};
 
+  // m1 (defense-in-depth): renderer гасит «Установить» при vendorBlock, но MAIN —
+  // единственный авторитет запуска. Заблокировано (translocation / оторванный офлайн-
+  // vendor у офлайн-издания) → НЕ запускаем ни один компонент, даже если IPC как-то дошёл.
+  const vb = vendorBlockInfo();
+  if (vb.blocked) {
+    return { id, ok: false, code: -1, error: 'офлайн-ресурсы недоступны (translocation/оторванный vendor) — установка заблокирована' };
+  }
+
   // Allowlist check: reject unknown/traversal ids before building any path.
   if (!id || !VALID_COMPONENT_IDS.has(id)) {
     return { id, ok: false, code: -1, error: `Unknown component id: ${id}` };
   }
+
+  // Тестер-фидбек: окно установщика уходило ЗА браузер (или теряло фокус после
+  // UAC) → прогресс не виден, кажется «ничего не ставится». Поднимаем ОДИН раз за
+  // эпизод ухода фокуса; дальше — мигаем в таскбаре, чтобы не вырывать окно у
+  // юзера, который намеренно ушёл в браузер (M1: без 8-12 рывков за прогон).
+  // Флаг сбрасывается, когда юзер сам вернулся в окно (mainWindow 'focus').
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFocused()) {
+      if (!_frontedForInstall) { _frontedForInstall = true; bringToFront(); }
+      else { try { mainWindow.flashFrame(true); } catch (_) {} }
+    }
+  } catch (_) {}
 
   // BUG #11 (defense-in-depth): компонент, не предназначенный для этой платформы,
   // не запускаем — даже если renderer его как-то прислал (в UI он отфильтрован).
@@ -997,28 +1106,63 @@ function winLaunchDeElevated(exe, folderArg) {
 // Папка ~/HamidunStart создаётся, если её нет, чтобы VS Code открыл реальный воркспейс
 // (пустой проект), а не безымянное окно. НАМЕРЕННО без URI вида vscode://…/open — тот
 // открыл бы панель-агент, а задача — показать новичку файлы проека (IDE).
-ipcMain.handle('launch-vscode', () => {
+// Open a folder in VS Code (de-elevated on Windows; `open -a` on macOS). Shared
+// by the default finish button (HamidunStart sandbox) and the explicit course
+// launcher below.
+function launchVsCodeOn(dir, { create = true } = {}) {
   try {
-    const startDir = path.join(os.homedir(), 'HamidunStart');
-    // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
-    // редактор получил бы путь к файлу/несуществующему — подтверждаем, что это директория.
-    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
-    try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
+    if (create) {
+      // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
+      // редактор получил бы путь к файлу/несуществующему — подтверждаем, что это директория.
+      try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
+    }
+    try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
     if (IS_WIN) {
       const codeExe = firstExisting([
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
         path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
       ]);
       // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
-      if (codeExe) { return winLaunchDeElevated(codeExe, startDir); }
+      if (codeExe) { return winLaunchDeElevated(codeExe, dir); }
     } else if (IS_MAC) {
       // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE. `open` запускает
       // цель от имени пользователя (macOS не эскалирует integrity как Windows).
-      spawn('/usr/bin/open', ['-a', 'Visual Studio Code', startDir], { detached: true, stdio: 'ignore' }).unref();
-      return true;
+      // #7: `open -a` возвращает НЕнулевой код, если приложения нет НИГДЕ (LaunchServices
+      // ищет по всему диску, не только /Applications), и при этом НЕ запускает ничего.
+      // spawnSync даёт честный код синхронно: не врём true (нет .app) и не врём false
+      // (VS Code в нестандартном месте вроде ~/Downloads — pre-check по путям его бы
+      // пропустил). Раньше fire-and-forget spawn всегда возвращал true. open отдаёт
+      // управление быстро (хендофф в LaunchServices), main-поток блокируется кратко.
+      const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir],
+        { stdio: 'ignore', timeout: 15000 });
+      return r.status === 0;
     }
   } catch (e) { /* ignore */ }
   return false;
+}
+
+ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart')));
+
+// Explicit «open the course-simulator» — NOT auto-opened; the finish screen
+// offers it as a labelled choice. Opens the course folder in VS Code so Claude
+// Code picks up the mentor CLAUDE.md; the user then types «начать» to activate
+// the course-driver. Only if the course actually installed (folder exists) —
+// we never create an empty course dir.
+ipcMain.handle('launch-course', () => {
+  const cfg = readJson('config.json', {});
+  const raw = (cfg.course && cfg.course.targetDirDefault) || '';
+  // resolveCourseTarget зеркалит course.ps1/course.sh: expand %USERPROFILE% на Win,
+  // защита от Windows-пути на macOS (иначе `/Users/x\HamidunCourse` — папки нет, B1).
+  const target = uninstallTargets.resolveCourseTarget(raw, os.homedir(), process.platform);
+  // Курс распаковывается в <target>/vibecoding-course/ — именно там CLAUDE.md
+  // наставника (course.ps1:87). Открываем ЕЁ, а не родителя, иначе «начать»
+  // подхватит ванильный Claude без наставника (B2). CLAUDE.md — финальный признак.
+  const dir = path.join(target, 'vibecoding-course');
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+    if (!fs.existsSync(path.join(dir, 'CLAUDE.md'))) return false;
+  } catch (e) { return false; }
+  return launchVsCodeOn(dir, { create: false });
 });
 
 // ---- «Войти в Claude» — открыть терминал с командой claude -----------
@@ -1031,8 +1175,12 @@ function regQueryValue(keyPath, valueName) {
     // reg.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
     const reg = remoteFetch.sysBin('reg.exe');
     if (!reg) return '';
+    // timeout ОБЯЗАТЕЛЕН: без него зависший reg.exe (агрессивный AV/EDR песочит
+    // консольные бинари, повреждённый куст реестра) вешает main-процесс Electron
+    // навсегда — detect-state не резолвится, кнопка «Установить» никогда не
+    // включается. Двойник regQueryValueTyped уже имеет timeout:20000.
     const out = execFileSync(reg, ['query', keyPath, '/v', valueName],
-      { encoding: 'utf8', windowsHide: true });
+      { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
     const m = out.match(new RegExp('^\\s*' + valueName + '\\s+REG(?:_EXPAND)?_SZ\\s+(.+)$', 'im'));
     return m ? m[1].trim() : '';
   } catch (e) { return ''; }
@@ -1096,31 +1244,75 @@ function freshWindowsPath() {
   return joined;
 }
 
-ipcMain.handle('open-claude-terminal', () => {
+ipcMain.handle('open-claude-terminal', async () => {
   try {
     if (IS_WIN) {
       const freshPath = freshWindowsPath();
-      const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
-      // cmd.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
-      // #6: fail-closed — БЕЗ fallback в короткое имя 'cmd.exe' (иначе PATH-резолв
-      // короткого имени под нашим токеном воскрешает hijack). System32 не валиден →
-      // не открываем терминал (return false), не резолвим короткое имя по PATH.
+      const startDir = path.join(os.homedir(), 'HamidunStart');
+      try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
+      // #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся ПЕРВАЯ сессия
+      // Claude у новичка идёт с ПРАВАМИ АДМИНА (high integrity — тот же integrity-
+      // escalation, что закрыт для Code.exe через winLaunchDeElevated), (2) cwd
+      // наследуется от установщика = %TEMP%-распаковка portable-exe → «куда делись
+      // мои файлы» + claude просит доверие к странной папке, (3) drag&drop файлов в
+      // elevated-окно не работает (UIPI). Решение: .cmd-лаунчер с фиксированным cwd,
+      // запущенный через explorer.exe — тот стартует цель medium-токеном shell
+      // (де-элевация), как folderFallback в winLaunchDeElevated.
+      const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+      const exp = path.join(sysRoot, 'explorer.exe');
+      const launcher = path.join(startDir, 'claude-start.cmd');
+      // cwd фиксируем в HamidunStart; canonical-локации claude (~/.local/bin,
+      // %APPDATA%\npm) префиксуем к PATH — %USERPROFILE% cmd раскроет в рантайме
+      // под ДЕ-элевированным (интерактивным) пользователем.
+      // %USERPROFILE%/%ProgramFiles% раскрываются в РАНТАЙМЕ под ДЕ-элевированным
+      // (интерактивным) юзером — не бейкаем абсолютные пути os.homedir() (в over-the-
+      // shoulder это был бы профиль АДМИНА). where claude — авторитетная проверка в
+      // контексте запуска: нет claude → сообщение + pause (окно НЕ схлопывается за долю
+      // секунды, как было бы с голым `claude`). nodejs в PATH — claude.cmd требует node.
+      const cmdBody = '@echo off\r\n' +
+        'cd /d "%USERPROFILE%\\HamidunStart"\r\n' +
+        'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"\r\n' +
+        'title Claude Code\r\n' +
+        'where claude >nul 2>nul || (echo Claude Code не найден. Запусти установщик заново и отметь компонент "Claude Code". & echo. & pause & exit /b 1)\r\n' +
+        'claude\r\n' +
+        'if errorlevel 1 pause\r\n';
+      try { fs.writeFileSync(launcher, cmdBody, 'utf8'); } catch (e) { return false; }
+      if (fs.existsSync(exp)) {
+        spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+        return true;
+      }
+      // Фолбэк (explorer недоступен): прежний путь, но хотя бы с фиксированным cwd.
       const cmdExe = remoteFetch.sysBin('cmd.exe');
       if (!cmdExe) return false;
-      // `start "Claude Code" cmd /k claude` — a new console window that stays
-      // open; it inherits the fresh PATH from this spawn's env.
+      const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
       const child = spawn(cmdExe, ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
-        { env, detached: true, stdio: 'ignore', windowsHide: true });
+        { env, cwd: startDir, detached: true, stdio: 'ignore', windowsHide: true });
       child.unref();
       return true;
     }
     if (IS_MAC) {
-      const child = spawn('/usr/bin/osascript', [
-        '-e', 'tell application "Terminal" to activate',
-        '-e', 'tell application "Terminal" to do script "claude"'
-      ], { detached: true, stdio: 'ignore' });
-      child.unref();
-      return true;
+      // #3: НЕ fire-and-forget с вечным true. На hardened-runtime без Apple-Events-
+      // entitlement (добавлен в build/entitlements.mac.plist) событие отклонилось бы
+      // (-1743), на ad-hoc сборке юзер мог нажать «Не разрешать» — тогда osascript
+      // выходит НЕнулевым. Возвращаем честный результат → renderer покажет подсказку.
+      // АСИНХРОННО (main-loop НЕ морозим) + БОЛЬШОЙ таймаут: первый клик упирается в
+      // TCC-диалог «управлять Терминалом», который osascript ждёт, пока юзер читает и
+      // жмёт «Разрешить». false — ТОЛЬКО по реальному ненулевому коду, НЕ по короткому
+      // таймауту (иначе врали бы «не дал разрешение», пока диалог ещё на экране).
+      return await new Promise((resolve) => {
+        let settled = false;
+        const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+        let child;
+        try {
+          child = spawn('/usr/bin/osascript', [
+            '-e', 'tell application "Terminal" to activate',
+            '-e', 'tell application "Terminal" to do script "claude"'
+          ], { stdio: 'ignore' });
+        } catch (e) { return done(false); }
+        child.on('error', () => done(false));
+        child.on('close', (code) => done(code === 0));
+        setTimeout(() => done(false), 120000); // renderer не ждёт вечно, но переживает TCC-диалог
+      });
     }
   } catch (e) { /* ignore */ }
   return false;
@@ -1185,6 +1377,14 @@ function resolveExecutable(names, extraDirs) {
     (process.env.PATH || '').split(':').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
   }
   for (const d of dirs) {
+    // #18: мёртвые UNC/сетевые записи PATH (\\server\share при выключенном VPN)
+    // заставляют fs.existsSync висеть полный SMB-таймаут — × имена × компоненты это
+    // минуты фриза детекции при выключенной кнопке «Установить». UNC при детекции
+    // пропускаем; существование КАТАЛОГА проверяем ОДИН раз, а не имя×каталог.
+    if (IS_WIN && /^\\\\/.test(d)) continue;
+    let dirOk;
+    try { dirOk = fs.existsSync(d); } catch (e) { dirOk = false; }
+    if (!dirOk) continue;
     for (const n of names) {
       try { const p = path.join(d, n); if (fs.existsSync(p)) return p; } catch (e) { /* ignore */ }
     }
@@ -1252,6 +1452,21 @@ function findClaudeBinary() {
 }
 
 // Детектор на компонент: { installed:bool, detectedVersion:string }.
+// macOS: установлены ли Xcode Command Line Tools. `xcode-select -p` возвращает
+// путь если да, ошибку если нет — и, в отличие от `git`/`xcode-select --install`,
+// САМ диалог установки НЕ открывает. Кэшируем: за детекцию состояние не меняется.
+let _cltPresent = null;
+function xcodeCltPresent() {
+  if (!IS_MAC) return true;
+  if (_cltPresent !== null) return _cltPresent;
+  try {
+    const r = spawnSync('/usr/bin/xcode-select', ['-p'],
+      { timeout: 4000, stdio: ['ignore', 'ignore', 'ignore'] });
+    _cltPresent = r.status === 0;
+  } catch (_) { _cltPresent = false; }
+  return _cltPresent;
+}
+
 function detectComponents() {
   const home = os.homedir();
   const claudeHome = path.join(home, '.claude');
@@ -1261,7 +1476,13 @@ function detectComponents() {
   {
     const bin = resolveExecutable(IS_WIN ? ['git.exe'] : ['git'],
       IS_WIN ? [path.join(winPF(), 'Git', 'cmd'), path.join(winPF(), 'Git', 'bin'), path.join(winPF86(), 'Git', 'cmd')] : []);
-    const v = probeVersion(bin, ['--version'], /(\d+\.\d+(?:\.\d+)?)/);
+    // macOS-ГОЧА: /usr/bin/git — это Apple-шим; его вызов на чистом маке БЕЗ
+    // Command Line Tools САМ открывает системный диалог «установить инструменты
+    // разработчика» (тестер упёрся в него в фазе детекции). Не пробим версию
+    // такого шима — считаем git не установленным; git.sh поставит вшитый
+    // портативный dugite-git без окон Apple.
+    const macShim = IS_MAC && bin === '/usr/bin/git' && !xcodeCltPresent();
+    const v = (bin && !macShim) ? probeVersion(bin, ['--version'], /(\d+\.\d+(?:\.\d+)?)/) : '';
     out.git = { installed: !!(bin && v), detectedVersion: v };
   }
   // node
@@ -1311,8 +1532,15 @@ function detectComponents() {
   }
   // config (~/.claude развёрнут)
   {
-    const found = firstExisting([path.join(claudeHome, 'skills'), path.join(claudeHome, 'settings.json')]);
-    out.config = { installed: !!found, detectedVersion: '' };
+    // #19: «установлено» — по МАРКЕРУ завершённости (config.ps1/config.sh пишут его
+    // ТОЛЬКО в самом конце успешной раскладки). Иначе оборванная установка (частичный
+    // ~/.claude/skills после сна/перезагрузки/убийства AV) выглядела завершённой,
+    // авто-снимала галку config, и повторный запуск не доразворачивал конфиг. Легаси-
+    // фолбэк (маркера ещё нет от старых сборок): skills И settings.json одновременно.
+    const marker = fs.existsSync(path.join(claudeHome, '.hamidun-config-complete'));
+    const legacy = fs.existsSync(path.join(claudeHome, 'skills')) &&
+                   fs.existsSync(path.join(claudeHome, 'settings.json'));
+    out.config = { installed: marker || legacy, detectedVersion: '' };
   }
   // pydeps (best-effort: python + представительный пакет). Ложно-негатив безвреден —
   // переустановка pydeps идемпотентна; ложно-позитив лишь снимает галку по умолчанию.
@@ -1321,7 +1549,14 @@ function detectComponents() {
       IS_WIN ? [path.join(winLocalAppData(), 'Programs', 'Python', 'Python313'),
                 path.join(winLocalAppData(), 'Programs', 'Python', 'Python312')] : []);
     let found = false;
-    if (py) {
+    // macOS-ГОЧА (ТОТ ЖЕ класс, что git-шим выше, стр. 1379): /usr/bin/python3 —
+    // Apple-стаб; его запуск на чистом маке БЕЗ Command Line Tools САМ открывает
+    // системный диалог «установить инструменты разработчика» — прямо в фазе
+    // детекции, до единого клика. Не пробим такой шим — считаем pydeps не
+    // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
+    // пакеты через framework/uv-python без окон Apple).
+    const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
+    if (py && !pyShim) {
       try {
         execFileSync(py, ['-c', 'import PIL, requests'],
           { windowsHide: true, timeout: 6000, stdio: 'ignore' });

@@ -24,6 +24,7 @@
   "build": {
     "appId": "com.hamidun.setup",
     "productName": "Hamidun Setup",
+    "compression": "maximum",
     "directories": { "output": "release" },
     "files": [
       "src/**/*"
@@ -44,7 +45,7 @@
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
-        { "from": "vendor", "to": "vendor" }
+        { "from": "vendor", "to": "vendor", "filter": ["**/*", "!playwright-browsers/**", "!playwright-browsers-*/**"] }
       ]
     },
     "portable": {
@@ -61,7 +62,10 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": true
+      "notarize": true,
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Чтобы открыть Терминал с командой claude для запуска Claude Code."
+      }
     },
     "dmg": {
       "contents": [

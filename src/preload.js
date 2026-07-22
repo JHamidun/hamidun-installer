@@ -27,7 +27,9 @@ contextBridge.exposeInMainWorld('installer', {
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
   launchVsCode: () => ipcRenderer.invoke('launch-vscode'),
+  launchCourse: () => ipcRenderer.invoke('launch-course'),
   openClaudeTerminal: () => ipcRenderer.invoke('open-claude-terminal'),
+  detectUserWarning: () => ipcRenderer.invoke('detect-user-warning'),
   saveCredentials: (obj) => ipcRenderer.invoke('save-credentials', obj),
   // Анонимная телеметрия установки ({ok, failed[], durationSec}) — URL зашит в
   // config.json на стороне main; ошибки там глотаются, ответ не важен.

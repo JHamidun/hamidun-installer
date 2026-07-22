@@ -36,6 +36,14 @@ function escapeHtml(s) {
   ));
 }
 
+// Хэндл бота-спутника из конфига (links.bot = https://t.me/<handle>) — ЕДИНЫЙ источник,
+// без хардкода «@vibecodeguidebot» по коду. Пустой конфиг → нейтральный фолбэк.
+function botHandle() {
+  const bot = (STATE.config && STATE.config.links && STATE.config.links.bot) || '';
+  const m = String(bot).match(/t\.me\/([A-Za-z0-9_]+)/i);
+  return m ? '@' + m[1] : 'бота-помощника';
+}
+
 async function init() {
   const boot = await window.installer.bootstrap();
   STATE.platform = boot.platform;
@@ -65,10 +73,21 @@ async function init() {
     })
   );
 
+  // Хэндл бота на приветственном экране — из конфига (без хардкода в статике).
+  const wcBot = $('#wc-bot-handle');
+  if (wcBot) wcBot.textContent = botHandle();
   renderGroups();
   renderPacks();
   renderPreflight();
-  renderUserWarning();
+  // userWarning считается в main асинхронно (tasklist на Windows медленный) — не блокируем
+  // первую отрисовку: дорисуем баннер, когда детект вернётся.
+  if (window.installer.detectUserWarning) {
+    window.installer.detectUserWarning()
+      .then((w) => { STATE.userWarning = w || ''; renderUserWarning(); })
+      .catch(() => {});
+  } else {
+    renderUserWarning();
+  }
   renderVendorBlock();
   renderProgressBotBanner();
   refreshDerived();
@@ -86,7 +105,14 @@ async function init() {
   if (nextBtn) nextBtn.addEventListener('click', () => openStartHereMemo());
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
-    if (auto && auto.checked) { await window.installer.launchVsCode(); }
+    if (auto && auto.checked) {
+      let ok = false;
+      try { ok = await window.installer.launchVsCode(); } catch (_) {}
+      // #7: не закрываемся МОЛЧА, если VS Code не открылся (нет в сборке / не встал) —
+      // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе. Показываем
+      // ту же подсказку, что и главная CTA, и НЕ квитим.
+      if (!ok) { const cta = $('#ns-vscode'); if (cta) cta.click(); return; }
+    }
     window.installer.quit();
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
@@ -487,12 +513,37 @@ function renderVendorBlock() {
     emoji: '⚠️',
     title: 'Запусти установщик из окна DMG',
     bodyHtml:
-      '<p>macOS переместил приложение в защищённую область, поэтому офлайн-компоненты недоступны.</p>' +
-      '<p>Закрой это окно и запусти установщик <b>двойным кликом прямо в открытом окне DMG</b> ' +
-      '(<b>не</b> из «Программ»). Если уже перетащил в «Программы» — удали оттуда и запусти из образа.</p>',
+      '<p>macOS поставил приложению «карантин» и запускает его из защищённой копии — офлайн-компоненты рядом с ним недоступны, установка заблокирована.</p>' +
+      '<p><b>Почему «просто открыть из окна DMG» часто НЕ помогает:</b> если образ уже смонтирован, снятие карантина на него не подействует — образ надо ЗАКРЫТЬ (отмонтировать) и открыть заново. Команда ниже делает всё это сама.</p>' +
+      '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
+      '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
+      '<li>Открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter). Вставь <b>ОДНОЙ строкой</b> и Enter:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code>' +
+      '<br><span style="font-size:12px;opacity:.82">Она снимет карантин, ЗАКРОЕТ старый образ и откроет свежий — это ключевой шаг.</span></li>' +
+      '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
+      '</ol>' +
+      '<p style="font-size:12px;opacity:.82">Если dmg не в «Загрузках» — напиши боту-помощнику, пришли скрин. Застрял — @vibecodeguidebot.</p>',
     closeLabel: 'Понятно',
     blocking: true,
   });
+  // #8: модалку можно закрыть кнопкой «Понятно» — но «Установить» останется погашенной
+  // без единого объяснения (повторный показ зашит только в startInstall, а он не стреляет
+  // по disabled-кнопке) → глухой тупик до перезапуска приложения. Рисуем НЕсмываемый
+  // баннер с той же командой xattr и кнопкой «Показать инструкцию» (re-open модалки).
+  if (!document.getElementById('vendorblock-banner')) {
+    const b = document.createElement('div');
+    b.id = 'vendorblock-banner';
+    b.className = 'preflight-warn';
+    b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
+    b.innerHTML = '🛑 Установка заблокирована: macOS запускает приложение из карантинной копии. ' +
+      'Выполни ОДНОЙ строкой (снимет карантин + перемонтирует образ) и запусти из СВЕЖЕГО окна DMG:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
+      '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
+    const hero = document.querySelector('#view-select .hero');
+    if (hero) hero.insertAdjacentElement('afterend', b);
+    const rb = document.getElementById('vendorblock-reopen');
+    if (rb) rb.addEventListener('click', () => renderVendorBlock());
+  }
 }
 
 // На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
@@ -559,8 +610,9 @@ function showWhatInstalls() {
     });
   });
   const body =
-    '<p class="wi-lead">Всё ставится офлайн из самого установщика и только с твоего выбора — ' +
-    'ничего постороннего из интернета не тянется.</p>' +
+    '<p class="wi-lead">Ставится только то, что ты выбрал. Основное — офлайн из самого ' +
+    'установщика; компоненты с пометкой «онлайн» докачиваются с официальных источников ' +
+    'с проверкой целостности.</p>' +
     '<ul class="wi-list">' + rows.join('') + '</ul>';
   openModal({
     id: 'what-installs',
@@ -754,11 +806,21 @@ async function runComponents(ids, env) {
     appendLog(line);
   });
   const failed = [];
-  const skipped = [];
+  // Два РАЗНЫХ вида пропуска (см. ветки ниже):
+  //   depSkipped      — не встала ЗАВИСИМОСТЬ (это проблема: идёт в retry, ломает okAll);
+  //   gracefulSkipped — осознанный exit 120 «нечего ставить / не входит в сборку»
+  //                     (это НЕ ошибка: не идёт в retry, НЕ ломает okAll, не шлётся в ok:false).
+  const depSkipped = [];
+  const gracefulSkipped = [];
   const bad = new Set();
   // Компоненты, пропущенные В ХОДЕ прогона (dep-провал ИЛИ осознанный exit-120-skip).
   // Их убираем из HM_SELECTED перед verify, иначе verify нарисует по ним красный крест.
-  const runtimeSkipped = new Set();
+  // КУМУЛЯТИВНО через прогоны (живёт в STATE, сбрасывается только новым startInstall):
+  // на «Повторить» run1-пропуски (vscode/extension/nomad exit-120) обязаны остаться
+  // исключёнными, иначе verify нарисует по ним ложные кресты на уже починенной сборке.
+  STATE.installedEver = STATE.installedEver || new Set();
+  STATE.skippedEver = STATE.skippedEver || new Set();
+  const runtimeSkipped = STATE.skippedEver;
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -766,16 +828,21 @@ async function runComponents(ids, env) {
     const broken = firstBrokenDep(id, bad);
     if (broken) {
       setStep(id, 'skipped');
-      skipped.push(id);
+      depSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
-      $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+      $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
+    // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
+    // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
+    // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
+    // его и нарисовать честный крест, а не «– (не выбрано)».
+    runtimeSkipped.delete(id);
 
     // Remote-компонент: докачку+проверку+распаковку+запуск делает АТОМАРНО main
     // внутри runComponent (renderer не задаёт путь кэша и не вклинивается между
@@ -818,11 +885,16 @@ async function runComponents(ids, env) {
       // в bad, чтобы зависимые (extension requires vscode) не запускались красным впустую,
       // а тоже грациозно пропускались. Из HM_SELECTED для verify компонент уже убираем.
       setStep(id, 'skipped');
-      skipped.push(id);
+      gracefulSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
-    } else if (res && res.ok) { setStep(id, 'done'); ok++; }
+    } else if (res && res.ok) {
+      setStep(id, 'done'); ok++;
+      // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
+      // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
+      STATE.installedEver.add(id);
+    }
     else {
       setStep(id, 'error');
       failed.push(id);
@@ -834,10 +906,10 @@ async function runComponents(ids, env) {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }
     }
-    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${skipped.length} · Всего: ${ids.length}`;
+    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
   }
   off && off();
-  return { failed, skipped };
+  return { failed, depSkipped, gracefulSkipped };
 }
 
 // Карусель советов на время установки: то, что спасает новичка в первый день
@@ -889,6 +961,13 @@ async function startInstall() {
   if (STATE.vendorBlocked) { renderVendorBlock(); return; }
   const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
+  // Свежая установка — сбрасываем КУМУЛЯТИВНЫЕ (кросс-прогонные) наборы статусов:
+  // installedEver (что реально встало хоть раз) и skippedEver (что осознанно
+  // пропущено, exit 120). retryFailed их НЕ сбрасывает — иначе теряется, что
+  // vscode/nomad/course не входили в сборку, и после «Повторить» verify рисует
+  // ложные красные кресты, а финиш врёт «Агент Nomad уже установлен».
+  STATE.installedEver = new Set();
+  STATE.skippedEver = new Set();
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -927,18 +1006,22 @@ async function retryFailed(ids) {
 function finishInstall(res) {
   stopTips();
   const failed = res.failed || [];
-  const skipped = res.skipped || [];
+  // depSkipped (упала зависимость) = проблема; gracefulSkipped (exit 120, «не входит
+  // в сборку») = НЕ проблема и на исход установки не влияет.
+  const depSkipped = res.depSkipped || [];
+  const gracefulSkipped = res.gracefulSkipped || [];
   // Независимая проверка (verify) может найти проблему, даже когда все шаги
   // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
   const checkFailed = (STATE.checks || []).some(
     (c) => (c.status || (c.ok ? 'ok' : 'fail')) === 'fail'
   );
-  const okAll = failed.length === 0 && skipped.length === 0 && !checkFailed;
+  // Осознанный exit-120-skip НЕ ломает okAll — компонент просто не входит в эту сборку.
+  const okAll = failed.length === 0 && depSkipped.length === 0 && !checkFailed;
   let title, sub;
   if (okAll) {
     title = 'Готово!';
     sub = 'Всё установлено. Ниже — три простых шага до первого результата, или нажми кнопку бота — он поведёт дальше.';
-  } else if (failed.length === 0 && skipped.length === 0) {
+  } else if (failed.length === 0 && depSkipped.length === 0) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
     sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
@@ -954,8 +1037,8 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, skipped);
-  sendInstallTelemetry(failed, okAll);
+  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed);
+  sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
 
@@ -965,27 +1048,33 @@ function finishInstall(res) {
 // Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
 // renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
 // телеметрии не зависит ни в каком исходе.
-function sendInstallTelemetry(failed, okAll) {
+function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
   if (STATE.telemetrySent || STATE.telemetryConsent === false) return;
   STATE.telemetrySent = true;
   const durationSec = STATE.installStartedAt
     ? Math.max(0, Math.round((Date.now() - STATE.installStartedAt) / 1000))
     : 0;
   try {
+    // gracefulSkipped едет отдельным полем (симметрично тому, как main санитизирует
+    // failed) — и НЕ влияет на ok: осознанный «не входит в сборку» это не провал.
     const p = window.installer.sendTelemetry({
       ok: !!okAll,
       failed: (failed || []).slice(),
+      skipped: (gracefulSkipped || []).slice(),
       durationSec,
     });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, skipped) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
   failed = failed || [];
-  skipped = skipped || [];
+  depSkipped = depSkipped || [];
+  gracefulSkipped = gracefulSkipped || [];
+  checkFailed = !!checkFailed;
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
+  const botH = botHandle();
   const isWin = STATE.platform === 'win32';
   // Cursor опционален: кнопку «Открыть Cursor» показываем ТОЛЬКО если пользователь его выбрал.
   const cursorSelected = !!(STATE.selected && STATE.selected.cursor);
@@ -994,16 +1083,20 @@ function renderNextSteps(failed, skipped) {
   const rel = isWin ? relRaw.replace(/\//g, '\\') : relRaw.replace(/\\/g, '/');
   const credPath = STATE.homedir ? STATE.homedir + sep + rel : rel;
 
-  // Retry both the real failures and anything skipped because a dep failed
-  // (retrying the dep may unblock them).
-  const retryList = failed.concat(skipped);
-  const skipHtml = skipped.length
-    ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${skipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
+  // Retry только реальные провалы и dep-skip (перезапуск зависимости может их
+  // разблокировать). gracefulSkipped (exit 120) в retry НЕ идёт — там нечего ставить.
+  const retryList = failed.concat(depSkipped);
+  const depSkipHtml = depSkipped.length
+    ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${depSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
          <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
-         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в @vibecodeguidebot.</div></div>` + skipHtml
+         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
+    : '';
+  // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
+  const gracefulSkipHtml = gracefulSkipped.length
+    ? `<div class="ns-note">Не входит в эту сборку — пропущено (это не ошибка): <b>${gracefulSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
 
   // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
@@ -1019,9 +1112,9 @@ function renderNextSteps(failed, skipped) {
          <div class="ns-bot-icon" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M21.5 3.6 2.9 10.8c-1 .4-1 1.8.1 2.1l4.6 1.5 1.7 5.2c.3 1 1.6 1.2 2.2.4l2.4-2.9 4.7 3.4c.8.6 2 .2 2.2-.9l2.5-14.2c.2-1.1-.8-2-1.8-1.6Z" fill="#fff"/></svg></div>
          <div class="ns-bot-body">
            <div class="ns-bot-title">Застрял или что-то непонятно?</div>
-           <div class="ns-bot-text">Спроси бота академии — он ответит и проведёт по шагам. Это нормально в первый день.</div>
+           <div class="ns-bot-text">Спроси бота-помощника — живого ИИ в Telegram: пиши своими словами, он ответит и проведёт по шагам. Это нормально в первый день.</div>
          </div>
-         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота @vibecodeguidebot</button>
+         <button type="button" class="ns-bot-btn" data-ext="${botUrl}">Спросить бота ${botH}</button>
        </div>`
     : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
@@ -1068,7 +1161,7 @@ function renderNextSteps(failed, skipped) {
 
   // Третий шаг ведёт на бота; если ссылки на бота в конфиге нет — на памятку.
   const step3 = botUrl
-    ? `<li><b>Если что-то не получается</b> — не разбирайся в одиночку: нажми кнопку «Бот-помощник» рядом с «Открыть VS Code» — бот ответит и проведёт по шагам.</li>`
+    ? `<li><b>Застрял на любом шаге</b> — напиши боту-помощнику (кнопка «Бот-помощник» ниже). Это <b>живой ИИ-ассистент в Telegram</b>: пиши ему вопросы своими словами («не понял, что делать», «как запустить», «просит оплату — что это») — ответит и проведёт по установке, запуску и первому проекту.</li>`
     : `<li><b>Если что-то не получается</b> — открой памятку «Что дальше» ниже: в ней ответы на весь первый день.</li>`;
 
   // ── Доступ к нейросети (CJM: главный барьер воронки «скачал → Claude заработал») ──
@@ -1078,9 +1171,13 @@ function renderNextSteps(failed, skipped) {
   // выбора): компонент прошёл успешно в этом прогоне ИЛИ уже стоял на машине (детект)
   // → «уже установлен»; упал / пропущен (exit 120, lite-сборка) / не выбирался →
   // честное «можно доустановить» (повторный запуск установщика с галочкой Nomad).
+  // Ground-truth (кросс-прогонный): «уже установлен» ТОЛЬКО если nomad реально встал
+  // в этой сессии (installedEver) ИЛИ был найден на машине детектом. НЕ по per-прогонным
+  // спискам — иначе после «Повторить» (где nomad не перезапускался и его нет ни в
+  // failed/skipped текущего прогона) карточка ложно звала регистрироваться и вставлять
+  // ключ, хотя агента на машине нет (тупик на платном шаге воронки).
   const nomadInstalled =
-    (!!(STATE.selected && STATE.selected.nomad) &&
-      !failed.includes('nomad') && !skipped.includes('nomad')) ||
+    !!(STATE.installedEver && STATE.installedEver.has('nomad')) ||
     !!(STATE.detected && STATE.detected.nomad && STATE.detected.nomad.installed);
   const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
   const claudeUrl = links.claude || 'https://claude.ai/login';
@@ -1099,45 +1196,128 @@ function renderNextSteps(failed, skipped) {
     : '';
   const accessHtml = `
     <div class="ns-access">
-      <div class="ns-access-title">Осталось подключить нейросеть — без неё Claude не ответит. Выбери, как удобно:</div>
+      <div class="ns-access-title">Шаг 2 сам попросит войти в нейросеть — это нормально. Сначала открой VS Code и напиши запрос; когда Claude попросит доступ — выбери способ:</div>
       <div class="ns-access-grid">
         <div class="ns-access-card">
           <div class="ns-access-h">💳 Своя подписка Claude</div>
-          <div class="ns-access-t">Если есть зарубежная карта — оформи Claude Pro или Max. При первом запросе Claude сам попросит войти.</div>
+          <div class="ns-access-t">Понадобится зарубежная карта. Подписка платная — Claude Pro от $20/мес (для старта хватит). Заранее платить не нужно: Claude сам попросит войти при первом запросе.</div>
           <div class="ns-access-btns"><button type="button" class="ns-access-btn" data-ext="${claudeUrl}">Войти на claude.ai</button></div>
         </div>
         ${nomadCard}
       </div>
     </div>`;
 
+  // Явный (НЕ автоматический) вход в курс-симулятор. Тестер-фидбек + решение
+  // Жемала: по умолчанию симулятор не открывается, но должен быть чёткий путь и
+  // команда активации. Показываем блок только если курс реально установлен.
+  // Курс-симулятор бандлится всегда (не всегда попадает в STATE.selected). Блок
+  // показываем, если курс в этой сборке НЕ упал и НЕ пропущен (exit 120 у
+  // lite/partial-сборки без vendor/course-архива); финальную гарантию — что папка
+  // курса реально на месте — даёт main-хендлер launch-course (иначе no-op).
+  // Ground-truth (как у nomad): блок курса показываем, только если курс реально
+  // встал в этой сессии ИЛИ найден на машине — не по per-прогонным спискам (после
+  // «Повторить» они пусты и блок всплывал бы даже на сборке без курса).
+  const courseInstalled =
+    !!(STATE.installedEver && STATE.installedEver.has('course')) ||
+    !!(STATE.detected && STATE.detected.course && STATE.detected.course.installed);
+  const courseHtml = courseInstalled
+    ? `<div class="ns-course">
+         <div class="ns-course-h">🎓 Хочешь учиться по шагам? Включи курс-симулятор</div>
+         <div class="ns-course-t">Отдельный режим: ИИ-наставник ведёт тебя за руку по миссиям на ТВОём проекте. Не знаешь, с чего начать — начни отсюда, это самый простой первый час. Есть своя задача — иди по шагам 1–2 выше, курс никуда не денется. Сам по себе не открывается — включаешь так:</div>
+         <ol class="ns-course-steps">
+           <li>Нажми «Открыть курс-симулятор» ниже — папка курса откроется в VS Code.</li>
+           <li>В панели Claude (значок <b>✳</b>) напиши <b>«начать»</b> — наставник поздоровается и поведёт по первой миссии.</li>
+         </ol>
+         <button type="button" id="ns-course" class="btn-sm">🎓 Открыть курс-симулятор</button>
+       </div>`
+    : '';
+
   const ns = $('#next-steps');
   ns.innerHTML = `
     <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
-      <li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>.</li>
-      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». При первом запросе Claude попросит подключить нейросеть — как это сделать (своя подписка или Nomad для РФ), смотри в блоке ниже.</li>
+      <li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в VS Code: закрыл окно — просто открой VS Code снова (ярлык на рабочем столе / в меню Пуск).</li>
+      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». Claude Code — это <b>чат</b>: ты пишешь задачу текстом, он делает. При первом запросе он попросит подключить нейросеть — как (своя подписка Claude или Nomad для РФ), смотри в блоке ниже.</li>
       ${step3}
     </ol>
     ${accessHtml}
+    ${courseHtml}
     ${checksHtml}
     ${failHtml}
+    ${gracefulSkipHtml}
     <div class="ns-actions">
-      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code</button>
-      ${botUrl ? `<button type="button" class="btn-sm ns-bot-main" data-ext="${botUrl}">💬 ${window.HMFinishLink.botButtonLabel(failed)}</button>` : ''}
-      ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
-      <button type="button" id="ns-claude" class="btn-sm">⚡ Войти в Claude через терминал</button>
-      <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
-      ${logBtn}
+      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>
       ${videoBtn}
-      ${startBtn}
+      ${(failed.length || checkFailed) ? logBtn : ''}
     </div>
     ${botCta}
+    <details class="ns-more">
+      <summary>Ещё инструменты ▾</summary>
+      <div class="ns-actions ns-actions-more">
+        ${cursorSelected ? `<button type="button" id="ns-cursor" class="btn-sm">Открыть Cursor</button>` : ''}
+        <button type="button" id="ns-claude" class="btn-sm">Запустить Claude в терминале (для продвинутых)</button>
+        <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
+        ${startBtn}
+        ${(failed.length || checkFailed) ? '' : logBtn}
+      </div>
+    </details>
     ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autovscode" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть VS Code на папке проекта при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');
 
-  $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
-  $('#ns-vscode').addEventListener('click', () => window.installer.launchVsCode());
+  // #3: не молчим на false — Терминал мог не открыться (TCC-отказ на macOS / нет cmd).
+  const claudeBtnEl = $('#ns-claude');
+  claudeBtnEl.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.openClaudeTerminal(); } catch (_) {}
+    if (!ok) {
+      let hint = claudeBtnEl.parentElement.querySelector('.ns-claude-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err ns-claude-err'; // стиль ns-course-err + уникальный якорь для дедупа
+        claudeBtnEl.parentElement.appendChild(hint);
+      }
+      hint.textContent = STATE.platform === 'darwin'
+        ? 'Не удалось открыть Терминал (macOS не дал разрешение управлять Терминалом). Открой Терминал сам: ⌘+Пробел → «Терминал» → набери claude.'
+        : 'Не удалось открыть терминал. Открой командную строку (Пуск → cmd) и набери claude.';
+    }
+  });
+  // #7: не молчим на false. VS Code мог не войти в сборку / не установиться (lite,
+  // антивирус, сеть), а на macOS launchVsCodeOn раньше врал true даже без .app.
+  // Теперь ждём реальный результат и показываем подсказку про доустановку — как у курса.
+  const vscodeBtnEl = $('#ns-vscode');
+  vscodeBtnEl.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.launchVsCode(); } catch (_) {}
+    if (!ok) {
+      let hint = vscodeBtnEl.parentElement.querySelector('.ns-vscode-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err ns-vscode-err'; // стиль ns-course-err + уникальный якорь для дедупа
+        vscodeBtnEl.parentElement.appendChild(hint);
+      }
+      hint.textContent = 'VS Code не открылся — похоже, он не установлен в этой сборке. ' +
+        'Запусти установщик ещё раз с компонентом «VS Code», ' +
+        (cursorSelected ? 'или открой Cursor кнопкой в «Ещё инструменты», ' : '') +
+        'либо спроси бота-помощника.';
+    }
+  });
+  const courseBtn = $('#ns-course');
+  if (courseBtn) courseBtn.addEventListener('click', async () => {
+    // M2: не молчим на false — папки курса нет (не входил в сборку / снесли).
+    let ok = false;
+    try { ok = await window.installer.launchCourse(); } catch (_) {}
+    if (!ok) {
+      let hint = courseBtn.parentElement.querySelector('.ns-course-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err';
+        courseBtn.parentElement.appendChild(hint);
+      }
+      hint.textContent = 'Папка курса не найдена — курс не входил в эту сборку или папку удалили. ' +
+        'Запусти установщик ещё раз с компонентом «Курс», либо спроси бота-помощника.';
+    }
+  });
   const cursorBtn = $('#ns-cursor');
   if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.

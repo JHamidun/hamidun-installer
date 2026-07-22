@@ -14,13 +14,15 @@ else
   echo "Определяю последнюю LTS-версию..."
   # Без python3 (bare /usr/bin/python3 без CLT дёргает GUI-диалог установки).
   # Записи в index.json идут от новых к старым; у LTS "lts" — строка (кодовое имя), у остальных false.
-  VER=$(curl -fsSL https://nodejs.org/dist/index.json \
+  # Таймауты обязательны: curl без --max-time на РФ-DPI виснет молча навсегда.
+  VER=$(curl -fsSL --connect-timeout 20 --max-time 900 --retry 3 --retry-connrefused https://nodejs.org/dist/index.json \
     | grep -o '{[^{}]*}' | grep '"lts":"' | head -n1 \
     | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
-  [ -z "$VER" ] && { echo "Не удалось определить LTS-версию Node.js (нет сети или изменился формат index.json)."; exit 1; }
+  [ -z "$VER" ] && { echo "Не удалось определить LTS-версию Node.js (сеть недоступна или очень медленная, либо изменился формат index.json) — повтори установку этого компонента."; exit 1; }
   PKG="/tmp/node-${VER}.pkg"
   echo "Скачиваю Node.js ${VER}..."
-  dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG"
+  # set -e здесь нет — без явного чека провал скачивания молча дошёл бы до admin_run.
+  dl "https://nodejs.org/dist/${VER}/node-${VER}.pkg" "$PKG" || exit 1
 fi
 [ "$BUNDLED" = 1 ] && verify_artifact "$PKG"  # вшитый артефакт — сверяем SHA-256 (fail-closed)
 # verify + install АТОМАРНО под root на root-owned staged копии (Codex round-4 P1):

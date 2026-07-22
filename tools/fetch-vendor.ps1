@@ -100,7 +100,7 @@ if (Test-Path $cxvsix) {
   # Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
   # платформы отдаёт ЧУЖУЮ платформу (напр. alpine-arm64/linux-x64) → офлайн-install на Windows
   # упадёт по несовпадению платформы. Резолвим win32-x64; нет такой цели → generic /latest
-  # (хуже для офлайна, но online-фолбэк в vscode.ps1 спасёт). Всё non-fatal: Codex опционален.
+  # (платформо-гейт ниже проверит манифест; чужая/generic НЕ вшивается). Всё non-fatal: Codex опционален.
   try {
     $cxUrl = $null
     try {
@@ -110,11 +110,37 @@ if (Test-Path $cxvsix) {
     if (-not $cxUrl) {
       $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/latest' -Headers $UA -MaximumRedirection 6
       $cxUrl = $cxMeta.files.download
-      if ($cxUrl) { Write-Host "  win32-x64-цель не найдена — беру generic (офлайн может не встать, online-фолбэк)" }
+      if ($cxUrl) { Write-Host "  win32-x64-цель не найдена — беру generic (платформо-гейт ниже решит, вшивать ли)" }
     }
     if ($cxUrl) { Dl $cxUrl $cxvsix }
     else { Write-Host "  ! Open VSX не отдал ссылку на .vsix — Codex поставится онлайн при установке" }
   } catch { Write-Host "  ! Open VSX недоступен ($($_.Exception.Message)) — Codex поставится онлайн при установке" }
+}
+if (Test-Path $cxvsix) {
+  # Платформо-гейт (build-honesty): generic /latest часто отдаёт чужую платформу
+  # (linux/alpine) — офлайн 'code --install-extension' падает по platform mismatch и
+  # роняет ВЕСЬ компонент VS Code. Читаем extension.vsixmanifest (vsix = zip) и вшиваем
+  # ТОЛЬКО при TargetPlatform="win32-x64"; чужая/generic (атрибута нет) или битый zip →
+  # удаляем файл (в checksums.json ниже он тогда не попадёт) — Codex поставится онлайн.
+  $cxOk = $false
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $za = [IO.Compression.ZipFile]::OpenRead($cxvsix)
+    try {
+      $entry = $za.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' } | Select-Object -First 1
+      if ($entry) {
+        $sr = New-Object IO.StreamReader($entry.Open())
+        try { $cxManifest = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        if ($cxManifest -match 'TargetPlatform\s*=\s*["'']win32-x64["'']') { $cxOk = $true }
+      }
+    } finally { $za.Dispose() }
+  } catch { }
+  if ($cxOk) {
+    Write-Host "  ok chatgpt.vsix (TargetPlatform=win32-x64)"
+  } else {
+    Remove-Item $cxvsix -Force -ErrorAction SilentlyContinue
+    Write-Host "  ! chatgpt.vsix не под win32-x64 (generic/чужая платформа или битый zip) — НЕ вшиваю, Codex поставится онлайн при установке"
+  }
 }
 
 Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
@@ -235,6 +261,15 @@ if ($py) {
     & $py -m pip install --quiet playwright 2>&1 | Out-Null
     $env:PLAYWRIGHT_BROWSERS_PATH = $pw
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
+    # Drop chromium_headless_shell (~254 MB): it is a SEPARATE headless-only
+    # chromium build, redundant with the full chromium above (which also runs
+    # headless). Windows `portable` target embeds the whole payload as ONE .7z,
+    # and 32-bit makensis can't mmap a >2 GiB archive — keeping the shell pushes
+    # the exe over that hard limit (build aborts with "failed creating mmap").
+    # Removing it keeps the offline installer under 2 GiB. Nothing offline uses
+    # browser-headless (the repo's «headless» is the tray-less bridge agent).
+    Get-ChildItem -Path $pw -Directory -Filter 'chromium_headless_shell-*' -ErrorAction SilentlyContinue |
+      ForEach-Object { Remove-Item -Recurse -Force $_.FullName; Write-Host "  срезан $($_.Name) (254M, дубль под 2 GiB-лимит NSIS)" }
   } catch { Write-Host "  (playwright browsers пропущены: $($_.Exception.Message))" }
 }
 
@@ -352,7 +387,9 @@ Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive me
 $componentsRawN = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
 if ($componentsRawN -and $componentsRawN -match '"nomad"') {
   $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO } else { 'C:\Vibecode\hamidun-agent' }
-  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'main' }
+  # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (зеркало
+  # fetch-vendor-mac.sh). Бамп = сменить тег здесь и в fetch-vendor-mac.sh, либо env HM_NOMAD_REF.
+  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'v2026.7.22' }
   $srcOut    = Join-Path $root 'vendor\nomad-src'
   if (-not (Test-Path (Join-Path $agentRepo '.git'))) {
     Write-Host "  ! репозиторий Nomad не найден ($agentRepo) — задай HM_NOMAD_AGENT_REPO. nomad-src НЕ вшит (компонент Nomad → graceful skip)."
@@ -369,6 +406,13 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
       # Нативный Windows tar.exe (bsdtar) — понимает C:\ пути. НЕ msys /usr/bin/tar.
       & "$env:SystemRoot\System32\tar.exe" -x -f "$tmpTar" -C "$srcOut"
       Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue
+      # `uv tool install` не требует тестов, сайт-доков и опциональных скиллов —
+      # снимаем их, чтобы вшитый .7z оставался под лимитом mmap 32-битного
+      # makensis (~2GB, target=portable). Иначе крупный агент рушит NSIS-сборку.
+      foreach ($drop in @('tests', 'website', 'optional-skills')) {
+        $dp = Join-Path $srcOut $drop
+        if (Test-Path $dp) { Remove-Item -Recurse -Force $dp -ErrorAction SilentlyContinue }
+      }
       if (Test-Path (Join-Path $srcOut 'pyproject.toml')) {
         # Экспорт-фильтр + гейт: несводимые деанон/секрет-паттерны в раздаваемом exe → FATAL.
         if (-not (Invoke-NomadSrcSanitize $srcOut)) { exit 1 }
@@ -474,6 +518,32 @@ if ($componentsRawM -and $componentsRawM -match '"mascot"') {
   }
   Write-Host "[vendor] OK: скрепка на месте (vendor\apps\claude-mascot\claude-mascot.exe)."
 }
+
+# Маркер издания: offlineEdition=true пишем ТОЛЬКО если completeness-проверка выше прошла
+# без пропусков ($missing пуст). Неполный vendor → честно offlineEdition=false (сбрасываем
+# и возможный true от прошлого прогона): renderer работает в online/lite-режиме, а не даёт
+# ложную офлайн-гарантию по недостающим артефактам. Сборку НЕ валим (WARNING, не exit 1).
+# main.js по true жёстко блокирует запуск офлайн-издания без vendor (translocation/оторванный
+# sibling); онлайн/lite-издание при отсутствии vendor лишь мягко предупреждает.
+# Текстовая вставка (не ConvertTo-Json) — сохраняет формат/комментарии.
+$offlineVal = if ($missing.Count -gt 0) { 'false' } else { 'true' }
+if ($missing.Count -gt 0) {
+  Write-Host "[vendor] WARNING: vendor неполон — offlineEdition=false (издание НЕ заявляется офлайн-полным). Недостающее: $($missing -join ', ')"
+}
+$cfgPath = Join-Path $root 'config.json'
+try {
+  $enc = New-Object System.Text.UTF8Encoding($false)   # UTF-8 без BOM
+  $raw = [IO.File]::ReadAllText($cfgPath, $enc)
+  if ($raw -match '"offlineEdition"') {
+    $raw = [regex]::Replace($raw, '"offlineEdition"\s*:\s*(true|false)', ('"offlineEdition": ' + $offlineVal))
+  } else {
+    # Вставляем ключ сразу после ПЕРВОЙ '{' (верх объекта), count=1.
+    $raw = [regex]::new('\{').Replace($raw, "{`n  `"offlineEdition`": $offlineVal,", 1)
+  }
+  [IO.File]::WriteAllText($cfgPath, $raw, $enc)
+  if ($offlineVal -eq 'true') { Write-Host "[vendor] config.json: offlineEdition=true (издание заявлено офлайн-полным)." }
+  else { Write-Host "[vendor] config.json: offlineEdition=false (vendor неполон — online/lite-режим)." }
+} catch { Write-Host "  ! offlineEdition в config.json не записан - $($_.Exception.Message)" }
 
 $total = (Get-ChildItem -Recurse -File (Join-Path $root 'vendor') | Measure-Object Length -Sum).Sum
 Write-Host ("[vendor] ГОТОВО — vendor\ весит {0:N0} МБ" -f ($total/1MB))

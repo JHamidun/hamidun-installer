@@ -19,10 +19,13 @@ fi
 
 if [ "$INSTALLED" -eq 0 ]; then
   echo "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
-  if curl -fsSL https://claude.ai/install.sh | bash; then
+  # Таймауты обязательны: curl без --max-time на РФ-DPI виснет молча навсегда.
+  if curl -fsSL --connect-timeout 20 --max-time 900 --retry 3 --retry-connrefused https://claude.ai/install.sh | bash; then
     INSTALLED=1
   elif have npm && npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' --no-audit --no-fund; then
     INSTALLED=1
+  else
+    echo "Сеть недоступна или очень медленная — повтори установку этого компонента."
   fi
 fi
 

@@ -88,6 +88,25 @@ if ! have uv; then
   fi
 fi
 
+# 2b. Честная проверка сети (vendor-honesty): вшит только ИСХОДНИК Nomad —
+#     `uv python install` тянет CPython с GitHub, а `uv tool install` резолвит
+#     зависимости из PyPI. Полностью офлайн-машина падала бы криптичной ошибкой uv →
+#     вместо этого осознанный skip 120 (НЕ красный крест): Nomad поставится позже при
+#     подключении. Быстрая проба: TCP/TLS-ответ ЛЮБОГО из хостов с коротким таймаутом,
+#     без скачиваний; curl внутри условия if — под set -e упавшая проба скрипт не убивает.
+#     В dry-run сеть не пробуем.
+if [ -z "$DRY" ]; then
+  NET_OK=0
+  for probe_host in https://github.com https://pypi.org; do
+    if curl -sI --connect-timeout 3 --max-time 5 "$probe_host" >/dev/null 2>&1; then NET_OK=1; break; fi
+  done
+  if [ "$NET_OK" != "1" ]; then
+    echo "Nomad требует интернет (Python + библиотеки, ~300 МБ) — сеть недоступна. Поставь позже при подключении к интернету. Пропускаю."
+    exit 120
+  fi
+  echo "Nomad докачивает Python и библиотеки из интернета (~300 МБ) — это займёт время..."
+fi
+
 # 3. Python 3.12 (pyproject требует <3.14) + установка nomad (команды nmd/nomad-agent/nomad-acp).
 # БЕЗ принудительной перезаписи: uv-тул/шимы этого имени уже отсеяны guard-ом выше, а
 # принудительная замена могла бы затронуть и не-uv бинарь того же имени — недопустимо.
