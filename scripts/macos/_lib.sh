@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Shared helpers for macOS component scripts.
 have() { command -v "$1" >/dev/null 2>&1; }
-dl()   { curl -fsSL "$1" -o "$2"; }
+# Скачивание с жёсткими сетевыми таймаутами: curl без --connect-timeout/--max-time
+# на РФ-DPI виснет молча навсегда (эталон: claude-desktop.sh/chatgpt-desktop.sh).
+# -# вместо -s — видимый прогресс (вывод curl стримится в UI установщика).
+# При провале удаляем частично скачанный файл — обрывок не должен пройти проверки ниже.
+dl() {
+  if ! curl -fSL -# --connect-timeout 20 --max-time 900 --retry 3 --retry-connrefused "$1" -o "$2"; then
+    rm -f "$2" 2>/dev/null || true
+    echo "Сеть недоступна или очень медленная — повтори установку этого компонента."
+    return 1
+  fi
+}
 # ---- Запуск команды под root с нативным macOS GUI-промптом пароля ----
 # admin_run ПРИНИМАЕТ ARGV (НЕ строку): admin_run /bin/cp -R "$SRC" "$DEST".
 # Каждый аргумент отдельно квотируется для shell ('...', внутренние ' -> '\''

@@ -100,7 +100,7 @@ if (Test-Path $cxvsix) {
   # Open VSX: расширение платформо-специфичное (внутри bundled codex-бинарь). /latest БЕЗ
   # платформы отдаёт ЧУЖУЮ платформу (напр. alpine-arm64/linux-x64) → офлайн-install на Windows
   # упадёт по несовпадению платформы. Резолвим win32-x64; нет такой цели → generic /latest
-  # (хуже для офлайна, но online-фолбэк в vscode.ps1 спасёт). Всё non-fatal: Codex опционален.
+  # (платформо-гейт ниже проверит манифест; чужая/generic НЕ вшивается). Всё non-fatal: Codex опционален.
   try {
     $cxUrl = $null
     try {
@@ -110,11 +110,37 @@ if (Test-Path $cxvsix) {
     if (-not $cxUrl) {
       $cxMeta = Invoke-RestMethod 'https://open-vsx.org/api/openai/chatgpt/latest' -Headers $UA -MaximumRedirection 6
       $cxUrl = $cxMeta.files.download
-      if ($cxUrl) { Write-Host "  win32-x64-цель не найдена — беру generic (офлайн может не встать, online-фолбэк)" }
+      if ($cxUrl) { Write-Host "  win32-x64-цель не найдена — беру generic (платформо-гейт ниже решит, вшивать ли)" }
     }
     if ($cxUrl) { Dl $cxUrl $cxvsix }
     else { Write-Host "  ! Open VSX не отдал ссылку на .vsix — Codex поставится онлайн при установке" }
   } catch { Write-Host "  ! Open VSX недоступен ($($_.Exception.Message)) — Codex поставится онлайн при установке" }
+}
+if (Test-Path $cxvsix) {
+  # Платформо-гейт (build-honesty): generic /latest часто отдаёт чужую платформу
+  # (linux/alpine) — офлайн 'code --install-extension' падает по platform mismatch и
+  # роняет ВЕСЬ компонент VS Code. Читаем extension.vsixmanifest (vsix = zip) и вшиваем
+  # ТОЛЬКО при TargetPlatform="win32-x64"; чужая/generic (атрибута нет) или битый zip →
+  # удаляем файл (в checksums.json ниже он тогда не попадёт) — Codex поставится онлайн.
+  $cxOk = $false
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $za = [IO.Compression.ZipFile]::OpenRead($cxvsix)
+    try {
+      $entry = $za.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' } | Select-Object -First 1
+      if ($entry) {
+        $sr = New-Object IO.StreamReader($entry.Open())
+        try { $cxManifest = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        if ($cxManifest -match 'TargetPlatform\s*=\s*["'']win32-x64["'']') { $cxOk = $true }
+      }
+    } finally { $za.Dispose() }
+  } catch { }
+  if ($cxOk) {
+    Write-Host "  ok chatgpt.vsix (TargetPlatform=win32-x64)"
+  } else {
+    Remove-Item $cxvsix -Force -ErrorAction SilentlyContinue
+    Write-Host "  ! chatgpt.vsix не под win32-x64 (generic/чужая платформа или битый zip) — НЕ вшиваю, Codex поставится онлайн при установке"
+  }
 }
 
 Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
@@ -484,23 +510,30 @@ if ($componentsRawM -and $componentsRawM -match '"mascot"') {
   Write-Host "[vendor] OK: скрепка на месте (vendor\apps\claude-mascot\claude-mascot.exe)."
 }
 
-# Маркер издания: этот артефакт заявлен ПОЛНОСТЬЮ ОФЛАЙНОВЫМ (прошли completeness/FATAL-гейты
-# выше). Пишем offlineEdition:true в bundled config.json — main.js по нему жёстко блокирует
-# запуск офлайн-издания без vendor (translocation/оторванный sibling). Онлайн/lite-издание
-# (fetch-vendor НЕ запускался → ключа нет → main видит online) при отсутствии vendor лишь
-# мягко предупреждает. Текстовая вставка (не ConvertTo-Json) — сохраняет формат/комментарии.
+# Маркер издания: offlineEdition=true пишем ТОЛЬКО если completeness-проверка выше прошла
+# без пропусков ($missing пуст). Неполный vendor → честно offlineEdition=false (сбрасываем
+# и возможный true от прошлого прогона): renderer работает в online/lite-режиме, а не даёт
+# ложную офлайн-гарантию по недостающим артефактам. Сборку НЕ валим (WARNING, не exit 1).
+# main.js по true жёстко блокирует запуск офлайн-издания без vendor (translocation/оторванный
+# sibling); онлайн/lite-издание при отсутствии vendor лишь мягко предупреждает.
+# Текстовая вставка (не ConvertTo-Json) — сохраняет формат/комментарии.
+$offlineVal = if ($missing.Count -gt 0) { 'false' } else { 'true' }
+if ($missing.Count -gt 0) {
+  Write-Host "[vendor] WARNING: vendor неполон — offlineEdition=false (издание НЕ заявляется офлайн-полным). Недостающее: $($missing -join ', ')"
+}
 $cfgPath = Join-Path $root 'config.json'
 try {
   $enc = New-Object System.Text.UTF8Encoding($false)   # UTF-8 без BOM
   $raw = [IO.File]::ReadAllText($cfgPath, $enc)
   if ($raw -match '"offlineEdition"') {
-    $raw = [regex]::Replace($raw, '"offlineEdition"\s*:\s*(true|false)', '"offlineEdition": true')
+    $raw = [regex]::Replace($raw, '"offlineEdition"\s*:\s*(true|false)', ('"offlineEdition": ' + $offlineVal))
   } else {
     # Вставляем ключ сразу после ПЕРВОЙ '{' (верх объекта), count=1.
-    $raw = [regex]::new('\{').Replace($raw, "{`n  `"offlineEdition`": true,", 1)
+    $raw = [regex]::new('\{').Replace($raw, "{`n  `"offlineEdition`": $offlineVal,", 1)
   }
   [IO.File]::WriteAllText($cfgPath, $raw, $enc)
-  Write-Host "[vendor] config.json: offlineEdition=true (издание заявлено офлайн-полным)."
+  if ($offlineVal -eq 'true') { Write-Host "[vendor] config.json: offlineEdition=true (издание заявлено офлайн-полным)." }
+  else { Write-Host "[vendor] config.json: offlineEdition=false (vendor неполон — online/lite-режим)." }
 } catch { Write-Host "  ! offlineEdition в config.json не записан - $($_.Exception.Message)" }
 
 $total = (Get-ChildItem -Recurse -File (Join-Path $root 'vendor') | Measure-Object Length -Sum).Sum

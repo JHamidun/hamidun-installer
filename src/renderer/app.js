@@ -79,7 +79,15 @@ async function init() {
   renderGroups();
   renderPacks();
   renderPreflight();
-  renderUserWarning();
+  // userWarning считается в main асинхронно (tasklist на Windows медленный) — не блокируем
+  // первую отрисовку: дорисуем баннер, когда детект вернётся.
+  if (window.installer.detectUserWarning) {
+    window.installer.detectUserWarning()
+      .then((w) => { STATE.userWarning = w || ''; renderUserWarning(); })
+      .catch(() => {});
+  } else {
+    renderUserWarning();
+  }
   renderVendorBlock();
   renderProgressBotBanner();
   refreshDerived();
@@ -97,7 +105,14 @@ async function init() {
   if (nextBtn) nextBtn.addEventListener('click', () => openStartHereMemo());
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
-    if (auto && auto.checked) { await window.installer.launchVsCode(); }
+    if (auto && auto.checked) {
+      let ok = false;
+      try { ok = await window.installer.launchVsCode(); } catch (_) {}
+      // #7: не закрываемся МОЛЧА, если VS Code не открылся (нет в сборке / не встал) —
+      // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе. Показываем
+      // ту же подсказку, что и главная CTA, и НЕ квитим.
+      if (!ok) { const cta = $('#ns-vscode'); if (cta) cta.click(); return; }
+    }
     window.installer.quit();
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
@@ -510,6 +525,24 @@ function renderVendorBlock() {
     closeLabel: 'Понятно',
     blocking: true,
   });
+  // #8: модалку можно закрыть кнопкой «Понятно» — но «Установить» останется погашенной
+  // без единого объяснения (повторный показ зашит только в startInstall, а он не стреляет
+  // по disabled-кнопке) → глухой тупик до перезапуска приложения. Рисуем НЕсмываемый
+  // баннер с той же командой xattr и кнопкой «Показать инструкцию» (re-open модалки).
+  if (!document.getElementById('vendorblock-banner')) {
+    const b = document.createElement('div');
+    b.id = 'vendorblock-banner';
+    b.className = 'preflight-warn';
+    b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
+    b.innerHTML = '🛑 Установка заблокирована: macOS поместил приложение в карантин. ' +
+      'Сними карантин с dmg и запусти установщик из окна DMG:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:12px">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
+      '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
+    const hero = document.querySelector('#view-select .hero');
+    if (hero) hero.insertAdjacentElement('afterend', b);
+    const rb = document.getElementById('vendorblock-reopen');
+    if (rb) rb.addEventListener('click', () => renderVendorBlock());
+  }
 }
 
 // На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
@@ -781,7 +814,12 @@ async function runComponents(ids, env) {
   const bad = new Set();
   // Компоненты, пропущенные В ХОДЕ прогона (dep-провал ИЛИ осознанный exit-120-skip).
   // Их убираем из HM_SELECTED перед verify, иначе verify нарисует по ним красный крест.
-  const runtimeSkipped = new Set();
+  // КУМУЛЯТИВНО через прогоны (живёт в STATE, сбрасывается только новым startInstall):
+  // на «Повторить» run1-пропуски (vscode/extension/nomad exit-120) обязаны остаться
+  // исключёнными, иначе verify нарисует по ним ложные кресты на уже починенной сборке.
+  STATE.installedEver = STATE.installedEver || new Set();
+  STATE.skippedEver = STATE.skippedEver || new Set();
+  const runtimeSkipped = STATE.skippedEver;
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -799,6 +837,11 @@ async function runComponents(ids, env) {
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
+    // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
+    // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
+    // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
+    // его и нарисовать честный крест, а не «– (не выбрано)».
+    runtimeSkipped.delete(id);
 
     // Remote-компонент: докачку+проверку+распаковку+запуск делает АТОМАРНО main
     // внутри runComponent (renderer не задаёт путь кэша и не вклинивается между
@@ -845,7 +888,12 @@ async function runComponents(ids, env) {
       bad.add(id);
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
-    } else if (res && res.ok) { setStep(id, 'done'); ok++; }
+    } else if (res && res.ok) {
+      setStep(id, 'done'); ok++;
+      // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
+      // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
+      STATE.installedEver.add(id);
+    }
     else {
       setStep(id, 'error');
       failed.push(id);
@@ -912,6 +960,13 @@ async function startInstall() {
   if (STATE.vendorBlocked) { renderVendorBlock(); return; }
   const order = ensureVerifyLast(installOrder());
   if (!order.length) return;
+  // Свежая установка — сбрасываем КУМУЛЯТИВНЫЕ (кросс-прогонные) наборы статусов:
+  // installedEver (что реально встало хоть раз) и skippedEver (что осознанно
+  // пропущено, exit 120). retryFailed их НЕ сбрасывает — иначе теряется, что
+  // vscode/nomad/course не входили в сборку, и после «Повторить» verify рисует
+  // ложные красные кресты, а финиш врёт «Агент Nomad уже установлен».
+  STATE.installedEver = new Set();
+  STATE.skippedEver = new Set();
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -981,7 +1036,7 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, depSkipped, gracefulSkipped);
+  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed);
   sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
@@ -1011,10 +1066,11 @@ function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, depSkipped, gracefulSkipped) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
   failed = failed || [];
   depSkipped = depSkipped || [];
   gracefulSkipped = gracefulSkipped || [];
+  checkFailed = !!checkFailed;
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const botH = botHandle();
@@ -1114,10 +1170,13 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
   // выбора): компонент прошёл успешно в этом прогоне ИЛИ уже стоял на машине (детект)
   // → «уже установлен»; упал / пропущен (exit 120, lite-сборка) / не выбирался →
   // честное «можно доустановить» (повторный запуск установщика с галочкой Nomad).
+  // Ground-truth (кросс-прогонный): «уже установлен» ТОЛЬКО если nomad реально встал
+  // в этой сессии (installedEver) ИЛИ был найден на машине детектом. НЕ по per-прогонным
+  // спискам — иначе после «Повторить» (где nomad не перезапускался и его нет ни в
+  // failed/skipped текущего прогона) карточка ложно звала регистрироваться и вставлять
+  // ключ, хотя агента на машине нет (тупик на платном шаге воронки).
   const nomadInstalled =
-    (!!(STATE.selected && STATE.selected.nomad) &&
-      !failed.includes('nomad') && !depSkipped.includes('nomad') &&
-      !gracefulSkipped.includes('nomad')) ||
+    !!(STATE.installedEver && STATE.installedEver.has('nomad')) ||
     !!(STATE.detected && STATE.detected.nomad && STATE.detected.nomad.installed);
   const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
   const claudeUrl = links.claude || 'https://claude.ai/login';
@@ -1154,10 +1213,12 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
   // показываем, если курс в этой сборке НЕ упал и НЕ пропущен (exit 120 у
   // lite/partial-сборки без vendor/course-архива); финальную гарантию — что папка
   // курса реально на месте — даёт main-хендлер launch-course (иначе no-op).
+  // Ground-truth (как у nomad): блок курса показываем, только если курс реально
+  // встал в этой сессии ИЛИ найден на машине — не по per-прогонным спискам (после
+  // «Повторить» они пусты и блок всплывал бы даже на сборке без курса).
   const courseInstalled =
-    !failed.includes('course') &&
-    !depSkipped.includes('course') &&
-    !gracefulSkipped.includes('course');
+    !!(STATE.installedEver && STATE.installedEver.has('course')) ||
+    !!(STATE.detected && STATE.detected.course && STATE.detected.course.installed);
   const courseHtml = courseInstalled
     ? `<div class="ns-course">
          <div class="ns-course-h">🎓 Хочешь учиться по шагам? Включи курс-симулятор</div>
@@ -1186,7 +1247,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
     <div class="ns-actions">
       <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>
       ${videoBtn}
-      ${failed.length ? logBtn : ''}
+      ${(failed.length || checkFailed) ? logBtn : ''}
     </div>
     ${botCta}
     <details class="ns-more">
@@ -1196,15 +1257,50 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped) {
         <button type="button" id="ns-claude" class="btn-sm">Запустить Claude в терминале (для продвинутых)</button>
         <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
         ${startBtn}
-        ${failed.length ? '' : logBtn}
+        ${(failed.length || checkFailed) ? '' : logBtn}
       </div>
     </details>
     ${keysHtml}
     <label class="ns-auto"><input type="checkbox" id="ns-autovscode" ${fin.autoOpenCursorDefault ? 'checked' : ''}/> Открыть VS Code на папке проекта при нажатии «Готово»</label>`;
   ns.classList.remove('hidden');
 
-  $('#ns-claude').addEventListener('click', () => window.installer.openClaudeTerminal());
-  $('#ns-vscode').addEventListener('click', () => window.installer.launchVsCode());
+  // #3: не молчим на false — Терминал мог не открыться (TCC-отказ на macOS / нет cmd).
+  const claudeBtnEl = $('#ns-claude');
+  claudeBtnEl.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.openClaudeTerminal(); } catch (_) {}
+    if (!ok) {
+      let hint = claudeBtnEl.parentElement.querySelector('.ns-claude-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err ns-claude-err'; // стиль ns-course-err + уникальный якорь для дедупа
+        claudeBtnEl.parentElement.appendChild(hint);
+      }
+      hint.textContent = STATE.platform === 'darwin'
+        ? 'Не удалось открыть Терминал (macOS не дал разрешение управлять Терминалом). Открой Терминал сам: ⌘+Пробел → «Терминал» → набери claude.'
+        : 'Не удалось открыть терминал. Открой командную строку (Пуск → cmd) и набери claude.';
+    }
+  });
+  // #7: не молчим на false. VS Code мог не войти в сборку / не установиться (lite,
+  // антивирус, сеть), а на macOS launchVsCodeOn раньше врал true даже без .app.
+  // Теперь ждём реальный результат и показываем подсказку про доустановку — как у курса.
+  const vscodeBtnEl = $('#ns-vscode');
+  vscodeBtnEl.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.launchVsCode(); } catch (_) {}
+    if (!ok) {
+      let hint = vscodeBtnEl.parentElement.querySelector('.ns-vscode-err');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.className = 'ns-course-err ns-vscode-err'; // стиль ns-course-err + уникальный якорь для дедупа
+        vscodeBtnEl.parentElement.appendChild(hint);
+      }
+      hint.textContent = 'VS Code не открылся — похоже, он не установлен в этой сборке. ' +
+        'Запусти установщик ещё раз с компонентом «VS Code», ' +
+        (cursorSelected ? 'или открой Cursor кнопкой в «Ещё инструменты», ' : '') +
+        'либо спроси бота-помощника.';
+    }
+  });
   const courseBtn = $('#ns-course');
   if (courseBtn) courseBtn.addEventListener('click', async () => {
     // M2: не молчим на false — папки курса нет (не входил в сборку / снесли).

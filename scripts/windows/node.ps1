@@ -39,11 +39,18 @@ if ($local -and (Test-Path $local)) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: скачать MSI Node.js LTS с nodejs.org и msiexec /i /qn" }
     else {
         Write-Host "winget не найден — качаю MSI Node.js LTS..."
-        $idx = Invoke-RestMethod "https://nodejs.org/dist/index.json"
-        $lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
-        $url = "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-x64.msi"
-        $msi = Join-Path $env:TEMP "node-lts.msi"
-        Invoke-WebRequest $url -OutFile $msi
+        # СЕТЬ: дефолтный TimeoutSec=0 (бесконечно) недопустим, а прогресс-бар в PS5.1 в разы замедляет скачивание.
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $idx = Invoke-RestMethod "https://nodejs.org/dist/index.json" -UseBasicParsing -TimeoutSec 60
+            $lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
+            $url = "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-x64.msi"
+            $msi = Join-Path $env:TEMP "node-lts.msi"
+            Invoke-WebRequest $url -OutFile $msi -UseBasicParsing -TimeoutSec 600
+        } catch {
+            Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
+            exit 1
+        }
         Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
     }
 }

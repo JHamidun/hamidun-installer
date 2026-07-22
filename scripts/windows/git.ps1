@@ -68,10 +68,17 @@ if ($local -and (Test-Path $local)) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: скачать Git for Windows с github.com и запустить /VERYSILENT" }
     else {
         Write-Host "winget не найден — качаю Git for Windows напрямую..."
-        $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' }
-        $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
-        $exe = Join-Path $env:TEMP $asset.name
-        Invoke-WebRequest $asset.browser_download_url -OutFile $exe
+        # СЕТЬ: дефолтный TimeoutSec=0 (бесконечно) недопустим, а прогресс-бар в PS5.1 в разы замедляет скачивание.
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' } -UseBasicParsing -TimeoutSec 60
+            $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
+            $exe = Join-Path $env:TEMP $asset.name
+            Invoke-WebRequest $asset.browser_download_url -OutFile $exe -UseBasicParsing -TimeoutSec 600
+        } catch {
+            Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
+            exit 1
+        }
         Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait
     }
 }

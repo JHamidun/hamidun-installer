@@ -277,6 +277,11 @@ if ($installFailed) {
 }
 
 if ($dstPresent) {
+    # #19: маркер ЗАВЕРШЁННОСТИ — детекция config в main.js считает «установлено» по
+    # нему, а не по наличию одной папки skills. Иначе оборванная установка (частичный
+    # ~/.claude/skills) выглядела завершённой, авто-снимала галку, и повторный запуск
+    # НЕ доразворачивал конфиг. Пишем в самом конце, после успешной раскладки.
+    try { Set-Content -Path (Join-Path $dst '.hamidun-config-complete') -Value 'ok' -NoNewline -ErrorAction Stop } catch {}
     Write-Host "OK: конфиг развёрнут. Не забудь заполнить ~/.claude/.credentials.master.env"
     exit 0
 }

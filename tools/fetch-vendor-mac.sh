@@ -596,20 +596,28 @@ sys.exit(0 if ok else 1)
   echo "[vendor-mac] OK: скрепка на месте ($(basename "$GATE_APP") — подпись Developer ID $MASCOT_TEAM_ID + нотаризация подтверждены)."
 fi
 
-# Маркер издания: этот артефакт заявлен ПОЛНОСТЬЮ ОФЛАЙНОВЫМ (прошли completeness/FATAL-гейты
-# выше). Пишем offlineEdition:true в bundled config.json — main.js по нему жёстко блокирует
-# запуск офлайн-издания без vendor (translocation/оторванный sibling). Онлайн/lite-издание
-# (fetch-vendor-mac НЕ запускался → ключа нет) при отсутствии vendor лишь мягко предупреждает.
-# Текстовая вставка (perl, слёрп -0777, первое вхождение) — сохраняет формат/комментарии.
-echo "[vendor-mac] config.json: offlineEdition=true (издание заявлено офлайн-полным)..."
+# Маркер издания: offlineEdition=true пишем ТОЛЬКО если completeness-проверка выше прошла
+# без пропусков ($MISSING пуст). Неполный vendor → честно offlineEdition=false (сбрасываем
+# и возможный true от прошлого прогона): установка работает в online/lite-режиме, а не даёт
+# ложную офлайн-гарантию (git.sh без git-tar ушёл бы в 'xcode-select --install' — диалог
+# Apple CLT). Сборку НЕ валим (WARNING, не exit 1). main.js по true жёстко блокирует запуск
+# офлайн-издания без vendor (translocation/оторванный sibling); онлайн/lite-издание лишь
+# мягко предупреждает. Текстовая вставка (perl, слёрп -0777, первое вхождение) — сохраняет
+# формат/комментарии.
+OFFLINE_VAL=true
+if [ -n "$MISSING" ]; then
+  OFFLINE_VAL=false
+  echo "[vendor-mac] WARNING: vendor неполон — offlineEdition=false (издание НЕ заявляется офлайн-полным). Недостающее:$MISSING"
+fi
+echo "[vendor-mac] config.json: offlineEdition=$OFFLINE_VAL..."
 CFG="$ROOT/config.json"
 if [ -f "$CFG" ]; then
   if grep -q '"offlineEdition"' "$CFG"; then
-    /usr/bin/perl -0777 -pi -e 's/"offlineEdition"\s*:\s*(?:true|false)/"offlineEdition": true/' "$CFG"
+    /usr/bin/perl -0777 -pi -e 's/"offlineEdition"\s*:\s*(?:true|false)/"offlineEdition": '"$OFFLINE_VAL"'/' "$CFG"
   else
-    /usr/bin/perl -0777 -pi -e 's/\{/\{\n  "offlineEdition": true,/' "$CFG"
+    /usr/bin/perl -0777 -pi -e 's/\{/\{\n  "offlineEdition": '"$OFFLINE_VAL"',/' "$CFG"
   fi
-  echo "  ok config.json offlineEdition=true"
+  echo "  ok config.json offlineEdition=$OFFLINE_VAL"
 else
   echo "  ! config.json не найден ($CFG) — offlineEdition не записан"
 fi

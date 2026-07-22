@@ -1,5 +1,7 @@
 ﻿# Claude Code CLI — Windows (native installer)
 $ErrorActionPreference = 'Continue'
+# Прогресс-бар Invoke-RestMethod в PS5.1 сильно замедляет скачивание — глушим.
+$ProgressPreference = 'SilentlyContinue'
 # irm|iex ниже тянет ОФИЦИАЛЬНЫЙ установщик claude.ai по HTTPS (доверие = TLS + подлинность домена).
 # Своего SHA-256 для него нет (плавающая версия). Форсим TLS 1.2, чтобы PS5.1 не откатился на TLS1.0.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -37,16 +39,21 @@ if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyCo
     if ($npmExit -ne 0) {
         Write-Host "Офлайн-установка npm вернула код ${npmExit}. Пробую онлайн-установщик..."
         try {
-            Invoke-RestMethod "https://claude.ai/install.ps1" | Invoke-Expression
+            Invoke-RestMethod "https://claude.ai/install.ps1" -TimeoutSec 120 | Invoke-Expression
         } catch {
             Write-Host "Онлайн-установщик тоже не сработал ($($_.Exception.Message))."
+            # claude.ai гео-блокируется из РФ (403), а registry.npmjs.org доступен —
+            # третий шаг: обычный npm install из онлайн-реестра (зеркально macos/claude.sh).
+            Write-Host "Пробую npm install из онлайн-реестра npmjs..."
+            npm install -g '@anthropic-ai/claude-code' --no-audit --no-fund
+            $npmExit = $LASTEXITCODE
         }
     }
 } else {
     if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://claude.ai/install.ps1 | iex (или npm install -g @anthropic-ai/claude-code)"; exit 0 }
     Write-Host "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
     try {
-        Invoke-RestMethod "https://claude.ai/install.ps1" | Invoke-Expression
+        Invoke-RestMethod "https://claude.ai/install.ps1" -TimeoutSec 120 | Invoke-Expression
     } catch {
         Write-Host "Нативный установщик не сработал ($($_.Exception.Message)). Пробую npm..."
         if (Get-Command npm -ErrorAction SilentlyContinue) {
