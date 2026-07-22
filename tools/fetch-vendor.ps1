@@ -404,6 +404,13 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
       # Нативный Windows tar.exe (bsdtar) — понимает C:\ пути. НЕ msys /usr/bin/tar.
       & "$env:SystemRoot\System32\tar.exe" -x -f "$tmpTar" -C "$srcOut"
       Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue
+      # `uv tool install` не требует тестов, сайт-доков и опциональных скиллов —
+      # снимаем их, чтобы вшитый .7z оставался под лимитом mmap 32-битного
+      # makensis (~2GB, target=portable). Иначе крупный агент рушит NSIS-сборку.
+      foreach ($drop in @('tests', 'website', 'optional-skills')) {
+        $dp = Join-Path $srcOut $drop
+        if (Test-Path $dp) { Remove-Item -Recurse -Force $dp -ErrorAction SilentlyContinue }
+      }
       if (Test-Path (Join-Path $srcOut 'pyproject.toml')) {
         # Экспорт-фильтр + гейт: несводимые деанон/секрет-паттерны в раздаваемом exe → FATAL.
         if (-not (Invoke-NomadSrcSanitize $srcOut)) { exit 1 }
