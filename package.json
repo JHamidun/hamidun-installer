@@ -45,7 +45,7 @@
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
-        { "from": "vendor", "to": "vendor" }
+        { "from": "vendor", "to": "vendor", "filter": ["**/*", "!playwright-browsers/**", "!playwright-browsers-*/**"] }
       ]
     },
     "portable": {
