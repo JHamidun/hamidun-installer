@@ -863,7 +863,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         const m = '[докачка] «' + declared + '» не удалась (' + errMsg + ') — пробую системный установщик компонента (winget/прямая загрузка).';
         send(m); logLine(m);
       } else {
-        return { id, ok: false, code: -1, stage: 'fetch', error: errMsg };
+        // Стадию классифицируем ЗДЕСЬ (авторитетно), а не регексом в renderer: только
+        // реальное расхождение sha/манифеста — это 'integrity' (подмена артефакта,
+        // повтор бессмыслен). Сеть, недоступные зеркала, отказ создать staging и прочая
+        // среда — 'fetch': пользователю честно предлагаем «Повторить».
+        const integrity = /sha-?256|checksums\.json|не совпал|подмен/i.test(errMsg);
+        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg };
       }
     } else {
       remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main

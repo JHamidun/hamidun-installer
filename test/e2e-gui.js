@@ -156,8 +156,12 @@ async function main() {
     })(COMPONENT);
     log('разрешены (цель + зависимости):', [...allowed].join(', '));
 
+    // В netfail важен UI-контракт при обрыве, а не какой именно компонент выбран:
+    // изоляцию не делаем (UI не даёт снять компонент, пока от него зависит отмеченный —
+    // цикл не сходится). В ok-режиме изоляция нужна, чтобы не ставить полстека.
     let picked = null;
-    for (let pass = 0; pass < 4; pass++) {
+    const passes = MODE === 'netfail' ? 1 : 4;
+    for (let pass = 0; pass < passes; pass++) {
       picked = await page.evaluate(({ id, allow }) => {
         const cards = Array.from(document.querySelectorAll('#groups .card'));
         for (const c of cards) {
@@ -176,8 +180,9 @@ async function main() {
       log('проход ' + (pass + 1) + ': лишние ещё отмечены →', extra.join(', ') || '—');
     }
     const extraChecked = picked.stillChecked.filter((x) => !allowed.has(x));
-    check('целевой «' + COMPONENT + '» выбран, лишние сняты (отмечено: ' + picked.stillChecked.join(',') + ')',
-      picked.targetChecked && extraChecked.length === 0, JSON.stringify(picked));
+    check('целевой «' + COMPONENT + '» выбран' + (MODE === 'netfail' ? '' : ', лишние сняты') +
+      ' (отмечено: ' + picked.stillChecked.join(',') + ')',
+      picked.targetChecked && (MODE === 'netfail' || extraChecked.length === 0), JSON.stringify(picked));
 
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));

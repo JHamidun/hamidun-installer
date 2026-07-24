@@ -38,36 +38,42 @@
       "remoteId": "git",
       "name": "Git for Windows",
       "sizeBytes": 64671441,
-      "sha256": "345654674ed10e7ac577c8fa1655776cbc006d797bc8b19999f3dce983830539",
+      "sha256": "46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/git-win32-345654674ed10e7ac577c8fa1655776cbc006d797bc8b19999f3dce983830539.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/git-win32-46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/git-win32-345654674ed10e7ac577c8fa1655776cbc006d797bc8b19999f3dce983830539.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/git-win32-46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725.zip"
         }
       ],
       "installRelPath": "scripts/windows/git.ps1",
+      "gatedFiles": {
+        "git-setup.exe": "2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983"
+      },
       "platform": "win32"
     },
     {
       "remoteId": "node",
       "name": "Node.js LTS",
       "sizeBytes": 31625209,
-      "sha256": "5842279fe183059ab34adac89656b6e1d9252ea2f8d8736a226e7f5cc24f7fa1",
+      "sha256": "8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-win32-5842279fe183059ab34adac89656b6e1d9252ea2f8d8736a226e7f5cc24f7fa1.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-win32-8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/node-win32-5842279fe183059ab34adac89656b6e1d9252ea2f8d8736a226e7f5cc24f7fa1.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/node-win32-8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8.zip"
         }
       ],
       "installRelPath": "scripts/windows/node.ps1",
+      "gatedFiles": {
+        "node-lts.msi": "ae5d9e9f6c85b8d35717f499ba907259ec80672c289858bae19074355906a240"
+      },
       "platform": "win32"
     },
     {
