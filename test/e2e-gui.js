@@ -206,9 +206,16 @@ async function main() {
       }, { id: COMPONENT });
     }
     const extraChecked = picked.stillChecked.filter((x) => !allowed.has(x));
-    check('целевой «' + COMPONENT + '» выбран' + (MODE === 'netfail' ? '' : ', лишние сняты') +
-      ' (отмечено: ' + picked.stillChecked.join(',') + ')',
-      picked.targetChecked && (MODE === 'netfail' || extraChecked.length === 0), JSON.stringify(picked));
+    if (MODE === 'netfail') {
+      // Выбор не трогаем и НЕ требуем конкретный компонент: на чистой машине часть из них
+      // уже установлена (у раннера свои git/node) и по умолчанию снята — это нормальное
+      // поведение продукта. Достаточно, что есть что ставить: иначе проверять обрыв не на чем.
+      log('отмечено по умолчанию:', picked.stillChecked.join(',') || '—');
+      check('есть выбранные компоненты для установки', picked.stillChecked.length > 0, JSON.stringify(picked));
+    } else {
+      check('целевой «' + COMPONENT + '» выбран, лишние сняты (отмечено: ' + picked.stillChecked.join(',') + ')',
+        picked.targetChecked && extraChecked.length === 0, JSON.stringify(picked));
+    }
 
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));
@@ -243,7 +250,10 @@ async function main() {
       check('кнопка «Повторить» доступна пользователю', retryVisible);
       check('провал НЕ выдан за успех (нет экрана «Готово»)', terminal.kind !== 'finish');
     } else {
-      check('докачка стартовала (в UI виден прогресс скачивания)', sawDownload, steps.slice(0, 200));
+      // Прогресс скачивания есть ТОЛЬКО в lite: офлайн-издание ставит из вшитого vendor,
+      // и «докачка» там означала бы, что мы зря тащим байты по сети.
+      if (expectLite) check('lite: докачка стартовала (в UI виден прогресс скачивания)', sawDownload, steps.slice(0, 200));
+      else check('offline: установка без докачки (сеть не нужна)', !sawDownload, steps.slice(0, 200));
       check('прогон дошёл до финиша', terminal.kind === 'finish', terminal.kind + ' ' + (terminal.text || ''));
       // Реальная проверка результата: конфиг разложен в ИЗОЛИРОВАННЫЙ профиль.
       if (COMPONENT === 'config') {
