@@ -1777,10 +1777,18 @@ ipcMain.handle('save-credentials', (_e, obj) => {
 // НИКОГДА не манифестом. Манифест даёт лишь версию для показа/сравнения обновлений.
 // Кросс-платформенно (win + mac). Read-only: ничего не пишет, безопасно в dry-run.
 
-// Windows Program Files из env — только для ЧТЕНИЯ путей детекции (не elevated exec),
-// поэтому spoofing здесь безвреден (в отличие от buildInstallEnv, где значения строгие).
-function winPF() { return process.env.ProgramFiles || 'C:\\Program Files'; }
-function winPF86() { return process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'; }
+// Windows Program Files — НЕ из env: значение попадает в extraDirs резолвинга бинарей,
+// а результат резолвинга запускается под elevated-токеном (probeVersion). Подменённый
+// HKCU\Environment\ProgramFiles поставил бы каталог атакующего ПЕРВЫМ в порядке поиска.
+// Выводим из валидированного системного корня. Цена: у admin'а, перенёсшего Program Files
+// на другой диск, компонент может не задетектиться → предложим переустановку (скрипты
+// идемпотентны) — безопасный ложно-отрицательный вместо запуска чужого бинаря.
+function winSysDrive() {
+  try { return path.parse(remoteFetch.winSystemRoot() || 'C:\\Windows').root || 'C:\\'; }
+  catch (e) { return 'C:\\'; }
+}
+function winPF() { return path.join(winSysDrive(), 'Program Files'); }
+function winPF86() { return path.join(winSysDrive(), 'Program Files (x86)'); }
 function winLocalAppData() { return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'); }
 
 // БЕЗОПАСНОСТЬ (детекция под ELEVATED-токеном): путь ведёт в admin-owned корень
@@ -1789,10 +1797,19 @@ function winLocalAppData() { return process.env.LOCALAPPDATA || path.join(os.hom
 // WindowsApps) — user-writable: medium-малварь того же юзера подсадила бы туда fake
 // (git.exe/node.exe/python.exe/uv.exe) на PATH и получила бы RCE под АДМИНОМ при
 // авто-детекции на старте. Такие бинари НЕ запускаем (детект по существованию цел).
+// КРИТИЧНО: корни выводим ТОЛЬКО из ВАЛИДИРОВАННОГО winSystemRoot(), НИКОГДА из
+// launch-env. Иначе medium-малварь пишет HKCU\Environment\ProgramFiles=C:\Users\v\evil,
+// кладёт туда evil\Git\cmd\git.exe — и префикс-проверка вернула бы true, а winSafeToExec
+// (`winPathAdminOwned(...) || winFileAdminOwned(...)`) короткозамкнулся бы ДО честной
+// проверки владельца → запуск чужого бинаря под АДМИНОМ на старте детекции.
+// Program Files, перенесённый админом в нестандартное место, по-прежнему проходит —
+// через owner-фолбэк winFileAdminOwned (его файлы принадлежат Administrators/SYSTEM).
 function winPathAdminOwned(p) {
   try {
+    const winRoot = remoteFetch.winSystemRoot() || 'C:\\Windows';
+    const drv = path.parse(winRoot).root || 'C:\\';
     const rp = path.resolve(String(p)).toLowerCase();
-    const roots = [winPF(), winPF86(), process.env.SystemRoot || process.env.windir || 'C:\\Windows']
+    const roots = [path.join(drv, 'Program Files'), path.join(drv, 'Program Files (x86)'), winRoot]
       .map((r) => path.resolve(String(r)).toLowerCase().replace(/[\\/]+$/, '') + path.sep);
     return roots.some((r) => rp.startsWith(r));
   } catch (e) { return false; }
@@ -1821,19 +1838,28 @@ function winFileAdminOwned(p) {
       "$ErrorActionPreference='Stop';" +
       // SYSTEM, Administrators, TrustedInstaller — принципалы, писать под которыми medium-юзер не может.
       "$allow=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464');" +
-      "$f=$env:HM_CHK_FILE;$par=Split-Path -LiteralPath $f -Parent;" +
+      // NB: [IO.Path]::GetDirectoryName, а НЕ Split-Path: в PS 5.1 «-LiteralPath … -Parent»
+      // не резолвится (AmbiguousParameterSet), а «-Path» глобит [квадратные] скобки в пути.
+      "$f=$env:HM_CHK_FILE;$par=[System.IO.Path]::GetDirectoryName($f);" +
       // write-класс: WriteData/CreateFiles 0x2, AppendData/CreateDirs 0x4, WriteEA 0x10,
-      // WriteAttributes 0x100, Delete 0x10000, WriteDAC 0x40000, WriteOwner 0x80000;
-      // для каталога дополнительно DeleteSubdirectoriesAndFiles 0x40 (удаляет наш файл).
+      // WriteAttributes 0x100, Delete 0x10000, WriteDAC 0x40000, WriteOwner 0x80000 +
+      // generic-формы GENERIC_ALL 0x10000000 / GENERIC_WRITE 0x40000000; для каталога
+      // дополнительно DeleteSubdirectoriesAndFiles 0x40 (им удаляют НАШ файл).
       "foreach($it in @($f,$par)){" +
-      "$m=if($it -eq $par){0xC0156}else{0xC0116};" +
+      "$m=if($it -eq $par){0x500C0156}else{0x500C0116};" +
       "$a=Get-Acl -LiteralPath $it;" +
       "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
       "if($allow -notcontains $o){Write-Output 'USER';exit 0}" +
-      "foreach($ace in $a.Access){" +
+      // GetAccessRules(...[SecurityIdentifier]) отдаёт ACE СРАЗУ в SID-виде. Через
+      // $a.Access + .Translate() нельзя: локализованные псевдо-принципалы («ЦЕНТР
+      // ПАКЕТОВ ПРИЛОЖЕНИЙ\ВСЕ ПАКЕТЫ ПРИЛОЖЕНИЙ» на ru-RU) НЕ транслируются обратно,
+      // и проверка вырождалась бы в вечный USER — то есть в мёртвый код (проверено).
+      // Inherit-only ACE (PropagationFlags -band 2) к самому объекту не применяются —
+      // иначе штатный CREATOR OWNER (OI)(CI)(IO)(F) в System32 давал бы ложный USER.
+      "foreach($ace in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){" +
       "if($ace.AccessControlType -ne 'Allow'){continue}" +
-      "try{$s=$ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{Write-Output 'USER';exit 0}" +
-      "if($allow -contains $s){continue}" +
+      "if(([int]$ace.PropagationFlags -band 2) -ne 0){continue}" +
+      "if($allow -contains $ace.IdentityReference.Value){continue}" +
       "if(([int]$ace.FileSystemRights -band $m) -ne 0){Write-Output 'USER';exit 0}" +
       "}}" +
       "Write-Output 'ADMIN'";
@@ -2612,4 +2638,14 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   } catch (e) { manOk = false; manErr = String((e && e.message) || e); }
   if (!fin.ok || !manOk) {
     const msg = 'Артефакты удалены, но учётные записи не очищены: ' +
-      (!fin.ok ? ('маркер (' + fin.error + ') ') : '') + (!manOk ? ('манифест (' + manErr 
+      (!fin.ok ? ('маркер (' + fin.error + ') ') : '') + (!manOk ? ('манифест (' + manErr + ')') : '');
+    say(msg);
+    logLine('=== uninstall done, bookkeeping FAILED ===');
+    return { id, ok: false, code: 1, error: msg };
+  }
+  say('Деинсталляция «' + id + '» завершена.');
+  logLine('=== uninstall done ===');
+  return { id, ok: true, code: 0 };
+});
+
+ipcMain.handle('quit', () => app.quit());
