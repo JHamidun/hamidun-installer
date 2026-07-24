@@ -1,7 +1,6 @@
 {
-  "offlineEdition": false,
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
-  "configRepoBranch": "v38",
+  "configRepoBranch": "main",
   "nomad": {
     "_comment": "VENDOR-ONLY: repoUrl is ALWAYS empty and MUST stay empty — the Nomad component NEVER clones. It installs only from the bundled vendor/nomad-src (main.js sets HM_NOMAD_SRC); if not bundled it skips gracefully (exit 120). Removing the clone path closes the round-7 TOCTOU P0 (foreign pyproject.toml swapped between Test-Path and git clone). packageName matches pyproject [project].name.",
     "repoUrl": "",
@@ -60,6 +59,5 @@
     "cabinet": "https://cp.nomadnet.ai/cabinet",
     "claude": "https://claude.ai/login",
     "video": ""
-  },
-  "edition": "lite"
+  }
 }

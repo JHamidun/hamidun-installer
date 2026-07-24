@@ -98,11 +98,11 @@
           ]
         }
       ],
-      "artifactName": "Hamidun-Setup-Windows-Lite.${ext}",
+      "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
         {
-          "from": "vendor-lite",
+          "from": "vendor",
           "to": "vendor",
           "filter": [
             "**/*",
@@ -115,7 +115,7 @@
     },
     "portable": {
       "requestExecutionLevel": "admin",
-      "artifactName": "Hamidun-Setup-Windows-Lite.${ext}"
+      "artifactName": "Hamidun-Setup-Windows.${ext}"
     },
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
