@@ -39,7 +39,9 @@ function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch
 /** Копия распакованного приложения (чтобы править resources без порчи исходной сборки). */
 function stageApp() {
   const src = path.join(ROOT, 'release', 'win-unpacked');
-  if (!fs.existsSync(src)) {
+  // HM_E2E_SOURCE=1 — принудительно из исходников. Нужно для НЕэлевейтед-машины:
+  // упакованный exe несёт requireAdministrator и без UAC просто не стартует.
+  if (process.env.HM_E2E_SOURCE === '1' || !fs.existsSync(src)) {
     // CI/чистая машина: собранного пакета нет — гоняем ТОТ ЖЕ код из исходников
     // (electron <repo>). Проверяется реальный main/renderer/scripts-контур.
     log('release/win-unpacked нет — запускаю из исходников (source mode)');
