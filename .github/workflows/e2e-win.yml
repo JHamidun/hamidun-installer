@@ -15,7 +15,7 @@ on:
       component:
         description: 'Компонент для установки в E2E (config | git | node)'
         required: false
-        default: 'config'
+        default: 'git'
   push:
     branches: ['e2e/**']
 
@@ -66,7 +66,7 @@ jobs:
       - name: E2E — обрыв сети (мёртвые зеркала → error-net + «Повторить»)
         shell: pwsh
         env:
-          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
           HM_E2E_TIMEOUT: '420000'
         run: node test/e2e-gui.js netfail
 
@@ -77,7 +77,7 @@ jobs:
       - name: E2E — реальная докачка с S3 и установка
         shell: pwsh
         env:
-          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok
 

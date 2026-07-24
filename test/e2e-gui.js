@@ -120,8 +120,9 @@ async function main() {
 
     // --- Экран 2: выбор ---
     await page.waitForSelector('#view-select:not(.hidden)', { timeout: 60000 }).catch(() => {});
-    await page.waitForSelector('#groups .comp, #groups input[type=checkbox]', { timeout: 60000 });
-    check('экран выбора компонентов отрисован', true);
+    await page.waitForSelector('#groups .card', { timeout: 120000 });
+    const nCards = await page.locator('#groups .card').count();
+    check('экран выбора отрисован (' + nCards + ' компонентов)', nCards > 0);
 
     // Детекция завершилась → кнопка «Установить» активна.
     await page.waitForFunction(() => {
@@ -136,16 +137,23 @@ async function main() {
     check('lite-превью объёма докачки показано («Скачается…»)', /Скачается/i.test(summary), summary.trim().slice(0, 120));
 
     // --- Выбираем ТОЛЬКО целевой компонент ---
+    // Карточки — div.card с click-toggle (не чекбоксы); опознаём по data-id.
     const picked = await page.evaluate((id) => {
-      const boxes = Array.from(document.querySelectorAll('#groups input[type=checkbox]'));
+      const cards = Array.from(document.querySelectorAll('#groups .card'));
       let target = null;
-      for (const b of boxes) {
-        const bid = b.dataset.id || b.id || b.value || '';
-        const isTarget = bid === id || bid.endsWith(id);
-        if (isTarget) target = b;
-        if (b.checked !== isTarget) b.click();
+      for (const c of cards) {
+        const isTarget = c.dataset.id === id;
+        if (isTarget) target = c;
+        const isChecked = c.classList.contains('checked');
+        if (isChecked !== isTarget) c.click();   // приводим к нужному состоянию
       }
-      return { total: boxes.length, targetFound: !!target, targetChecked: !!(target && target.checked) };
+      return {
+        total: cards.length,
+        ids: cards.map((c) => c.dataset.id),
+        targetFound: !!target,
+        targetChecked: !!(target && target.classList.contains('checked')),
+        stillChecked: cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id),
+      };
     }, COMPONENT);
     check('целевой компонент «' + COMPONENT + '» выбран (остальные сняты)', picked.targetChecked, JSON.stringify(picked));
 

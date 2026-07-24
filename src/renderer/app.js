@@ -325,6 +325,7 @@ function renderCard(c) {
   const updateAvail = !!(det && det.updateAvailable);
   const el = document.createElement('div');
   el.className = 'card' + (checked ? ' checked' : '') + (installed ? ' installed' : '');
+  el.dataset.id = c.id;   // якорь для GUI-автотестов (test/e2e-gui.js); в UI не виден
   const reqNames = (c.requires || []).map((r) => STATE.byId[r] && STATE.byId[r].name).filter(Boolean);
   const okBadge = installed
     ? `<span class="badge ok">✓ уже установлено${det.detectedVersion ? ' · ' + escapeHtml(det.detectedVersion) : ''}</span>`
