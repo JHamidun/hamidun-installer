@@ -9,7 +9,8 @@
       "sizeBytes": "точный размер архива в байтах (для прогресса и resume)",
       "sha256": "SHA-256 архива (hex, lower) — ОБЯЗАТЕЛЕН и валиден (64-hex). Проверяется БЕЗУСЛОВНО ПОСЛЕ докачки И на cache-hit; не совпал -> архив удаляется, пробуется след. зеркало. Нет валидного sha -> компонент НЕ ставится (fail-closed). Единственный гейт целостности для elevated-запуска.",
       "mirrors": "[{host, url}] по приоритету. url ДОЛЖЕН быть https (без http-downgrade) и без плейсхолдеров. Зеркало с 'PLACEHOLDER' в url молча игнорируется (R2 — заглушка до включения). Имя объекта content-addressed (sha в имени) — см. objectKeyConvention.",
-      "installRelPath": "относит. путь install-скрипта, который запускается ПОСЛЕ докачки (напр. scripts/windows/uv.ps1). Скрипт получает env HM_REMOTE_CACHE=<распакованный кэш> — путь вычисляет ТОЛЬКО main из проверенного sha-каталога (renderer его задать не может). Информативно — фактический скрипт main.js берёт по id (scripts/<os>/<id>.<ext>)."
+      "installRelPath": "относит. путь install-скрипта, который запускается ПОСЛЕ докачки (напр. scripts/windows/uv.ps1). Скрипт получает env HM_REMOTE_CACHE=<распакованный кэш> — путь вычисляет ТОЛЬКО main из проверенного sha-каталога (renderer его задать не может). Информативно — фактический скрипт main.js берёт по id (scripts/<os>/<id>.<ext>). push-component.py отказывается публиковать запись, если такого скрипта нет в репо.",
+      "gatedFiles": "BUILD-TIME (рантайм игнорирует): {имя файла: sha256} для членов архива, которые проверяет ВШИТЫЙ vendor/checksums.json (Confirm-HmArtifact, ключ = базовое имя). tools/build-lite.js перед сборкой сверяет это с манифестом, который уезжает в exe: пересобранный vendor без перепубликации компонента иначе роняет установку у КАЖДОГО lite-пользователя с текстом «файл подменён». Записи без gatedFiles (опубликованные старым push-component.py) считаются рассинхроном — перепубликуй компонент."
     },
     "objectKeyConvention": "CONTENT-ADDRESSED / IMMUTABLE: vibecoding-installer/<remoteId>-<sha256>.zip  либо  vibecoding-installer/<remoteId>-<platform>-<sha256>.zip. sha в имени => перезалив того же контента идемпотентен, новый контент = новый ключ, выпущенные установщики (ждущие конкретный sha) не ломаются от перезаливки.",
     "howToPublish": "python tools/push-component.py <remoteId> <файл-или-папка> [--platform win32|darwin] — упакует в zip, снимет байты ОДИН раз, посчитает по ним sha256+size, зальёт ИМЕННО эти байты в Reg.ru S3 (ACL public-read) под content-addressed ключом, проверит анонимную публичную загрузку (200+sha+size) и только потом обновит этот файл (upsert по remoteId+platform)."
@@ -175,24 +176,6 @@
         }
       ],
       "installRelPath": "scripts/windows/config.ps1",
-      "platform": "win32"
-    },
-    {
-      "remoteId": "playwright-browsers",
-      "name": "Playwright browsers",
-      "sizeBytes": 179634011,
-      "sha256": "b38965a05499bbebc058d41beadcbb22186bef86bcdcd98525a0470e65dc3c07",
-      "mirrors": [
-        {
-          "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/playwright-browsers-win32-b38965a05499bbebc058d41beadcbb22186bef86bcdcd98525a0470e65dc3c07.zip"
-        },
-        {
-          "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/playwright-browsers-win32-b38965a05499bbebc058d41beadcbb22186bef86bcdcd98525a0470e65dc3c07.zip"
-        }
-      ],
-      "installRelPath": "scripts/windows/playwright-browsers.ps1",
       "platform": "win32"
     },
     {

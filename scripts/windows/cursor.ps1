@@ -35,6 +35,7 @@ $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\cursor-setup.exe' 
 $inst = $null
 $instBundled = $false
 $onlineCache = $null
+$instProc = $null
 if ($local -and (Test-Path $local)) {
     Write-Host "Ставлю Cursor из встроенного установщика (офлайн)..."
     $inst = $local
@@ -83,24 +84,39 @@ if ($inst) {
     } else {
         # SECURITY (#4): онлайн-скачанный установщик лежит в ADMIN-OWNED secure-cache. ДО elevated-
         # запуска — гейт Authenticode (fail-closed): иначе medium-малварь того же юзера подменила бы exe.
-        $sig = if (Test-Path -LiteralPath $inst) { Get-AuthenticodeSignature -LiteralPath $inst } else { $null }
-        if (-not ($sig -and $sig.Status -eq 'Valid')) {
-            $st = if ($sig) { $sig.Status } else { 'нет подписи' }
-            Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Cursor не подтвердилась ($st) — НЕ запускаю (fail-closed)."
+        # Status='Valid' сам по себе НЕ защищает: цепочку строит пользовательский chain-engine, а
+        # HKCU\...\SystemCertificates\Root пишется тем же юзером БЕЗ UAC (+ HKCU-прокси WinINET рулит
+        # загрузкой). Test-HmTrustedSigner требует корень в LocalMachine\Root + EKU Code Signing.
+        $why = Test-HmTrustedSigner -Path $inst
+        if ($why) {
+            Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Cursor не подтвердилась ($why) — НЕ запускаю (fail-closed)."
             if ($onlineCache) { try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
             Write-Host "ОШИБКА: Cursor не установился (подпись не подтверждена)."
             exit 1
         }
     }
     Write-Host "Установщик Cursor может показать окно «This User Installer is not meant to run as Administrator» — нажми OK, это нормально (весь установщик запущен с правами администратора)."
-    Start-Process -FilePath $inst -ArgumentList '/S'
+    # -PassThru (но НЕ -Wait: с -Wait шаг завис бы до закрытия авто-запущенного Cursor) — дескриптор
+    # нужен, чтобы чистить Admins-only secure-cache ПОСЛЕ реального выхода установщика: пока его
+    # образ залочен, Remove-Item тихо не срабатывает и каталог с ~200 МБ остаётся в ProgramData
+    # навсегда (пользователю он недоступен: owner=Administrators, Users без ACE).
+    $instProc = Start-Process -FilePath $inst -ArgumentList '/S' -PassThru
 }
 for ($i = 0; $i -lt 180 -and -not (Test-Path $cexe); $i++) { Start-Sleep -Seconds 1 }
 Start-Sleep -Seconds 2
 Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-# Чистим Admins-only online-кэш (установщик уже прочитал exe; больше не нужен). Best-effort.
-if ($onlineCache) { try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+# Чистим Admins-only online-кэш. Best-effort, но с ограниченным ожиданием (максимум ~60 с):
+# пока процесс установщика жив, его образ залочен и Remove-Item молча ничего не удаляет —
+# каталог оставался бы в %ProgramData% навсегда (Admins-only, пользователь удалить не может).
+if ($onlineCache) {
+    for ($k = 0; $k -lt 30; $k++) {
+        if ($instProc -and -not $instProc.HasExited) { Start-Sleep -Seconds 2; continue }
+        try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        if (-not (Test-Path -LiteralPath $onlineCache)) { break }
+        Start-Sleep -Seconds 2
+    }
+}
 
 Update-Path
 if (Test-Path $cexe) { Write-Host "Cursor установлен."; exit 0 }

@@ -7,15 +7,28 @@
 // Renderer (medium integrity, тот же юзер) НЕЛЬЗЯ доверять произвольные env-ключи:
 // NODE_OPTIONS=--require=...\evil.js, npm_config_*, GIT_EXEC_PATH, NODE_PATH и т.п.
 // выполнили бы чужой код при старте npm/node под нашим elevated-токеном. Поэтому из
-// renderer-env пропускаем ТОЛЬКО ключи, которые установщик реально эмитит — с
-// префиксом HM_ (см. src/renderer/app.js → envForRun) — И ИСКЛЮЧАЕМ HM_REMOTE_CACHE:
+// renderer-env пропускаем ТОЛЬКО ключи, которые установщик реально эмитит.
+//
+// Это ЯВНЫЙ СПИСОК КЛЮЧЕЙ, а не префикс-тест HM_*: префикс пропускал бы и ключи,
+// которых envForRun не эмитит НИКОГДА (HM_COURSE_TARGET, HM_COURSE_BEACON_URL,
+// HM_NOMAD_CLOUD_BASEURL/KEY, HM_BRIDGE_TOKEN…), а их читают элевейтед install-скрипты
+// как путь раскладки / внешний URL. HM_REMOTE_CACHE отсутствует в списке намеренно:
 // его задаёт main из проверенного (sha256) пути, renderer не должен его подменять.
+//
+// ВАЖНО: новый HM_-ключ в src/renderer/app.js → envForRun ОБЯЗАН быть добавлен сюда,
+// иначе он молча не доедет до install-скрипта.
+const RENDERER_ENV_ALLOW = new Set([
+  'hm_config_repo_url', 'hm_config_repo_branch', 'hm_claude_ext_id', 'hm_home',
+  'hm_keep_skills', 'hm_all_pack_skills', 'hm_bridge_endpoint', 'hm_bridge_pacdomains',
+  'hm_selected', 'hm_additive', 'hm_repair', 'hm_repair_confirmed'
+]);
+
 // Сравнение имён РЕГИСТРОНЕЗАВИСИМО: в Windows env 'Path'/'PATH'/'path' — одно имя,
 // поэтому и allowlist сверяем в нижнем регистре (иначе 'nodE_optionS' проскочил бы).
 function isAllowedRendererEnvKey(k) {
   const lk = String(k).toLowerCase();
   if (lk === 'hm_remote_cache') return false; // ставит ТОЛЬКО main из проверенного пути
-  return lk.indexOf('hm_') === 0;             // только HM_* установщика
+  return RENDERER_ENV_ALLOW.has(lk);
 }
 
 // Вернуть НОВЫЙ объект с подмножеством renderer-env по allowlist (исходник не мутируем).

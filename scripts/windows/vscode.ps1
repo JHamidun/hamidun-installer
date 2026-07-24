@@ -157,13 +157,20 @@ function Install-ExtSafe($cli, $extId, $vsix) {
         return $false
     }
     if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте."; return $true }
-    if ($vsix) {
+    # Ретрай через Marketplace — ТОЛЬКО когда первая задача ДОКАЗАННО завершилась (Gate='medium').
+    # При Gate='unknown' (родитель не дождался Last Result) установка, возможно, ещё идёт:
+    # вторая задача пошла бы поверх неё в тот же ~/.vscode/extensions (конкурентная запись).
+    if ($vsix -and $r.Gate -eq 'medium') {
         Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
         $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
         if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
         if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
     }
-    Write-Host "  ${extId}: не подтвердилось."
+    if ($r.Gate -eq 'unknown') {
+        Write-Host "  ${extId}: установка пока не отчиталась (возможно, ещё идёт в фоне) — второй запуск НЕ делаю, проверь панель Extensions позже."
+    } else {
+        Write-Host "  ${extId}: не подтвердилось."
+    }
     return $false
 }
 
@@ -187,6 +194,16 @@ if ($okCodex)  { Write-Host "OK: Codex (openai.chatgpt) в VS Code устано�
 
 # P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
 if ($okClaude -and $okCodex) { exit 0 }
+# ИСКЛЮЧЕНИЕ: Codex-vsix (chatgpt.vsix) намеренно НЕ вшит в эту сборку (лимит makensis 2 ГБ —
+# package.json build.win.extraResources исключает apps/chatgpt.vsix). Тогда единственный путь —
+# Marketplace, а он требует интернета: на офлайн-машине компонент проваливался ВСЕГДА, хотя
+# VS Code и ОБЯЗАТЕЛЬНАЯ панель Claude вставали нормально. Codex здесь ОПЦИОНАЛЕН: предупреждаем
+# и завершаемся успехом. Если vsix в сборке ЕСТЬ и просто не встал — строгое поведение сохраняется.
+if ($okClaude -and -not $okCodex -and -not $codexVsix) {
+    Write-Host "Codex (openai.chatgpt) не вошёл в эту сборку и ставится только из Marketplace (нужен интернет) — пропускаю."
+    Write-Host "  VS Code и панель Claude Code установлены. Codex поставишь позже: VS Code -> Extensions -> 'ChatGPT - Codex' -> Install."
+    exit 0
+}
 $missing = @()
 if (-not $okClaude) { $missing += 'Claude Code (anthropic.claude-code)' }
 if (-not $okCodex)  { $missing += 'Codex (openai.chatgpt)' }

@@ -131,31 +131,53 @@ async function main() {
     }, null, { timeout: 180000 });
     check('кнопка «Установить» активировалась (детекция + preflight прошли)', true);
 
-    // Phase-4: превью объёма докачки в lite-издании.
+    // Phase-4: превью объёма докачки — ТОЛЬКО в lite-издании (в офлайне качать нечего,
+    // и показывать «Скачается» было бы враньём). Ожидание задаёт HM_E2E_EXPECT_LITE.
     const summary = (await page.textContent('#summary')) || '';
     log('summary:', summary.trim().slice(0, 160));
-    check('lite-превью объёма докачки показано («Скачается…»)', /Скачается/i.test(summary), summary.trim().slice(0, 120));
+    const expectLite = process.env.HM_E2E_EXPECT_LITE === '1';
+    const hasPreview = /Скачается/i.test(summary);
+    check(expectLite ? 'lite: превью объёма докачки показано' : 'offline: превью докачки корректно ОТСУТСТВУЕТ',
+      hasPreview === expectLite, summary.trim().slice(0, 120));
 
     // --- Выбираем ТОЛЬКО целевой компонент ---
     // Карточки — div.card с click-toggle (не чекбоксы); опознаём по data-id.
-    const picked = await page.evaluate((id) => {
-      const cards = Array.from(document.querySelectorAll('#groups .card'));
-      let target = null;
-      for (const c of cards) {
-        const isTarget = c.dataset.id === id;
-        if (isTarget) target = c;
-        const isChecked = c.classList.contains('checked');
-        if (isChecked !== isTarget) c.click();   // приводим к нужному состоянию
-      }
-      return {
-        total: cards.length,
-        ids: cards.map((c) => c.dataset.id),
-        targetFound: !!target,
-        targetChecked: !!(target && target.classList.contains('checked')),
-        stillChecked: cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id),
-      };
-    }, COMPONENT);
-    check('целевой компонент «' + COMPONENT + '» выбран (остальные сняты)', picked.targetChecked, JSON.stringify(picked));
+    // ВАЖНО: UI сам восстанавливает ЗАВИСИМОСТИ (config требует git+node), поэтому
+    // «оставить ровно один компонент» невозможно и не нужно. Разрешаем целевой +
+    // его транзитивные зависимости, снимаем остальное, сходясь за несколько проходов.
+    const comps = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
+    const byId = {};
+    for (const g of (comps.groups || [])) for (const c of (g.components || [])) byId[c.id] = c;
+    const allowed = new Set();
+    (function addDeps(id) {
+      if (!id || allowed.has(id) || !byId[id]) return;
+      allowed.add(id);
+      (byId[id].requires || []).forEach(addDeps);
+    })(COMPONENT);
+    log('разрешены (цель + зависимости):', [...allowed].join(', '));
+
+    let picked = null;
+    for (let pass = 0; pass < 4; pass++) {
+      picked = await page.evaluate(({ id, allow }) => {
+        const cards = Array.from(document.querySelectorAll('#groups .card'));
+        for (const c of cards) {
+          const want = allow.includes(c.dataset.id);
+          if (c.classList.contains('checked') !== want) c.click();
+        }
+        const target = cards.find((c) => c.dataset.id === id);
+        return {
+          total: cards.length,
+          targetChecked: !!(target && target.classList.contains('checked')),
+          stillChecked: cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id),
+        };
+      }, { id: COMPONENT, allow: [...allowed] });
+      const extra = picked.stillChecked.filter((x) => !allowed.has(x));
+      if (picked.targetChecked && !extra.length) break;
+      log('проход ' + (pass + 1) + ': лишние ещё отмечены →', extra.join(', ') || '—');
+    }
+    const extraChecked = picked.stillChecked.filter((x) => !allowed.has(x));
+    check('целевой «' + COMPONENT + '» выбран, лишние сняты (отмечено: ' + picked.stillChecked.join(',') + ')',
+      picked.targetChecked && extraChecked.length === 0, JSON.stringify(picked));
 
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));

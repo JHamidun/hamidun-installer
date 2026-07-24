@@ -45,15 +45,27 @@ install_into() {
   return 1
 }
 
-CURSOR_CLI="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
-if [ -x "$CURSOR_CLI" ]; then
+# P1: редактор может стоять в /Applications (обычная установка) ИЛИ ~/Applications
+# (user-install без прав администратора) — vscode.sh уже детектит оба. Ищем CLI там же,
+# иначе на user-install мы бы не нашли ни Cursor, ни VS Code и упали exit 1 (ложный
+# красный) при УЖЕ установленном расширении.
+hm_cli() {  # $1=имя бандла, $2=имя бинаря CLI
+  for base in "/Applications" "$HOME/Applications"; do
+    c="$base/$1/Contents/Resources/app/bin/$2"
+    [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+CURSOR_CLI="$(hm_cli 'Cursor.app' cursor)" || CURSOR_CLI=""
+if [ -n "$CURSOR_CLI" ]; then
   install_into "$CURSOR_CLI" "Cursor" && OK=1
 else
   echo "Cursor CLI не найден — пропускаю Cursor."
 fi
 
-CODE_CLI="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
-if [ -x "$CODE_CLI" ]; then
+CODE_CLI="$(hm_cli 'Visual Studio Code.app' code)" || CODE_CLI=""
+if [ -n "$CODE_CLI" ]; then
   install_into "$CODE_CLI" "VS Code" && OK=1
 fi
 

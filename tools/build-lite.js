@@ -57,6 +57,48 @@ function buildVendorLite() {
   console.log(`[build-lite] vendor-lite собран: ${(dirSize(VENDOR_LITE) / 1048576).toFixed(1)} МБ`);
 }
 
+// Сверка ДВУХ гейтов целостности между собой (иначе релизная ошибка выглядит как атака).
+// Первый гейт — sha ZIP-а из remote-components.json (проверяет remote-fetch).
+// Второй — вшитый vendor/checksums.json (Confirm-HmArtifact внутри install-скриптов, по
+// БАЗОВОМУ имени файла). Второй манифест едет в exe, а содержимое zip-ов зафиксировано в
+// момент публикации: пересобрал vendor (обновился python/маскот/nomad) и собрал lite БЕЗ
+// перепубликации → у пользователя докачка проходит, а Confirm-HmArtifact падает с «файл
+// подменён». Поэтому перед сборкой сверяем: sha файлов, реально лежащих в опубликованных
+// архивах (push-component.py пишет их в запись реестра как gatedFiles), == sha в манифесте,
+// который вшивается в этот exe.
+function assertRegistryMatchesChecksums() {
+  const chkPath = path.join(VENDOR_LITE, 'checksums.json'); // ровно тот, что уедет в exe
+  const files = (JSON.parse(fs.readFileSync(chkPath, 'utf8')).files) || {};
+  const regPath = path.join(ROOT, 'remote-components.json');
+  const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+  let checked = 0;
+  for (const e of (reg.components || [])) {
+    if (!e || !e.remoteId || e.platform !== 'win32') continue;
+    const gated = e.gatedFiles;
+    if (!gated || typeof gated !== 'object') {
+      throw new Error(
+        `реестр докачки: у «${e.remoteId}» нет поля gatedFiles — запись опубликована старой версией ` +
+        `tools/push-component.py, и сверить её с вшитым checksums.json невозможно. Перепубликуй компонент: ` +
+        `python tools/publish-vendor.py --only ${e.remoteId}`
+      );
+    }
+    for (const [name, sha] of Object.entries(gated)) {
+      const local = files[name];
+      if (!local) continue; // имени нет в манифесте → рантайм-гейт его не проверяет
+      if (String(local.sha256).toLowerCase() !== String(sha).toLowerCase()) {
+        throw new Error(
+          `рассинхрон вшитого checksums.json и опубликованного «${e.remoteId}»: файл ${name} ` +
+          `в архиве = ${String(sha).slice(0, 12)}…, в манифесте = ${String(local.sha256).slice(0, 12)}… — ` +
+          `у КАЖДОГО lite-пользователя компонент упадёт после докачки с «файл подменён». ` +
+          `Перепубликуй компонент: python tools/publish-vendor.py --only ${e.remoteId} — и только потом собирай lite.`
+        );
+      }
+      checked++;
+    }
+  }
+  console.log(`[build-lite] реестр докачки сверен с вшитым checksums.json: ${checked} файл(ов) совпало.`);
+}
+
 function findLiteExe() {
   for (const dir of ['dist', 'release', path.join('dist', 'win-unpacked')]) {
     const p = path.join(ROOT, dir, 'Hamidun-Setup-Windows-Lite.exe');
@@ -75,6 +117,13 @@ function findLiteExe() {
 function main() {
   const cfgBak = fs.readFileSync(CFG);
   const pkgBak = fs.readFileSync(PKG);
+  // Ctrl+C во время долгого electron-builder НЕ должен оставить дерево мутированным
+  // (package.json с from:'vendor-lite' молча испортил бы следующую офлайн-сборку).
+  // Достаточно зарегистрировать слушателя: он отменяет default-terminate, дочерний
+  // процесс получает свой SIGINT и падает, execFileSync бросает → finally отрабатывает.
+  const onSig = () => { process.exitCode = 130; };
+  process.on('SIGINT', onSig);
+  process.on('SIGTERM', onSig);
   try {
     // 1. config.json: edition:lite + offlineEdition:false + configRepoBranch:v38
     const cfg = JSON.parse(cfgBak.toString('utf8'));
@@ -98,6 +147,9 @@ function main() {
     // 3. vendor-lite
     buildVendorLite();
 
+    // 3b. Вшитый checksums.json vs опубликованные архивы (fail-closed, ДО долгой сборки)
+    assertRegistryMatchesChecksums();
+
     // 4. electron-builder --win (БЕЗ fetch:vendor/fetch:config — тяжёлое и конфиг стримятся)
     console.log('[build-lite] electron-builder --win …');
     // Node 22 на Windows НЕ спавнит .cmd напрямую через execFileSync (EINVAL, CVE-фикс) —
@@ -120,11 +172,21 @@ function main() {
     // Каждый restore независимо: сбой одного (EPERM/AV-lock) не должен блокировать
     // остальные. package.json ПЕРВЫМ — оставленный мутированным (from:vendor-lite) он
     // молча испортил бы следующую офлайн-сборку (пол-компонентов).
-    const safe = (label, fn) => { try { fn(); } catch (e) { console.error(`[build-lite] restore ${label} FAILED: ${e.message}`); } };
+    let restoreOk = true;
+    const safe = (label, fn) => {
+      try { fn(); } catch (e) { restoreOk = false; console.error(`[build-lite] restore ${label} FAILED: ${e.message}`); }
+    };
     safe('package.json', () => fs.writeFileSync(PKG, pkgBak));
     safe('config.json', () => fs.writeFileSync(CFG, cfgBak));
     safe('vendor-lite', () => fs.rmSync(VENDOR_LITE, { recursive: true, force: true }));
-    console.log('[build-lite] config.json/package.json восстановлены, vendor-lite убран.');
+    if (restoreOk) {
+      console.log('[build-lite] config.json/package.json восстановлены, vendor-lite убран.');
+    } else {
+      process.exitCode = process.exitCode || 1;
+      console.error('[build-lite] ВНИМАНИЕ: восстановление НЕ полное — ВОССТАНОВИ ВРУЧНУЮ: '
+        + 'git checkout package.json config.json && rm -rf vendor-lite '
+        + '(иначе следующая офлайн-сборка соберётся из vendor-lite и выйдет под именем …-Lite.exe).');
+    }
   }
 }
 

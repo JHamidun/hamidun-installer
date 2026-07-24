@@ -54,7 +54,16 @@ else
   if [ -x "$HOME/.local/bin/git" ]; then GIT_BIN="$HOME/.local/bin/git";
   elif have git && { [ "$(command -v git)" != "/usr/bin/git" ] || xcode-select -p >/dev/null 2>&1; }; then GIT_BIN="$(command -v git)"; fi
   if [ -z "$GIT_BIN" ]; then echo "Встроенный конфиг не найден и рабочий Git недоступен — выберите компонент Git или пересоберите установщик офлайн."; exit 1; fi
-  URL="${HM_CONFIG_REPO_URL:-https://github.com/JHamidun/claude-code-config-pack}"
+  # Источник конфига разворачивается в ~/.claude (settings.json + hooks), поэтому URL из
+  # окружения принимаем ТОЛЬКО как https://github.com/... — второй рубеж к авторитетному
+  # override в main (renderer не должен уводить клон на чужой хост). Всё остальное —
+  # откат на источник по умолчанию, а не clone откуда попало.
+  URL_DEFAULT="https://github.com/JHamidun/claude-code-config-pack"
+  URL="${HM_CONFIG_REPO_URL:-$URL_DEFAULT}"
+  case "$URL" in
+    https://github.com/?*) ;;
+    *) echo "ВНИМАНИЕ: источник конфига ($URL) не с https://github.com/ — использую источник по умолчанию."; URL="$URL_DEFAULT" ;;
+  esac
   BRANCH="${HM_CONFIG_REPO_BRANCH:-main}"
   CLONE="$HOME/.hamidun-setup/config-repo"
   # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог
@@ -88,7 +97,7 @@ PRESERVE_DIR_GLOBS="--exclude=memory/ --exclude=projects/ --exclude=todos/ --exc
 if [ -d "$CLAUDE_HOME" ]; then
   STAMP=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="$CLAUDE_HOME.backup.$STAMP"
-  echo "Резервная копия ~/.claude → $BACKUP_DIR ..."
+  echo "Резервная копия ~/.claude → $BACKUP_DIR (храню 3 последние, старые удаляю)..."
   if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
     SRC_N=$(find "$CLAUDE_HOME" 2>/dev/null | wc -l | tr -d ' ')
     DST_N=$(find "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ')
@@ -98,6 +107,15 @@ if [ -d "$CLAUDE_HOME" ]; then
   else
     echo "ВНИМАНИЕ: бэкап ~/.claude снять не удалось. НЕ критично: оригинал ~/.claude на месте (не переносится/не стирается). Продолжаю."
   fi
+  # Ретенция: держим 3 ПОСЛЕДНИЕ копии. Без неё каждый прогон (repair/повтор/ручной
+  # перезапуск) оставлял полную копию ~/.claude навсегда — гигабайты, о которых юзер не
+  # знает и которые никто не чистит (деинсталляция config не поддерживается). Имена —
+  # $CLAUDE_HOME.backup.<YYYYMMDD-HHMMSS>, лексикографический sort = хронологический.
+  ls -d "$CLAUDE_HOME".backup.* 2>/dev/null | sort -r | tail -n +4 | while IFS= read -r old; do
+    case "$old" in
+      "$CLAUDE_HOME".backup.*) [ -d "$old" ] && rm -rf "$old" ;;
+    esac
+  done
 fi
 
 # hm_copy — копирование из вшитого/клонированного source ПОВЕРХ ~/.claude, БЕЗ переноса.

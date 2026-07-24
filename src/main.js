@@ -142,6 +142,16 @@ let mainWindow = null;
 // Track live installer child processes so we can kill orphans if the window
 // closes mid-install (otherwise silent installers keep running invisibly).
 const CHILDREN = new Set();
+
+// win32: Admins-only staging-каталоги докачки, ЖИВЫЕ в этом процессе (remoteId → dir).
+// Нужны для двух вещей: (1) ретрай компонента в той же сессии переиспользует УЖЕ
+// скачанный и sha-проверенный <remoteId>.zip (remote-fetch сам ловит идемпотентность)
+// вместо повторной закачки сотен МБ; (2) гарантированная уборка на выходе — иначе
+// закрытие окна посреди докачки оставляет в %ProgramData% до ~1.6 ГБ, которые обычный
+// пользователь без админа удалить НЕ может. Модель угроз не меняется: каталог рождён
+// НАМИ атомарно (owner=Administrators, DACL {SYSTEM,Admins}), имя случайное, а
+// remote-fetch.ensureCacheSecure перепроверяет защищённость перед КАЖДЫМ использованием.
+const SECURE_DIRS = new Map();
 // Kill the whole process TREE of each tracked child, not just the shell wrapper.
 // The shell (powershell/bash) spawns msiexec, pip, curl, hdiutil… as its own
 // children; killing only the wrapper orphans them and they keep running unseen.
@@ -230,8 +240,49 @@ function createWindow() {
 // не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
 let _frontedForInstall = false;
 
+// Уборка Admins-only staging-каталогов ЭТОГО процесса (см. SECURE_DIRS): закрытие окна
+// посреди докачки не должно оставлять пользователю нестираемые гигабайты в %ProgramData%.
+function cleanupAllSecureDirs() {
+  for (const d of SECURE_DIRS.values()) {
+    try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+  }
+  SECURE_DIRS.clear();
+}
+
+// Сборка мусора от ПРОШЛЫХ запусков (краш/убийство антивирусом/выключение питания —
+// before-quit тогда не отработал). Гейты, чтобы элевейтед-удаление не превратилось в
+// arbitrary-delete примитив (%ProgramData% доступен Users на создание — malware может
+// пред-создать HmDeElev-* junction): строгий шаблон имени, НЕ reparse-point, каталог
+// защищён (owner=Admins, посторонних ACE нет) и «остыл» (ничего не менялось 6 часов —
+// живая докачка другого инстанса обновляет mtime своего .part).
+function pruneStaleSecureDirs() {
+  if (!IS_WIN) return;
+  try {
+    const pd = remoteFetch.winProgramData();
+    if (!pd || !fs.existsSync(pd)) return;
+    const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+    for (const name of fs.readdirSync(pd)) {
+      if (!/^HmDeElev-[0-9a-f]{32}$/i.test(name)) continue;
+      const dir = path.join(pd, name);
+      let st;
+      try { st = fs.lstatSync(dir); } catch (e) { continue; }
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;      // junction-подмена → не трогаем
+      let newest = st.mtimeMs;
+      try {
+        for (const child of fs.readdirSync(dir)) {
+          try { newest = Math.max(newest, fs.lstatSync(path.join(dir, child)).mtimeMs); } catch (e) { /* ignore */ }
+        }
+      } catch (e) { /* ignore */ }
+      if (newest > cutoff) continue;                                // возможно живой каталог другого инстанса
+      if (!remoteFetch.verifyDirSecureWin(dir)) continue;           // не наш/не защищён → не удаляем
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    }
+  } catch (e) { /* уборка мусора не должна ломать запуск */ }
+}
+
 app.whenReady().then(() => {
   createWindow();
+  try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -239,10 +290,11 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   killChildren();
+  cleanupAllSecureDirs();
   if (!IS_MAC) app.quit();
 });
 
-app.on('before-quit', killChildren);
+app.on('before-quit', () => { killChildren(); cleanupAllSecureDirs(); });
 
 // ---- IPC -------------------------------------------------------------
 
@@ -512,7 +564,10 @@ const COMPONENT_VENDOR_ARTIFACT = {
   mascot: 'apps/claude-mascot',
   nomad: 'nomad-src',
   config: 'config-pack',
-  'playwright-browsers': 'playwright-browsers',
+  // NB: ключа 'playwright-browsers' здесь НЕТ намеренно — карта ключуется по id
+  // КОМПОНЕНТА (components.json), а компонента с таким id не существует: браузеры
+  // Playwright ставит pydeps.ps1 (офлайн из $HM_VENDOR\playwright-browsers, иначе
+  // онлайн-фолбэк `playwright install chromium`). Мёртвый ключ вводил в заблуждение.
   pydeps: 'apps/python-setup.exe',
   extension: 'apps/claude-code.vsix',
 };
@@ -526,11 +581,15 @@ function downloadDeadlineFor(sizeBytes) {
 }
 
 // Компоненты, чей install-скрипт имеет СОБСТВЕННЫЙ онлайн-фолбэк (winget / прямая
-// загрузка с github/vendor CDN). В lite при неудачной докачке с S3 НЕ роняем их
-// жёстко — даём скрипту попробовать системный установщик (как в офлайн-издании, где
-// они не declared-remote и скрипт всегда запускается). Компоненты БЕЗ такого фолбэка
-// (nomad/config/pydeps/extension/claude/playwright-browsers) остаются fail-closed.
-const SCRIPT_ONLINE_FALLBACK = new Set(['git', 'node', 'vscode', 'cursor']);
+// загрузка с github/vendor CDN; у config это укреплённый `git clone` из config.ps1/
+// config.sh с АВТОРИТЕТНЫМИ координатами репозитория — см. блок id==='config' ниже).
+// В lite при неудачной докачке с S3 НЕ роняем их жёстко — даём скрипту попробовать
+// системный установщик (как в офлайн-издании, где они не declared-remote и скрипт
+// всегда запускается). Компоненты БЕЗ такого фолбэка (nomad/pydeps/extension/claude)
+// остаются fail-closed. ВАЖНО: провал докачки запоминается (fetchFellBack) — тогда
+// graceful-skip скрипта (exit 120) НЕ выдаётся за успех, а превращается в честную
+// ошибку с ретраем (иначе сорванная докачка vscode = тихий «пропущено»).
+const SCRIPT_ONLINE_FALLBACK = new Set(['git', 'node', 'vscode', 'cursor', 'config']);
 
 // Куда докачивать (ADMIN-OWNED STAGING):
 //   Windows: НЕ ИСПОЛЬЗУЕТСЯ (P0 Codex круг 6). Предсказуемый %ProgramData%\HamidunSetup\
@@ -710,8 +769,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   const cleanupSecureCache = () => {
     if (!secureCacheDir) return;
     try { fs.rmSync(secureCacheDir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    for (const [rid, d] of SECURE_DIRS) { if (d === secureCacheDir) SECURE_DIRS.delete(rid); }
     secureCacheDir = '';
   };
+  // Провал докачки, «прощённый» из-за собственного онлайн-фолбэка скрипта (см.
+  // SCRIPT_ONLINE_FALLBACK). Заполнен → graceful-skip скрипта (exit 120) НЕ считается
+  // успехом: компонент честно краснеет со stage:'fetch' и получает авто-ретрай.
+  let fetchFellBack = '';
   let stagingVendor = '';       // задан → HM_VENDOR указывает СЮДА (sha-проверенный staging докачки)
   const { reg, compRemote } = loadRemoteMaps();
   const declared = compRemote.get(id);
@@ -743,14 +807,27 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // Users писать туда НЕ могут ПО КОНСТРУКЦИИ: medium-малварь ТОГО ЖЕ юзера не может ни
     // пред-создать <id>.zip, ни держать write-handle, ни подменить содержимое между
     // SHA-256 и распаковкой (owner/DACL-window + ZIP-TOCTOU закрыты). Пред-существующее
-    // НЕ переиспользуем. fs.mkdirSync+post-icacls запрещён (окно наследования ProgramData).
+    // НА ДИСКЕ (чужое) НЕ переиспользуем НИКОГДА. Переиспользуем ТОЛЬКО каталог, который
+    // РОДИЛИ САМИ в ЭТОМ процессе (SECURE_DIRS) — иначе ретрай компонента качал бы те же
+    // сотни МБ заново, хотя валидный <remoteId>.zip уже лежит рядом. Защищённость всё
+    // равно перепроверяется в fetchRemote (ensureCacheSecure) перед каждым использованием.
+    // fs.mkdirSync+post-icacls запрещён (окно наследования ProgramData).
     let cacheDir;
     if (IS_WIN) {
-      cacheDir = winMakeSecureDir();
+      // Каталог ЭТОГО процесса переиспользуем только если он всё ещё существует И
+      // всё ещё защищён (owner=Admins, посторонних ACE нет) — иначе рождаем новый.
+      cacheDir = SECURE_DIRS.get(declared) || '';
+      if (cacheDir) {
+        let stillSafe = false;
+        try { stillSafe = fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir); } catch (e) { stillSafe = false; }
+        if (!stillSafe) { SECURE_DIRS.delete(declared); cacheDir = ''; }
+      }
+      if (!cacheDir) cacheDir = winMakeSecureDir();
       if (!cacheDir) {
         return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось создать защищённый кэш докачки (owner=Administrators + DACL {SYSTEM,Administrators}) — нужны права администратора; установка remote-компонента заблокирована (fail-closed).' };
       }
-      secureCacheDir = cacheDir; // чистим после установки
+      SECURE_DIRS.set(declared, cacheDir);
+      secureCacheDir = cacheDir; // чистим после успешной установки / на выходе
     } else {
       cacheDir = remoteCacheDir(declared);
     }
@@ -773,12 +850,16 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     }
     logLine('=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
     if (!fr || !fr.ok) {
-      cleanupSecureCache();
+      // Каталог НЕ сносим: частично скачанное/уже проверенное переживёт ретрай в этой
+      // же сессии (см. SECURE_DIRS); финальная уборка — при успехе или на выходе.
       const errMsg = (fr && fr.error) || 'докачка не удалась';
       if (SCRIPT_ONLINE_FALLBACK.has(id)) {
-        // Не роняем жёстко: у скрипта есть свой онлайн-фолбэк (winget/прямая загрузка).
-        // stagingVendor остаётся '' → HM_VENDOR=bundled (артефакта нет) → скрипт уйдёт
-        // в фолбэк. Проваливаемся дальше к spawn (как офлайн-издание).
+        // Не роняем жёстко: у скрипта есть свой онлайн-фолбэк (winget/прямая загрузка/
+        // git clone для config). stagingVendor остаётся '' → HM_VENDOR=bundled (артефакта
+        // нет) → скрипт уйдёт в фолбэк. Проваливаемся дальше к spawn (как офлайн-издание).
+        // Помним, что фолбэк вызван ПРОВАЛОМ ДОКАЧКИ: если скрипт всё же скажет «нечего
+        // ставить» (exit 120), это НЕ успех, а невосстановленная докачка (см. close).
+        fetchFellBack = errMsg;
         const m = '[докачка] «' + declared + '» не удалась (' + errMsg + ') — пробую системный установщик компонента (winget/прямая загрузка).';
         send(m); logLine(m);
       } else {
@@ -814,10 +895,43 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // install-скриптов (source-agnostic через HM_VENDOR) + второй checksums-гейт
   // работают без правок и на офлайн-, и на lite-издании.
   const vroot = stagingVendor || bundledVendorEarly;
+  // LITE-ГОЧА (иначе половина компонентов ломается): staging несёт артефакты ТОЛЬКО
+  // СВОЕГО компонента, поэтому он ЗАСЛОНЯЕТ вшитый vendor. HM_VENDOR по-прежнему
+  // указывает на staging (там лежат sha-проверенные байты этого компонента и копия
+  // checksums.json — второй гейт), а вот пути к КОНКРЕТНЫМ файлам резолвим по факту
+  // существования: есть в staging → берём оттуда, иначе → из bundled vendor. Без этого
+  // pydeps в lite искал requirements.txt в staging pydeps (там его нет) и падал
+  // «сначала установите конфиг», а nomad не видел nomad-src при чужом staging.
+  const vendorPick = (rel) => {
+    try {
+      const inStaging = path.join(vroot, rel);
+      if (fs.existsSync(inStaging)) return inStaging;
+    } catch (e) { /* ignore */ }
+    return path.join(bundledVendorEarly, rel);
+  };
+  // LITE-ГОЧА №2 (nomad): его архив несёт только исходники агента, а uv вшит в
+  // установщик (bundled-only) и в staging не попадает НИКОГДА → nomad.ps1 не находил
+  // $HM_VENDOR\apps\uv\uv.exe и уходил в `irm https://astral.sh/uv/install.ps1 | iex`
+  // ПОД АДМИНОМ, обнуляя офлайн/sha-гарантию для байтов, физически лежащих внутри
+  // установщика. Докладываем вшитый uv в staging этого компонента: источник —
+  // read-only bundled vendor внутри exe, приёмник — Admins-only staging, новых окон
+  // подмены нет, а второй гейт проходит (Confirm-HmArtifact резолвит по basename, и
+  // uv.exe/uvx.exe есть в скопированном туда checksums.json).
+  if (stagingVendor && id === 'nomad') {
+    try {
+      const uvSrc = path.join(bundledVendorEarly, 'apps', 'uv');
+      const uvDst = path.join(stagingVendor, 'apps', 'uv');
+      if (fs.existsSync(uvSrc) && !fs.existsSync(uvDst)) {
+        fs.mkdirSync(path.dirname(uvDst), { recursive: true });
+        fs.cpSync(uvSrc, uvDst, { recursive: true });
+        logLine('[vendor] вшитый uv доложен в staging nomad (офлайн-путь uv.ps1 вместо онлайн-установки).');
+      }
+    } catch (e) { logLine('[vendor] не удалось доложить uv в staging: ' + String(e && e.message || e)); }
+  }
   childEnv.HM_VENDOR = vroot;
-  childEnv.HM_BUNDLED_CONFIG = path.join(vroot, 'config-pack');
+  childEnv.HM_BUNDLED_CONFIG = vendorPick('config-pack');
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
-  childEnv.HM_NOMAD_SRC = path.join(vroot, 'nomad-src');
+  childEnv.HM_NOMAD_SRC = vendorPick('nomad-src');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
   // HM_REMOTE_CACHE ставим ТОЛЬКО из проверенного пути (или не ставим вовсе).
   if (remoteCache) childEnv.HM_REMOTE_CACHE = remoteCache;
@@ -844,6 +958,16 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     const msg = '[режим конфига] ' + (mode === 'additive' ? 'АДДИТИВНЫЙ (только недостающее)' : 'чистая установка') +
       ' — ' + det.reason;
     send(msg); logLine(msg);
+    // Координаты репозитория конфига — АВТОРИТЕТНО из вшитого config.json, НИКОГДА из
+    // renderer'а (install-env пропускает любые HM_*, поэтому HM_CONFIG_REPO_URL/BRANCH
+    // были renderer-управляемыми). Это обязательное условие того, что config попал в
+    // SCRIPT_ONLINE_FALLBACK: онлайн-фолбэк config.ps1/config.sh делает `git clone` —
+    // подменяемый URL означал бы клонирование чужого репозитория в ~/.claude.
+    const appCfg = readJson('config.json', {});
+    const repoUrl = String(appCfg.configRepoUrl || '');
+    childEnv.HM_CONFIG_REPO_URL = /^https:\/\/github\.com\/JHamidun\//i.test(repoUrl)
+      ? repoUrl : 'https://github.com/JHamidun/claude-code-config-pack';
+    childEnv.HM_CONFIG_REPO_BRANCH = String(appCfg.configRepoBranch || 'main');
   }
 
   let cmd, args;
@@ -899,27 +1023,57 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // фильтруются из UI-лога. Как источник целей удаления они НЕ используются:
     // квитанция — маркер {id, version, installedAt}, а цели удаления вычисляет
     // доверенный код по зашитому аллоулисту (src/uninstall-targets.js).
-    const onData = (buf) => {
-      buf
-        .toString()
-        .split(/\r?\n/)
-        .forEach((l) => {
-          if (l.length) {
-            const ri = receipts.parseReceiptLine(l);
-            if (ri) { logLine(l); return; }
-            send(l);
-            logLine(l);
-          }
-        });
+    const emitLine = (l) => {
+      if (!l.length) return;
+      const ri = receipts.parseReceiptLine(l);
+      if (ri) { logLine(l); return; }
+      send(l);
+      logLine(l);
     };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
+    // buf.toString() на КАЖДОМ чанке рвал многобайтовую кириллицу на границе чанка и
+    // терял склейку незавершённой строки (обильный вывод pip/robocopy → «кракозябры»).
+    // StringDecoder держит хвост многобайтовой последовательности, а tail — хвост строки.
+    let lastOut = Date.now();
+    const mkLineReader = () => {
+      const dec = new (require('string_decoder').StringDecoder)('utf8');
+      let tail = '';
+      return {
+        push: (buf) => {
+          lastOut = Date.now();
+          const parts = (tail + dec.write(buf)).split(/\r?\n/);
+          tail = parts.pop();
+          parts.forEach(emitLine);
+        },
+        flush: () => { const rest = tail + dec.end(); tail = ''; rest.split(/\r?\n/).forEach(emitLine); }
+      };
+    };
+    const outR = mkLineReader();
+    const errR = mkLineReader();
+    child.stdout.on('data', (b) => outR.push(b));
+    child.stderr.on('data', (b) => errR.push(b));
+    // Watchdog БЕЗ убийства: msiexec/pip/playwright легально идут десятками минут, а
+    // kill посреди MSI-транзакции хуже висяка. Но молчащий шаг без единого признака
+    // жизни — это «установщик завис, что делать?»: раз в 10 минут честно говорим.
+    let stallWarned = 0;
+    const stallTimer = setInterval(() => {
+      const mins = Math.floor((Date.now() - lastOut) / 60000);
+      if (mins >= 10 && mins >= stallWarned + 10) {
+        stallWarned = mins;
+        const m = '[внимание] шаг «' + id + '» не выдаёт вывод ' + mins + ' мин. Возможно, ' +
+          'системный установщик ждёт другую установку Windows. Если так и останется — закройте ' +
+          'окно установщика (дочерние процессы будут остановлены) и запустите его ещё раз.';
+        send(m); logLine(m);
+      }
+    }, 60000);
+    if (stallTimer.unref) stallTimer.unref();
     child.on('error', (e) => {
       send(`[ERROR] ${e.message}`);
       logLine(`[ERROR] ${e.message}`);
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
+      try { clearInterval(stallTimer); } catch (e) { /* ignore */ }
+      try { outR.flush(); errR.flush(); } catch (e) { /* ignore */ }  // последняя строка без \n
       logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
       // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
@@ -961,9 +1115,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       } else if (skipped && !isDryRun) {
         logLine(`=== компонент «${id}» пропущен (код ${code}, нечего ставить) — маркер/манифест НЕ записаны ===`);
       }
-      // win32: удаляем СВЕЖИЙ Admins-only кэш докачки (25МБ zip+распаковка) — компонент
-      // уже отработал (из кэша запущен/скопирован), больше он не нужен. Best-effort.
-      cleanupSecureCache();
+      // win32: удаляем СВЕЖИЙ Admins-only кэш докачки (zip+распаковка) — компонент
+      // отработал успешно, больше кэш не нужен. Best-effort. При НЕуспехе каталог
+      // оставляем: повтор шага переиспользует уже скачанный sha-проверенный архив
+      // (уборка гарантированно произойдёт на выходе, см. cleanupAllSecureDirs).
+      if (okRun || skipped) cleanupSecureCache();
+      // Graceful-skip (exit 120) ПОСЛЕ провала докачки — не «нечего ставить», а
+      // «докачка не доехала, системный установщик тоже не сработал»: отдаём честную
+      // сетевую ошибку (авто-ретрай + inline «Повторить»), а не тихое «пропущено».
+      if (skipped && fetchFellBack) {
+        resolve({ id, ok: false, code, stage: 'fetch',
+          error: 'докачка не удалась (' + fetchFellBack + '), а системный установщик компонента недоступен' });
+        return;
+      }
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
       resolve({ id, ok: okRun || skipped, code, skipped });
@@ -1073,7 +1237,22 @@ ipcMain.handle('save-start-here', () => {
 
 // Reveal a file in Explorer/Finder (openPath on a .env silently fails on macOS
 // where .env has no default app — showItemInFolder always works).
-ipcMain.handle('reveal-path', (_e, p) => { try { if (p) shell.showItemInFolder(p); } catch (e) { /* ignore */ } return true; });
+// Renderer НЕ доверенный: путь из него НЕ принимаем (как в open-path/open-external/
+// save-start-here). Иначе elevated shell.showItemInFolder биндил бы shell-namespace
+// на \\attacker\share (UNC/WebDAV, HKCU-shell-extension). Легитимная цель ровно одна —
+// файл ключей из вшитого config.json; собираем её здесь, аргумент игнорируем.
+ipcMain.handle('reveal-path', () => {
+  try {
+    const cfg = readJson('config.json', {});
+    const rel = String((cfg.finish && cfg.finish.credentialsRelPath) || '.claude/.credentials.master.env');
+    const home = path.resolve(os.homedir());
+    const target = path.resolve(home, rel);
+    if (!target.startsWith(home + path.sep)) return false;   // rel с ../ или UNC
+    if (!fs.existsSync(target)) return false;
+    shell.showItemInFolder(target);
+    return true;
+  } catch (e) { return false; }
+});
 
 ipcMain.handle('launch-cursor', () => {
   try {
@@ -1431,6 +1610,43 @@ function freshWindowsPath() {
   return joined;
 }
 
+// ---- кэши ОДНОГО прохода детекции --------------------------------------
+// Кэшировать на весь процесс НЕЛЬЗЯ: PATH меняется ПОСЛЕ установки, и пере-детекция
+// (renderer зовёт detect-state снова) обязана читать свежий реестр. Поэтому кэш
+// сбрасывается в начале КАЖДОГО прохода detectComponents: внутри прохода 8-10 пар
+// спавнов reg.exe схлопываются в одну, а Get-Acl по одному и тому же бинарю — в один.
+let _detPathCache = '';
+let _detOwnerCache = null;
+function detResetCaches() { _detPathCache = ''; _detOwnerCache = new Map(); }
+function freshWindowsPathCached() {
+  if (!_detPathCache) _detPathCache = freshWindowsPath();
+  return _detPathCache;
+}
+
+// Окружение для ДЕТЕКЦИОННЫХ спавнов (Windows). Установщик elevated, поэтому
+// наследовать process.env нельзя: HKCU\Environment пишется medium-малварью того же
+// юзера, а интерпретаторы/хосты исполняют код из env (PYTHONPATH/PYTHONSTARTUP →
+// import чужого .py; PSModulePath/COR_PROFILER → загрузка в powershell.exe). Здесь —
+// авторитетные системные значения (валидированный SystemRoot, не из env) + профильные
+// пути, которые НУЖНЫ для корректной детекции (python user site-packages ставится
+// `pip install --user` в %APPDATA%). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
+function detectSpawnEnv() {
+  const root = remoteFetch.winSystemRoot() || process.env.SystemRoot || 'C:\\Windows';
+  const s32 = path.join(root, 'System32');
+  const out = {
+    SystemRoot: root,
+    windir: root,
+    SystemDrive: (path.parse(root).root || 'C:\\').replace(/[\\/]+$/, ''),
+    PATH: s32, Path: s32,
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    PSModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')
+  };
+  for (const k of ['USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'USERNAME']) {
+    if (process.env[k] !== undefined) out[k] = process.env[k];
+  }
+  return out;
+}
+
 ipcMain.handle('open-claude-terminal', async () => {
   try {
     if (IS_WIN) {
@@ -1510,7 +1726,20 @@ ipcMain.handle('save-credentials', (_e, obj) => {
     const file = path.join(dir, '.credentials.master.env');
     fs.mkdirSync(dir, { recursive: true });
     let text = '';
-    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { text = ''; }
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      // ENOENT — файла ещё нет, это норма (создадим). ЛЮБАЯ другая ошибка чтения
+      // (EBUSY/EACCES/EIO/ELOOP/EMFILE, cloud-placeholder OneDrive) означает «файл,
+      // возможно, ЕСТЬ, но мы его не прочитали» → писать НЕЛЬЗЯ: writeFileSync ниже
+      // затёр бы все ранее сохранённые ключи одной новой строкой (необратимо, без
+      // бэкапа, да ещё под {ok:true}). Fail-closed — как probePath в install-mode.js.
+      if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) {
+        return { ok: false, error: 'Не удалось прочитать существующий файл ключей (' +
+          ((e && e.code) || String(e)) + '). Ключи НЕ сохранены, чтобы не потерять уже записанные.' };
+      }
+      text = '';
+    }
     const saved = [];
     for (const key of Object.keys(obj || {})) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue; // sane env-var names only
@@ -1528,7 +1757,15 @@ ipcMain.handle('save-credentials', (_e, obj) => {
       }
       saved.push(key);
     }
-    if (saved.length) fs.writeFileSync(file, text, 'utf8');
+    if (saved.length) {
+      // Атомарная замена: без tmp+rename падение посреди writeFileSync (диск полон,
+      // антивирус) оставило бы ОБРЕЗАННЫЙ файл ключей. rename в пределах того же
+      // каталога атомарен и переживает такой сбой.
+      const tmp = file + '.tmp-' + process.pid;
+      fs.writeFileSync(tmp, text, 'utf8');
+      try { fs.renameSync(tmp, file); }
+      catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } throw e; }
+    }
     return { ok: true, saved, path: file };
   } catch (e) {
     return { ok: false, error: String(e) };
@@ -1566,20 +1803,50 @@ function winPathAdminOwned(p) {
 // запускать под elevated-токеном ГДЕ БЫ он ни лежал (в т.ч. admin-установленный инструмент
 // в нестандартной локации вне Program Files — иначе его версия не детектилась бы). Дороже
 // (spawn powershell Get-Acl), поэтому зовём ТОЛЬКО когда путь НЕ в очевидном admin-корне.
+// ВАЖНО: одного ВЛАДЕЛЬЦА мало. Файл, созданный элевейтед-процессом в user-writable
+// каталоге (%LOCALAPPDATA%\Programs\…, ~\.local\bin), наследует DACL родителя с Full
+// Control для интерактивного юзера, а владельцем остаётся Administrators: medium-малварь
+// ПЕРЕЗАПИСЫВАЕТ такой файл НА МЕСТЕ (владелец не меняется!) → гейт пропускал бы payload
+// под elevated-токеном. Поэтому дополнительно требуем, чтобы у НЕ-admin принципалов не
+// было write-класса прав ни на файл, ни на его родительский каталог — это же закрывает
+// и TOCTOU-окно между проверкой и exec (подменить нечем). Любая ошибка/таймаут → false.
 function winFileAdminOwned(p) {
+  const key = String(p).toLowerCase();
+  if (_detOwnerCache && _detOwnerCache.has(key)) return _detOwnerCache.get(key);
+  const remember = (v) => { if (_detOwnerCache) _detOwnerCache.set(key, v); return v; };
   try {
     const ps = remoteFetch.winPowershellPath();
-    if (!ps) return false;
+    if (!ps) return remember(false);
     const script =
       "$ErrorActionPreference='Stop';" +
       // SYSTEM, Administrators, TrustedInstaller — принципалы, писать под которыми medium-юзер не может.
       "$allow=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464');" +
-      "$o=(Get-Acl -LiteralPath $env:HM_CHK_FILE).GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
-      "if($allow -contains $o){Write-Output 'ADMIN'}else{Write-Output 'USER'}";
+      "$f=$env:HM_CHK_FILE;$par=Split-Path -LiteralPath $f -Parent;" +
+      // write-класс: WriteData/CreateFiles 0x2, AppendData/CreateDirs 0x4, WriteEA 0x10,
+      // WriteAttributes 0x100, Delete 0x10000, WriteDAC 0x40000, WriteOwner 0x80000;
+      // для каталога дополнительно DeleteSubdirectoriesAndFiles 0x40 (удаляет наш файл).
+      "foreach($it in @($f,$par)){" +
+      "$m=if($it -eq $par){0xC0156}else{0xC0116};" +
+      "$a=Get-Acl -LiteralPath $it;" +
+      "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
+      "if($allow -notcontains $o){Write-Output 'USER';exit 0}" +
+      "foreach($ace in $a.Access){" +
+      "if($ace.AccessControlType -ne 'Allow'){continue}" +
+      "try{$s=$ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{Write-Output 'USER';exit 0}" +
+      "if($allow -contains $s){continue}" +
+      "if(([int]$ace.FileSystemRights -band $m) -ne 0){Write-Output 'USER';exit 0}" +
+      "}}" +
+      "Write-Output 'ADMIN'";
+    // env — доверенный (см. detectSpawnEnv): унаследованный process.env позволял бы
+    // medium-юзеру подсунуть свой PSModulePath/COR_PROFILER в powershell.exe ВНУТРИ
+    // самой проверки, которая и отвечает на вопрос ADMIN/USER.
+    const env = IS_WIN
+      ? Object.assign(detectSpawnEnv(), { HM_CHK_FILE: String(p) })
+      : Object.assign({}, process.env, { HM_CHK_FILE: String(p) });
     const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      { encoding: 'utf8', windowsHide: true, timeout: 8000, env: Object.assign({}, process.env, { HM_CHK_FILE: String(p) }) });
-    return !r.error && r.status === 0 && /(^|\n)ADMIN$/.test(String(r.stdout || '').trim());
-  } catch (e) { return false; }
+      { encoding: 'utf8', windowsHide: true, timeout: 8000, env });
+    return remember(!r.error && r.status === 0 && /(^|\n)ADMIN$/.test(String(r.stdout || '').trim()));
+  } catch (e) { return remember(false); }
 }
 
 // Безопасно ли запускать этот бинарь под elevated-токеном при детекции: путь в admin-owned
@@ -1587,7 +1854,15 @@ function winFileAdminOwned(p) {
 // admin-локаций). Иначе — не запускаем (user-owned fake = RCE-вектор), детект по существованию.
 function winSafeToExec(bin) {
   if (!IS_WIN) return true;
-  return winPathAdminOwned(bin) || winFileAdminOwned(bin);
+  // КАНОНИЗАЦИЯ ОБЯЗАТЕЛЬНА: строковый префикс-тест обходится симлинком/junction из
+  // admin-корня в user-writable каталог (nvm-windows штатно делает C:\Program Files\
+  // nodejs → %APPDATA%\nvm\v<ver>) — CreateProcess пойдёт через reparse-точку и
+  // исполнит подменённый бинарь ПОД АДМИНОМ. Проверяем РЕАЛЬНЫЙ путь; не удалось
+  // канонизировать → fail-closed (ложно-негатив безвреден: детект по существованию цел).
+  let real;
+  try { real = (fs.realpathSync.native || fs.realpathSync)(String(bin)); }
+  catch (e) { return false; }
+  return winPathAdminOwned(real) || winFileAdminOwned(real);
 }
 
 // Ищем исполняемый файл: известные абсолютные каталоги, затем свежий PATH (перечитан
@@ -1596,7 +1871,11 @@ function resolveExecutable(names, extraDirs) {
   const dirs = [];
   (extraDirs || []).forEach((d) => { if (d) dirs.push(d); });
   if (IS_WIN) {
-    freshWindowsPath().split(';').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
+    // Кэш на ОДИН проход детекции: иначе каждый resolveExecutable = 2 спавна reg.exe
+    // (8-10 за проход, под EDR это секунды заморозки main-процесса при выключенной
+    // кнопке «Установить»). Сбрасывается в начале detectComponents — PATH после
+    // установки перечитывается заново.
+    freshWindowsPathCached().split(';').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
   } else {
     ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin',
       path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.cargo', 'bin')]
@@ -1627,9 +1906,13 @@ function probeVersion(bin, args, re) {
   // Прочее → пустая версия (существование детектится отдельно; переустановка безопасна).
   if (!winSafeToExec(bin)) return '';
   try {
-    const out = execFileSync(bin, args, {
+    const opts = {
       encoding: 'utf8', windowsHide: true, timeout: 6000, stdio: ['ignore', 'pipe', 'ignore']
-    });
+    };
+    // Windows: спавним с ДОВЕРЕННЫМ окружением (см. detectSpawnEnv) — унаследованный
+    // process.env под elevated-токеном нёс бы HKCU-переменные medium-юзера.
+    if (IS_WIN) opts.env = detectSpawnEnv();
+    const out = execFileSync(bin, args, opts);
     const m = String(out || '').match(re);
     if (m) return (m[1] || m[0]).trim();
     return out ? String(out).trim().split(/\r?\n/)[0] : '';
@@ -1699,6 +1982,7 @@ function xcodeCltPresent() {
 }
 
 function detectComponents() {
+  detResetCaches();   // свежий PATH и свежие owner-проверки на КАЖДЫЙ проход детекции
   const home = os.homedir();
   const claudeHome = path.join(home, '.claude');
   const out = {};
@@ -1793,8 +2077,20 @@ function detectComponents() {
     const pyExecSafe = py && !pyShim && winSafeToExec(py);
     if (pyExecSafe) {
       try {
-        execFileSync(py, ['-c', 'import PIL, requests'],
-          { windowsHide: true, timeout: 6000, stdio: 'ignore' });
+        // `-E` + доверенный env: без них PYTHONPATH/PYTHONSTARTUP из HKCU\Environment
+        // (пишет medium-малварь того же юзера) заставили бы интерпретатор ИМПОРТИРОВАТЬ
+        // чужой PIL.py ПОД АДМИНОМ — авто-детекция на старте, до единого клика.
+        // `-I` НЕ используем: он выключает и user site-packages, а pydeps ставит пакеты
+        // через `pip install --user` → детекция стала бы вечно ложно-отрицательной.
+        // cwd в System32: для `-c` sys.path[0]='' = ТЕКУЩИЙ каталог, а portable-exe
+        // запускается из user-writable Downloads (подмена модуля по cwd).
+        const opts = { windowsHide: true, timeout: 6000, stdio: 'ignore' };
+        const pyArgs = IS_WIN ? ['-E', '-c', 'import PIL, requests'] : ['-c', 'import PIL, requests'];
+        if (IS_WIN) {
+          opts.env = detectSpawnEnv();
+          opts.cwd = path.join(remoteFetch.winSystemRoot() || 'C:\\Windows', 'System32');
+        }
+        execFileSync(py, pyArgs, opts);
         found = true;
       } catch (e) { found = false; }
     }
@@ -2316,14 +2612,4 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   } catch (e) { manOk = false; manErr = String((e && e.message) || e); }
   if (!fin.ok || !manOk) {
     const msg = 'Артефакты удалены, но учётные записи не очищены: ' +
-      (!fin.ok ? ('маркер (' + fin.error + ') ') : '') + (!manOk ? ('манифест (' + manErr + ')') : '');
-    say(msg);
-    logLine('=== uninstall done, bookkeeping FAILED ===');
-    return { id, ok: false, code: 1, error: msg };
-  }
-  say('Деинсталляция «' + id + '» завершена.');
-  logLine('=== uninstall done ===');
-  return { id, ok: true, code: 0 };
-});
-
-ipcMain.handle('quit', () => app.quit());
+      (!fin.ok ? ('маркер (' + fin.error + ') ') : '') + (!manOk ? ('манифест (' + manErr 

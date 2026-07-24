@@ -113,7 +113,18 @@ fi
 if [ -z "$DRY" ]; then
   uv python install 3.12
   echo "Устанавливаю Nomad (команды nmd/nomad-agent/nomad-acp)..."
-  uv tool install --python 3.12 "$SRC"
+  # $SRC на маке лежит на ТОЛЬКО-ЧИТАЕМОМ томе (vendor едет в dmg рядом с .app, UDZO
+  # монтируется read-only), а uv/setuptools собирают пакет IN-TREE — создают build/ и
+  # nomad_agent.egg-info/ прямо в исходнике → EROFS и падение сборки. Ставим из КОПИИ
+  # УЖЕ ПРОВЕРЕННОГО (tree-SHA выше) дерева в приватном mktemp-каталоге 0700: порядок
+  # «verify → copy → install» сохраняет fail-closed. Побочно — vendor не загрязняется
+  # артефактами сборки (иначе повторный прогон дал бы ложное «vendor подменён»).
+  BUILD_SRC="$(mktemp -d "${TMPDIR:-/tmp}/hm-nomad-build.XXXXXX")" || {
+    echo "ОШИБКА: не удалось создать временный каталог для сборки Nomad."; exit 1; }
+  trap 'rm -rf "$BUILD_SRC"' EXIT
+  cp -R "$SRC/." "$BUILD_SRC/" || {
+    echo "ОШИБКА: не удалось скопировать проверенный nomad-src во временный каталог."; exit 1; }
+  uv tool install --python 3.12 "$BUILD_SRC"
   export PATH="$HOME/.local/bin:$PATH"
   # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
   # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в

@@ -99,20 +99,30 @@ if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
 }
 
 # 3) Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH (без админа), если его там ещё нет.
+#    ЧЕРЕЗ РЕЕСТР, а не [Environment]::SetEnvironmentVariable: на .NET Framework (скрипты идут
+#    Windows PowerShell 5.1) Get отдаёт УЖЕ развёрнутое значение, а Set пишет RegistryValueKind
+#    ::String → HKCU\Environment\Path молча превращается REG_EXPAND_SZ → REG_SZ, а записи вида
+#    %USERPROFILE%\.local\bin / %JAVA_HOME%\bin остаются РАЗВЁРНУТЫМИ литералами (а не
+#    определённые в elevated-окружении — мёртвым текстом «%VAR%», который Windows уже никогда
+#    не развернёт). Тот же дефект уже починен в claude.ps1 (Add-ToUserPath) и учтён деинсталлятором.
 $pathEntryOurs = $false
 try {
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if ($null -eq $userPath) { $userPath = '' }
-    $already = @($userPath -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ieq $dest.TrimEnd('\')) }).Count -gt 0
-    if (-not $already) {
-        $newPath = if ($userPath.TrimEnd(';')) { $userPath.TrimEnd(';') + ';' + $dest } else { $dest }
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Host "Добавил $dest в PATH — uv появится в новых терминалах."
-        $pathEntryOurs = $true
-    } else {
-        Write-Host "$dest уже в PATH."
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
+    try {
+        # Сырое значение (DoNotExpand) — сохраняем %VAR% пользователя как есть.
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+        $already = @($expanded -split ';' | Where-Object { $_ -and ($_.TrimEnd('\') -ieq $dest.TrimEnd('\')) }).Count -gt 0
+        if (-not $already) {
+            $newPath = if ($raw.TrimEnd(';')) { $raw.TrimEnd(';') + ';' + $dest } else { $dest }
+            $key.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            Write-Host "Добавил $dest в PATH — uv появится в новых терминалах."
+        } else {
+            Write-Host "$dest уже в PATH."
+        }
         $pathEntryOurs = $true   # запись указывает на НАШ каталог установки — владеем ею
-    }
+    } finally { try { $key.Close() } catch { } }
 } catch { Write-Host "  [warn] не удалось прописать PATH: $($_.Exception.Message)" }
 
 # P0-4: квитанция владения — ТОЧНЫЕ пути/PATH-запись (main соберёт в receipt).

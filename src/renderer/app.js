@@ -895,6 +895,27 @@ function firstBrokenDep(id, badSet) {
   return null;
 }
 
+// Провал ДОКАЧКИ бывает двух РАЗНЫХ природ, а main отдаёт для обеих stage:'fetch':
+//   СЕТЬ         — обрыв/таймаут/зеркало не ответило: лечится ретраем;
+//   ЦЕЛОСТНОСТЬ  — SHA-256 не совпал, распаковка fail-closed, нет валидного SHA в
+//                  реестре, нет сборки для платформы, не создан защищённый кэш
+//                  (нужны права администратора). Это ДЕТЕРМИНИРОВАННО: авто-ретрай
+//                  бесполезен (и стоит ещё ~1.5 ГБ трафика), а «проверь интернет»
+//                  уводит пользователя не туда — чинить Wi-Fi при подменённом или
+//                  устаревшем артефакте бессмысленно, это надо эскалировать.
+// Признак: явный stage:'integrity' (если main его отдаёт) ИЛИ маркер в тексте ошибки.
+const INTEGRITY_ERR_RE = /SHA-256|fail-closed|checksums\.json|распаковк|нет сборки|защищ|целостност|прав администратора/i;
+function isIntegrityFail(res) {
+  if (!res || res.ok) return false;
+  if (res.stage === 'integrity') return true;
+  if (res.stage !== 'fetch') return false;
+  return INTEGRITY_ERR_RE.test(String(res.error || ''));
+}
+// Сетевой обрыв докачки = stage 'fetch' И НЕ провал целостности/среды.
+function isNetFail(res) {
+  return !!(res && !res.ok && res.stage === 'fetch' && !isIntegrityFail(res));
+}
+
 async function runComponents(ids, env) {
   STATE.runActive = true; // inline-«Повторить» на шагах заблокированы до конца прогона
   const off = window.installer.onLog(({ line }) => {
@@ -925,6 +946,14 @@ async function runComponents(ids, env) {
   STATE.installedEver = STATE.installedEver || new Set();
   STATE.skippedEver = STATE.skippedEver || new Set();
   const runtimeSkipped = STATE.skippedEver;
+  // НЕРЕШЁННЫЕ проблемы — тоже КУМУЛЯТИВНО (id → 'net' | 'integrity' | 'fail' | 'dep').
+  // Inline-«Повторить» на одном шаге запускает прогон ТОЛЬКО из этого id (+verify), и
+  // per-прогонные failed/depSkipped после него пусты → финиш рапортовал бы «Готово!
+  // Всё установлено», хотя остальные компоненты так и не встали, а кнопки повтора уже
+  // нет. Карта переживает прогоны (сбрасывается только новым startInstall) и чистится
+  // ровно тогда, когда компонент реально встал или осознанно пропущен.
+  STATE.badEver = STATE.badEver || new Map();
+  const badEver = STATE.badEver;
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -934,6 +963,7 @@ async function runComponents(ids, env) {
       setStep(id, 'skipped');
       depSkipped.push(id);
       bad.add(id);
+      badEver.set(id, 'dep');
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
@@ -985,7 +1015,9 @@ async function runComponents(ids, env) {
     // ERROR-NET: обрыв ДОКАЧКИ (stage 'fetch') — это сеть, не провал установки.
     // ОДИН авто-ретрай внутри прогона: повторный runComponent того же id (main
     // заново пробует зеркала). Сетевой сбой НИКОГДА не маппится в graceful-skip.
-    if (res && !res.ok && res.stage === 'fetch') {
+    // Авто-ретрай — ТОЛЬКО на сетевом обрыве. Провал целостности/среды детерминирован:
+    // повтор дал бы тот же результат ценой ещё одной полной докачки.
+    if (isNetFail(res)) {
       appendLog(`[↻] ${STATE.byId[id].name}: сеть оборвалась при докачке (${res.error || 'нет соединения'}) — пробую ещё раз…`);
       setStepLabel(id, `${comp.name} — сеть оборвалась, повторяю…`);
       try { res = await window.installer.runComponent(id, runEnv); }
@@ -1002,10 +1034,12 @@ async function runComponents(ids, env) {
       setStep(id, 'skipped');
       gracefulSkipped.push(id);
       bad.add(id);
+      badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
+      badEver.delete(id); // встало — проблема закрыта
       // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
       // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
       STATE.installedEver.add(id);
@@ -1014,16 +1048,24 @@ async function runComponents(ids, env) {
       // Сетевой обрыв докачки (после авто-ретрая) — ОРАНЖЕВЫЙ error-net, не красный
       // провал: «Сеть оборвалась» + inline-«Повторить». В failed компонент ВХОДИТ
       // (общий retry/финиш его видят); в graceful-skip НЕ уходит никогда.
-      const isNet = !!(res && res.stage === 'fetch');
+      const isNet = isNetFail(res);
+      const isIntegrity = isIntegrityFail(res);
       setStep(id, isNet ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
+      badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : 'fail'));
       const name = STATE.byId[id].name;
       if (isNet) {
         fetchFailed.push(id);
         setStepLabel(id, `${name} — Сеть оборвалась`);
         addStepRetry(id);
         appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}. Проверь интернет и нажми «Повторить».`);
+      } else if (isIntegrity) {
+        // Скачанный файл не совпал с эталоном / среда не даёт защитить кэш: КРАСНЫЙ шаг,
+        // БЕЗ кнопки «Повторить» (повтор детерминированно даст то же) и без «проверь интернет».
+        integrityFailed.push(id);
+        setStepLabel(id, `${name} — Проверка целостности не пройдена`);
+        appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: пришли лог в бота.`);
       } else {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }

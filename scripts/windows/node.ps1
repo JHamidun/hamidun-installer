@@ -67,13 +67,16 @@ if ($local -and (Test-Path $local)) {
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
-        # Гейт подписи ДО запуска (fail-closed): elevated-запуск неподтверждённого msi недопустим даже из secure-cache.
-        $sig = if ($msi -and (Test-Path -LiteralPath $msi)) { Get-AuthenticodeSignature -LiteralPath $msi } else { $null }
-        if ($sig -and $sig.Status -eq 'Valid') {
+        # Гейт подписи ДО запуска (fail-closed): elevated-запуск неподтверждённого msi недопустим
+        # даже из secure-cache. Одного Status='Valid' МАЛО: цепочка строится пользовательским
+        # chain-engine, который принял бы корень, подложенный medium-малварью того же юзера в
+        # HKCU\...\SystemCertificates\Root БЕЗ UAC. Test-HmTrustedSigner требует корень в
+        # LocalMachine\Root + EKU Code Signing (тот же принцип, что в claude-desktop.ps1).
+        $why = if ($msi) { Test-HmTrustedSigner -Path $msi } else { 'MSI не найден' }
+        if (-not $why) {
             Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait
         } else {
-            $st = if ($sig) { $sig.Status } else { 'нет подписи' }
-            Write-Host "  БЕЗОПАСНОСТЬ: подпись MSI Node.js не подтвердилась ($st) — НЕ запускаю (fail-closed)."
+            Write-Host "  БЕЗОПАСНОСТЬ: подпись MSI Node.js не подтвердилась ($why) — НЕ запускаю (fail-closed)."
         }
         # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
         try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }

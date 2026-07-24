@@ -224,13 +224,29 @@ function removeDirTree(p, opts, dry) {
     catch (e) { if (e && e.code === 'ENOENT') return res('absent', 'нечего удалять'); }
   }
   if (!quarantine) return res('failed', 'ЗАЩИТА: не удалось захватить дерево в карантин');
+  // Провал удаления ОБЯЗАН вернуть дерево на исходный путь (как в gated-варианте):
+  // иначе состояние на диске расходится с рапортом «не удалено» — каталог компонента
+  // уехал в .hm-quar.<hex>, а повторный запуск видит ENOENT → 'absent' → рапортует
+  // ложный успех и осиротевший карантин остаётся навсегда. Если и возврат не удался —
+  // путь карантина попадает в сообщение (и в install.log), мусор не невидим.
+  const restore = () => { try { fs.renameSync(quarantine, g.norm); return true; } catch (e) { return false; } };
   try {
     // rmSync не следует по симлинкам внутрь (удаляет саму ссылку) — содержимое чужих целей цело.
-    fs.rmSync(quarantine, { recursive: true, force: false });
+    // maxRetries/retryDelay — против транзиентных EPERM/EBUSY на Windows (процесс ещё
+    // не отпустил образ сразу после taskkill, антивирус держит хендл).
+    fs.rmSync(quarantine, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });
   } catch (e) {
-    if (fs.existsSync(quarantine)) return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e));
+    if (fs.existsSync(quarantine)) {
+      const back = restore();
+      return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e) +
+        (back ? ' (дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
+    }
   }
-  if (fs.existsSync(quarantine)) return res('failed', 'дерево осталось на месте');
+  if (fs.existsSync(quarantine)) {
+    const back = restore();
+    return res('failed', 'дерево осталось на месте' +
+      (back ? ' (возвращено)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
+  }
   return res('removed', 'удалено дерево');
 }
 

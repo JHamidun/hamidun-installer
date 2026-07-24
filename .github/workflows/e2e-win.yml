@@ -67,6 +67,7 @@ jobs:
         shell: pwsh
         env:
           HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
+          HM_E2E_EXPECT_LITE: '1'
           HM_E2E_TIMEOUT: '420000'
         run: node test/e2e-gui.js netfail
 
@@ -78,6 +79,7 @@ jobs:
         shell: pwsh
         env:
           HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
+          HM_E2E_EXPECT_LITE: '1'
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok
 
@@ -121,6 +123,7 @@ jobs:
       - name: E2E — GUI на чистом macOS (bundled-конфиг → изолированный ~/.claude)
         env:
           HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok
 

@@ -337,7 +337,8 @@ function ipv4IsPrivate(ip) {
   if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true; // CGNAT
   if (o[0] === 192 && o[1] === 0 && o[2] === 0) return true;  // IETF protocol
   if (o[0] === 192 && o[1] === 0 && o[2] === 2) return true;  // TEST-NET-1
-  if (o[0] === 198 && o[1] === 18) return true;               // benchmark
+  if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return true; // 198.18.0.0/15 benchmark (RFC 2544)
+  if (o[0] === 192 && o[1] === 88 && o[2] === 99) return true; // 192.88.99.0/24 6to4 relay anycast (RFC 7526)
   if (o[0] === 198 && o[1] === 51 && o[2] === 100) return true; // TEST-NET-2
   if (o[0] === 203 && o[1] === 0 && o[2] === 113) return true; // TEST-NET-3
   if (o[0] >= 224) return true;                               // multicast/reserved
@@ -395,6 +396,9 @@ function ipv6IsPrivate(addr) {
   // /48 (первые 6 байт = 00 64 ff 9b 00 01) отвергаем безусловно (fail-closed).
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
       b[4] === 0x00 && b[5] === 0x01) return true;                            // 64:ff9b:1::/48 NAT64 local-use
+  // #30: 2002::/16 — 6to4: встроенный IPv4 лежит в байтах 2..5 (2002:7f00:1:: = 127.0.0.1).
+  // Классифицируем ПО вложенному адресу, как для ::ffff:/96 и 64:ff9b::/96.
+  if (b[0] === 0x20 && b[1] === 0x02) return ipv4IsPrivate([b[2], b[3], b[4], b[5]].join('.')); // 2002::/16 6to4
   if (b.slice(0, 12).every((x) => x === 0)) return ipv4IsPrivate(v4tail());   // ::a.b.c.d (deprecated)
   return false;
 }
@@ -550,6 +554,7 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
     let written = 0;
     let done = false;
     let subAttempts = 0;
+    let lastProgressMark = 0; // #31: отметка прогресса, по которой сбрасывается бюджет попыток
     let activeReq = null;
     let activeRes = null;
     let lastTick = Date.now();
@@ -579,10 +584,19 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
       try { fs.ftruncateSync(fd, 0); } catch (e) { /* ignore */ }
       hash = crypto.createHash('sha256');
       written = 0;
+      // #8: прогресс откатился к нулю — окно min-rate watchdog'а ОБЯЗАНО откатиться
+      // вместе с ним, иначе written(0) - lastTickBytes(уже скачанное) < минимума и
+      // ЖИВОЕ соединение убивается «скорость ниже минимума» сразу после рестарта.
+      lastTick = Date.now(); lastTickBytes = 0; lastPct = -1;
     };
 
     const attempt = () => {
       if (done) return;
+      // #31: бюджет попыток считаем ПОДРЯД идущими безрезультатными. Если докачка
+      // реально продвинулась с прошлой попытки — бюджет обновляем; общая длительность
+      // всё равно ограничена deadlineAt и stall-watchdog'ом. restartFresh() обнуляет
+      // written, поэтому 416/Range-ignore-петля бюджет не восстанавливает.
+      if (written > lastProgressMark) { lastProgressMark = written; subAttempts = 0; }
       if (++subAttempts > MAX_SUB_ATTEMPTS) { finish({ ok: false, error: 'исчерпаны попытки докачки' }); return; }
       let cbUsed = false;    // openStream может позвать cb дважды (res, потом поздний error) — учитываем 1 раз
       let advanced = false;  // этот attempt уже уступил место resume — не дублируем из error/close/end

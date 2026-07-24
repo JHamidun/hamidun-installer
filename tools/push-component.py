@@ -70,6 +70,49 @@ def platform_to_script(remote_id, platform):
     return f"scripts/windows/{remote_id}.ps1"
 
 
+def gated_files_map(zip_path: Path, platform):
+    """{базовое имя файла: sha256} для членов архива, которые ПРОВЕРЯЕТ второй гейт.
+
+    Второй гейт — вшитый vendor/checksums.json (Confirm-HmArtifact в install-скриптах,
+    ключ = БАЗОВОЕ имя файла). Его манифест уезжает в exe, а содержимое опубликованного
+    архива фиксируется здесь: пересобрал vendor и собрал lite без перепубликации — и у
+    пользователя докачка проходит, а установка падает с «файл подменён». Записываем
+    фактические sha, чтобы tools/build-lite.js мог сверить это ДО релиза.
+    """
+    chk_path = REPO_ROOT / "vendor" / "checksums.json"
+    if not chk_path.exists():
+        if platform in (None, "win32"):
+            raise SystemExit(
+                "[fail] нет vendor/checksums.json — не с чем сверять целостность публикуемого архива.\n"
+                "       Запусти `npm run fetch:vendor` (он генерит манифест) и повтори публикацию."
+            )
+        return {}
+    manifest = json.loads(chk_path.read_text(encoding="utf-8")).get("files", {})
+    gated = {}
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.rsplit("/", 1)[-1]
+            if name not in manifest:
+                continue
+            h = hashlib.sha256()
+            with z.open(info) as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            digest = h.hexdigest().lower()
+            prev = gated.get(name)
+            if prev and prev != digest:
+                # Рантайм-гейт ключуется базовым именем — два разных файла с одним именем
+                # в одном архиве сделали бы проверку недетерминированной.
+                raise SystemExit(
+                    f"[fail] в архиве два разных файла с именем «{name}» — второй гейт "
+                    f"(checksums.json) ключуется базовым именем и стал бы неоднозначным."
+                )
+            gated[name] = digest
+    return gated
+
+
 def snapshot_bytes(path: Path):
     """Снимок байтов архива ОДИН раз (в память) + его sha256/size. Дальше во ВСЕ
     зеркала и в реестр идут ИМЕННО эти байты — sha не может «разъехаться» с тем,
@@ -262,6 +305,15 @@ def main():
         print(f"ОШИБКА: источник не найден: {src}", file=sys.stderr)
         sys.exit(1)
 
+    # Запись реестра всегда указывает на install-скрипт (main.js берёт его по id). Если
+    # скрипта нет — компонент упал бы у пользователя с «Script not found» после докачки
+    # сотен МБ. Проверяем ДО заливки: реестр не должен содержать недостижимых записей.
+    script_rel = platform_to_script(args.remoteId, args.platform or "win32")
+    if not (REPO_ROOT / script_rel).exists():
+        print(f"ОШИБКА: нет install-скрипта {script_rel} для «{args.remoteId}» — публиковать нечего "
+              f"(после докачки установщик не нашёл бы, что запускать).", file=sys.stderr)
+        sys.exit(1)
+
     creds = load_creds()
     if not (creds.get("REGRU_S3_ENDPOINT") and creds.get("REGRU_S3_ACCESS_KEY")
             and creds.get("REGRU_S3_SECRET_KEY") and creds.get("REGRU_S3_BUCKET")):
@@ -280,6 +332,11 @@ def main():
     data, sha, size = snapshot_bytes(zip_path)
     print(f"  sha256={sha}")
     print(f"  size={size} байт ({size/1024/1024:.2f} МБ)")
+    # sha файлов архива, которые потом проверит вшитый checksums.json (второй гейт) —
+    # чтобы build-lite мог поймать рассинхрон «архив опубликован / vendor пересобран».
+    gated = gated_files_map(zip_path, args.platform)
+    print(f"  файлов под вторым гейтом (checksums.json): {len(gated)}"
+          + (f" — {', '.join(sorted(gated))}" if gated else ""))
 
     # Ключ объекта CONTENT-ADDRESSED / IMMUTABLE: sha в имени (P1-2). Перезалив
     # того же контента идемпотентен; выпущенные установщики не ломаются.
@@ -360,7 +417,11 @@ def main():
         "sizeBytes": size,
         "sha256": sha,
         "mirrors": mirrors,
-        "installRelPath": platform_to_script(args.remoteId, args.platform or "win32"),
+        "installRelPath": script_rel,
+        # Build-time (рантайм его игнорирует): {имя файла: sha256} для членов архива,
+        # которые проверяет вшитый vendor/checksums.json. tools/build-lite.js сверяет
+        # это с манифестом, который уезжает в exe, и не даёт выпустить рассинхрон.
+        "gatedFiles": gated,
     }
     if args.platform:
         entry["platform"] = args.platform

@@ -95,13 +95,16 @@ if ($local -and (Test-Path $local)) {
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
-        # Гейт подписи ДО запуска (fail-closed): elevated-запуск неподтверждённого exe недопустим даже из secure-cache.
-        $sig = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AuthenticodeSignature -LiteralPath $exe } else { $null }
-        if ($sig -and $sig.Status -eq 'Valid') {
+        # Гейт подписи ДО запуска (fail-closed): elevated-запуск неподтверждённого exe недопустим
+        # даже из secure-cache. НЕ ограничиваемся Status='Valid' — WinVerifyTrust строит цепочку
+        # ПОЛЬЗОВАТЕЛЬСКИМ chain-engine и принял бы подпись от корня, который medium-малварь того же
+        # юзера положила в HKCU\...\SystemCertificates\Root БЕЗ UAC (а HKCU-прокси WinINET позволил бы
+        # ей же подсунуть файл). Test-HmTrustedSigner требует корень в LocalMachine\Root + EKU Code Signing.
+        $why = if ($exe) { Test-HmTrustedSigner -Path $exe } else { 'файл установщика не найден' }
+        if (-not $why) {
             Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -WorkingDirectory $cache -Wait
         } else {
-            $st = if ($sig) { $sig.Status } else { 'нет подписи' }
-            Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Git не подтвердилась ($st) — НЕ запускаю (fail-closed)."
+            Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Git не подтвердилась ($why) — НЕ запускаю (fail-closed)."
         }
         # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
         try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }

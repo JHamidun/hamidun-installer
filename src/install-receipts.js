@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const SCHEMA_VERSION = 2;
 const DIR_NAME = '.hamidun-setup';
@@ -97,6 +98,30 @@ function recoverBak(dir, dstBaseName) {
 
 // Атомарная запись: temp в ТОМ ЖЕ каталоге + rename (без unlink-first; old→backup,
 // temp→dest, откат при сбое — P2-9 паттерн). dryRun → не пишем.
+// Открыть temp-файл в dir БЕЗОПАСНО (тот же приём, что uninstall-exec.js:removeProfileLine):
+// НЕПРЕДСКАЗУЕМОЕ имя (crypto.randomBytes) + 'wx' (O_CREAT|O_EXCL — по заранее
+// подложенному hardlink/symlink НЕ пишем, получаем EEXIST) + fstat открытого fd
+// (обычный файл, nlink==1). Предсказуемое pid+Date.now()-имя с флагом 'w' позволяло
+// medium-integrity процессу того же юзера заранее подставить ссылку и заставить
+// ЭЛЕВЕЙТЕД установщик усечь и перезаписать чужой файл. Префикс имени сохранён
+// (base + '.') — listReceiptDebris продолжает находить хвосты.
+function openExclTmp(dir, base) {
+  for (let i = 0; i < 3; i++) {
+    const cand = path.join(dir, base + '.' + crypto.randomBytes(8).toString('hex') + '.tmp');
+    let fd;
+    try { fd = fs.openSync(cand, 'wx', 0o600); }
+    catch (e) { if (e && e.code === 'EEXIST') continue; throw e; }
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || (typeof st.nlink === 'number' && st.nlink !== 1)) {
+      fs.closeSync(fd);
+      try { fs.rmSync(cand, { force: true }); } catch (e2) { /* ignore */ }
+      throw new Error('ЗАЩИТА: temp не обычный файл / nlink!=1 — отказ');
+    }
+    return { fd, tmp: cand };
+  }
+  throw new Error('ЗАЩИТА: temp уже существует (EEXIST) — возможная подмена, отказ');
+}
+
 function writeReceipt(homedir, id, receipt, opts) {
   opts = opts || {};
   const dst = receiptPath(homedir, id);
@@ -104,8 +129,9 @@ function writeReceipt(homedir, id, receipt, opts) {
   const dir = receiptsDir(homedir);
   fs.mkdirSync(dir, { recursive: true });
   const json = JSON.stringify(receipt, null, 2);
-  const tmp = path.join(dir, id + '.json.' + process.pid + '.' + Date.now() + '.tmp');
-  const fd = fs.openSync(tmp, 'w', 0o600);
+  const ex = openExclTmp(dir, String(id) + '.json');
+  const tmp = ex.tmp;
+  const fd = ex.fd;
   try {
     fs.writeFileSync(fd, json, 'utf8');
     try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
@@ -118,7 +144,7 @@ function writeReceipt(homedir, id, receipt, opts) {
     // Windows: rename поверх существующего может дать EPERM. НЕ unlink-first:
     // old→backup, temp→dest; при сбое возвращаем старый на место. Если и rollback
     // упал — .bak остаётся и восстановится при следующем чтении (recoverBak).
-    const bak = dst + '.' + process.pid + '.' + Date.now() + '.bak';
+    const bak = dst + '.' + crypto.randomBytes(8).toString('hex') + '.bak';
     let movedOld = false;
     try {
       try { fs.renameSync(dst, bak); movedOld = true; }

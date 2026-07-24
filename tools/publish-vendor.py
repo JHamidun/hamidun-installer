@@ -55,15 +55,23 @@ COMPONENTS = {
                                            ("nomad-src.sha256", "nomad-src.sha256")],
                "name": "Nomad (source + integrity manifest)"},
     "config": {"kind": "single", "src": "config-pack",           "prefix": "config-pack",       "name": "Claude config pack (v38)"},
-    "playwright-browsers": {"kind": "single", "src": "playwright-browsers", "prefix": "playwright-browsers", "name": "Playwright browsers"},
+    # playwright-browsers НЕ публикуем: компонента с таким id нет в components.json, а
+    # loadRemoteMaps (main.js) выводит remote строго по id компонентов — запись реестра была
+    # недостижима, install-скрипта scripts/windows/playwright-browsers.ps1 не существует.
+    # Браузеры ставит pydeps.ps1 онлайн (`python -m playwright install chromium`) с честным
+    # предупреждением при сбое. Если однажды понадобится офлайн — класть их ЧАСТЬЮ pydeps
+    # (parts + перепубликация), а не отдельным remoteId.
     # Составные: собираем staging с точной структурой, пушим папку без префикса.
     "pydeps": {"kind": "staged", "parts": [("apps/python-setup.exe", "apps/python-setup.exe"),
                                            ("pywheels",              "pywheels")],
                "name": "Python + wheels (pydeps)"},
+    # chatgpt.vsix СЮДА НЕ КЛАДЁМ (был glob apps/*.vsix = +338 МБ на каждого lite-юзера):
+    # extension.ps1 читает только claude-code.vsix и шрифт, а единственный потребитель
+    # chatgpt.vsix — vscode.ps1 — работает со staging СВОЕГО компонента (vscode), куда
+    # архив extension не попадает. В lite Codex ставится из Marketplace.
     "extension": {"kind": "staged", "parts": [("apps/claude-code.vsix", "apps/claude-code.vsix"),
-                                              ("apps/*.vsix",           "apps/"),  # + chatgpt-*.vsix (glob)
                                               ("apps/JetBrainsMono-Regular.ttf", "apps/JetBrainsMono-Regular.ttf")],  # шрифт: в lite HM_VENDOR=staging, из vendor-lite недостижим
-                  "name": "VS Code extensions (Claude Code + ChatGPT)"},
+                  "name": "VS Code extensions (Claude Code + шрифт)"},
 }
 
 

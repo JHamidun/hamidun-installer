@@ -145,6 +145,84 @@ function New-HmSecureStagingDir {
     } catch { return $null }
 }
 
+# --- НАДЁЖНЫЙ гейт Authenticode для ОНЛАЙН-скачанных установщиков (git/node/cursor/python).
+#     Возвращает '' если бинарь ДОВЕРЕН, иначе строку-причину отказа (вызывающий → fail-closed).
+#
+#     ПОЧЕМУ мало `(Get-AuthenticodeSignature $f).Status -eq 'Valid'`: WinVerifyTrust строит
+#     цепочку ПОЛЬЗОВАТЕЛЬСКИМ chain-engine, который объединяет машинный стор с
+#     HKCU\Software\Microsoft\SystemCertificates\Root. Этот ключ пишется medium-integrity
+#     процессом ТОГО ЖЕ юзера БЕЗ UAC (certutil -user -addstore Root rogue.cer), а наш
+#     elevated split-token процесс грузит ТУ ЖЕ HKCU-ветку. Плюс Invoke-WebRequest в PS 5.1
+#     уважает HKCU-прокси WinINET (тоже без UAC). Итог: same-user малварь могла подсунуть
+#     свой установщик с Status='Valid' и получить исполнение под АДМИНОМ.
+#     Поэтому ТРЕБУЕМ: корень цепочки лежит в LocalMachine\Root + EKU Code Signing.
+#     Тот же принцип уже применён в claude-desktop.ps1/chatgpt-desktop.ps1 (там ещё и точное O=);
+#     здесь пин издателя ОПЦИОНАЛЕН (-ExpectedOrg/-ExpectedSubjectMatch), т.к. точные RDN
+#     сторонних издателей (Git for Windows/Node/Cursor) не подтверждены на реальных артефактах,
+#     а слепой пин ломал бы легитимную установку. Обязательная (непереборчивая) половина —
+#     цепочка к МАШИННОМУ корню — закрывает описанный privesc сама по себе.
+function Test-HmTrustedSigner {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$ExpectedOrg = '',
+        [string]$ExpectedSubjectMatch = ''
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return 'файл не найден' }
+    # (a) Authenticode: подпись есть И хеш файла не подменён.
+    $sig = $null
+    try { $sig = Get-AuthenticodeSignature -LiteralPath $Path } catch { return "подпись не читается: $($_.Exception.Message)" }
+    if (-not $sig) { return 'подпись не читается' }
+    if ($sig.Status -ne 'Valid') { return "Authenticode Status=$($sig.Status)" }
+    $cert = $sig.SignerCertificate
+    if (-not $cert) { return 'нет сертификата подписанта' }
+    # (b) Цепочка ОБЯЗАНА выстраиваться до корня в LocalMachine\Root (CurrentUser\Root НЕ доверяем).
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
+    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))  # EKU Code Signing
+    $built = $false
+    try { $built = $chain.Build($cert) } catch { return "не удалось построить цепочку: $($_.Exception.Message)" }
+    if (-not $built) {
+        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
+        return "цепочка сертификатов не выстроилась ($st)"
+    }
+    $elems = $chain.ChainElements
+    if (-not $elems -or $elems.Count -lt 1) { return 'пустая цепочка сертификатов' }
+    $root = $elems[$elems.Count - 1].Certificate
+    if (-not $root -or -not $root.Thumbprint) { return 'не удалось определить корень цепочки' }
+    $inMachine = $false
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        foreach ($c in $store.Certificates) { if ($c.Thumbprint -eq $root.Thumbprint) { $inMachine = $true; break } }
+    } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
+    finally { try { $store.Close() } catch { } }
+    if (-not $inMachine) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
+    # (c) EKU Code Signing у leaf-серта.
+    $hasCodeSigning = $false
+    foreach ($ext in $cert.Extensions) {
+        if ($ext -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+            foreach ($oid in $ext.EnhancedKeyUsages) { if ($oid.Value -eq '1.3.6.1.5.5.7.3.3') { $hasCodeSigning = $true; break } }
+        }
+    }
+    if (-not $hasCodeSigning) { return 'у сертификата нет EKU Code Signing' }
+    # (d) Опциональный пин Organization (O=) из RDN — точное сравнение, не подстрока Subject.
+    if ($ExpectedOrg) {
+        $org = ''
+        try {
+            foreach ($ln in ($cert.SubjectName.Format($true) -split '\r?\n')) {
+                if ($ln -match '^\s*O=') { $org = ($ln -replace '^\s*O=', '').Trim(); break }
+            }
+        } catch { }
+        if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
+    }
+    # (e) Опциональный (более мягкий) пин по Subject — для издателей, у кого RDN не подтверждён.
+    if ($ExpectedSubjectMatch -and ("$($cert.Subject)" -notmatch $ExpectedSubjectMatch)) {
+        return "Subject подписи не совпал с ожидаемым издателем ($($cert.Subject))"
+    }
+    return ''
+}
+
 function Invoke-HmDeElevated {
     param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
 
@@ -257,7 +335,12 @@ function Invoke-HmDeElevated {
         # Ждём завершения по ЛОКАЛЬ-НЕЗАВИСИМОМУ «Last Result» (поле #6 CSV /HRESULT):
         # 267009=выполняется, 267011=ещё не запускалась, иначе=exit-код обёртки.
         $lastResult = $null
-        $deadline = (Get-Date).AddSeconds(180)
+        # Дедлайн согласован с <ExecutionTimeLimit>PT10M</ExecutionTimeLimit> задачи (+30 с запаса):
+        # при 180 с долгая (но нормальная) установка vsix на слабой машине с активным Defender
+        # объявлялась провалом, вызывающий стартовал ВТОРУЮ конкурентную задачу поверх первой.
+        # Реального зависания это не удлиняет: планировщик сам прибьёт задачу на 10-й минуте
+        # (AllowHardTerminate=true), Last Result станет ненулевым и цикл выйдет раньше дедлайна.
+        $deadline = (Get-Date).AddSeconds(630)
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 400
             $csv = & $schtasks '/Query' '/TN' $tag '/HRESULT' '/FO' 'CSV' '/NH' '/V' 2>$null | Out-String

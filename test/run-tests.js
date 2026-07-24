@@ -413,17 +413,40 @@ ok('#4 allowlist: NODE_OPTIONS/npm_config_*/GIT_EXEC_PATH/NODE_PATH/произв
   assert(Object.keys(out).length === 0, 'ни один не-HM_ ключ не должен пройти: ' + JSON.stringify(out));
 });
 
-// (2) легитимные HM_* сохраняются (happy-path не теряет нужные переменные).
-ok('#4 allowlist: HM_SELECTED и прочие HM_* сохраняются', () => {
+// (2) легитимные (реально эмитимые envForRun) HM_* сохраняются, а HM_*, которых
+// renderer НЕ эмитит никогда (HM_COURSE_TARGET — путь раскладки курса под админом),
+// отбрасываются: allowlist — ЯВНЫЙ СПИСОК КЛЮЧЕЙ, а не префикс-тест HM_.
+ok('#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен', () => {
   const out = installEnv.filterRendererEnv({
     HM_SELECTED: 'git,node,claude',
-    HM_COURSE_TARGET: 'C:\\Users\\x\\HamidunCourse',
+    HM_COURSE_TARGET: 'C:\\Program Files\\Common Files',
     HM_KEEP_SKILLS: 'a,b,c',
     HM_HOME: 'C:\\Users\\x'
   });
   assert(out.HM_SELECTED === 'git,node,claude', 'HM_SELECTED должен сохраниться');
-  assert(out.HM_COURSE_TARGET && out.HM_KEEP_SKILLS && out.HM_HOME, 'все HM_* должны сохраниться');
-  assert(Object.keys(out).length === 4, 'ровно 4 HM_* ключа: ' + JSON.stringify(out));
+  assert(out.HM_KEEP_SKILLS && out.HM_HOME, 'эмитимые HM_* должны сохраниться');
+  assert(!('HM_COURSE_TARGET' in out), 'HM_COURSE_TARGET (renderer его не эмитит) обязан быть отброшен');
+  assert(Object.keys(out).length === 3, 'ровно 3 разрешённых ключа: ' + JSON.stringify(out));
+});
+
+// (2b) allowlist ПОКРЫВАЕТ ровно то, что эмитит src/renderer/app.js → envForRun:
+// новый HM_-ключ в envForRun без строки в allowlist молча не доедет до скрипта.
+ok('#4 allowlist: список ключей совпадает с envForRun (app.js) — ни одного лишнего/недостающего', () => {
+  const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const envFn = appSrc.slice(appSrc.indexOf('function envForRun'), appSrc.indexOf('function appendLog'));
+  const emitted = Array.from(new Set((envFn.match(/HM_[A-Z0-9_]+/g) || [])));
+  assert(emitted.length >= 12, 'envForRun должен эмитить свои HM_-ключи, найдено: ' + emitted.length);
+  emitted.forEach((k) => {
+    assert(installEnv.isAllowedRendererEnvKey(k), k + ' эмитится envForRun, но не разрешён allowlist-ом');
+  });
+  const envSrc = fs.readFileSync(path.join(ROOT, 'src', 'install-env.js'), 'utf8');
+  const listed = (envSrc.match(/'hm_[a-z0-9_]+'/g) || []).map((s) => s.replace(/'/g, '').toUpperCase());
+  listed.forEach((k) => {
+    assert(emitted.indexOf(k) !== -1, k + ' разрешён allowlist-ом, но envForRun его не эмитит');
+  });
+  assert(!installEnv.isAllowedRendererEnvKey('HM_COURSE_TARGET'), 'HM_COURSE_TARGET не должен проходить');
+  assert(!installEnv.isAllowedRendererEnvKey('HM_NOMAD_CLOUD_BASEURL'), 'HM_NOMAD_CLOUD_BASEURL не должен проходить');
+  assert(!installEnv.isAllowedRendererEnvKey('HM_BRIDGE_TOKEN'), 'HM_BRIDGE_TOKEN не должен проходить');
 });
 
 // (3) HM_REMOTE_CACHE из renderer отбрасывается — его ставит ТОЛЬКО main из проверенного пути.
@@ -1289,12 +1312,15 @@ ok('P1 (vscode.ps1): успех только при обоих расширен�
   assert(/\$missing/.test(s) && /anthropic\.claude-code/.test(s) && /openai\.chatgpt/.test(s), 'в ошибке называем отсутствующее расширение');
 });
 
-// P1 (vscode.sh): exit 0 ТОЛЬКО когда оба EXT_OK; отсутствующее названо.
-ok('P1 (vscode.sh): успех только при обоих EXT_OK (Claude И Codex); называет отсутствующее', () => {
+// vscode.sh: exit 0 по ОБЯЗАТЕЛЬНОМУ Claude; Codex опционален (сборка его не гейтит,
+// verify.sh не проверяет) → его отсутствие = предупреждение, а не красный компонент.
+ok('vscode.sh: успех по обязательному Claude; отсутствие опционального Codex — предупреждение, не exit 1', () => {
   const s = EG_SH();
-  assert(/if \[ "\$EXT_OK_CLAUDE" -eq 1 \] && \[ "\$EXT_OK_CODEX" -eq 1 \]; then exit 0; fi/.test(s), 'exit 0 требует оба EXT_OK==1');
-  assert(!/\[ "\$EXT_OK_CLAUDE" -eq 1 \] && exit 0/.test(s), 'старое поведение (успех по одному Claude) убрано');
-  assert(/missing=/.test(s), 'формируем список отсутствующих расширений для сообщения');
+  assert(/if \[ "\$EXT_OK_CLAUDE" -eq 1 \]; then exit 0; fi/.test(s), 'exit 0 требует установленный anthropic.claude-code');
+  assert(!/\[ "\$EXT_OK_CLAUDE" -eq 1 \] && \[ "\$EXT_OK_CODEX" -eq 1 \]; then exit 0; fi/.test(s), 'Codex больше НЕ гейтит успех');
+  const warn = s.slice(s.indexOf('if [ "$EXT_OK_CODEX" -ne 1 ]'));
+  assert(/ПРЕДУПРЕЖДЕНИЕ[^\n]*openai\.chatgpt/.test(warn), 'отсутствие Codex — именованное предупреждение');
+  assert(/Не установилось расширение Claude Code \(anthropic\.claude-code\)/.test(s), 'exit 1 называет именно обязательное расширение');
 });
 
 // P1 (main.js): «vscode» установлен ТОЛЬКО при приложении И ОБОИХ расширениях (иначе Codex доставляется).
@@ -1785,6 +1811,13 @@ ok('config.ps1: add-missing = robocopy /XC /XN /XO; repair = robocopy без /XC
     'repair: robocopy БЕЗ /XC — наши базовые перезаписываются, /XF/XD исключают пользовательское; /XJ не сквозь junction');
   assert(/\$mergeXD = @\(\$excludeDirs\) \+ @\('skills'\)/.test(s),
     'skills — reparse point → исключается из merge (/XD skills), robocopy не пишет сквозь junction');
+  // Правило «не писать сквозь reparse» — для ВСЕХ детей ~/.claude (agents/rules/tools/…),
+  // не только skills: junction на git-репо юзера иначе затирался бы в repair.
+  assert(/\$mergeXD = @\(\$excludeDirs\) \+ \$reparseKids/.test(s), 'ВСЕ reparse-дети ~/.claude исключаются из merge');
+  const kidScan = s.slice(s.indexOf('$reparseKids = @()'), s.indexOf('$skillsSkipped = $false'));
+  assert(/Get-ChildItem -Force -LiteralPath \$claudeHome -ErrorAction Stop/.test(kidScan), 'reparse-дети перечисляются fail-closed (-ErrorAction Stop)');
+  assert(/if \(-not \$kidScanOk\) \{/.test(kidScan) && /\$installFailed = \$true/.test(kidScan),
+    'сбой проверки reparse → fail-closed: подкаталоги пропущены + компонент честно провален');
   assert(/if \(\$ADDITIVE\) \{/.test(s), 'ветвление по $ADDITIVE (add-missing / repair)');
   assert(!/& \$installer/.test(s), 'НЕ запускает install.ps1 через & $installer (он делал Move-Item = wipe)');
   assert(!/-BackupExisting/.test(s), 'нет -BackupExisting (это и был wipe: Move-Item всего ~/.claude)');
@@ -1818,12 +1851,16 @@ ok('config.ps1: settings.json — наш базовый; CLAUDE.md/credentials �
 ok('config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $preExisting щадит скиллы юзера в add-missing; reparse skip', () => {
   const s = CFG_PS1();
   assert(/if \(\$pruneDisabled -or \$installFailed\)/.test(s), 'прунинг пропускается при pruneDisabled ИЛИ installFailed');
-  assert(/\$weAdded = -not \$preExisting\.ContainsKey\(\$_\.Name\)/.test(s),
-    'guard $weAdded: в ОБОИХ режимах скилл, бывший ДО раскладки, не удаляем (синхр. с config.ps1 после concurrent-коммита 094b15c)');
+  assert(/\$weAdded = \(-not \$preExisting\.ContainsKey\(\$_\.Name\)\) -or \$ourPrev\.ContainsKey\(\$_\.Name\)/.test(s),
+    'guard $weAdded: скилл юзера, бывший ДО раскладки, не удаляем; НАШ из прошлого прогона (.hamidun-skills.txt) — прунится, иначе снятие пака работает лишь раз');
+  assert(/\$ourListPath = Join-Path \$claudeHome '\.hamidun-skills\.txt'/.test(s), 'маркер «наших» скиллов пишется/читается в ~/.claude/.hamidun-skills.txt');
+  assert(s.indexOf("$ourPrev = @{}") < s.indexOf('robocopy $srcClaude $claudeHome'), 'прошлый список «наших» читается ДО merge-copy');
   assert(/\$preExisting\[\$_\.Name\] = \$true/.test(s), 'инвентарь пред-существующих скиллов собирается ДО merge-copy');
   assert(/-ErrorAction Stop \| ForEach-Object \{/.test(s), 'перечисление с -ErrorAction Stop (fail-closed)');
-  assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$skillsReparse = \$true \}/.test(s),
-    'дочерний skill-reparse → $skillsReparse (merge не пишет сквозь него)');
+  assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$reparseSkills \+= \$_\.Name \}/.test(s),
+    'дочерний skill-reparse → исключается ПОИМЁННО ($reparseSkills), а не пропуском всего каталога skills');
+  assert(/foreach \(\$n in \$reparseSkills\) \{ \$mergeXD \+= \(Join-Path \(Join-Path \$srcClaude 'skills'\) \$n\) \}/.test(s),
+    'слинкованный дочерний скилл исключается адресно, остальные скиллы раскладываются');
   const loop = s.slice(s.indexOf('Get-ChildItem -Directory $skillsDir | ForEach-Object'));
   assert(/ReparsePoint\) \{ return \}/.test(loop.slice(0, 700)), 'reparse-скилл (symlink/junction) в прунинге скипается');
 });
@@ -1835,6 +1872,8 @@ ok('config.ps1: бэкап — КОПИЯ robocopy /R:1 (не move); непол�
   assert(iB !== -1 && iAfter > iB, 'блок бэкапа найден');
   const blk = s.slice(iB, iAfter);
   assert(/robocopy \$claudeHome \$backupDir \/E \/R:1 \/W:1/.test(blk), 'бэкап — robocopy (копия, /R:1 не зависает на локах)');
+  assert(/robocopy \$claudeHome \$backupDir \/E \/R:1 \/W:1 \/XJ/.test(blk),
+    'бэкап с /XJ — не рекурсирует по junction внутри ~/.claude (иначе уходит в профиль/сетевую цель и растёт бесконечно)');
   assert(/Это НЕ критично/.test(blk) && /Продолжаю/.test(blk), 'неполный бэкап → предупреждение + продолжаем');
   assert(!/exit 1/.test(blk), 'бэкап НЕ фатален: нет exit 1 (оригинал не переносится/не стирается)');
 });
@@ -2225,6 +2264,30 @@ if (powershellAvailable()) {
         'внешний файл за junction НЕ тронут (robocopy /XD skills + /XJ — не прошёл сквозь ссылку)');
       assert(!fs.existsSync(base + '/external-skills/our-skill/SKILL.md'),
         'наш skills/our-skill/SKILL.md НЕ дописан во внешнюю цель через junction');
+      assert(/скиллы НЕ разложены/.test(r.stdout || ''),
+        'честный статус: рапорт не выдаёт «всё ок», когда skills пропущены целиком: ' + (r.stdout || ''));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('config.ps1 REPAIR: слинкован ОДИН дочерний скилл → внешняя цель цела, остальные скиллы РАЗЛОЖЕНЫ (#42)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);
+      // clone везёт skills/our-skill; добавим второй скилл, чтобы проверить, что он доехал.
+      fs.mkdirSync(clone + '/.claude/skills/second-skill', { recursive: true });
+      fs.writeFileSync(clone + '/.claude/skills/second-skill/SKILL.md', 'second');
+      fs.mkdirSync(base + '/ext-one', { recursive: true });
+      fs.writeFileSync(base + '/ext-one/DATA.md', 'EXTERNAL-ONE');
+      let linked = false;
+      try { fs.symlinkSync(base + '/ext-one', home + '/.claude/skills/our-skill', 'junction'); linked = true; }
+      catch (e) { linked = false; }
+      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      const r = runCfgPs1(home, clone, {});   // repair
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(!fs.existsSync(base + '/ext-one/SKILL.md'), 'во внешнюю цель слинкованного скилла НЕ писали');
+      assert.strictEqual(fs.readFileSync(base + '/ext-one/DATA.md', 'utf8'), 'EXTERNAL-ONE', 'внешний файл цел');
+      assert(fs.existsSync(home + '/.claude/skills/second-skill/SKILL.md'),
+        'остальные скиллы разложены (одна ссылка не отменяет раскладку всего каталога): ' + (r.stdout || ''));
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 } else {
@@ -2839,7 +2902,12 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
 ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существующего nomad-agent/шимов → skip 120', () => {
   const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
   assert(!/--force/.test(nsh), 'nomad.sh: НИ ОДНОГО --force');
-  assert(/uv tool install --python 3\.12 "\$SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
+  // Ставим из КОПИИ проверенного дерева (read-only dmg: setuptools собирает IN-TREE),
+  // но по-прежнему без --force и строго ПОСЛЕ tree-SHA гейта.
+  assert(/uv tool install --python 3\.12 "\$BUILD_SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
+  assert(/BUILD_SRC="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/hm-nomad-build\.XXXXXX"\)"/.test(nsh), 'nomad.sh: сборка из приватного mktemp-каталога (0700), не из read-only vendor');
+  assert(/cp -R "\$SRC\/\." "\$BUILD_SRC\/"/.test(nsh), 'nomad.sh: копия проверенного дерева в temp');
+  assert(nsh.indexOf('TREE_GOT" != "$TREE_WANT"') < nsh.indexOf('BUILD_SRC="$(mktemp'), 'nomad.sh: порядок verify → copy → install (fail-closed сохранён)');
   assert(nsh.indexOf('UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"') !== -1, 'nomad.sh: проверяется uv-tool nomad-agent');
   assert(nsh.indexOf('[ -e "$HOME/.local/bin/nmd" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-agent" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-acp" ]') !== -1,
     'nomad.sh: проверяются шимы nmd/nomad-agent/nomad-acp');

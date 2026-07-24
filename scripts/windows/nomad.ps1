@@ -131,16 +131,32 @@ if (-not $DRY) {
 $uv = Resolve-UvExe
 $uvPlannedOffline = $false   # dry-run: uv будет поставлен из vendor — онлайн-фолбэк не превьюим
 if (-not $uv) {
-    $uvScript    = Join-Path $PSScriptRoot 'uv.ps1'
-    $vendorUvExe = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\uv\uv.exe' } else { '' }
-    if ($vendorUvExe -and (Test-Path -LiteralPath $vendorUvExe -PathType Leaf) -and (Test-Path -LiteralPath $uvScript -PathType Leaf)) {
+    $uvScript = Join-Path $PSScriptRoot 'uv.ps1'
+    # В lite-издании nomad — remote-компонент, и HM_VENDOR указывает на его staging, где apps\uv
+    # НЕТ (uv остаётся bundled-only и лежит во ВШИТОМ vendor рядом с checksums.json). Раньше из-за
+    # этого ветка (b) молча пропускалась и основным путём становился онлайн-скрипт astral.sh под
+    # админом. Ищем вшитый uv ещё и в bundled-корне: HM_VENDOR_BUNDLED (если main его пробросил)
+    # либо <resources>\vendor рядом со скриптами (<resources>\scripts\windows -> ..\..\vendor).
+    $uvRoots = New-Object System.Collections.Generic.List[string]
+    if ($env:HM_VENDOR)         { $uvRoots.Add($env:HM_VENDOR) }
+    if ($env:HM_VENDOR_BUNDLED) { $uvRoots.Add($env:HM_VENDOR_BUNDLED) }
+    try { $uvRoots.Add((Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor')) } catch { }
+    $uvRoot = ''
+    foreach ($root in $uvRoots) {
+        if ($root -and (Test-Path -LiteralPath (Join-Path $root 'apps\uv\uv.exe') -PathType Leaf)) { $uvRoot = $root; break }
+    }
+    if ($uvRoot -and (Test-Path -LiteralPath $uvScript -PathType Leaf)) {
         Write-Host "uv не найден — ставлю вшитый офлайн-uv (vendor\apps\uv, SHA-256 fail-closed, через uv.ps1)..."
         if ($DRY) {
             Write-Host "  [dry-run] WOULD: установить uv из vendor через uv.ps1 (офлайн, без сети)"
             $uvPlannedOffline = $true
         } else {
+            # uv.ps1 (и Confirm-HmArtifact внутри) резолвит и бинарь, и checksums.json через
+            # HM_VENDOR — на время вызова указываем на корень, где вшитый uv реально лежит, и
+            # ОБЯЗАТЕЛЬНО восстанавливаем: секция 3 верифицирует nomad-src по staging-HM_VENDOR.
             # exit N внутри дочернего .ps1 возвращает управление сюда с $LASTEXITCODE=N.
-            & $uvScript
+            $savedVendor = $env:HM_VENDOR
+            try { $env:HM_VENDOR = $uvRoot; & $uvScript } finally { $env:HM_VENDOR = $savedVendor }
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [warn] вшитый uv не установился (код $LASTEXITCODE) — попробую онлайн-фолбэк."
             }
