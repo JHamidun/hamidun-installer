@@ -19,6 +19,10 @@ name: Build macOS LITE (.dmg, streaming)
 
 on:
   workflow_dispatch:
+  # Запуск до мержа в main: workflow_dispatch доступен только для файлов дефолтной
+  # ветки, поэтому обкатываем сборку пушем во временную ветку mac-lite/*.
+  push:
+    branches: ['mac-lite/**']
 
 jobs:
   build-mac-lite:
