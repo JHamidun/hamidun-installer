@@ -31,7 +31,7 @@ else
     PY="$P3"
   else
     echo "Скачиваю Python с python.org..."
-    PKG="/tmp/python.pkg"; dl "https://www.python.org/ftp/python/3.12.7/python-3.12.7-macos11.pkg" "$PKG"
+    PKG="/tmp/python.pkg"; dl "https://www.python.org/ftp/python/3.12.7/python-3.12.7-macos11.pkg" "$PKG" || exit 1
     # verify + install атомарно под root на staged копии (Codex P1) — окна подмены /tmp
     # между verify и install нет (PSF Team ID, fail-closed) — см. PYTHON_TEAM_ID выше.
     if ! admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" hm_pkg_install "$PKG" "$PYTHON_TEAM_ID"; then

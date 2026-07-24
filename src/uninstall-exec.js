@@ -213,13 +213,24 @@ function removeDirTree(p, opts, dry) {
   }
   if (!st.isDirectory()) return res('failed', 'ЗАЩИТА: цель-дерево оказалась не каталогом');
   if (dry) return res('removed', '[dry-run] WOULD remove tree');
+  // #10: атомарный quarantine-rename ДО рекурсивного удаления — схлопывает TOCTOU-окно
+  // (medium-малварь того же юзера подменяет ancestor-симлинк между checkTarget и обходом
+  // rmSync) до ОДНОГО rename в непредсказуемое имя-сиблинг. Тот же приём, что gated-путь.
+  const parent = path.dirname(g.norm);
+  let quarantine = '';
+  for (let attempt = 0; attempt < 5 && !quarantine; attempt++) {
+    const cand = path.join(parent, '.hm-quar.' + crypto.randomBytes(12).toString('hex'));
+    try { fs.renameSync(g.norm, cand); quarantine = cand; }
+    catch (e) { if (e && e.code === 'ENOENT') return res('absent', 'нечего удалять'); }
+  }
+  if (!quarantine) return res('failed', 'ЗАЩИТА: не удалось захватить дерево в карантин');
   try {
     // rmSync не следует по симлинкам внутрь (удаляет саму ссылку) — содержимое чужих целей цело.
-    fs.rmSync(g.norm, { recursive: true, force: false });
+    fs.rmSync(quarantine, { recursive: true, force: false });
   } catch (e) {
-    if (fs.existsSync(g.norm)) return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e));
+    if (fs.existsSync(quarantine)) return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e));
   }
-  if (fs.existsSync(g.norm)) return res('failed', 'дерево осталось на месте');
+  if (fs.existsSync(quarantine)) return res('failed', 'дерево осталось на месте');
   return res('removed', 'удалено дерево');
 }
 

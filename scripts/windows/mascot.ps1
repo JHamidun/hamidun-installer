@@ -107,13 +107,17 @@ Write-Host "HM-RECEIPT path $(Join-Path $env:USERPROFILE '.claude-mascot')"
 if ($autoRunOk) { Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|ClaudeMascot" }
 
 # Запуск сейчас
-$proc = $null
-try { $proc = Start-Process -FilePath $dest -PassThru -ErrorAction Stop }
+# Запуск сейчас — ДЕ-ЭЛЕВАЦИЯ через explorer.exe (medium integrity): под elevated-токеном
+# был бы copy→run TOCTOU (medium-малварь юзера подменит $dest в user-writable каталоге
+# между Copy-Item и запуском → elevated-запуск чужого exe). explorer стартует цель токеном
+# shell (medium), не под админом; дочернего хендла не даёт → живость проверяем HTTP-probe.
+$launched = $false
+try { Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$dest`"" -ErrorAction Stop; $launched = $true }
 catch { Write-Host "  ВНИМАНИЕ: скрепка не запустилась ($($_.Exception.Message))." }
 
 # 6. Health-check (НЕ критичный: скрепка поднимает http://127.0.0.1:45832/health, но может не успеть за 10 с)
 $healthy = $false
-if ($proc) {
+if ($launched) {
     foreach ($i in 1..10) {
         Start-Sleep -Seconds 1
         try {
@@ -122,10 +126,8 @@ if ($proc) {
         } catch { }
     }
 }
-$procAlive = $false
-if ($proc) { try { $procAlive = -not $proc.HasExited } catch { } }
 if ($healthy) { Write-Host "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude." }
-elseif ($procAlive) { Write-Host "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится на экране — запусти вручную: $dest" }
+elseif ($launched) { Write-Host "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится на экране — запусти вручную: $dest" }
 elseif ($autoRunOk) { Write-Host "Скрепка установлена, но не подтвердила запуск — стартует при следующем входе в Windows (автозапуск). Вручную: $dest" }
 else { Write-Host "Скрепка установлена, но не запустилась и автозапуск не прописан — запусти вручную: $dest" }
 exit 0

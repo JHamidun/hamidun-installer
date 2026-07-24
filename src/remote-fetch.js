@@ -613,6 +613,13 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
         else if (code >= 300) { finish({ ok: false, error: 'HTTP ' + code }); return; }
         // иначе 2xx при written===0 — пишем с нуля
 
+        // #12: завершённость этого ответа определяем по ТРАНСПОРТУ (Content-Length),
+        // а НЕ по registry sizeBytes (cap — лишь верхняя граница/DoS-предел). Неточный
+        // cap оператора не должен зацикливать resume при совпадающем sha.
+        const clen = Number(res.headers['content-length'] || 0);
+        const respBase = written;                                  // байт до этого ответа
+        const respExpected = clen > 0 ? respBase + clen : 0;       // 0 = длина неизвестна
+
         res.on('data', (chunk) => {
           if (done || localErr) return;
           // #9 (held-fd short-write): fs.writeSync возвращает ЧИСЛО реально записанных
@@ -644,15 +651,17 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
         res.on('end', () => {
           if (done || localErr) return;
           activeRes = null;
-          if (cap && written < cap) { nextAttempt(); return; } // короткий ответ → докачиваем
-          // #9: перед публикацией — РЕАЛЬНЫЙ размер файла на диске == хешированному
-          // (written) == ожидаемому (cap, если известен). Закрывает случай, когда
-          // held-fd короче, чем то, что мы «посчитали» записанным/захешированным.
+          // Тело недобрано ОТНОСИТЕЛЬНО Content-Length этого ответа (сервер закрыл раньше)
+          // → докачиваем. registry-cap для этого решения НЕ используем (#12).
+          if (respExpected > 0 && written < respExpected) { nextAttempt(); return; }
+          // #9: перед публикацией — РЕАЛЬНЫЙ размер файла на диске == хешированному (written).
           let fsize = -1;
           try { fsize = fs.fstatSync(fd).size; }
           catch (e) { finish({ ok: false, error: 'fstat перед публикацией не удался: ' + String(e.message || e) }); return; }
           if (fsize !== written) { finish({ ok: false, error: 'размер на диске (' + fsize + ') не совпал с записанным (' + written + ')' }); return; }
-          if (cap && (written !== cap || fsize !== cap)) { finish({ ok: false, error: 'итоговый размер ' + written + ' не равен ожидаемому ' + cap }); return; }
+          // Целостность гарантирует sha (сверяется в fetchRemote); cap — лишь верхняя
+          // граница (превышение отбито в data-хендлере). written<cap при совпавшем sha —
+          // НОРМА (оператор завысил sizeBytes), НЕ провал (#12).
           finish({ ok: true, bytes: written, sha: hash.digest('hex').toLowerCase() });
         });
       });

@@ -241,6 +241,12 @@ h1 {
 @keyframes spin { to { transform: rotate(360deg); } }
 .step.running { border-color: var(--h-cyan); }
 .step.error { border-color: var(--h-red); }
+/* Сетевой обрыв докачки (lite): ОРАНЖЕВЫЙ «проверь интернет», не красный провал. */
+.step.error-net .dot { background: #e8963a; border-color: #e8963a; }
+.step.error-net { border-color: #e8963a; }
+/* Inline-«Повторить» на шаге с оборванной докачкой. */
+.step .step-retry { margin-left: auto; flex: 0 0 auto; padding: 3px 10px; font-size: 11.5px; }
+.step .step-retry:disabled { opacity: .5; cursor: default; }
 
 .log-wrap {
   display: flex; flex-direction: column; min-height: 0;

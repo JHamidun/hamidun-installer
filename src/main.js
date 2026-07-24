@@ -87,6 +87,15 @@ function isOfflineEdition() {
   catch (e) { return false; }
 }
 
+// Лёгкое (стриминг с S3) издание? Маркер edition:'lite' в config.json ставит
+// prep-lite.js на сборке. В lite тяжёлые компоненты НЕ вшиты — main докачивает их
+// из реестра (loadRemoteMaps авто-выводит remote по наличию записи, id==remoteId),
+// кроме bundled-only (uv, P1-A). Офлайн-издание маркера lite НЕ имеет → всё из vendor.
+function isLiteEdition() {
+  try { return readJson('config.json', {}).edition === 'lite'; }
+  catch (e) { return false; }
+}
+
 // Жёсткий стоп ДО установки (только упакованный mac-.app):
 //   • translocation — Gatekeeper исполняет .app из read-only AppTranslocation, sibling-
 //     vendor оторван: заведомо сломанный офлайн-запуск → блок ВСЕГДА (не зависит от
@@ -326,6 +335,14 @@ ipcMain.handle('bootstrap', () => {
     // BUG #11: платформо-гейтнутые компоненты (uv=win32-only) на чужой ОС не отдаём.
     components: componentsForPlatform(),
     packs: readJson('packs.json', { core: [], packs: [] }),
+    // Лёгкое (стриминг с S3) издание? Renderer по этому полю решает, показывать ли
+    // превью размера докачки («Скачается: ~X МБ») и гонять ли preflight probe-remote.
+    edition: isLiteEdition() ? 'lite' : 'offline',
+    // Превью МБ докачки: componentId → ТОЧНЫЙ sizeBytes архива из вшитого реестра
+    // remote-components.json — ровно для тех компонентов, которые ЭТО издание реально
+    // докачивает (loadRemoteMaps: явный remote-флаг ИЛИ lite-авто-remote, кроме
+    // bundled-only). Рукописный sizeHint для суммирования НЕ используется (врёт).
+    remoteSizes: remoteSizesForRenderer(),
     logPath: LOG_PATH,
     freeGB,
     osRelease: os.release(),
@@ -416,15 +433,104 @@ function loadRemoteMaps() {
   const reg = loadRemoteRegistry();
   const ids = new Set();
   for (const e of (reg.components || [])) { if (e && e.remoteId) ids.add(e.remoteId); }
-  const compRemote = new Map(); // component id → remoteId (из components.json)
+  const compRemote = new Map(); // component id → remoteId
   const data = readJson('components.json', { groups: [] });
+  // В lite-издании тяжёлые компоненты НЕ вшиты → авто-выводим remote по наличию
+  // записи в реестре (id==remoteId, так публикует publish-vendor.py), КРОМЕ
+  // bundled-only (uv — P1-A, мал, едет внутри lite). Так components.json остаётся
+  // чистым и в офлайн-, и в lite-издании (remote — не файловый флаг, а edition+реестр).
+  const lite = isLiteEdition();
+  const BUNDLED_ONLY = new Set(['uv']);
   for (const g of (data.groups || [])) {
     for (const c of (g.components || [])) {
-      if (c && c.remote && c.remoteId) compRemote.set(c.id, c.remoteId);
+      if (!c || !c.id) continue;
+      if (c.remote && c.remoteId) {
+        compRemote.set(c.id, c.remoteId);                     // явный флаг (совместимость)
+      } else if (lite && ids.has(c.id) && !BUNDLED_ONLY.has(c.id)) {
+        compRemote.set(c.id, c.id);                           // lite: авто-remote по реестру
+      }
     }
   }
   return { reg, ids, compRemote };
 }
+
+// Превью размера докачки для renderer (bootstrap.remoteSizes): componentId →
+// sizeBytes архива из реестра. Карта следует loadRemoteMaps (какие id remote в
+// ЭТОМ издании) × pickEntry (платформенная запись). В офлайн-издании compRemote
+// без явных remote-флагов пуст → превью пустое (ничего не качаем — не показываем).
+function remoteSizesForRenderer() {
+  const out = {};
+  try {
+    const { reg, compRemote } = loadRemoteMaps();
+    for (const [cid, rid] of compRemote) {
+      const entry = remoteFetch.pickEntry(reg, rid, process.platform);
+      const sz = entry ? Number(entry.sizeBytes) : 0;
+      if (sz > 0) out[cid] = sz;
+    }
+  } catch (e) { /* превью размеров не должно ломать bootstrap */ }
+  return out;
+}
+
+// PREFLIGHT LITE: доступность сервера докачки (S3/CDN) ДО активации «Установить».
+// CSP renderer'а запрещает fetch — сеть пробует ТОЛЬКО main через этот IPC.
+// Renderer аргументов не передаёт; пробуем зеркала ПЕРВОГО платформенного
+// remote-компонента реестра (probeMirror: https-only + анти-SSRF, Range bytes=0-0,
+// абсолютный дедлайн 8с). Любое живое зеркало → online:true (установка пойдёт —
+// fetchRemote сам выберет живое зеркало). Не lite / нечего качать → online:true.
+ipcMain.handle('probe-remote', async () => {
+  try {
+    if (!isLiteEdition()) return { online: true, skipped: true };
+    const { reg, compRemote } = loadRemoteMaps();
+    let entry = null;
+    for (const rid of new Set(compRemote.values())) {
+      entry = remoteFetch.pickEntry(reg, rid, process.platform);
+      if (entry) break;
+    }
+    if (!entry) return { online: true, skipped: true }; // качать нечего — сеть не нужна
+    const urls = (entry.mirrors || []).map((m) => m && m.url).filter((u) => remoteFetch.isFetchableUrl(u));
+    if (!urls.length) return { online: false };
+    const settled = await Promise.allSettled(urls.map((u) => remoteFetch.probeMirror(u, 8000)));
+    const online = settled.some((r) => r.status === 'fulfilled' && r.value && r.value.ok);
+    return { online };
+  } catch (e) {
+    return { online: false, error: String((e && e.message) || e) };
+  }
+});
+
+// vendor-first гейт: id remote-компонента → его ОСНОВНОЙ вшитый артефакт
+// (относительно vendorRoot). Если он есть в bundled vendor — это ОФЛАЙН-издание,
+// докачка НЕ запускается (даже при remote:true в components.json): существующий
+// vendor/ имеет приоритет, сеть не трогается. Путь = та же vendor-раскладка, что
+// публикует tools/publish-vendor.py (zip повторяет её 1:1) → HM_VENDOR=staging.
+const COMPONENT_VENDOR_ARTIFACT = {
+  git: 'apps/git-setup.exe',
+  node: 'apps/node-lts.msi',
+  vscode: 'apps/vscode-setup.exe',
+  cursor: 'apps/cursor-setup.exe',
+  claude: 'npm-cache',
+  uv: 'apps/uv',
+  mascot: 'apps/claude-mascot',
+  nomad: 'nomad-src',
+  config: 'config-pack',
+  'playwright-browsers': 'playwright-browsers',
+  pydeps: 'apps/python-setup.exe',
+  extension: 'apps/claude-code.vsix',
+};
+
+// Дедлайн скачивания = f(sizeBytes): консервативные ~300 КБ/с (медленный РФ-канал)
+// + 30% запас, но не меньше 20 мин. 786МБ npm-cache в дефолтные 20 мин не лезет.
+function downloadDeadlineFor(sizeBytes) {
+  const sz = Number(sizeBytes) || 0;
+  const est = Math.ceil((sz / (300 * 1024)) * 1000 * 1.3);
+  return Math.max(20 * 60 * 1000, est);
+}
+
+// Компоненты, чей install-скрипт имеет СОБСТВЕННЫЙ онлайн-фолбэк (winget / прямая
+// загрузка с github/vendor CDN). В lite при неудачной докачке с S3 НЕ роняем их
+// жёстко — даём скрипту попробовать системный установщик (как в офлайн-издании, где
+// они не declared-remote и скрипт всегда запускается). Компоненты БЕЗ такого фолбэка
+// (nomad/config/pydeps/extension/claude/playwright-browsers) остаются fail-closed.
+const SCRIPT_ONLINE_FALLBACK = new Set(['git', 'node', 'vscode', 'cursor']);
 
 // Куда докачивать (ADMIN-OWNED STAGING):
 //   Windows: НЕ ИСПОЛЬЗУЕТСЯ (P0 Codex круг 6). Предсказуемый %ProgramData%\HamidunSetup\
@@ -500,8 +606,10 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'nodejs'),
       path.join(pf86, 'Git', 'cmd')
     ];
-    const vroot = vendorRoot();
-    if (vroot) dirs.push(path.join(vroot, 'apps'));
+    // ВНИМАНИЕ: НЕ добавляем vendor/apps в elevated PATH — portable-exe распаковывает
+    // vendor в user-writable %TEMP%, medium-малварь того же юзера подсадила бы туда
+    // node.exe/git.exe и получила бы запуск под АДМИНОМ через bare-команду. Vendor-
+    // артефакты потребляются ТОЛЬКО по абсолютному HM_VENDOR-пути в install-скриптах.
     const seen = new Set(); const uniq = [];
     for (const d of dirs) { const key = String(d).toLowerCase(); if (d && !seen.has(key)) { seen.add(key); uniq.push(d); } }
     const trustedPath = uniq.join(';');
@@ -604,10 +712,25 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     try { fs.rmSync(secureCacheDir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
     secureCacheDir = '';
   };
+  let stagingVendor = '';       // задан → HM_VENDOR указывает СЮДА (sha-проверенный staging докачки)
   const { reg, compRemote } = loadRemoteMaps();
   const declared = compRemote.get(id);
+  // vendor-first: если основной артефакт компонента уже вшит в bundled vendor —
+  // это офлайн-издание, докачку НЕ запускаем (защита от remote-флагов).
+  const bundledVendorEarly = vendorRoot();
+  const bundledRel = COMPONENT_VENDOR_ARTIFACT[id];
+  const vendorHasArtifact = !!(bundledRel && fs.existsSync(path.join(bundledVendorEarly, bundledRel)));
+  // Офлайн-издание НИКОГДА не качает (защита от remote-флагов в общей components.json;
+  // и mac-офлайн, где win-артефактов по этим путям нет, не должен идти в докачку —
+  // darwin-записей в реестре пока нет). Lite-издание (offlineEdition=false) без вшитого
+  // артефакта — качает.
+  const useBundled = vendorHasArtifact || isOfflineEdition();
   if (declared && isDryRun) {
     send('[dry-run] Докачка «' + declared + '» пропущена — ничего не скачиваем.');
+  } else if (declared && useBundled) {
+    const why = vendorHasArtifact ? 'уже вшит в установщик' : 'офлайн-издание';
+    send('[локально] «' + declared + '» ' + why + ' — докачка не нужна.');
+    logLine('vendor-first: ' + declared + ' (' + why + ') — download пропущен.');
   } else if (declared) {
     const entry = remoteFetch.pickEntry(reg, declared, process.platform);
     if (!entry) {
@@ -638,6 +761,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         entry,
         cacheDir,
         timeoutMs: 20000,
+        downloadDeadlineMs: downloadDeadlineFor(entry.sizeBytes),
         onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
         // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
         // общий лог естественно, атрибутируется по id, ничего не ломает.
@@ -645,15 +769,35 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       });
     } catch (e) {
       logLine('[ERROR] fetch-remote: ' + String(e));
-      cleanupSecureCache();
-      return { id, ok: false, code: -1, stage: 'fetch', error: String(e.message || e) };
+      fr = { ok: false, error: String(e.message || e) };
     }
     logLine('=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
     if (!fr || !fr.ok) {
       cleanupSecureCache();
-      return { id, ok: false, code: -1, stage: 'fetch', error: (fr && fr.error) || 'докачка не удалась' };
+      const errMsg = (fr && fr.error) || 'докачка не удалась';
+      if (SCRIPT_ONLINE_FALLBACK.has(id)) {
+        // Не роняем жёстко: у скрипта есть свой онлайн-фолбэк (winget/прямая загрузка).
+        // stagingVendor остаётся '' → HM_VENDOR=bundled (артефакта нет) → скрипт уйдёт
+        // в фолбэк. Проваливаемся дальше к spawn (как офлайн-издание).
+        const m = '[докачка] «' + declared + '» не удалась (' + errMsg + ') — пробую системный установщик компонента (winget/прямая загрузка).';
+        send(m); logLine(m);
+      } else {
+        return { id, ok: false, code: -1, stage: 'fetch', error: errMsg };
+      }
+    } else {
+      remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
+      // Второй fail-closed рубеж (Confirm-HmArtifact/verify_artifact) читает
+      // $HM_VENDOR/checksums.json по basename. Staging станет HM_VENDOR → кладём туда
+      // КОПИЮ вшитого checksums.json (покрывает артефакты по basename). Не смогли —
+      // fail-closed: без второго гейта remote-компонент не пускаем.
+      try {
+        fs.copyFileSync(path.join(bundledVendorEarly, 'checksums.json'), path.join(fr.path, 'checksums.json'));
+      } catch (e) {
+        cleanupSecureCache();
+        return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось положить checksums.json в staging (второй гейт целостности не сработает): ' + String(e.message || e) };
+      }
+      stagingVendor = fr.path;   // HM_VENDOR укажет СЮДА (а не в bundled vendor)
     }
-    remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
   }
 
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
@@ -665,7 +809,11 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // remoteCache (для оставшихся/будущих remote-компонентов).
   delete childEnv.HM_REMOTE_CACHE;
   // Paths to assets baked into the installer at build time (offline sources).
-  const vroot = vendorRoot();
+  // Для remote-компонента (докачан в staging) HM_VENDOR указывает на sha-проверенный
+  // staging (структурирован как vendor/), иначе — на bundled vendor. Так все 18
+  // install-скриптов (source-agnostic через HM_VENDOR) + второй checksums-гейт
+  // работают без правок и на офлайн-, и на lite-издании.
+  const vroot = stagingVendor || bundledVendorEarly;
   childEnv.HM_VENDOR = vroot;
   childEnv.HM_BUNDLED_CONFIG = path.join(vroot, 'config-pack');
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
@@ -782,9 +930,27 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // и любой ненулевой код маркер НЕ пишут (иначе фантомная кнопка «Удалить» → снос
       // чужого venv/шимов при деинсталляции). Манифест справочный; grund-truth — детекция.
       if (receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))) {
-        const ver = (meta && meta.version) || '';
+        let ver = (meta && meta.version) || '';
         try {
           const src = remoteCache ? 'remote' : (vendorAvailable() ? 'bundled' : 'online');
+          // FIX #17: аддитивная переустановка config НЕ трогает уже изменённые базовые
+          // файлы (robocopy /XC пропускает существующие), поэтому нельзя продвигать
+          // записанную версию до currentVersion — иначе updateAvailable погаснет, а
+          // базовый скилл со старым багом останется, и пользователь решит, что обновился.
+          // Когда запуск был АДДИТИВНЫМ (HM_ADDITIVE='1') И обновление реально было
+          // доступно (прежняя записанная версия строго старше currentVersion) — держим
+          // прежнюю installedVersion. Тогда isOutdated() остаётся true и UI продолжает
+          // предлагать «Переустановить начисто» (repair/clean реально применит обновление).
+          if (id === 'config' && childEnv.HM_ADDITIVE === '1') {
+            const prev = manifest.getEntry(os.homedir(), id);
+            const prevVer = prev ? (prev.version || '') : '';
+            if (prevVer && manifest.isOutdated(prevVer, ver)) {
+              logLine('[manifest] config additive + доступно обновление (' + prevVer +
+                ' → ' + ver + '): версию НЕ продвигаем, оставляем ' + prevVer +
+                ' — updateAvailable сохраняется, нужна чистая переустановка (repair).');
+              ver = prevVer;
+            }
+          }
           manifest.recordInstall(os.homedir(), id, ver, src);
         } catch (e) { logLine('[manifest] запись версии не удалась: ' + String(e)); }
         // Installed-маркер (id/version/installedAt) — только при успехе, не в dry-run,
@@ -805,7 +971,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   });
 });
 
-ipcMain.handle('open-external', (_e, url) => { if (url) shell.openExternal(url); return true; });
+ipcMain.handle('open-external', (_e, url) => {
+  // Renderer НЕ доверенный: без allowlist схем file:/UNC(file://host)/ms-msdt:/
+  // search-ms:/HKCU-зарегистрированные хендлеры дали бы запуск произвольного через
+  // elevated shell.openExternal. Пропускаем только веб/почту/telegram (нужны кнопкам).
+  try {
+    const u = new URL(String(url));
+    if (['http:', 'https:', 'mailto:', 'tg:'].includes(u.protocol)) {
+      shell.openExternal(u.href);
+      return true;
+    }
+  } catch (e) { /* невалидный url */ }
+  return false;
+});
 
 // ---- анонимная телеметрия установки (opt-out чекбоксом на экране выбора) ----
 // БЕЗ uid и ПД: только событие, платформа, исход, id упавших компонентов и
@@ -851,8 +1029,17 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
 ipcMain.handle('open-path', async (_e, p) => {
   if (!p) return { ok: false, error: 'empty-path' };
+  // Renderer НЕ доверенный: без confine он мог бы попросить открыть \\attacker\share\x.exe
+  // или подсаженный в user-writable путь → shell.openPath запустит его под АДМИНОМ.
+  // Разрешаем ТОЛЬКО доверенные цели: install.log, памятку «Что дальше» на столе,
+  // файлы внутри ресурсов установщика (вшитый START-HERE.html).
   try {
-    const err = await shell.openPath(p);
+    const rp = path.resolve(String(p));
+    const root = path.resolve(resourceRoot());
+    const desktopMemo = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    const allowed = rp === path.resolve(LOG_PATH) || rp === desktopMemo || rp.startsWith(root + path.sep);
+    if (!allowed) return { ok: false, error: 'bad-path' };
+    const err = await shell.openPath(rp);
     return { ok: !err, error: err || '' };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -1247,7 +1434,6 @@ function freshWindowsPath() {
 ipcMain.handle('open-claude-terminal', async () => {
   try {
     if (IS_WIN) {
-      const freshPath = freshWindowsPath();
       const startDir = path.join(os.homedir(), 'HamidunStart');
       try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
       // #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся ПЕРВАЯ сессия
@@ -1281,14 +1467,11 @@ ipcMain.handle('open-claude-terminal', async () => {
         spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
         return true;
       }
-      // Фолбэк (explorer недоступен): прежний путь, но хотя бы с фиксированным cwd.
-      const cmdExe = remoteFetch.sysBin('cmd.exe');
-      if (!cmdExe) return false;
-      const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
-      const child = spawn(cmdExe, ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
-        { env, cwd: startDir, detached: true, stdio: 'ignore', windowsHide: true });
-      child.unref();
-      return true;
+      // Фолбэк (explorer недоступен, крайне редко): НЕ запускаем claude под elevated-
+      // токеном с user-writable PATH (freshPath несёт ~/.local/bin, %APPDATA%\npm →
+      // claude.cmd юзера выполнился бы под АДМИНОМ). Возвращаем false → renderer покажет
+      // ручную инструкцию «открой обычный терминал и набери claude».
+      return false;
     }
     if (IS_MAC) {
       // #3: НЕ fire-and-forget с вечным true. На hardened-runtime без Apple-Events-
@@ -1363,6 +1546,50 @@ function winPF() { return process.env.ProgramFiles || 'C:\\Program Files'; }
 function winPF86() { return process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'; }
 function winLocalAppData() { return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'); }
 
+// БЕЗОПАСНОСТЬ (детекция под ELEVATED-токеном): путь ведёт в admin-owned корень
+// (Program Files / System32 / Windows)? Medium-юзер туда писать не может → запускать
+// бинарь оттуда для probe-версии безопасно. Всё прочее (LOCALAPPDATA/APPDATA/home/
+// WindowsApps) — user-writable: medium-малварь того же юзера подсадила бы туда fake
+// (git.exe/node.exe/python.exe/uv.exe) на PATH и получила бы RCE под АДМИНОМ при
+// авто-детекции на старте. Такие бинари НЕ запускаем (детект по существованию цел).
+function winPathAdminOwned(p) {
+  try {
+    const rp = path.resolve(String(p)).toLowerCase();
+    const roots = [winPF(), winPF86(), process.env.SystemRoot || process.env.windir || 'C:\\Windows']
+      .map((r) => path.resolve(String(r)).toLowerCase().replace(/[\\/]+$/, '') + path.sep);
+    return roots.some((r) => rp.startsWith(r));
+  } catch (e) { return false; }
+}
+
+// Владелец ФАЙЛА — admin-принципал (SYSTEM / Administrators / TrustedInstaller)?
+// Тогда medium-малварь его не создавала/подменяла (её файлы user-owned) → безопасно
+// запускать под elevated-токеном ГДЕ БЫ он ни лежал (в т.ч. admin-установленный инструмент
+// в нестандартной локации вне Program Files — иначе его версия не детектилась бы). Дороже
+// (spawn powershell Get-Acl), поэтому зовём ТОЛЬКО когда путь НЕ в очевидном admin-корне.
+function winFileAdminOwned(p) {
+  try {
+    const ps = remoteFetch.winPowershellPath();
+    if (!ps) return false;
+    const script =
+      "$ErrorActionPreference='Stop';" +
+      // SYSTEM, Administrators, TrustedInstaller — принципалы, писать под которыми medium-юзер не может.
+      "$allow=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464');" +
+      "$o=(Get-Acl -LiteralPath $env:HM_CHK_FILE).GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
+      "if($allow -contains $o){Write-Output 'ADMIN'}else{Write-Output 'USER'}";
+    const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 8000, env: Object.assign({}, process.env, { HM_CHK_FILE: String(p) }) });
+    return !r.error && r.status === 0 && /(^|\n)ADMIN$/.test(String(r.stdout || '').trim());
+  } catch (e) { return false; }
+}
+
+// Безопасно ли запускать этот бинарь под elevated-токеном при детекции: путь в admin-owned
+// корне (быстро, без subprocess) ИЛИ сам файл admin-owned (точная проверка для нестандартных
+// admin-локаций). Иначе — не запускаем (user-owned fake = RCE-вектор), детект по существованию.
+function winSafeToExec(bin) {
+  if (!IS_WIN) return true;
+  return winPathAdminOwned(bin) || winFileAdminOwned(bin);
+}
+
 // Ищем исполняемый файл: известные абсолютные каталоги, затем свежий PATH (перечитан
 // из реестра на Windows) / POSIX-каталоги. Возвращает путь или ''.
 function resolveExecutable(names, extraDirs) {
@@ -1395,6 +1622,10 @@ function resolveExecutable(names, extraDirs) {
 // Запускает bin с args и достаёт версию regex'ом (1-я группа). Ошибка/таймаут → ''.
 function probeVersion(bin, args, re) {
   if (!bin) return '';
+  // Под elevated-токеном НЕ запускаем бинарь, который мог подменить medium-юзер (RCE):
+  // разрешаем admin-owned (путь в Program Files/System32 ИЛИ владелец файла = admin).
+  // Прочее → пустая версия (существование детектится отдельно; переустановка безопасна).
+  if (!winSafeToExec(bin)) return '';
   try {
     const out = execFileSync(bin, args, {
       encoding: 'utf8', windowsHide: true, timeout: 6000, stdio: ['ignore', 'pipe', 'ignore']
@@ -1556,7 +1787,11 @@ function detectComponents() {
     // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
     // пакеты через framework/uv-python без окон Apple).
     const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
-    if (py && !pyShim) {
+    // Windows: НЕ запускаем python под elevated-токеном, если он мог быть подменён medium-
+    // юзером (тот же RCE-вектор, что probeVersion; admin-owned — можно). Ложно-негатив
+    // безвреден (pydeps.ps1 идемпотентен).
+    const pyExecSafe = py && !pyShim && winSafeToExec(py);
+    if (pyExecSafe) {
       try {
         execFileSync(py, ['-c', 'import PIL, requests'],
           { windowsHide: true, timeout: 6000, stdio: 'ignore' });

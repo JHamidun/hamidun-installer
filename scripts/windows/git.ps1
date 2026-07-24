@@ -1,6 +1,7 @@
 ﻿# Git — Windows
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # New-HmSecureStagingDir (Admins-only secure-cache для онлайн-фолбэка)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -19,7 +20,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 
@@ -65,21 +65,46 @@ if ($local -and (Test-Path $local)) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: winget install -e --id Git.Git --silent" }
     else { Write-Host "Устанавливаю Git через winget..."; winget install -e --id Git.Git --silent --accept-package-agreements --accept-source-agreements }
 } else {
-    if ($DRY) { Write-Host "  [dry-run] WOULD: скачать Git for Windows с github.com и запустить /VERYSILENT" }
+    if ($DRY) { Write-Host "  [dry-run] WOULD: скачать Git for Windows с github.com в secure-cache, проверить подпись и запустить /VERYSILENT" }
     else {
         Write-Host "winget не найден — качаю Git for Windows напрямую..."
         # СЕТЬ: дефолтный TimeoutSec=0 (бесконечно) недопустим, а прогресс-бар в PS5.1 в разы замедляет скачивание.
+        # SECURITY (#4): качаем НЕ в user-writable %TEMP% (medium-малварь того же юзера подменила бы exe
+        # между скачиванием и Start-Process → RCE под админом), а в ADMIN-OWNED secure-cache
+        # (New-HmSecureStagingDir -Elevated $true). Перед elevated-запуском — гейт Authenticode (fail-closed).
         $ProgressPreference = 'SilentlyContinue'
+        $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+        $icacls   = Join-Path (Join-Path $sysRoot 'System32') 'icacls.exe'
+        $progData = Join-Path ([System.IO.Path]::GetPathRoot($sysRoot)) 'ProgramData'
+        $cache = $null
+        if ((Test-Path -LiteralPath $icacls) -and (Test-Path -LiteralPath $progData)) {
+            $cache = New-HmSecureStagingDir -ProgramData $progData -Icacls $icacls -Elevated $true
+        }
+        if (-not ($cache -and (Test-Path -LiteralPath $cache))) {
+            Write-Host "  Не удалось создать защищённый кэш для скачивания — прерываю онлайн-фолбэк Git."
+            exit 1
+        }
+        $exe = $null
         try {
             $rel = Invoke-RestMethod "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ 'User-Agent' = 'hamidun-setup' } -UseBasicParsing -TimeoutSec 60
             $asset = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Object -First 1
-            $exe = Join-Path $env:TEMP $asset.name
+            $exe = Join-Path $cache $asset.name
             Invoke-WebRequest $asset.browser_download_url -OutFile $exe -UseBasicParsing -TimeoutSec 600
         } catch {
+            try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
-        Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -Wait
+        # Гейт подписи ДО запуска (fail-closed): elevated-запуск неподтверждённого exe недопустим даже из secure-cache.
+        $sig = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AuthenticodeSignature -LiteralPath $exe } else { $null }
+        if ($sig -and $sig.Status -eq 'Valid') {
+            Start-Process -FilePath $exe -ArgumentList '/VERYSILENT','/NORESTART','/SP-','/SUPPRESSMSGBOXES' -WorkingDirectory $cache -Wait
+        } else {
+            $st = if ($sig) { $sig.Status } else { 'нет подписи' }
+            Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Git не подтвердилась ($st) — НЕ запускаю (fail-closed)."
+        }
+        # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
+        try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
 }
 

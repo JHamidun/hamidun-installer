@@ -1,5 +1,6 @@
 ﻿# AI-мост (Hamidun Bridge) — Windows: ставим агент + автозапуск (трей)
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -18,7 +19,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
@@ -59,14 +59,33 @@ $pyw = Join-Path (Split-Path $py) 'pythonw.exe'
 New-Item -ItemType Directory -Force $dst | Out-Null
 Copy-Item -Force $agentSrc (Join-Path $dst 'bridge_agent.py')
 $wheels = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'pywheels' } else { '' }
-# stderr от pip — это не фатал (нативная тулза), поэтому Out-Null для потока,
-# но статус берём из $LASTEXITCODE + честной проверки импорта модулей.
-if ($wheels -and (Test-Path $wheels)) { & $py -m pip install --user --no-index --find-links $wheels pystray pillow 2>&1 | Out-Null }
-else { & $py -m pip install --user pystray pillow 2>&1 | Out-Null }
-$pipExit = $LASTEXITCODE
-& $py -c "import pystray, PIL" 2>&1 | Out-Null
-$trayOk = ($LASTEXITCODE -eq 0)
-if (-not $trayOk) {
+# SECURITY (#6): $py/$pyw лежат в user-профиле — они USER-WRITABLE. Запуск '& $py' в ЭТОМ
+# скрипте (установщик requireAdministrator -> high integrity) исполнил бы user-writable python
+# под АДМИНОМ: medium-малварь ТОГО ЖЕ юзера подменяет python -> RCE под админом. Плюс
+# 'pip install --user' под админ-токеном ставит в ЧУЖОЙ (админский) профиль, а не юзера.
+# Поэтому pip install И import-check гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevated, medium integrity,
+# schtasks). FAIL-CLOSED: примитив недоступен ($null) или отработал НЕ на medium (Gate!='medium')
+# -> трей-пакеты ПРОПУСКАЕМ и предупреждаем; НЕ откатываемся на '& $py' под high integrity.
+$pipArgs = if ($wheels -and (Test-Path $wheels)) {
+    @('-m', 'pip', 'install', '--user', '--no-index', '--find-links', $wheels, 'pystray', 'pillow')
+} else {
+    @('-m', 'pip', 'install', '--user', 'pystray', 'pillow')
+}
+$trayOk   = $false
+$pipExit  = -1
+$deElevOk = $false
+$pipRes = Invoke-HmDeElevated $py $pipArgs
+if ($null -ne $pipRes -and $pipRes.Gate -eq 'medium') {
+    $deElevOk = $true
+    $pipExit  = $pipRes.Code
+    # import-check ТОЖЕ де-элевированно (запуск user-writable python под админом = тот же вектор).
+    $impRes = Invoke-HmDeElevated $py @('-c', 'import pystray, PIL')
+    $trayOk = ($null -ne $impRes -and $impRes.Gate -eq 'medium' -and $impRes.Code -eq 0)
+}
+if (-not $deElevOk) {
+    Write-Host "ВНИМАНИЕ: безопасная (де-элевированная) установка недоступна — пропускаю пакеты трея (pystray/pillow), НЕ ставлю их под правами администратора."
+    Write-Host "Мост будет работать в фоне; значок в трее появится после ручной установки от своего пользователя: py -m pip install --user pystray pillow"
+} elseif (-not $trayOk) {
     Write-Host "ВНИМАНИЕ: pystray/pillow не установились (pip exit=$pipExit) — значок в трее будет недоступен."
     Write-Host "Мост сможет работать в фоне, но переключать его из трея не получится, пока не поставите пакеты."
 }
@@ -101,7 +120,21 @@ if (-not (Test-Path $cfgPath)) {
 $run = if (Test-Path $pyw) { $pyw } else { $py }
 $agentPath = Join-Path $dst 'bridge_agent.py'
 New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
-Start-Process -FilePath $run -ArgumentList "`"$agentPath`"" -WindowStyle Hidden
+# SECURITY (#6): запуск трея сейчас — НЕ Start-Process под ELEVATED (это стартовало бы
+# user-writable pythonw/python под АДМИНОМ; medium-малварь юзера подменит бинарь -> RCE).
+# Запускаем ДЕ-ЭЛЕВИРОВАННО через explorer.exe (паттерн mascot.ps1): explorer стартует .cmd-
+# лаунчер токеном ОБОЛОЧКИ (medium integrity), не под админом. Трей — long-running процесс,
+# поэтому НЕ Invoke-HmDeElevated (он блокирует и удаляет одноразовую задачу -> убил бы трей).
+# Лаунчер задаёт фиксированный cwd; UTF-8 + `chcp 65001` — на случай не-ASCII пути профиля.
+# Если запуск сейчас не удастся — трей поднимется при следующем входе в Windows через HKCU\Run.
+$launchCmd = Join-Path $dst 'launch-bridge.cmd'
+$cmdBody = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$dst`"`r`nstart `"`" `"$run`" `"$agentPath`"`r`n"
+try {
+    [System.IO.File]::WriteAllText($launchCmd, $cmdBody, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$launchCmd`"" -ErrorAction Stop
+} catch {
+    Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."
+}
 
 # P0-4: квитанция владения — ТОЧНЫЕ пути/реестр созданных артефактов (main соберёт в receipt).
 Write-Host "HM-RECEIPT path $dst"

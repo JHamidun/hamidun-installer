@@ -18,7 +18,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
@@ -77,15 +76,14 @@ if ($haveBundled) {
     $url    = if ($env:HM_CONFIG_REPO_URL) { $env:HM_CONFIG_REPO_URL } else { 'https://github.com/JHamidun/claude-code-config-pack' }
     $branch = if ($env:HM_CONFIG_REPO_BRANCH) { $env:HM_CONFIG_REPO_BRANCH } else { 'main' }
     $clone  = Join-Path $env:USERPROFILE '.hamidun-setup\config-repo'
-    if (Test-Path (Join-Path $clone '.git')) {
-        Write-Host "Обновляю конфиг с GitHub..."
-        git -C $clone fetch --depth 1 origin $branch 2>&1 | Out-Null
-        git -C $clone reset --hard "origin/$branch" 2>&1 | Out-Null
-    } else {
-        Write-Host "Скачиваю конфиг с GitHub ($url)..."
-        New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null
-        git clone --depth 1 -b $branch $url $clone
-    }
+    # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог пред-
+    # создать $clone\.git с core.fsmonitor/hooksPath = payload → code-exec под нашим git.
+    # Всегда СВЕЖИЙ clone + hardening-флаги (командные -c перебивают repo-local config).
+    $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false')
+    if (Test-Path $clone) { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }
+    Write-Host "Скачиваю конфиг с GitHub ($url)..."
+    New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null
+    git @gitHard clone --depth 1 -b $branch $url $clone
 }
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.ps1
@@ -109,7 +107,7 @@ if (Test-Path $claudeHome) {
     try {
         # M7: robocopy (не Copy-Item -Recurse) — PS 5.1 не longPathAware; /R:1 /W:1 — не
         # зависать на залоченном файле (дефолт robocopy — 1M ретраев по 30с).
-        robocopy $claudeHome $backupDir /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        robocopy $claudeHome $backupDir /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XF '.credentials.master.env' '.credentials.json' 'tg_session.session*' | Out-Null
         if ($LASTEXITCODE -ge 8) { $backupOk = $false }
         $global:LASTEXITCODE = 0
         if (-not (Test-Path $backupDir)) { $backupOk = $false }

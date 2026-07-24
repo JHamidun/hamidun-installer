@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /* Pre-flight tests — pure logic + data integrity. Run: node test/run-tests.js */
 const assert = require('assert');
 const fs = require('fs');
@@ -238,6 +238,19 @@ ok('offline: uv вшит — НЕ remote-компонент (нет remote:true/
   // Спящий онлайн-фолбэк в реестре не мешает: пока uv не объявлен remote, main его не читает.
   const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
   assert(rf.pickEntry(remoteReg, 'uv', 'win32'), 'запись uv/win32 в реестре осталась (спящий фолбэк)');
+});
+// Lite-издание: main авто-выводит remote по реестру (id==remoteId), кроме bundled-only.
+// Проверяем ДАННЫЕ, на которые опирается loadRemoteMaps (isLiteEdition-ветка): тяжёлые
+// компоненты имеют запись в реестре, uv остаётся вшитым, безартефактные — не remote.
+ok('lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only', () => {
+  const regIds = new Set((remoteReg.components || []).map((e) => e.remoteId));
+  ['git', 'node', 'vscode', 'cursor', 'claude', 'extension', 'config', 'pydeps', 'nomad', 'mascot'].forEach((id) => {
+    assert(byId[id], `компонент ${id} существует`);
+    assert(regIds.has(id), `lite: ${id} обязан иметь запись в реестре (id==remoteId) для авто-докачки`);
+  });
+  ['course', 'bridge', 'verify', 'claude-desktop', 'chatgpt-desktop'].forEach((id) => {
+    if (byId[id]) assert(!regIds.has(id), `${id} без vendor-артефакта не должен иметь remote-запись в реестре`);
+  });
 });
 
 console.log('== Round-3 fixes: winSystemRoot (#6), openStream redirect (#8), install-env (#4) ==');
@@ -3688,12 +3701,11 @@ ok('P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи insta
 ok('P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки', () => {
   const cps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
   const iDryPs = cps.indexOf('if ($DRY) {');
-  assert(iDryPs !== -1 && iDryPs < cps.indexOf('git clone'), 'config.ps1: dry-run раньше git clone');
-  assert(iDryPs < cps.indexOf('git -C $clone fetch'), 'config.ps1: dry-run раньше git fetch/reset');
+  assert(iDryPs !== -1 && iDryPs < cps.indexOf('clone --depth 1'), 'config.ps1: dry-run раньше git clone');
   assert(iDryPs < cps.indexOf('robocopy $claudeHome $backupDir'), 'config.ps1: dry-run раньше копии-бэкапа');
   const csh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
   const iDrySh = csh.indexOf('if [ -n "${HM_DRY_RUN:-}" ]; then');
-  assert(iDrySh !== -1 && iDrySh < csh.indexOf('git clone'), 'config.sh: dry-run раньше git clone');
+  assert(iDrySh !== -1 && iDrySh < csh.indexOf('clone --depth 1'), 'config.sh: dry-run раньше git clone');
   assert(iDrySh < csh.indexOf('cp -R "$CLAUDE_HOME" "$BACKUP_DIR"'), 'config.sh: dry-run раньше копии-бэкапа');
   const ups = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'uv.ps1'), 'utf8');
   const iUpsDry = ups.indexOf('if ($DRY) {');

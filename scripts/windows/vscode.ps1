@@ -17,7 +17,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin')
     }
     if ($env:LOCALAPPDATA) { $parts += (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path

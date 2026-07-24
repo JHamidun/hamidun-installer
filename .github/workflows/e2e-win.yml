@@ -1,0 +1,85 @@
+name: E2E — чистая Windows (GUI + реальная докачка)
+
+# Прогоняет НАСТОЯЩИЙ GUI установщика на ДЕВСТВЕННОЙ Windows-машине (runner
+# windows-latest: чистая ОС, ничего из нашего стека не установлено, процесс работает
+# с правами администратора — значит Admins-only staging докачки создаётся штатно).
+#
+# Два сценария:
+#   ok      — реальная докачка компонента с живых S3-зеркал → установка → проверка
+#             результата в изолированном профиле.
+#   netfail — зеркала подменены на мёртвый хост: UI обязан ЧЕСТНО показать обрыв
+#             сети и кнопку «Повторить», а не выдать провал за успех.
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Компонент для установки в E2E (config | git | node)'
+        required: false
+        default: 'config'
+  push:
+    branches: ['e2e/**']
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Проверка прав (E2E требует элевации для staging докачки)
+        shell: pwsh
+        run: |
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $p  = New-Object Security.Principal.WindowsPrincipal($id)
+          Write-Host "Пользователь: $($id.Name)"
+          Write-Host "IsAdmin: $($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+          if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Host "ВНИМАНИЕ: runner НЕ элевейтед — докачка упрётся в fail-closed staging."
+          }
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          Copy-Item test/fixtures/checksums-e2e.json vendor/checksums.json -Force
+          $cfg = Get-Content config.json -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName edition -NotePropertyValue 'lite' -Force
+          $cfg | Add-Member -NotePropertyName offlineEdition -NotePropertyValue $false -Force
+          ($cfg | ConvertTo-Json -Depth 12) | Set-Content config.json -Encoding UTF8
+          Write-Host "config.json: edition=lite, offlineEdition=false; vendor/checksums.json на месте"
+
+      - name: Юнит-тесты (базлайн)
+        run: npm test
+
+      - name: E2E — обрыв сети (мёртвые зеркала → error-net + «Повторить»)
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_TIMEOUT: '420000'
+        run: node test/e2e-gui.js netfail
+
+      - name: Восстановить реестр после netfail
+        shell: pwsh
+        run: git checkout -- remote-components.json
+
+      - name: E2E — реальная докачка с S3 и установка
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js ok
+
+      - name: Артефакты (скриншоты GUI)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: release/e2e-*.png
+          if-no-files-found: ignore

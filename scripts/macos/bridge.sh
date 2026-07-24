@@ -110,6 +110,12 @@ for RC in "$HOME/.zshrc" "$HOME/.bash_profile"; do
   if [ -f "$RC" ] && grep -qF "$BRIDGE_RC_MARK" "$RC"; then
     : # уже подключено — не дублируем
   else
+    # Свежесозданный ~/.bash_profile маскирует существующий ~/.profile (bash login
+    # читает только ПЕРВЫЙ) → сначала подсеваем source ~/.profile, чтобы не потерять
+    # PATH/env пользователя.
+    if [ ! -e "$RC" ] && [ "$RC" = "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
+      printf '[ -f "$HOME/.profile" ] && . "$HOME/.profile"\n' >> "$RC"
+    fi
     printf '\n%s\n' "$BRIDGE_RC_LINE" >> "$RC"
   fi
   # P0-4: наша строка в этом rc-файле (по маркеру) — фиксируем владение в квитанции.

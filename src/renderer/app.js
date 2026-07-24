@@ -19,6 +19,11 @@ let STATE = {
   repair: {},        // id -> bool: переустановить начисто (форс — отключает аддитивность)
   repairConfirmed: {}, // id -> bool: перезапись ~/.claude ОТДЕЛЬНО подтверждена диалогом (P0-1)
   detectDone: false,   // P0-1: кнопка установки выключена, пока детекция не завершилась
+  edition: 'offline',  // 'lite' = стриминг-издание (докачка с S3); из bootstrap (main решает)
+  remoteSizes: {},     // componentId -> ТОЧНЫЙ sizeBytes докачки (реестр; НЕ рукописный sizeHint)
+  netProbeDone: true,  // lite: false, пока main пробует сервер докачки (гейт «Установить»)
+  netOnline: true,     // lite: false = сервер докачки недоступен (жёлтый баннер + «Проверить снова»)
+  runActive: false,    // идёт прогон установки (гейт inline-кнопок «Повторить» на шагах)
 };
 
 // Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
@@ -56,6 +61,11 @@ async function init() {
   STATE.vendorAvailable = boot.vendorAvailable !== false;
   STATE.vendorBlock = boot.vendorBlock || { blocked: false };
   STATE.vendorBlocked = !!STATE.vendorBlock.blocked;
+  // Лёгкое (стриминг) издание + превью размеров докачки — авторитетно из main.
+  STATE.edition = boot.edition === 'lite' ? 'lite' : 'offline';
+  STATE.remoteSizes = boot.remoteSizes || {};
+  // PREFLIGHT LITE: до завершения probe-remote «Установить» не активируем.
+  STATE.netProbeDone = STATE.edition !== 'lite';
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -120,6 +130,56 @@ async function init() {
   setupMascots();
   // Детекция состояния — best-effort, после первичного рендера (не блокирует UI).
   detectAndApply();
+  // PREFLIGHT LITE: пробуем сервер докачки (через main-IPC — CSP запрещает сеть
+  // renderer'у). Нет сети → жёлтый баннер + «Проверить снова» (мягче vendorBlock).
+  runNetProbe();
+}
+
+// PREFLIGHT LITE: доступность сервера докачки ДО активации «Установить». Сеть
+// пробует ТОЛЬКО main (probe-remote); сбой самого IPC — fail-open (не запираем
+// установку по ошибке пробы), честный offline от main → баннер runNetProbe→
+// renderLiteNetBanner. В офлайн-издании — no-op (качать нечего).
+async function runNetProbe() {
+  if (STATE.edition !== 'lite' || !window.installer.probeRemote) {
+    STATE.netProbeDone = true;
+    refreshDerived();
+    return;
+  }
+  STATE.netProbeDone = false;
+  refreshDerived();
+  let online = true;
+  try {
+    const r = await window.installer.probeRemote();
+    online = !(r && r.online === false);
+  } catch (e) { online = true; } // fail-open: ошибка пробы ≠ «сети нет»
+  STATE.netOnline = online;
+  STATE.netProbeDone = true;
+  renderLiteNetBanner();
+  refreshDerived();
+}
+
+// Жёлтый баннер лёгкой версии: сервер докачки недоступен. НЕ жёсткий стоп (в
+// отличие от mac-vendorBlock): установку не запираем, но честно предупреждаем и
+// даём «Проверить снова». Перерисовывается на каждый вызов (сброс кнопки).
+function renderLiteNetBanner() {
+  const existing = document.getElementById('lite-net-warn');
+  if (existing) existing.remove();
+  if (STATE.netOnline) return;
+  const el = document.createElement('div');
+  el.id = 'lite-net-warn';
+  el.className = 'preflight-warn';
+  el.innerHTML = '⚠️ Лёгкой версии нужен интернет для скачивания компонентов, а сервер загрузки ' +
+    'сейчас недоступен. Проверь подключение (Wi-Fi/кабель, VPN может мешать) и нажми ' +
+    '«Проверить снова» — иначе установка оборвётся на докачке. ' +
+    '<button type="button" id="lite-net-retry" class="btn-sm">Проверить снова</button>';
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+  const rb = document.getElementById('lite-net-retry');
+  if (rb) rb.addEventListener('click', () => {
+    rb.disabled = true;
+    rb.textContent = 'Проверяю…';
+    runNetProbe();
+  });
 }
 
 // Определяем, что УЖЕ установлено (грунд-труть из main), помечаем «уже установлено» и
@@ -598,21 +658,34 @@ function openModal(opts) {
 // components.json (имя + описание + примерный размер sizeHint). Служебные (hidden,
 // напр. verify) не показываем. Ничего не выдумываем — только данные конфига.
 function showWhatInstalls() {
+  const lite = STATE.edition === 'lite';
+  const sizes = STATE.remoteSizes || {};
   const rows = [];
   (STATE.groups || []).forEach((g) => {
     (g.components || []).forEach((c) => {
       if (!c || c.hidden) return;
-      const size = c.sizeHint ? ' <span class="wi-size">' + escapeHtml(c.sizeHint) + '</span>' : '';
+      // Лёгкое издание: для remote-компонентов показываем ТОЧНЫЙ размер докачки из
+      // реестра (рукописный sizeHint тут про офлайн-сборку и врал бы).
+      const sizeText = (lite && sizes[c.id] != null)
+        ? '~' + fmtBytesRu(sizes[c.id]) + ' · скачается'
+        : (c.sizeHint || '');
+      const size = sizeText ? ' <span class="wi-size">' + escapeHtml(sizeText) + '</span>' : '';
       rows.push(
         '<li><div class="wi-name">' + escapeHtml(c.name) + size + '</div>' +
         '<div class="wi-desc">' + escapeHtml(c.desc || '') + '</div></li>'
       );
     });
   });
+  // Лёгкое издание: суммарное превью докачки по ВЫБРАННЫМ компонентам (точные байты).
+  const dlBytes = downloadTotalBytes();
+  const dlLead = dlBytes > 0
+    ? '<p class="wi-lead"><b>Скачается: ~' + escapeHtml(fmtBytesRu(dlBytes)) + '</b> — лёгкая ' +
+      'версия докачивает выбранные компоненты с сервера во время установки (с проверкой целостности).</p>'
+    : '';
   const body =
     '<p class="wi-lead">Ставится только то, что ты выбрал. Основное — офлайн из самого ' +
     'установщика; компоненты с пометкой «онлайн» докачиваются с официальных источников ' +
-    'с проверкой целостности.</p>' +
+    'с проверкой целостности.</p>' + dlLead +
     '<ul class="wi-list">' + rows.join('') + '</ul>';
   openModal({
     id: 'what-installs',
@@ -679,6 +752,24 @@ function renderProgressBotBanner() {
   if (btn) btn.addEventListener('click', () => window.installer.openExternal(btn.dataset.ext));
 }
 
+// Байты → человекочитаемо: до ~1 ГБ — «N МБ», дальше — «N,N ГБ». Суммируются ТОЛЬКО
+// точные sizeBytes из реестра докачки (рукописный sizeHint для математики не годится).
+function fmtBytesRu(bytes) {
+  const mb = Number(bytes || 0) / (1024 * 1024);
+  if (mb >= 1000) {
+    return String(Math.round((mb / 1024) * 10) / 10).replace('.', ',') + ' ГБ';
+  }
+  return String(Math.max(1, Math.round(mb))) + ' МБ';
+}
+
+// Сумма ТОЧНЫХ размеров докачки по ВЫБРАННЫМ remote-компонентам (превью «Скачается:
+// ~X»). Только lite-издание: в офлайн всё вшито — качать нечего, превью не показываем.
+function downloadTotalBytes() {
+  if (STATE.edition !== 'lite') return 0;
+  const sizes = STATE.remoteSizes || {};
+  return selectedIds().reduce((sum, id) => sum + (Number(sizes[id]) || 0), 0);
+}
+
 function refreshDerived() {
   // Скрытые компоненты не считаем в сводке — пользователь их не выбирал.
   const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
@@ -692,12 +783,20 @@ function refreshDerived() {
     if (STATE.selectedPacks[p.id]) nSkills += packSelectedCount(p);
   });
   const skillsPart = STATE.selected['config'] ? ` · тематических скиллов: ${nSkills}` : '';
-  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}`;
+  // Лёгкое издание: честное превью докачки по ТОЧНЫМ sizeBytes выбранных remote-
+  // компонентов (реестр). В офлайн-издании dlBytes=0 — ничего не показываем.
+  const dlBytes = downloadTotalBytes();
+  const dlPart = dlBytes > 0 ? ` · Скачается: ~${fmtBytesRu(dlBytes)}` : '';
+  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}${dlPart}`;
   // P0-1: кнопка выключена, пока детекция установленного не завершилась — чтобы
   // установка не стартовала с недодетектированным состоянием (режим/галки).
   // App-Translocation / оторванный vendor (STATE.vendorBlocked) — жёсткий стоп:
   // «Установить» не даём, пока офлайн-vendor неполон (main решает авторитетно).
-  $('#btn-install').disabled = n === 0 || !STATE.detectDone || !!STATE.vendorBlocked;
+  // Лёгкое издание: ждём и preflight probe-remote (netProbeDone; сам результат
+  // НЕ запирает кнопку — offline даёт мягкий баннер, не жёсткий стоп).
+  const btnInstall = $('#btn-install');
+  btnInstall.disabled = n === 0 || !STATE.detectDone || !STATE.netProbeDone || !!STATE.vendorBlocked;
+  btnInstall.textContent = dlBytes > 0 ? `Установить · скачается ~${fmtBytesRu(dlBytes)}` : 'Установить';
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
@@ -796,6 +895,7 @@ function firstBrokenDep(id, badSet) {
 }
 
 async function runComponents(ids, env) {
+  STATE.runActive = true; // inline-«Повторить» на шагах заблокированы до конца прогона
   const off = window.installer.onLog(({ line }) => {
     // Строки "CHECK ok <ярлык>" / "CHECK fail <ярлык>" от verify-скрипта не
     // сыпем в общий лог — собираем для чеклиста на финальном экране.
@@ -806,6 +906,9 @@ async function runComponents(ids, env) {
     appendLog(line);
   });
   const failed = [];
+  // Подмножество failed: финальный сбой = обрыв ДОКАЧКИ (stage 'fetch', после
+  // авто-ретрая). Финиш говорит про них «проверь интернет», не generic-ошибку.
+  const fetchFailed = [];
   // Два РАЗНЫХ вида пропуска (см. ветки ниже):
   //   depSkipped      — не встала ЗАВИСИМОСТЬ (это проблема: идёт в retry, ломает okAll);
   //   gracefulSkipped — осознанный exit 120 «нечего ставить / не входит в сборку»
@@ -849,16 +952,17 @@ async function runComponents(ids, env) {
     // шагами — см. main.js). Здесь только показываем прогресс докачки в step-list;
     // логи докачки и «целостность подтверждена (SHA-256)» приходят из main по
     // тому же каналу component-log. Провал докачки → res.stage==='fetch'.
+    // Remote = явный флаг components.json ИЛИ lite-авто-remote (bootstrap.remoteSizes —
+    // карта из main по loadRemoteMaps; в lite components.json remote-флагов не несёт).
     const comp = STATE.byId[id];
+    const isRemote = !!(comp && comp.remote) || (STATE.remoteSizes && STATE.remoteSizes[id] != null);
     let offP = null;
-    if (comp && comp.remote) {
+    if (comp && isRemote) {
       setStepLabel(id, `${comp.name} — Скачиваю…`);
       appendLog(`[↓] Докачка ${comp.name} из облака…`);
       offP = window.installer.onRemoteProgress((p) => {
         if (!p || p.id !== id) return;
-        setStepLabel(id, (p.pct != null)
-          ? `${comp.name} — Скачиваю ${p.pct}%`
-          : `${comp.name} — Скачиваю…`);
+        setStepLabel(id, remoteProgressLabel(comp.name, p));
       });
     }
 
@@ -876,6 +980,16 @@ async function runComponents(ids, env) {
     let res;
     try { res = await window.installer.runComponent(id, runEnv); }
     catch (e) { res = { id, ok: false, code: -1, error: String(e) }; }
+
+    // ERROR-NET: обрыв ДОКАЧКИ (stage 'fetch') — это сеть, не провал установки.
+    // ОДИН авто-ретрай внутри прогона: повторный runComponent того же id (main
+    // заново пробует зеркала). Сетевой сбой НИКОГДА не маппится в graceful-skip.
+    if (res && !res.ok && res.stage === 'fetch') {
+      appendLog(`[↻] ${STATE.byId[id].name}: сеть оборвалась при докачке (${res.error || 'нет соединения'}) — пробую ещё раз…`);
+      setStepLabel(id, `${comp.name} — сеть оборвалась, повторяю…`);
+      try { res = await window.installer.runComponent(id, runEnv); }
+      catch (e) { res = { id, ok: false, code: -1, stage: 'fetch', error: String(e) }; }
+    }
 
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
 
@@ -896,12 +1010,19 @@ async function runComponents(ids, env) {
       STATE.installedEver.add(id);
     }
     else {
-      setStep(id, 'error');
+      // Сетевой обрыв докачки (после авто-ретрая) — ОРАНЖЕВЫЙ error-net, не красный
+      // провал: «Сеть оборвалась» + inline-«Повторить». В failed компонент ВХОДИТ
+      // (общий retry/финиш его видят); в graceful-skip НЕ уходит никогда.
+      const isNet = !!(res && res.stage === 'fetch');
+      setStep(id, isNet ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
       const name = STATE.byId[id].name;
-      if (res && res.stage === 'fetch') {
-        appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}`);
+      if (isNet) {
+        fetchFailed.push(id);
+        setStepLabel(id, `${name} — Сеть оборвалась`);
+        addStepRetry(id);
+        appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}. Проверь интернет и нажми «Повторить».`);
       } else {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }
@@ -909,7 +1030,34 @@ async function runComponents(ids, env) {
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
   }
   off && off();
-  return { failed, depSkipped, gracefulSkipped };
+  STATE.runActive = false;
+  return { failed, depSkipped, gracefulSkipped, fetchFailed };
+}
+
+// «Скачиваю 45% · 12 из 27 МБ» — подпись шага докачки (received/total шлёт main).
+function remoteProgressLabel(name, p) {
+  const mb = (n) => Math.max(0, Math.round(Number(n || 0) / (1024 * 1024)));
+  if (p.pct != null && p.total) {
+    return `${name} — Скачиваю ${p.pct}% · ${mb(p.received)} из ${mb(p.total)} МБ`;
+  }
+  if (p.received) return `${name} — Скачиваю… ${mb(p.received)} МБ`;
+  return `${name} — Скачиваю…`;
+}
+
+// Inline-кнопка «Повторить» на шаге с оборванной докачкой (error-net). Повтор — через
+// СУЩЕСТВУЮЩИЙ механизм retryFailed([id]) (runComponent того же id + verify в конце).
+// До конца текущего прогона кнопка выключена (finishInstall включает) — второй
+// параллельный прогон не запускаем.
+function addStepRetry(id) {
+  const step = document.querySelector(`.step[data-id="${id}"]`);
+  if (!step || step.querySelector('.step-retry')) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn-sm step-retry';
+  b.textContent = 'Повторить';
+  b.disabled = true;
+  b.addEventListener('click', () => { if (!STATE.runActive) retryFailed([id]); });
+  step.appendChild(b);
 }
 
 // Карусель советов на время установки: то, что спасает новичка в первый день
@@ -1006,10 +1154,14 @@ async function retryFailed(ids) {
 function finishInstall(res) {
   stopTips();
   const failed = res.failed || [];
+  // Обрывы докачки (stage 'fetch') — подмножество failed с сетевой формулировкой.
+  const fetchFailed = res.fetchFailed || [];
   // depSkipped (упала зависимость) = проблема; gracefulSkipped (exit 120, «не входит
   // в сборку») = НЕ проблема и на исход установки не влияет.
   const depSkipped = res.depSkipped || [];
   const gracefulSkipped = res.gracefulSkipped || [];
+  // Прогон завершён — inline-«Повторить» на error-net-шагах теперь можно нажимать.
+  document.querySelectorAll('.step-retry').forEach((b) => { b.disabled = false; });
   // Независимая проверка (verify) может найти проблему, даже когда все шаги
   // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
   const checkFailed = (STATE.checks || []).some(
@@ -1025,6 +1177,10 @@ function finishInstall(res) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
     sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
+  } else if (fetchFailed.length && failed.every((id) => fetchFailed.indexOf(id) !== -1)) {
+    // ВСЕ провалы — обрывы докачки: это сеть, а не установка. Говорим прямо.
+    title = 'Сеть оборвалась при скачивании';
+    sub = 'Часть компонентов не докачалась. Проверь интернет и нажми «Повторить» — установка продолжится.';
   } else {
     title = 'Установка завершена с предупреждениями';
     sub = 'Часть компонентов не установилась — можно повторить ниже.';
@@ -1037,7 +1193,7 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed);
+  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed);
   sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
@@ -1067,11 +1223,12 @@ function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed) {
   failed = failed || [];
   depSkipped = depSkipped || [];
   gracefulSkipped = gracefulSkipped || [];
   checkFailed = !!checkFailed;
+  fetchFailed = fetchFailed || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const botH = botHandle();
@@ -1089,9 +1246,14 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
   const depSkipHtml = depSkipped.length
     ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${depSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
+  // Обрывы докачки — сетевая формулировка (не generic-ошибка): «проверь интернет
+  // и нажми Повторить». Имена компонентов — из components.json (доверенный конфиг).
+  const netHint = fetchFailed.length
+    ? `<div class="ns-fail-hint">Сеть оборвалась при докачке: <b>${fetchFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Проверь интернет и нажми «Повторить неустановленное».</div>`
+    : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${netHint}
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.

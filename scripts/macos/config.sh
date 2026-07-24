@@ -47,19 +47,23 @@ if [ "$HAVE_BUNDLED" -eq 1 ]; then
   echo "Использую встроенный конфиг (офлайн): $BUNDLED"
   CLONE="$BUNDLED"
 else
-  if ! have git; then echo "Встроенный конфиг не найден и Git недоступен — выберите Git или пересоберите установщик."; exit 1; fi
+  # #13: НЕ запускаем /usr/bin/git-шим на чистом маке без Command Line Tools (он сам
+  # открывает GUI-диалог «установить инструменты разработчика»). Предпочитаем портативный
+  # git.sh (~/.local/bin/git), иначе рабочий git (не шим ИЛИ CLT установлены).
+  GIT_BIN=""
+  if [ -x "$HOME/.local/bin/git" ]; then GIT_BIN="$HOME/.local/bin/git";
+  elif have git && { [ "$(command -v git)" != "/usr/bin/git" ] || xcode-select -p >/dev/null 2>&1; }; then GIT_BIN="$(command -v git)"; fi
+  if [ -z "$GIT_BIN" ]; then echo "Встроенный конфиг не найден и рабочий Git недоступен — выберите компонент Git или пересоберите установщик офлайн."; exit 1; fi
   URL="${HM_CONFIG_REPO_URL:-https://github.com/JHamidun/claude-code-config-pack}"
   BRANCH="${HM_CONFIG_REPO_BRANCH:-main}"
   CLONE="$HOME/.hamidun-setup/config-repo"
-  if [ -d "$CLONE/.git" ]; then
-    echo "Обновляю конфиг с GitHub..."
-    git -C "$CLONE" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1
-    git -C "$CLONE" reset --hard "origin/$BRANCH" >/dev/null 2>&1
-  else
-    echo "Скачиваю конфиг с GitHub ($URL)..."
-    mkdir -p "$(dirname "$CLONE")"
-    git clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
-  fi
+  # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог
+  # пред-создать $CLONE/.git с core.fsmonitor/hooksPath = payload → code-exec под нашим
+  # git. Всегда СВЕЖИЙ clone + hardening-флаги (командные -c перебивают repo-local).
+  rm -rf "$CLONE"
+  echo "Скачиваю конфиг с GitHub ($URL)..."
+  mkdir -p "$(dirname "$CLONE")"
+  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
 fi
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.sh

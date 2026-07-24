@@ -12,40 +12,88 @@
     "fetch:vendor": "powershell -ExecutionPolicy Bypass -NoProfile -File tools/fetch-vendor.ps1",
     "dist": "npm run fetch:config && npm run fetch:vendor && electron-builder",
     "dist:win": "npm run fetch:config && npm run fetch:vendor && electron-builder --win",
-    "dist:win:lite": "npm run fetch:config && electron-builder --win",
+    "dist:win:lite": "node tools/build-lite.js",
     "dist:mac": "npm run fetch:config && electron-builder --mac",
     "postinstall": "electron-builder install-app-deps",
     "test": "node test/run-tests.js"
   },
   "devDependencies": {
     "electron": "^32.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "playwright-core": "^1.61.1"
   },
   "build": {
     "appId": "com.hamidun.setup",
     "productName": "Hamidun Setup",
     "compression": "maximum",
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "src/**/*"
     ],
     "extraResources": [
-      { "from": "scripts", "to": "scripts" },
-      { "from": "agent", "to": "agent", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"] },
-      { "from": "config.json", "to": "config.json" },
-      { "from": "components.json", "to": "components.json" },
-      { "from": "remote-components.json", "to": "remote-components.json" },
-      { "from": "packs.json", "to": "packs.json" },
-      { "from": "assets/starter-project", "to": "assets/starter-project" },
-      { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }
+      {
+        "from": "scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "agent",
+        "to": "agent",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "config.json",
+        "to": "config.json"
+      },
+      {
+        "from": "components.json",
+        "to": "components.json"
+      },
+      {
+        "from": "remote-components.json",
+        "to": "remote-components.json"
+      },
+      {
+        "from": "packs.json",
+        "to": "packs.json"
+      },
+      {
+        "from": "assets/starter-project",
+        "to": "assets/starter-project"
+      },
+      {
+        "from": "assets/START-HERE.html",
+        "to": "assets/START-HERE.html"
+      }
     ],
     "win": {
       "icon": "build/icon.ico",
-      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
-        { "from": "vendor", "to": "vendor", "filter": ["**/*", "!playwright-browsers/**", "!playwright-browsers-*/**"] }
+        {
+          "from": "vendor",
+          "to": "vendor",
+          "filter": [
+            "**/*",
+            "!playwright-browsers/**",
+            "!playwright-browsers-*/**",
+            "!apps/chatgpt.vsix"
+          ]
+        }
       ]
     },
     "portable": {
@@ -55,7 +103,14 @@
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
       "icon": "build/icon.png",
-      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
       "category": "public.app-category.developer-tools",
       "artifactName": "Hamidun-Setup-Mac.${ext}",
       "hardenedRuntime": true,
@@ -69,9 +124,22 @@
     },
     "dmg": {
       "contents": [
-        { "x": 140, "y": 260 },
-        { "x": 400, "y": 260, "type": "link", "path": "/Applications" },
-        { "x": 270, "y": 110, "type": "file", "path": "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" }
+        {
+          "x": 140,
+          "y": 260
+        },
+        {
+          "x": 400,
+          "y": 260,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 110,
+          "type": "file",
+          "path": "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+        }
       ]
     }
   }

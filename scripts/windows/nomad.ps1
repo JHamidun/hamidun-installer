@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Continue'
 # по HTTPS (доверие = TLS). Форсим TLS 1.2. Основной путь — офлайн: уже установленный uv
 # или вшитый vendor-uv через uv.ps1 (SHA-256 fail-closed).
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+# #2: интегрити-гейт nomad-src (Confirm-HmArtifact + Get-HmTreeSha256 из _verify.ps1).
+. (Join-Path $PSScriptRoot '_verify.ps1')
+
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -24,7 +27,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 
@@ -171,6 +173,25 @@ if ($DRY) {
     & $uv python install 3.12
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv python install 3.12 завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Write-Host "Устанавливаю Nomad (команды nmd/nomad-agent/nomad-acp)..."
+    # #2: fail-closed integrity-гейт nomad-src ПЕРЕД установкой (medium-малварь того же
+    # юзера могла подменить pyproject.toml/любой .py в user-writable vendor до `uv tool
+    # install` → build-hook под АДМИНОМ). Зеркало mac nomad.sh. Нет манифеста/несовпал → exit 1.
+    $treeShaFile = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'nomad-src.sha256' } else { '' }
+    if (-not $treeShaFile -or -not (Test-Path $treeShaFile)) {
+        Write-Host "БЕЗОПАСНОСТЬ: нет манифеста целостности nomad-src (vendor\nomad-src.sha256) — отказываюсь ставить Nomad из непроверенного дерева. Установка остановлена."
+        exit 1
+    }
+    Confirm-HmArtifact $treeShaFile
+    Confirm-HmArtifact (Join-Path $src 'pyproject.toml')
+    $treeWant = ((Get-Content -Raw $treeShaFile) -replace '\s', '').ToLower()
+    $treeGot = Get-HmTreeSha256 $src
+    if (-not $treeWant -or $treeGot -ne $treeWant) {
+        Write-Host "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 дерева nomad-src — vendor подменён/повреждён. Установка Nomad остановлена."
+        Write-Host "  ожидалось: $treeWant"
+        Write-Host "  получено:  $treeGot"
+        exit 1
+    }
+    Write-Host "  Целостность подтверждена (SHA-256 дерева): vendor\nomad-src"
     & $uv tool install --python 3.12 "$src"
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path

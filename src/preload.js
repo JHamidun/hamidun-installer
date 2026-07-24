@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('installer', {
     ipcRenderer.on('remote-progress', handler);
     return () => ipcRenderer.removeListener('remote-progress', handler);
   },
+  // PREFLIGHT LITE: доступность сервера докачки. Сеть трогает ТОЛЬКО main
+  // (CSP renderer'а запрещает fetch); renderer аргументов не передаёт.
+  probeRemote: () => ipcRenderer.invoke('probe-remote'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   saveStartHere: () => ipcRenderer.invoke('save-start-here'),
