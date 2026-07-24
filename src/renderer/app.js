@@ -928,9 +928,6 @@ async function runComponents(ids, env) {
     appendLog(line);
   });
   const failed = [];
-  // Подмножество failed: финальный сбой = обрыв ДОКАЧКИ (stage 'fetch', после
-  // авто-ретрая). Финиш говорит про них «проверь интернет», не generic-ошибку.
-  const fetchFailed = [];
   // Два РАЗНЫХ вида пропуска (см. ветки ниже):
   //   depSkipped      — не встала ЗАВИСИМОСТЬ (это проблема: идёт в retry, ломает okAll);
   //   gracefulSkipped — осознанный exit 120 «нечего ставить / не входит в сборку»
@@ -1027,15 +1024,14 @@ async function runComponents(ids, env) {
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
 
     if (res && res.skipped) {
-      // P1: осознанный пропуск компонента (exit 120 — нечего ставить, напр. VS Code не
-      // вшит в сборку И не установлен). НЕ успех и НЕ ошибка: помечаем skipped И заносим
-      // в bad, чтобы зависимые (extension requires vscode) не запускались красным впустую,
-      // а тоже грациозно пропускались. Из HM_SELECTED для verify компонент уже убираем.
+      // P1: осознанный пропуск (exit 120 — нечего ставить, напр. VS Code не вшит в
+      // сборку И не установлен). НЕ успех и НЕ ошибка: skipped + в bad, чтобы зависимые
+      // не запускались красным впустую. Из HM_SELECTED для verify компонент уже убираем.
       setStep(id, 'skipped');
       gracefulSkipped.push(id);
       bad.add(id);
-      badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       runtimeSkipped.add(id);
+      badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
@@ -1056,14 +1052,12 @@ async function runComponents(ids, env) {
       badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : 'fail'));
       const name = STATE.byId[id].name;
       if (isNet) {
-        fetchFailed.push(id);
         setStepLabel(id, `${name} — Сеть оборвалась`);
         addStepRetry(id);
         appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}. Проверь интернет и нажми «Повторить».`);
       } else if (isIntegrity) {
         // Скачанный файл не совпал с эталоном / среда не даёт защитить кэш: КРАСНЫЙ шаг,
         // БЕЗ кнопки «Повторить» (повтор детерминированно даст то же) и без «проверь интернет».
-        integrityFailed.push(id);
         setStepLabel(id, `${name} — Проверка целостности не пройдена`);
         appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: пришли лог в бота.`);
       } else {
@@ -1074,7 +1068,20 @@ async function runComponents(ids, env) {
   }
   off && off();
   STATE.runActive = false;
-  return { failed, depSkipped, gracefulSkipped, fetchFailed };
+  // Финиш строится по КУМУЛЯТИВНОЙ карте нерешённых проблем (badEver), а НЕ по
+  // per-прогонным спискам: inline-«Повторить» одного шага запускает прогон только
+  // из него (+verify), per-прогонные failed/depSkipped после него пусты — финиш
+  // рапортовал бы «Готово! Всё установлено», хотя остальные провалы никуда не
+  // делись, и кнопки повтора на них уже не было бы. Карта чистится ровно тогда,
+  // когда компонент реально встал (res.ok) или осознанно пропущен (res.skipped).
+  const unresolved = Array.from(badEver);
+  return {
+    failed: unresolved.filter(([, k]) => k !== 'dep').map(([i]) => i),
+    depSkipped: unresolved.filter(([, k]) => k === 'dep').map(([i]) => i),
+    fetchFailed: unresolved.filter(([, k]) => k === 'net').map(([i]) => i),
+    integrityFailed: unresolved.filter(([, k]) => k === 'integrity').map(([i]) => i),
+    gracefulSkipped,
+  };
 }
 
 // «Скачиваю 45% · 12 из 27 МБ» — подпись шага докачки (received/total шлёт main).
@@ -1159,6 +1166,10 @@ async function startInstall() {
   // ложные красные кресты, а финиш врёт «Агент Nomad уже установлен».
   STATE.installedEver = new Set();
   STATE.skippedEver = new Set();
+  // Карта НЕРЕШЁННЫХ проблем (id → 'net'|'integrity'|'fail'|'dep') — тоже кумулятивная
+  // (retryFailed её НЕ сбрасывает): по ней финиш видит ВЕСЬ остаточный набор провалов,
+  // а не только результат последнего (возможно, одношагового inline-)прогона.
+  STATE.badEver = new Map();
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -1199,6 +1210,9 @@ function finishInstall(res) {
   const failed = res.failed || [];
   // Обрывы докачки (stage 'fetch') — подмножество failed с сетевой формулировкой.
   const fetchFailed = res.fetchFailed || [];
+  // Провалы ЦЕЛОСТНОСТИ (SHA-256 mismatch / fail-closed) — подмножество failed:
+  // детерминированны, «проверь интернет» и ретрай не помогут — эскалация в бота.
+  const integrityFailed = res.integrityFailed || [];
   // depSkipped (упала зависимость) = проблема; gracefulSkipped (exit 120, «не входит
   // в сборку») = НЕ проблема и на исход установки не влияет.
   const depSkipped = res.depSkipped || [];
@@ -1220,6 +1234,11 @@ function finishInstall(res) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
     sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
+  } else if (integrityFailed.length && failed.every((id) => integrityFailed.indexOf(id) !== -1)) {
+    // ВСЕ провалы — целостность: НЕ сеть. «Проверь интернет» увёл бы не туда —
+    // подменённый/устаревший артефакт надо эскалировать, а не ретраить.
+    title = 'Файл не прошёл проверку подлинности';
+    sub = 'Скачанный компонент не совпал с эталоном — установка остановлена. Нажми «Показать лог для поддержки» ниже и пришли файл в бота.';
   } else if (fetchFailed.length && failed.every((id) => fetchFailed.indexOf(id) !== -1)) {
     // ВСЕ провалы — обрывы докачки: это сеть, а не установка. Говорим прямо.
     title = 'Сеть оборвалась при скачивании';
@@ -1236,7 +1255,7 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed);
+  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed);
   sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
@@ -1266,12 +1285,13 @@ function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed) {
   failed = failed || [];
   depSkipped = depSkipped || [];
   gracefulSkipped = gracefulSkipped || [];
   checkFailed = !!checkFailed;
   fetchFailed = fetchFailed || [];
+  integrityFailed = integrityFailed || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const botH = botHandle();
@@ -1294,9 +1314,14 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   const netHint = fetchFailed.length
     ? `<div class="ns-fail-hint">Сеть оборвалась при докачке: <b>${fetchFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Проверь интернет и нажми «Повторить неустановленное».</div>`
     : '';
+  // Провал целостности — НЕ сетевая формулировка: «проверь интернет» тут вреден,
+  // повтор детерминированно даст то же — направляем в лог и бота (эскалация).
+  const integrityHint = integrityFailed.length
+    ? `<div class="ns-fail-hint">Не прошли проверку подлинности: <b>${integrityFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Повтор не поможет — нажми «Показать лог для поддержки» и пришли файл в ${botH}.</div>`
+    : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${netHint}
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${netHint}${integrityHint}
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.

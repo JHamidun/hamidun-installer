@@ -62,8 +62,13 @@ COMPONENTS = {
     # предупреждением при сбое. Если однажды понадобится офлайн — класть их ЧАСТЬЮ pydeps
     # (parts + перепубликация), а не отдельным remoteId.
     # Составные: собираем staging с точной структурой, пушим папку без префикса.
+    # requirements.txt ЕДЕТ ВНУТРИ архива: в lite config-pack не вшит и не попадает в
+    # staging pydeps, поэтому список пакетов был недостижим НИ ОДНИМ путём и компонент
+    # уходил в graceful skip (пакеты не ставились вообще). Путь внутри zip совпадает с
+    # тем, что резолвит vendorPick/HM_BUNDLED_CONFIG → pydeps.ps1 находит его без правок.
     "pydeps": {"kind": "staged", "parts": [("apps/python-setup.exe", "apps/python-setup.exe"),
-                                           ("pywheels",              "pywheels")],
+                                           ("pywheels",              "pywheels"),
+                                           ("config-pack/requirements.txt", "config-pack/requirements.txt")],
                "name": "Python + wheels (pydeps)"},
     # chatgpt.vsix СЮДА НЕ КЛАДЁМ (был glob apps/*.vsix = +338 МБ на каждого lite-юзера):
     # extension.ps1 читает только claude-code.vsix и шрифт, а единственный потребитель

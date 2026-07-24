@@ -25,10 +25,10 @@ const RENDERER_ENV_ALLOW = new Set([
 
 // Сравнение имён РЕГИСТРОНЕЗАВИСИМО: в Windows env 'Path'/'PATH'/'path' — одно имя,
 // поэтому и allowlist сверяем в нижнем регистре (иначе 'nodE_optionS' проскочил бы).
+// HM_REMOTE_CACHE режется самим списком (его там нет и быть не должно: ставит ТОЛЬКО
+// main из sha256-проверенного пути; плюс main безусловно delete-ит его из renderer-env).
 function isAllowedRendererEnvKey(k) {
-  const lk = String(k).toLowerCase();
-  if (lk === 'hm_remote_cache') return false; // ставит ТОЛЬКО main из проверенного пути
-  return RENDERER_ENV_ALLOW.has(lk);
+  return RENDERER_ENV_ALLOW.has(String(k).toLowerCase());
 }
 
 // Вернуть НОВЫЙ объект с подмножеством renderer-env по allowlist (исходник не мутируем).
