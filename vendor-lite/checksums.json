@@ -1,0 +1,20 @@
+{
+  "generatedAt": "2026-07-24T20:44:30Z",
+  "algorithm": "sha256",
+  "files": {
+    "chatgpt.vsix": { "sha256": "14d7449f9a221e50f56cabbef94c2fdf76a75089e14b4ae475a5d761739b8431", "bytes": 338520262 },
+    "claude-code.vsix": { "sha256": "d1815451304a397871c3bc624e2a67dd5ba915193b6be5a294b8f9f08ef95fcb", "bytes": 81900243 },
+    "claude-mascot.exe": { "sha256": "0e32b632d9641c7e90435eaf0800c618eb1b1749a5b87ad4fbb28be22d9e84d4", "bytes": 109096960 },
+    "cursor-setup.exe": { "sha256": "8624437fd7d3741252209be2a86a50e5c30a467ba5c1cd5c7713c91bb30a9905", "bytes": 196986056 },
+    "git-setup.exe": { "sha256": "2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983", "bytes": 65175776 },
+    "JetBrainsMono-Regular.ttf": { "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f", "bytes": 273900 },
+    "node-lts.msi": { "sha256": "ae5d9e9f6c85b8d35717f499ba907259ec80672c289858bae19074355906a240", "bytes": 32829440 },
+    "nomad-src.sha256": { "sha256": "3c8db152e8e163c3a52b7b0e16a94c868b162d2b14cdce43ef81c5e2df23a463", "bytes": 64 },
+    "pyproject.toml": { "sha256": "dd2128ba79509d0dfc71f6c206d8282a414a61097dd5ab67b2da149041f2af40", "bytes": 22601 },
+    "python-setup.exe": { "sha256": "c1cb40978b28f696b111c36034a1bdeda17d25e35c74a08ef5e5ff405a63fc20", "bytes": 28838672 },
+    "uv.exe": { "sha256": "6d40479cd1d0d5db7fc0fe68ad703fc8acbd84bba50d864bb97461f6af9d9561", "bytes": 76024832 },
+    "uvx.exe": { "sha256": "d3b36bf45f11da6a62e5395e70d53f7f6ffc4abe84d72780344f9ebee510e93e", "bytes": 339456 },
+    "vibecoding-course.zip": { "sha256": "57a2562948c5598686dd81b48beaae80bd23c2f4b1749c3272ec0e0a9267d8ba", "bytes": 274877 },
+    "vscode-setup.exe": { "sha256": "46b5a269597ddffa1a349212074b4ef12c9edbad6a69c193c10b1794a1a53582", "bytes": 215757544 }
+  }
+}

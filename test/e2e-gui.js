@@ -156,28 +156,54 @@ async function main() {
     })(COMPONENT);
     log('разрешены (цель + зависимости):', [...allowed].join(', '));
 
-    // В netfail важен UI-контракт при обрыве, а не какой именно компонент выбран:
-    // изоляцию не делаем (UI не даёт снять компонент, пока от него зависит отмеченный —
-    // цикл не сходится). В ok-режиме изоляция нужна, чтобы не ставить полстека.
+    // В netfail выбор НЕ трогаем: под тестом контракт UI при обрыве, а не состав набора
+    // (и снятие галок там только вносит шум). В ok-режиме изоляция нужна — иначе ставится
+    // полстека и прогон упирается в таймаут.
+    // ВАЖНО: UI не даёт снять компонент, пока отмечен зависящий от него, поэтому снимаем
+    // в ОБРАТНОМ топологическом порядке: за проход убираем только «листья» — лишние, от
+    // которых не зависит ни один отмеченный. Так набор сходится к цели + её зависимостям.
+    const requiresOf = {};
+    for (const id of Object.keys(byId)) requiresOf[id] = byId[id].requires || [];
     let picked = null;
-    const passes = MODE === 'netfail' ? 1 : 4;
+    const passes = MODE === 'netfail' ? 0 : 8;
     for (let pass = 0; pass < passes; pass++) {
-      picked = await page.evaluate(({ id, allow }) => {
+      const res = await page.evaluate(({ id, allow, reqs }) => {
         const cards = Array.from(document.querySelectorAll('#groups .card'));
+        const checked = cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id);
+        const neededBy = new Set();
+        for (const cid of checked) for (const r of (reqs[cid] || [])) neededBy.add(r);
+        let clicked = 0;
         for (const c of cards) {
-          const want = allow.includes(c.dataset.id);
-          if (c.classList.contains('checked') !== want) c.click();
+          const cid = c.dataset.id;
+          const isChecked = c.classList.contains('checked');
+          if (allow.includes(cid)) { if (!isChecked) { c.click(); clicked++; } continue; }
+          // лишний: снимаем только если от него никто из отмеченных не зависит
+          if (isChecked && !neededBy.has(cid)) { c.click(); clicked++; }
         }
+        const target = cards.find((c) => c.dataset.id === id);
+        return {
+          clicked,
+          total: cards.length,
+          targetChecked: !!(target && target.classList.contains('checked')),
+          stillChecked: cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id),
+        };
+      }, { id: COMPONENT, allow: [...allowed], reqs: requiresOf });
+      picked = res;
+      const extra = res.stillChecked.filter((x) => !allowed.has(x));
+      if (!extra.length && res.targetChecked) break;
+      if (!res.clicked) { log('проход ' + (pass + 1) + ': состояние стабильно, лишние →', extra.join(', ') || '—'); break; }
+      log('проход ' + (pass + 1) + ': осталось лишних →', extra.join(', ') || '—');
+    }
+    if (!picked) {
+      picked = await page.evaluate(({ id }) => {
+        const cards = Array.from(document.querySelectorAll('#groups .card'));
         const target = cards.find((c) => c.dataset.id === id);
         return {
           total: cards.length,
           targetChecked: !!(target && target.classList.contains('checked')),
           stillChecked: cards.filter((c) => c.classList.contains('checked')).map((c) => c.dataset.id),
         };
-      }, { id: COMPONENT, allow: [...allowed] });
-      const extra = picked.stillChecked.filter((x) => !allowed.has(x));
-      if (picked.targetChecked && !extra.length) break;
-      log('проход ' + (pass + 1) + ': лишние ещё отмечены →', extra.join(', ') || '—');
+      }, { id: COMPONENT });
     }
     const extraChecked = picked.stillChecked.filter((x) => !allowed.has(x));
     check('целевой «' + COMPONENT + '» выбран' + (MODE === 'netfail' ? '' : ', лишние сняты') +

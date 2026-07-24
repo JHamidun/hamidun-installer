@@ -88,10 +88,20 @@ def gated_files_map(zip_path: Path, platform):
             )
         return {}
     manifest = json.loads(chk_path.read_text(encoding="utf-8")).get("files", {})
+    # Манифест checksums.json описывает АРТЕФАКТЫ УСТАНОВЩИКА (vendor/apps/*, course/*,
+    # nomad-src) — их и проверяет Confirm-HmArtifact/verify_artifact по базовому имени.
+    # Контентные деревья ниже — это то, что ставится пользователю (конфиг-пак, npm-кэш,
+    # колёса); их файлы НИКОМУ не передаются в гейт, а совпадение базового имени там
+    # закономерно и безобидно: config-pack несёт свой canvas-fonts/JetBrainsMono-*.ttf,
+    # а манифест — совсем другой шрифт из vendor/apps для терминала. Без этого исключения
+    # сборка ложно падала бы «рассинхрон манифеста» на файле, который никто не верифицирует.
+    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/")
     gated = {}
     with zipfile.ZipFile(zip_path) as z:
         for info in z.infolist():
             if info.is_dir():
+                continue
+            if info.filename.startswith(CONTENT_TREES):
                 continue
             name = info.filename.rsplit("/", 1)[-1]
             if name not in manifest:

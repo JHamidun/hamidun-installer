@@ -1,7 +1,7 @@
 {
-  "offlineEdition": true,
+  "offlineEdition": false,
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
-  "configRepoBranch": "main",
+  "configRepoBranch": "v38",
   "nomad": {
     "_comment": "VENDOR-ONLY: repoUrl is ALWAYS empty and MUST stay empty — the Nomad component NEVER clones. It installs only from the bundled vendor/nomad-src (main.js sets HM_NOMAD_SRC); if not bundled it skips gracefully (exit 120). Removing the clone path closes the round-7 TOCTOU P0 (foreign pyproject.toml swapped between Test-Path and git clone). packageName matches pyproject [project].name.",
     "repoUrl": "",
@@ -22,10 +22,17 @@
   "bridge": {
     "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер.",
     "enrollEndpoint": "",
-    "pacDomains": ["claude.ai", "anthropic.com", "openai.com", "chatgpt.com", "oaistatic.com",
+    "pacDomains": [
+      "claude.ai",
+      "anthropic.com",
+      "openai.com",
+      "chatgpt.com",
+      "oaistatic.com",
       "oaiusercontent.com",
       "claudeusercontent.com",
-      "sora.com", "higgsfield.ai"]
+      "sora.com",
+      "higgsfield.ai"
+    ]
   },
   "claudeCodeExtensionId": "anthropic.claude-code",
   "course": {
@@ -53,5 +60,6 @@
     "cabinet": "https://cp.nomadnet.ai/cabinet",
     "claude": "https://claude.ai/login",
     "video": ""
-  }
+  },
+  "edition": "lite"
 }

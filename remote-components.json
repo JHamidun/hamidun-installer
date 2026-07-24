@@ -200,9 +200,7 @@
         }
       ],
       "installRelPath": "scripts/windows/config.ps1",
-      "gatedFiles": {
-        "JetBrainsMono-Regular.ttf": "b6b1ff4ddefe36d7f2a6174e1d001cab374e594519ee9049af028d577b64c5f5"
-      },
+      "gatedFiles": {},
       "platform": "win32"
     },
     {
