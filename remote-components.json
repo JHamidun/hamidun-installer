@@ -181,37 +181,44 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps)",
-      "sizeBytes": 121309505,
-      "sha256": "1a97d5854da8ee1720fca1145d5c29c32c1d06c4c57fb9d79f92faafe9f5977e",
+      "sizeBytes": 121322194,
+      "sha256": "1e9d48148f0b763788695c9f0f05faf00f2d58012f241dd694c28ac64cb42e64",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-win32-1a97d5854da8ee1720fca1145d5c29c32c1d06c4c57fb9d79f92faafe9f5977e.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-win32-1e9d48148f0b763788695c9f0f05faf00f2d58012f241dd694c28ac64cb42e64.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-win32-1a97d5854da8ee1720fca1145d5c29c32c1d06c4c57fb9d79f92faafe9f5977e.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-win32-1e9d48148f0b763788695c9f0f05faf00f2d58012f241dd694c28ac64cb42e64.zip"
         }
       ],
       "installRelPath": "scripts/windows/pydeps.ps1",
+      "gatedFiles": {
+        "python-setup.exe": "c1cb40978b28f696b111c36034a1bdeda17d25e35c74a08ef5e5ff405a63fc20"
+      },
       "platform": "win32"
     },
     {
       "remoteId": "extension",
-      "name": "VS Code extensions (Claude Code + ChatGPT)",
-      "sizeBytes": 418650499,
-      "sha256": "542ac4bffd4ab70523744570281268ec85f4446d29aec3687301e12ac25eae5a",
+      "name": "VS Code extensions (Claude Code + шрифт)",
+      "sizeBytes": 81749764,
+      "sha256": "786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-win32-542ac4bffd4ab70523744570281268ec85f4446d29aec3687301e12ac25eae5a.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-win32-786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-win32-542ac4bffd4ab70523744570281268ec85f4446d29aec3687301e12ac25eae5a.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-win32-786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217.zip"
         }
       ],
       "installRelPath": "scripts/windows/extension.ps1",
+      "gatedFiles": {
+        "claude-code.vsix": "d1815451304a397871c3bc624e2a67dd5ba915193b6be5a294b8f9f08ef95fcb",
+        "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
+      },
       "platform": "win32"
     }
   ]
