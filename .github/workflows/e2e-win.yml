@@ -1,28 +1,44 @@
-name: E2E — чистая Windows (GUI + реальная докачка)
+name: E2E — чистая Windows / macOS (GUI, реальная докачка и установка)
 
-# Прогоняет НАСТОЯЩИЙ GUI установщика на ДЕВСТВЕННОЙ Windows-машине (runner
-# windows-latest: чистая ОС, ничего из нашего стека не установлено, процесс работает
-# с правами администратора — значит Admins-only staging докачки создаётся штатно).
+# Прогоняет НАСТОЯЩИЙ GUI установщика на ДЕВСТВЕННОЙ машине (runner windows-latest:
+# чистая ОС, ничего из нашего стека не установлено, процесс работает с правами
+# администратора — значит Admins-only staging докачки создаётся штатно).
 #
-# Два сценария:
-#   ok      — реальная докачка компонента с живых S3-зеркал → установка → проверка
-#             результата в изолированном профиле.
-#   netfail — зеркала подменены на мёртвый хост: UI обязан ЧЕСТНО показать обрыв
-#             сети и кнопку «Повторить», а не выдать провал за успех.
+# Сценарии (node test/e2e-gui.js <mode>):
+#   netfail   — зеркала подменены на мёртвый хост: UI обязан ЧЕСТНО показать обрыв
+#               сети и кнопку «Повторить», а не выдать провал за успех.
+#   ok        — реальная докачка компонента с живых S3-зеркал → установка → проверка
+#               результата в изолированном профиле.
+#   preserve  — установка поверх НЕПУСТОГО профиля: пользовательские файлы обязаны
+#               уцелеть (ничего не затёрто и не удалено).
+#   rerun     — повторный прогон по уже установленному: идемпотентность, никаких
+#               дублей и «установим ещё раз то же самое».
+#   uninstall — откат: после деинсталляции в профиле не остаётся следов.
+#   full      — ВСЕ компоненты разом (~1.4 ГБ докачки). Тяжёлый, поэтому вынесен
+#               в отдельный ручной джоб (workflow_dispatch → run_full=true).
+#
+# Изоляция: e2e-gui.js подменяет USERPROFILE/HOME/APPDATA/LOCALAPPDATA на временный
+# каталог — реальный ~/.claude и система не затрагиваются ни в одном сценарии.
 on:
   workflow_dispatch:
     inputs:
       component:
-        description: 'Компонент для установки в E2E (config | git | node)'
+        description: 'Компонент для E2E (config | git | node). Пусто = git для netfail/ok, config для preserve/rerun/uninstall'
         required: false
-        default: 'git'
+        default: ''
+      run_full:
+        description: 'Гонять тяжёлый сценарий full (~1.4 ГБ докачки, отдельный джоб)'
+        type: boolean
+        required: false
+        default: false
   push:
     branches: ['e2e/**']
 
 jobs:
   e2e:
+    name: Windows (lite) — netfail / ok / preserve / rerun / uninstall
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +79,10 @@ jobs:
         continue-on-error: true
         run: npm test
 
-      - name: E2E — обрыв сети (мёртвые зеркала → error-net + «Повторить»)
+      # --- Сценарии. continue-on-error НЕ ставим НИГДЕ: падение сценария обязано
+      # ронять джоб, иначе тест перестаёт быть тестом. ---
+
+      - name: E2E netfail — обрыв сети (мёртвые зеркала → error-net + «Повторить»)
         shell: pwsh
         env:
           HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
@@ -71,11 +90,23 @@ jobs:
           HM_E2E_TIMEOUT: '420000'
         run: node test/e2e-gui.js netfail
 
-      - name: Восстановить реестр после netfail
+      # netfail портит remote-components.json прямо в дереве (source-mode). Все
+      # последующие сценарии качают по-настоящему — реестр обязан быть чистым.
+      # if: always() — чтобы отравленный реестр не уезжал дальше даже при падении
+      # netfail (сам джоб при этом всё равно останется красным).
+      - name: Восстановить реестр зеркал после netfail
+        if: always()
         shell: pwsh
-        run: git checkout -- remote-components.json
+        run: |
+          git checkout -- remote-components.json
+          git diff --exit-code -- remote-components.json
+          if ($LASTEXITCODE -ne 0) { throw 'remote-components.json НЕ восстановлен после netfail' }
+          if (Select-String -Path remote-components.json -Pattern 'hm-e2e-dead-host' -Quiet) {
+            throw 'в реестре остались мёртвые зеркала netfail — дальнейшие сценарии качали бы в никуда'
+          }
+          Write-Host 'реестр зеркал чист — можно гонять сценарии с реальной докачкой'
 
-      - name: E2E — реальная докачка с S3 и установка
+      - name: E2E ok — реальная докачка с S3 и установка
         shell: pwsh
         env:
           HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
@@ -83,7 +114,31 @@ jobs:
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok
 
-      - name: Артефакты (скриншоты GUI)
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: E2E uninstall — откат не оставляет следов в профиле
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js uninstall
+
+      - name: Артефакты (скриншоты GUI всех сценариев)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -91,12 +146,58 @@ jobs:
           path: release/e2e-*.png
           if-no-files-found: ignore
 
+  # Полный прогон «все компоненты сразу» (~1.4 ГБ докачки, десятки минут).
+  # Ручной/опциональный: только workflow_dispatch с run_full=true, чтобы обычный
+  # прогон на push оставался быстрым.
+  e2e-full:
+    name: Windows (lite) — full (все компоненты, ~1.4 ГБ) [ручной]
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          Copy-Item test/fixtures/checksums-e2e.json vendor/checksums.json -Force
+          $cfg = Get-Content config.json -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName edition -NotePropertyValue 'lite' -Force
+          $cfg | Add-Member -NotePropertyName offlineEdition -NotePropertyValue $false -Force
+          ($cfg | ConvertTo-Json -Depth 12) | Set-Content config.json -Encoding UTF8
+          Write-Host "config.json: edition=lite, offlineEdition=false; vendor/checksums.json на месте"
+
+      - name: E2E full — все компоненты разом
+        shell: pwsh
+        env:
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '5400000'
+        run: node test/e2e-gui.js full
+
+      - name: Артефакты (скриншоты GUI)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-win-full
+          path: release/e2e-*.png
+          if-no-files-found: ignore
+
   # macOS: dmg — ОФЛАЙН-издание (весь vendor вшит), поэтому здесь проверяется
-  # bundled-путь: конфиг берётся из вшитого config-pack, а не стримится.
+  # bundled-путь: конфиг берётся из вшитого config-pack, а не стримится. Докачки
+  # нет вообще → HM_E2E_EXPECT_LITE=0 (превью «Скачается» показывать нечего).
   # config-pack публичный → клонируем его в vendor на чистой машине.
   e2e-mac:
+    name: macOS (offline) — ok / preserve / rerun / uninstall
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -120,14 +221,37 @@ jobs:
         continue-on-error: true
         run: npm test
 
-      - name: E2E — GUI на чистом macOS (bundled-конфиг → изолированный ~/.claude)
+      # continue-on-error НЕ ставим: падение сценария обязано ронять джоб.
+
+      - name: E2E ok — GUI на чистом macOS (bundled-конфиг → изолированный ~/.claude)
         env:
           HM_E2E_COMPONENT: 'config'
           HM_E2E_EXPECT_LITE: '0'
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok
 
-      - name: Артефакты (скриншоты GUI)
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: E2E uninstall — откат не оставляет следов в профиле
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js uninstall
+
+      - name: Артефакты (скриншоты GUI всех сценариев)
         if: always()
         uses: actions/upload-artifact@v4
         with:
