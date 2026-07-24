@@ -15,6 +15,7 @@
     "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && electron-builder --win",
     "dist:win:lite": "node tools/build-lite.js",
     "dist:mac": "npm run fetch:config && electron-builder --mac",
+    "dist:mac:lite": "node tools/build-lite.js --mac",
     "postinstall": "electron-builder install-app-deps",
     "test": "node test/run-tests.js"
   },

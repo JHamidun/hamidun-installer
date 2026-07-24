@@ -1,0 +1,334 @@
+name: Build macOS LITE (.dmg, streaming)
+
+# Лёгкая (стриминговая) редакция Mac-установщика — зеркало build-lite для Windows.
+# Вместо ~2.7 ГБ офлайн-vendor в dmg едет только bundled-only минимум (uv + курс +
+# checksums.json), а тяжёлое (Cursor/Node/Python/wheels/npm-cache/маскот/config-pack/
+# nomad) докачивается по вшитому реестру remote-components.json с двух зеркал
+# (s3.regru.cloud + storage.yandexcloud.net) — см. src/main.js (isLiteEdition,
+# loadRemoteMaps, run-component → fetchRemote → HM_VENDOR=staging).
+#
+# Порядок шагов НЕ переставлять: сперва полный mac-vendor (из него публикуются
+# darwin-артефакты и генерится checksums.json), затем публикация в S3 (реестр
+# получает darwin-записи + gatedFiles), и только потом сборка lite — её гейт
+# assertRegistryMatchesChecksums сверяет вшитый checksums.json с уже
+# опубликованными архивами и падает на рассинхроне ДО релиза.
+#
+# Запуск: вкладка Actions -> "Build macOS LITE (.dmg, streaming)" -> Run workflow.
+# Результат кладётся под STAGING-ключ Hamidun-Setup-Mac-Lite.dmg — стабильный
+# Hamidun-Setup-Mac.dmg НЕ трогается (свап делает владелец после ручного теста).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac-lite:
+    runs-on: macos-latest
+    permissions:
+      contents: write   # коммит обновлённого remote-components.json обратно в ветку
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+
+      - name: Fetch latest config (bundle into installer)
+        run: npm run fetch:config
+
+      # Полный mac-vendor нужен ДАЖЕ для лёгкой сборки: из него публикуются darwin-архивы
+      # remote-компонентов и генерится vendor/checksums.json (второй, вшитый гейт).
+      # Переменные — 1:1 как в build-mac.yml.
+      - name: Fetch macOS vendor (full — источник для публикации и checksums.json)
+        env:
+          # Приватный репо Nomad-агента (JHamidun/nomad) — клонируется на раннере с токеном
+          # из секрета. Без него компонент Nomad делает graceful skip (dmg без агента).
+          NOMAD_AGENT_GIT_URL: ${{ secrets.NOMAD_AGENT_GIT_URL }}
+          # Аутентификация к api.github.com (маскот-релизы, шрифт): анонимный лимит на
+          # shared-IP раннера → транзиентные 403 → FATAL. С токеном лимит на порядки выше.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tools/fetch-vendor-mac.sh
+
+      # tools/push-component.py читает креды ТОЛЬКО из ~/.claude/.credentials.master.env
+      # (load_creds(), env-переменные он не смотрит) — в CI такого файла нет, поэтому
+      # создаём его из секретов. Файл лежит В ДОМАШНЕЙ директории, НЕ в workspace →
+      # в артефакты/dmg попасть не может; значения пишутся через printenv (в лог уходит
+      # только имя ключа), а сам файл удаляется отдельным always()-шагом в конце джоба.
+      - name: Prepare publisher credentials (~/.claude/.credentials.master.env)
+        env:
+          REGRU_S3_ENDPOINT: ${{ secrets.REGRU_S3_ENDPOINT }}
+          REGRU_S3_ACCESS_KEY: ${{ secrets.REGRU_S3_ACCESS_KEY }}
+          REGRU_S3_SECRET_KEY: ${{ secrets.REGRU_S3_SECRET_KEY }}
+          REGRU_S3_BUCKET: ${{ secrets.REGRU_S3_BUCKET }}
+          REGRU_S3_REGION: ${{ secrets.REGRU_S3_REGION }}
+          YCLOUD_S3_ENDPOINT: ${{ secrets.YCLOUD_S3_ENDPOINT }}
+          YCLOUD_S3_ACCESS_KEY: ${{ secrets.YCLOUD_S3_ACCESS_KEY }}
+          YCLOUD_S3_SECRET_KEY: ${{ secrets.YCLOUD_S3_SECRET_KEY }}
+          YCLOUD_S3_BUCKET: ${{ secrets.YCLOUD_S3_BUCKET }}
+          YCLOUD_S3_REGION: ${{ secrets.YCLOUD_S3_REGION }}
+        run: |
+          set -e
+          umask 077
+          mkdir -p "$HOME/.claude"
+          CRED="$HOME/.claude/.credentials.master.env"
+          : > "$CRED"
+          chmod 600 "$CRED"
+          # Значение читаем через printenv по ИМЕНИ — оно нигде не разворачивается в текст
+          # шага и не печатается; в лог идёт только факт «ключ записан».
+          write_kv() {
+            v=$(printenv "$1" || true)
+            if [ -z "$v" ]; then echo "  (нет $1 — пропуск)"; return 0; fi
+            printf '%s=%s\n' "$1" "$v" >> "$CRED"
+            echo "  + $1 записан"
+          }
+          # Reg.ru — первичное зеркало, без него публиковать нечем (fail-closed).
+          for k in REGRU_S3_ENDPOINT REGRU_S3_ACCESS_KEY REGRU_S3_SECRET_KEY REGRU_S3_BUCKET; do
+            [ -n "$(printenv "$k" || true)" ] || { echo "FATAL: пустой секрет $k — публикация darwin-компонентов невозможна."; exit 1; }
+          done
+          for k in REGRU_S3_ENDPOINT REGRU_S3_ACCESS_KEY REGRU_S3_SECRET_KEY REGRU_S3_BUCKET REGRU_S3_REGION; do write_kv "$k"; done
+          # Yandex Cloud — второе зеркало. Нужны ВСЕ четыре: push-component.py при наличии
+          # ACCESS_KEY+BUCKET лезет за YCLOUD_S3_ENDPOINT напрямую (KeyError при пустом).
+          if [ -n "${YCLOUD_S3_ENDPOINT:-}" ] && [ -n "${YCLOUD_S3_ACCESS_KEY:-}" ] \
+             && [ -n "${YCLOUD_S3_SECRET_KEY:-}" ] && [ -n "${YCLOUD_S3_BUCKET:-}" ]; then
+            for k in YCLOUD_S3_ENDPOINT YCLOUD_S3_ACCESS_KEY YCLOUD_S3_SECRET_KEY YCLOUD_S3_BUCKET YCLOUD_S3_REGION; do write_kv "$k"; done
+          else
+            echo "  YCLOUD_S3_* заданы не полностью — второе зеркало пропущено (реестр получит только regru)."
+          fi
+          echo "  строк в файле кредов: $(wc -l < "$CRED" | tr -d ' ')"
+          # Страховка: файл кредов не должен оказаться внутри репозитория.
+          case "$CRED" in "$GITHUB_WORKSPACE"*) echo "FATAL: файл кредов внутри workspace"; exit 1;; esac
+
+      - name: Install publish deps (boto3)
+        run: |
+          set -e
+          # macOS-раннер: системный python3 externally-managed (PEP 668) → нужен
+          # --break-system-packages. Ставим boto3 только если его нет.
+          python3 -c "import boto3" 2>/dev/null || python3 -m pip install --quiet --break-system-packages boto3
+          python3 -c "import boto3; print('boto3', boto3.__version__)"
+
+      # Публикация darwin-артефактов: zip → sha256 по снятым байтам → Reg.ru S3 (+Yandex) →
+      # анонимный verify обоих зеркал → upsert записи в remote-components.json (platform=darwin,
+      # gatedFiles = sha файлов, которые проверит вшитый checksums.json).
+      - name: Publish darwin remote components (S3 mirrors + registry upsert)
+        run: |
+          set -e
+          python3 tools/publish-vendor.py --platform darwin
+          # Fail-closed: без darwin-записей lite-сборка вышла бы «лёгкой», но без источников
+          # докачки — у пользователя все тяжёлые компоненты упали бы.
+          python3 - <<'PY'
+          import json, sys
+          reg = json.load(open('remote-components.json', encoding='utf-8'))
+          darwin = [c for c in reg.get('components', []) if c.get('platform') == 'darwin']
+          print('darwin-записей в реестре:', len(darwin))
+          for c in darwin:
+              print('  -', c['remoteId'], c.get('sizeBytes'), 'байт, зеркал:', len(c.get('mirrors') or []))
+          if not darwin:
+              sys.exit('FATAL: в remote-components.json нет ни одной darwin-записи — публикация не состоялась.')
+          PY
+
+      # Реестр с darwin-записями обязан вернуться в репо: он вшивается в КАЖДУЮ следующую
+      # сборку (extraResources remote-components.json). Если ветка защищена и push невозможен —
+      # реестр всё равно уезжает artifact'ом, и об этом кричит лог.
+      - name: Commit updated remote-components.json back to branch
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- remote-components.json; then
+            echo "remote-components.json не изменился — коммитить нечего."
+          else
+            git add remote-components.json
+            git commit -m "chore(registry): darwin remote components (mac-lite run ${{ github.run_number }})"
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "реестр запушен в ветку ${{ github.ref_name }}."
+            else
+              echo "=============================================================="
+              echo "ВНИМАНИЕ: PUSH НЕ ПРОШЁЛ (ветка защищена / нет прав)."
+              echo "Реестр с darwin-записями выложен ниже как artifact"
+              echo "  remote-components-darwin -> remote-components.json"
+              echo "СКАЧАЙ ЕГО И ЗАКОММИТЬ ВРУЧНУЮ, иначе следующая сборка потеряет"
+              echo "darwin-записи и лёгкий dmg останется без источников докачки."
+              echo "=============================================================="
+            fi
+          fi
+
+      # Реестр выкладываем всегда (несколько КБ) — страховка на случай непрошедшего push.
+      - name: Upload registry as artifact (fallback to manual commit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-components-darwin
+          path: remote-components.json
+          if-no-files-found: warn
+
+      # Записываем App Store Connect API-ключ (.p8) из secret в файл для notarytool.
+      # Секрет — через env-блок, НЕ интерполяцией в run-текст (анти-паттерн: значение
+      # попадает в сгенерированный скрипт шага; при set -x/ошибке шаблона риск утечки).
+      - name: Prepare notarization API key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/asc"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey.p8"
+          echo "APPLE_API_KEY=$RUNNER_TEMP/asc/AuthKey.p8" >> "$GITHUB_ENV"
+
+      # Подпись Developer ID + нотаризация ОБЯЗАТЕЛЬНЫ и для lite: без них macOS не запустит
+      # приложение (Gatekeeper). Переменные — те же, что в build-mac.yml.
+      - name: Build lite .app/.dmg (Developer ID signed + notarized, universal)
+        env:
+          CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run dist:mac:lite
+
+      # Финальный dmg собираем САМИ (как в build-mac.yml): electron-builder нотаризует и
+      # стейплит ЧИСТЫЙ .app, а рядом с ним на томе едет ЛЁГКИЙ vendor.
+      - name: Assemble final lite dmg (notarized app + LIGHT vendor)
+        env:
+          APPLE_CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+        run: |
+          set -e
+          APP="release/mac-universal/Hamidun Setup.app"
+          if [ ! -d "$APP" ]; then
+            APP="$(find release -maxdepth 3 -type d -name 'Hamidun Setup.app' | head -n1)"
+          fi
+          [ -n "$APP" ] && [ -d "$APP" ] || { echo "нет .app от electron-builder"; exit 1; }
+          echo "app: $APP"
+          echo "=== lipo -archs на Electron-бинаре (MUST быть arm64 + x86_64) ==="
+          EXEBIN="$APP/Contents/MacOS/Hamidun Setup"
+          [ -f "$EXEBIN" ] || EXEBIN="$(ls "$APP/Contents/MacOS/" | head -n1 | sed "s#^#$APP/Contents/MacOS/#")"
+          EXEARCHS=$(lipo -archs "$EXEBIN" || echo "?")
+          echo "archs: $EXEARCHS"
+          echo "$EXEARCHS" | grep -q arm64  || { echo "FATAL: нет arm64 слайса"; exit 1; }
+          echo "$EXEARCHS" | grep -q x86_64 || { echo "FATAL: нет x86_64 слайса — .app не universal"; exit 1; }
+          echo "=== вшитый config.json ОБЯЗАН быть lite (иначе dmg = офлайн-логика + лёгкий vendor = битая установка) ==="
+          python3 - "$APP/Contents/Resources/config.json" <<'PY'
+          import json, sys
+          cfg = json.load(open(sys.argv[1], encoding='utf-8'))
+          print('edition =', cfg.get('edition'), '| offlineEdition =', cfg.get('offlineEdition'))
+          if cfg.get('edition') != 'lite' or cfg.get('offlineEdition') is not False:
+              sys.exit('FATAL: собранный .app не lite — npm run dist:mac:lite не применил мутацию config.json.')
+          PY
+          echo "=== staple нотаризации на .app ==="
+          xcrun stapler validate "$APP" && echo "STAPLED OK" || echo "WARN: staple не подтверждён (app всё равно нотаризован в БД Apple)"
+
+          echo "=== лёгкий vendor для тома ==="
+          # Источник истины — vendor-lite от сборщика lite. Он убирается в finally
+          # (как в tools/build-lite.js), поэтому есть фолбэк: собираем тот же минимум
+          # (bundled-only) из полного vendor/ — uv (BUNDLED_ONLY в main.js, без remote),
+          # курс-симулятор и вшитый checksums.json (второй fail-closed гейт докачек).
+          LV="$RUNNER_TEMP/vendor-light"; rm -rf "$LV"
+          SRC=""
+          for cand in vendor-lite vendor-lite-mac; do
+            if [ -d "$cand" ]; then SRC="$cand"; break; fi
+          done
+          if [ -n "$SRC" ]; then
+            echo "  беру готовый $SRC"
+            cp -R "$SRC" "$LV"
+          else
+            echo "  vendor-lite не сохранился после сборки — собираю минимум из vendor/"
+            mkdir -p "$LV/apps" "$LV/course"
+            cp vendor/checksums.json "$LV/checksums.json"
+            for a in arm64 x64; do
+              cp "vendor/apps/uv-macos-$a.tar.gz" "$LV/apps/uv-macos-$a.tar.gz"
+            done
+            cp vendor/course/vibecoding-course.zip "$LV/course/vibecoding-course.zip"
+            [ -d vendor/licenses ] && cp -R vendor/licenses "$LV/licenses" || true
+          fi
+          LVMB=$(du -sm "$LV" | awk '{print $1}')
+          echo "  лёгкий vendor: ${LVMB} МБ"
+          [ "$LVMB" -lt 400 ] || { echo "FATAL: «лёгкий» vendor ${LVMB} МБ — похоже, в том уехал полный vendor."; exit 1; }
+          [ -s "$LV/checksums.json" ] || { echo "FATAL: в лёгком vendor нет checksums.json (второй гейт докачек)."; exit 1; }
+          ls -la "$LV" "$LV/apps"
+
+          # keychain для подписи dmg (кейчейн electron-builder уже мог быть удалён)
+          KC="$RUNNER_TEMP/dmgsign.keychain-db"; KP="hmpw$RANDOM"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          echo "$APPLE_CSC_LINK" | base64 --decode > "$RUNNER_TEMP/idcert.p12"
+          security import "$RUNNER_TEMP/idcert.p12" -k "$KC" -P "$APPLE_CSC_KEY_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed s/\"//g)
+          # стейджинг: нотаризованный app + ЛЁГКИЙ vendor + инструкция + ярлык Applications
+          ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
+          cp -R "$APP" "$ST/"
+          cp -R "$LV" "$ST/vendor"
+          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          ln -s /Applications "$ST/Applications"
+          OUT="release/Hamidun-Setup-Mac-Lite.dmg"; rm -f "$OUT"
+          echo "=== hdiutil create (том сам под размер контента) ==="
+          for attempt in 1 2 3 4 5; do
+            if hdiutil create -volname "Hamidun Setup" -srcfolder "$ST" -fs HFS+ -format UDZO -ov "$OUT"; then
+              echo "hdiutil create OK (попытка $attempt)"; break
+            fi
+            echo "hdiutil create failed (попытка $attempt: Resource busy?) — detach + пауза"
+            hdiutil detach "/Volumes/Hamidun Setup" -force 2>/dev/null || true
+            rm -f "$OUT"; sync; sleep 15
+            # if/fi, а не `[ ... ] && {...}`: под set -e AND-список с ложным условием
+            # вернул бы ненулевой код и убил бы шаг на ПЕРВОЙ же неудачной попытке.
+            if [ "$attempt" = 5 ]; then echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; fi
+          done
+          echo "=== подпись dmg Developer ID ==="
+          codesign --force --timestamp --sign "Developer ID Application: Jemal Mohamed Lemine (3VN93XA9DY)" --keychain "$KC" "$OUT"
+          codesign --verify --verbose "$OUT"
+          ls -la "$OUT"
+          DMGMB=$(du -m "$OUT" | awk '{print $1}')
+          echo "итоговый lite-dmg: ${DMGMB} МБ"
+          [ "$DMGMB" -lt 600 ] || { echo "FATAL: lite-dmg ${DMGMB} МБ — это не лёгкая редакция (ожидалось ~100-300 МБ)."; exit 1; }
+
+      # Заливаем ПОД STAGING-КЛЮЧОМ: стабильный vibecoding/downloads/Hamidun-Setup-Mac.dmg
+      # НЕ трогаем — свап делает владелец вручную после теста на чистом маке.
+      - name: Upload lite dmg to Reg.ru S3 (staging key)
+        env:
+          REGRU_S3_ACCESS_KEY: ${{ secrets.REGRU_S3_ACCESS_KEY }}
+          REGRU_S3_SECRET_KEY: ${{ secrets.REGRU_S3_SECRET_KEY }}
+          REGRU_S3_ENDPOINT: ${{ secrets.REGRU_S3_ENDPOINT }}
+          REGRU_S3_BUCKET: ${{ secrets.REGRU_S3_BUCKET }}
+          REGRU_S3_REGION: ${{ secrets.REGRU_S3_REGION }}
+        run: |
+          set -e
+          ls -la release/*.dmg
+          python3 -c "import boto3" 2>/dev/null || python3 -m pip install --quiet --break-system-packages boto3
+          python3 - <<'PY'
+          import os, boto3
+          from boto3.s3.transfer import TransferConfig
+          s3 = boto3.client('s3', endpoint_url=os.environ['REGRU_S3_ENDPOINT'],
+              aws_access_key_id=os.environ['REGRU_S3_ACCESS_KEY'],
+              aws_secret_access_key=os.environ['REGRU_S3_SECRET_KEY'],
+              region_name=os.environ['REGRU_S3_REGION'])
+          key = 'vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg'
+          bucket = os.environ['REGRU_S3_BUCKET']
+          # abort ТОЛЬКО orphan-multipart СВОЕГО ключа (чужие in-flight заливки — напр.
+          # Windows exe в тот же бакет — не трогаем), затем перезалив.
+          for u in s3.list_multipart_uploads(Bucket=bucket).get('Uploads', []):
+              if u['Key'] == key:
+                  s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
+                  print('aborted orphan multipart:', u['Key'])
+          s3.delete_object(Bucket=bucket, Key=key)
+          print('old staging dmg deleted (стабильный Hamidun-Setup-Mac.dmg НЕ тронут)')
+          cfg = TransferConfig(multipart_threshold=64*1024*1024, multipart_chunksize=64*1024*1024, use_threads=True)
+          s3.upload_file('release/Hamidun-Setup-Mac-Lite.dmg', bucket, key,
+              ExtraArgs={'ACL': 'public-read', 'ContentType': 'application/x-apple-diskimage'}, Config=cfg)
+          print('S3 OK:', os.environ['REGRU_S3_ENDPOINT'] + '/' + os.environ['REGRU_S3_BUCKET'] + '/' + key)
+          PY
+          DMG_SHA256=$(shasum -a 256 release/Hamidun-Setup-Mac-Lite.dmg | awk '{print $1}')
+          {
+            echo "## macOS LITE dmg (staging)"
+            echo ""
+            echo "URL: https://s3.regru.cloud/${REGRU_S3_BUCKET}/vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg"
+            echo ""
+            echo "SHA-256: \`$DMG_SHA256\`"
+            echo ""
+            echo "Стабильная ссылка Hamidun-Setup-Mac.dmg НЕ перезаписана — свап после ручного теста."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Креды публикатора не должны пережить джоб (раннер эфемерный, но правило — явное).
+      - name: Wipe publisher credentials
+        if: always()
+        run: rm -f "$HOME/.claude/.credentials.master.env"

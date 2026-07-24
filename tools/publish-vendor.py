@@ -14,10 +14,11 @@ remote-fetch распакует архив в staging и main подставит
 install-скриптов работают без правок (source-agnostic через HM_VENDOR).
 
 Использование:
-    python tools/publish-vendor.py                 # все win32-компоненты, что есть в vendor/
-    python tools/publish-vendor.py --only git,node # точечно
-    python tools/publish-vendor.py --skip-existing # пропустить те, что уже в реестре (по remoteId+platform)
-    python tools/publish-vendor.py --dry-run       # показать план, ничего не заливать
+    python tools/publish-vendor.py                    # все win32-компоненты, что есть в vendor/
+    python tools/publish-vendor.py --platform darwin  # то же для macOS-раскладки vendor (запускать НА маке)
+    python tools/publish-vendor.py --only git,node    # точечно
+    python tools/publish-vendor.py --skip-existing    # пропустить те, что уже в реестре (по remoteId+platform)
+    python tools/publish-vendor.py --dry-run          # показать план, ничего не заливать
 
 Компоненты, которых нет в локальном vendor/, помечаются SKIP (missing) и не роняют прогон.
 Составные (pydeps, extension) собираются во временный staging с корректной структурой.
@@ -36,10 +37,14 @@ VENDOR = REPO / "vendor"
 PUSH = REPO / "tools" / "push-component.py"
 REGISTRY = REPO / "remote-components.json"
 
-# remoteId -> спецификация публикации (win32).
+# remoteId -> спецификация публикации.
 #   kind="single": один источник (файл/папка) + zip_prefix (путь внутри архива).
-#   kind="staged": список (src, dest_rel) — собрать staging-папку и запушить её как есть.
-# name — человекочитаемое; platform всегда win32 в этой карте (darwin — отдельная фаза).
+#   kind="staged": список частей (src_rel, dest_rel[, required]) — собрать staging-папку
+#                  и запушить её как есть. src_rel может быть glob'ом; dest_rel,
+#                  оканчивающийся на "/", = каталог назначения (имя файла сохраняется).
+#                  required по умолчанию: литерал — обязателен, glob — нет; третьим
+#                  элементом можно потребовать, чтобы glob дал хотя бы одно совпадение.
+# name — человекочитаемое. Карты платформенные: COMPONENTS (win32) / COMPONENTS_DARWIN.
 COMPONENTS = {
     "git":    {"kind": "single", "src": "apps/git-setup.exe",    "prefix": "apps",              "name": "Git for Windows"},
     "node":   {"kind": "single", "src": "apps/node-lts.msi",     "prefix": "apps",              "name": "Node.js LTS"},
@@ -79,6 +84,53 @@ COMPONENTS = {
                   "name": "VS Code extensions (Claude Code + шрифт)"},
 }
 
+# macOS-раскладка (имена — ИЗ tools/fetch-vendor-mac.sh; читают их scripts/macos/*.sh
+# через $HM_VENDOR). Публикуется НА маке, после `bash tools/fetch-vendor-mac.sh`.
+#
+# ПОЧЕМУ ОБЕ АРХИТЕКТУРЫ В ОДНОМ АРХИВЕ: dmg универсальный (arm64 + x86_64), а запись
+# реестра выбирается ТОЛЬКО по platform (remote-fetch.pickEntry не знает про arch) —
+# значит arch-специфичные артефакты (git-macos-<arch>.tar.gz, claude-code-<arch>.vsix)
+# едут парой, и install-скрипт берёт свой через arch_tag. Отсюда glob'ы в parts.
+#
+# uv В КАРТЕ НЕТ СОЗНАТЕЛЬНО: он bundled-only (main.js BUNDLED_ONLY={uv}) — едет внутри
+# lite-dmg (vendor-lite), remote-запись для него была бы недостижима.
+COMPONENTS_DARWIN = {
+    # git: dugite-native, две арх-сборки (git.sh: $HM_VENDOR/apps/git-macos-$(arch_tag).tar.gz)
+    # glob НЕ обязателен: нет ни одного тарболла → компонент целиком уходит в SKIP
+    # (как git в win-карте), а не роняет прогон; одна арх без другой публикуется как есть —
+    # у второй арх git.sh штатно уходит в CLT-фолбэк (см. fetch-vendor-mac.sh: там это warn).
+    "git":    {"kind": "staged", "parts": [("apps/git-macos-*.tar.gz", "apps/")],
+               "name": "Git for macOS (dugite, arm64+x64)"},
+    "node":   {"kind": "single", "src": "apps/node.pkg",   "prefix": "apps",              "name": "Node.js LTS (macOS pkg)"},
+    # vscode.sh ставит редактор из apps/vscode.zip (darwin-universal), расширения —
+    # свой vsix при наличии, иначе Marketplace (в lite — Marketplace, как на Windows).
+    "vscode": {"kind": "single", "src": "apps/vscode.zip", "prefix": "apps",              "name": "Visual Studio Code (macOS)"},
+    "cursor": {"kind": "single", "src": "apps/cursor.dmg", "prefix": "apps",              "name": "Cursor (macOS dmg)"},
+    "claude": {"kind": "single", "src": "npm-cache",       "prefix": "npm-cache",         "name": "Claude Code CLI (npm-cache)"},
+    "mascot": {"kind": "single", "src": "apps/claude-mascot", "prefix": "apps/claude-mascot", "name": "Claude Mascot (macOS)"},
+    # nomad — как на Windows: дерево + манифест целостности (nomad.sh верифицирует
+    # fail-closed ДО uv tool install). nomad-src.sha256 генерит fetch-vendor-mac.sh —
+    # публиковать ТОЛЬКО после свежего фетча, иначе обязательная часть отсутствует.
+    "nomad":  {"kind": "staged", "parts": [("nomad-src", "nomad-src"),
+                                           ("nomad-src.sha256", "nomad-src.sha256")],
+               "name": "Nomad (source + integrity manifest)"},
+    "config": {"kind": "single", "src": "config-pack",     "prefix": "config-pack",       "name": "Claude config pack (v38)"},
+    # pydeps: как в win32 — установщик Python + колёса + requirements.txt ВНУТРИ архива
+    # (в lite config-pack не вшит, а pydeps.sh читает список пакетов через HM_VENDOR).
+    "pydeps": {"kind": "staged", "parts": [("apps/python.pkg",               "apps/python.pkg"),
+                                           ("pywheels",                      "pywheels"),
+                                           ("config-pack/requirements.txt",  "config-pack/requirements.txt")],
+               "name": "Python + wheels (pydeps, macOS)"},
+    # extension: claude-code-<arch>.vsix (обе арх — обязательны как группа) + шрифт.
+    # chatgpt-*.vsix СЮДА НЕ КЛАДЁМ (та же логика, что на Windows: его читает только
+    # vscode.sh из СВОЕГО staging, а в lite Codex ставится из Marketplace).
+    "extension": {"kind": "staged", "parts": [("apps/claude-code-*.vsix",           "apps/", True),
+                                              ("apps/JetBrainsMono-Regular.ttf",    "apps/JetBrainsMono-Regular.ttf")],
+                  "name": "VS Code extensions (Claude Code + шрифт, macOS)"},
+}
+
+PLATFORM_MAPS = {"win32": COMPONENTS, "darwin": COMPONENTS_DARWIN}
+
 
 def load_registry_ids():
     if not REGISTRY.exists():
@@ -87,8 +139,8 @@ def load_registry_ids():
     return {(c.get("remoteId"), c.get("platform")) for c in reg.get("components", [])}
 
 
-def run_push(remote_id, source, name, zip_prefix=None, dry=False):
-    cmd = [sys.executable, str(PUSH), remote_id, str(source), "--platform", "win32", "--name", name]
+def run_push(remote_id, source, name, zip_prefix=None, dry=False, platform="win32"):
+    cmd = [sys.executable, str(PUSH), remote_id, str(source), "--platform", platform, "--name", name]
     if zip_prefix:
         cmd += ["--zip-prefix", zip_prefix]
     if dry:
@@ -101,13 +153,18 @@ def stage_composite(spec):
     """Собирает временную staging-папку из parts (src-glob-relative-vendor, dest_rel)."""
     stage = Path(tempfile.mkdtemp(prefix="pubvendor_stage_"))
     staged_any = False
-    for src_rel, dest_rel in spec["parts"]:
+    for part in spec["parts"]:
+        src_rel, dest_rel = part[0], part[1]
         is_glob = any(ch in src_rel for ch in "*?[")
+        # Обязательность: литерал — всегда, glob — только если помечен явно третьим
+        # элементом (напр. claude-code-*.vsix: имя арх-зависимо, но хотя бы одна
+        # сборка обязана быть, иначе уедет extension без панели Claude).
+        required = part[2] if len(part) > 2 else (not is_glob)
         matches = sorted(VENDOR.glob(src_rel)) if is_glob else \
                   ([VENDOR / src_rel] if (VENDOR / src_rel).exists() else [])
-        # Литеральная (не-glob) часть ОБЯЗАТЕЛЬНА: молчаливый silent-skip публиковал бы
-        # неполный составной артефакт (напр. extension без claude-code.vsix) с кодом 0.
-        if not is_glob and not matches:
+        # Молчаливый silent-skip публиковал бы неполный составной артефакт
+        # (напр. extension без claude-code.vsix) с кодом 0.
+        if required and not matches:
             raise SystemExit(f"[fail] {spec['name']}: обязательная часть отсутствует в vendor/: {src_rel}")
         for m in matches:
             if dest_rel.endswith("/"):
@@ -126,21 +183,27 @@ def stage_composite(spec):
 def main():
     ap = argparse.ArgumentParser(description="Массовая публикация vendor-артефактов как remote-компонентов (2 зеркала).")
     ap.add_argument("--only", default="", help="запятыми: git,node,pydeps… (по умолчанию — все)")
-    ap.add_argument("--skip-existing", action="store_true", help="пропустить компоненты, уже присутствующие в реестре (remoteId+win32)")
+    ap.add_argument("--platform", choices=sorted(PLATFORM_MAPS), default="win32",
+                    help="раскладка vendor и platform записи реестра (по умолчанию win32)")
+    ap.add_argument("--skip-existing", action="store_true", help="пропустить компоненты, уже присутствующие в реестре (remoteId+platform)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    plat = args.platform
+    components = PLATFORM_MAPS[plat]
     only = {s.strip() for s in args.only.split(",") if s.strip()}
-    ids = list(COMPONENTS.keys()) if not only else [i for i in COMPONENTS if i in only]
-    if only - set(COMPONENTS):
-        print(f"[warn] неизвестные id в --only: {', '.join(sorted(only - set(COMPONENTS)))}", file=sys.stderr)
+    ids = list(components.keys()) if not only else [i for i in components if i in only]
+    if only - set(components):
+        print(f"[warn] неизвестные id в --only для платформы {plat}: "
+              f"{', '.join(sorted(only - set(components)))}", file=sys.stderr)
+    print(f"[publish-vendor] платформа: {plat}; компонентов в карте: {len(components)}")
 
     existing = load_registry_ids()
     results = {"ok": [], "skip_missing": [], "skip_existing": [], "fail": []}
 
     for rid in ids:
-        spec = COMPONENTS[rid]
-        if args.skip_existing and (rid, "win32") in existing:
+        spec = components[rid]
+        if args.skip_existing and (rid, plat) in existing:
             print(f"\n=== {rid}: уже в реестре — пропуск (--skip-existing) ===")
             results["skip_existing"].append(rid)
             continue
@@ -151,7 +214,7 @@ def main():
                 print(f"\n=== {rid}: нет в vendor/ ({spec['src']}) — SKIP ===")
                 results["skip_missing"].append(rid)
                 continue
-            rc = run_push(rid, src, spec["name"], spec.get("prefix"), args.dry_run)
+            rc = run_push(rid, src, spec["name"], spec.get("prefix"), args.dry_run, plat)
         else:  # staged
             stage = stage_composite(spec)
             if not stage:
@@ -159,7 +222,7 @@ def main():
                 results["skip_missing"].append(rid)
                 continue
             try:
-                rc = run_push(rid, stage, spec["name"], None, args.dry_run)
+                rc = run_push(rid, stage, spec["name"], None, args.dry_run, plat)
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
 
