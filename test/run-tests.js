@@ -4491,7 +4491,14 @@ ok('прогресс: полоса в ПРОЦЕНТАХ по прогону, п
   assert.strictEqual(HMFinish.runProgressPct(0, 0), 0, 'пустой набор не даёт NaN');
   assert.strictEqual(HMFinish.runProgressPct(9, 8), 100, 'больше 100% не показываем');
   assert.strictEqual(HMFinish.runProgressPct(-1, 8), 0, 'отрицательное не уводит полосу в минус');
-  assert(/HMFinishLink\.runProgressPct\(done, total\)/.test(a), 'интерфейс использует ТУ ЖЕ функцию, что проверена тестом');
+  assert(/window\.HMFinishLink\.runProgressPct\(done, total\)/.test(a), 'интерфейс использует ТУ ЖЕ функцию, что проверена тестом');
+  // Порядок загрузки: глобал должен существовать к моменту вызова, иначе полоса
+  // упадёт с ReferenceError уже у человека, а не в тестах.
+  // Сравниваем именно ТЕГИ скриптов: имена файлов упоминаются ещё и в комментариях
+  // разметки, и поиск по подстроке дал бы ложный порядок.
+  const si = html.indexOf('<script src="finish-link.js">');
+  const ai = html.indexOf('<script src="app.js">');
+  assert(si !== -1 && ai !== -1 && si < ai, 'finish-link.js подключается ДО app.js');
   assert(/сейчас: \$\{currentName\}/.test(a), 'в подписи видно, какой компонент идёт сейчас');
 
   // Полоса обязана двигаться и когда компонент ПРОПУЩЕН из-за зависимости, иначе она

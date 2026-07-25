@@ -1055,7 +1055,7 @@ function setRunProgress(done, total, currentName) {
   const label = document.getElementById('run-progress-label');
   if (!box || !fill || !label) return;
   box.classList.remove('hidden');
-  const pct = HMFinishLink.runProgressPct(done, total);
+  const pct = window.HMFinishLink.runProgressPct(done, total);
   fill.style.width = pct + '%';
   label.textContent = currentName
     ? `${pct}% · ${done} из ${total} · сейчас: ${currentName}`
