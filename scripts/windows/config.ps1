@@ -119,6 +119,15 @@ if (Test-Path $claudeHome) {
         Write-Host "ВНИМАНИЕ: полный бэкап ~/.claude снять не удалось (возможно, часть файлов занята — открыт Cursor/Claude)."
         Write-Host "  Это НЕ критично: оригинал ~/.claude НЕ переносится и НЕ стирается — твои данные на месте. Продолжаю."
     }
+    # РЕТЕНЦИЯ: держим 3 ПОСЛЕДНИЕ копии. Без неё каждый прогон (repair/повтор/ручной
+    # перезапуск) оставлял ПОЛНУЮ копию ~/.claude навсегда — гигабайты, о которых юзер не
+    # знает и которые никто не чистит. Имена $claudeHome.backup.<YYYYMMDD-HHmmss> →
+    # лексикографическая сортировка = хронологическая. Зеркало config.sh (mac).
+    try {
+        Get-ChildItem -Path (Split-Path $claudeHome -Parent) -Directory -Filter ((Split-Path $claudeHome -Leaf) + '.backup.*') -ErrorAction Stop |
+            Sort-Object Name -Descending | Select-Object -Skip 3 |
+            ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+    } catch { Write-Host "  (старые копии ~/.claude.backup.* не удалось перечислить — оставляю как есть)" }
 }
 
 # Существовал ли рабочий конфиг ДО обновления — для честного финального рапорта.
