@@ -4465,8 +4465,41 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
   assert(/credential\.helper=/.test(ps) && /credential\.interactive=false/.test(ps),
     'сам git-вызов на Windows тоже обезврежен (env могут не унаследовать)');
-  assert(/credential\.helper= -c credential\.interactive=false/.test(sh),
-    'и на macOS');
+  // ПОВЕДЕНЧЕСКАЯ проверка, а не текстовая. Текстовая уже пропустила боевую поломку:
+  // в строку попал ЛИТЕРАЛЬНЫЙ backslash-n вместо переноса, git получал лишний аргумент
+  // «n» и падал с «'n' is not a git command», а регекс по исходнику всё равно матчился —
+  // тест был зелёным на мёртвом коде. Поэтому собираем argv настоящим bash.
+  assert(/credential\.helper=/.test(sh) && /credential\.interactive=false/.test(sh),
+    'флаги защиты есть в строке (macOS)');
+  const gitLine = (sh.split(/\r?\n/).find((l) => /clone --depth 1 -b "\$BRANCH"/.test(l)) || '');
+  assert(gitLine, 'нашли строку вызова git clone');
+  assert(gitLine.indexOf('\\n') === -1,
+    'в строке нет литерального backslash-n: он ломает argv и убивает единственный путь получения конфига');
+
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-argv-'));
+  try {
+    const fake = path.join(sb, 'git');
+    fs.writeFileSync(fake, '#!/usr/bin/env bash\nfor a in "$@"; do printf "<%s>\\n" "$a"; done\n');
+    fs.chmodSync(fake, 0o755);
+    const script = 'GIT_BIN=' + JSON.stringify(fake) + '; BRANCH=main; URL=https://example.invalid/r.git; CLONE=' +
+      JSON.stringify(path.join(sb, 'c')) + '\n' + gitLine;
+    const r = require('child_process').spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 20000 });
+    const argv = String(r.stdout || '').trim().split(/\r?\n/)
+      .filter(Boolean).map((s) => s.replace(/^</, '').replace(/>$/, ''));
+    assert(argv.length > 5, 'подставной git отработал: ' + JSON.stringify(argv).slice(0, 200));
+    assert(argv.indexOf('n') === -1, 'в argv нет мусорного «n»: ' + argv.join(' '));
+    let firstPositional = '';
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === '-c') { i++; continue; }
+      if (argv[i].charAt(0) === '-') continue;
+      firstPositional = argv[i]; break;
+    }
+    assert.strictEqual(firstPositional, 'clone',
+      'git получает подкоманду clone, а не мусор: ' + argv.join(' '));
+    assert(argv.indexOf('credential.helper=') !== -1, 'защита от запроса кредов реально доехала до git');
+  } finally {
+    fs.rmSync(sb, { recursive: true, force: true });
+  }
 });
 
 ok('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)', async () => {

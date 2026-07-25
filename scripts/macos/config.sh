@@ -76,7 +76,7 @@ else
   # osxkeychain, а при установленном GCM — графическое окно) при любом отказе доступа
   # ждёт ввода, и установка виснет ВЕЧНО. Репозиторий конфига публичный: запрос
   # кредов = сломанная ситуация, правильный исход — быстро упасть с ошибкой.
-  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false \n    -c credential.helper= -c credential.interactive=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
+  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false -c credential.helper= -c credential.interactive=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
 fi
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.sh
