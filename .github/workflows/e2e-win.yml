@@ -294,3 +294,78 @@ jobs:
           name: e2e-screenshots-mac
           path: release/e2e-*.png
           if-no-files-found: ignore
+
+  # ── macOS, ЛЁГКОЕ издание: РЕАЛЬНАЯ докачка с S3 ────────────────────────────
+  #
+  # Джоб выше гоняет ОФЛАЙН-издание: оно ставит из вшитого vendor и сеть не трогает,
+  # то есть про стриминг на macOS не доказывает НИЧЕГО. Ровно эта дыра на Windows
+  # обернулась тем, что лёгкая версия не качала ни одного компонента, а сбой был виден
+  # только на чистой машине. Пока этот джоб не зелёный, лёгкую версию для macOS нельзя
+  # ставить дефолтной ссылкой.
+  e2e-mac-lite:
+    name: macOS (lite) — реальная докачка с S3
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        run: |
+          mkdir -p vendor
+          cp test/fixtures/checksums-e2e.json vendor/checksums.json
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('config.json','utf8'));c.edition='lite';c.offlineEdition=false;fs.writeFileSync('config.json',JSON.stringify(c,null,2));console.log('edition=lite')"
+          node -e "const r=require('./remote-components.json');const n=Object.values(r.components||r).filter(Boolean).length;console.log('записей в реестре докачки:',n)"
+
+      - name: Юнит-тесты (информативно)
+        continue-on-error: true
+        run: npm test
+
+      # Раннеры GitHub стоят в США, оба зеркала — российские. Если S3 из этой сети
+      # недоступен, надо знать это явно, а не гадать по «Сеть оборвалась».
+      - name: Диагностика зеркал (доступны ли S3 из сети раннера)
+        continue-on-error: true
+        run: |
+          for u in \
+            "https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg" \
+            "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding/downloads/Hamidun-Setup-Windows.exe" ; do
+            code=$(curl -so /dev/null -w '%{http_code}' --max-time 30 -r 0-0 "$u" || echo "нет ответа")
+            echo "$code  $u"
+          done
+
+      # config качается ВСЕГДА (в lite он не вшит) и проверяется по факту: >100 скиллов
+      # в изолированном профиле. Это сильнее, чем «в UI мелькнул прогресс».
+      - name: E2E ok — реальная докачка с S3 и установка
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js ok
+
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: Артефакты (скриншоты GUI)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-mac-lite
+          path: release/e2e-*.png
+          if-no-files-found: ignore
