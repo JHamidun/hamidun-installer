@@ -245,6 +245,176 @@
         "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
       },
       "platform": "win32"
+    },
+    {
+      "remoteId": "git",
+      "name": "Git for macOS (dugite, arm64+x64)",
+      "sizeBytes": 123139118,
+      "sha256": "c5c73af2f019cd97ea7b76701ed970dc5bf478fba254f92888968e78b3951b79",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/git-darwin-c5c73af2f019cd97ea7b76701ed970dc5bf478fba254f92888968e78b3951b79.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/git.sh",
+      "gatedFiles": {
+        "git-macos-arm64.tar.gz": "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437",
+        "git-macos-x64.tar.gz": "caf27c36b8834969550535bcd5e58186f970e080d1e175e76d9c1de3aac409ed"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "node",
+      "name": "Node.js LTS (macOS pkg)",
+      "sizeBytes": 91495148,
+      "sha256": "9bbf868f9c32c9daef01b1a7e4ea5d3197deda0cbd540488c54ee5b06fe47f81",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-darwin-9bbf868f9c32c9daef01b1a7e4ea5d3197deda0cbd540488c54ee5b06fe47f81.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/node.sh",
+      "gatedFiles": {
+        "node.pkg": "e5a6701100066156d69da48878e4b95986733b0688e0b83afbe1093778e3fffd"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "vscode",
+      "name": "Visual Studio Code (macOS)",
+      "sizeBytes": 531433049,
+      "sha256": "62efb502058bd1ce271befaddb182250c2bc9df86620a543d5b1df0da632b688",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/vscode-darwin-62efb502058bd1ce271befaddb182250c2bc9df86620a543d5b1df0da632b688.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/vscode.sh",
+      "gatedFiles": {
+        "vscode.zip": "459f13ea6ca9d4fb246804d253a58ec69528d62e382f592790efc559fbaaa5df"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "cursor",
+      "name": "Cursor (macOS dmg)",
+      "sizeBytes": 428005840,
+      "sha256": "3797c21a87aa1fb91d7d7af92b868c2e7745f4ea6ca7a43c98cb31f326116b96",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/cursor-darwin-3797c21a87aa1fb91d7d7af92b868c2e7745f4ea6ca7a43c98cb31f326116b96.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/cursor.sh",
+      "gatedFiles": {
+        "cursor.dmg": "42b1edea8912eb0b2fc686ea89a4a0047aaaf43da4f7d8eb34a4bafa35d477b1"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "claude",
+      "name": "Claude Code CLI (npm-cache)",
+      "sizeBytes": 67760090,
+      "sha256": "345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/claude.sh",
+      "gatedFiles": {},
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "mascot",
+      "name": "Claude Mascot (macOS)",
+      "sizeBytes": 202286822,
+      "sha256": "988b669f5b81874e9c4a59169b972ad1a3280a01bb1adb8944c3792009818679",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/mascot-darwin-988b669f5b81874e9c4a59169b972ad1a3280a01bb1adb8944c3792009818679.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/mascot.sh",
+      "gatedFiles": {
+        "claude-mascot": "37af276184c66a4ab5cfb5aa1d45439de11d6ba0fdbf69629200e79324c1384e"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "nomad",
+      "name": "Nomad (source + integrity manifest)",
+      "sizeBytes": 70284303,
+      "sha256": "6eb897203049ab3992e9f521be1a0a71ae346fa46252629ef0c9272c4daedc35",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/nomad-darwin-6eb897203049ab3992e9f521be1a0a71ae346fa46252629ef0c9272c4daedc35.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/nomad.sh",
+      "gatedFiles": {
+        "pyproject.toml": "fb3c40c752dabf7e31f788717a43eccae783328e8dcbad8da940735d2dffd419",
+        "nomad-src.sha256": "85fda790d3901ac182ef036e96244006ee8bfe84fa7b3896811e84f0e87ed04f"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "config",
+      "name": "Claude config pack (v38)",
+      "sizeBytes": 64851685,
+      "sha256": "13d28728064b0f5d4ba32d3e7fcf87ef8505c243bcb89b474c8f58cdacd9e757",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-darwin-13d28728064b0f5d4ba32d3e7fcf87ef8505c243bcb89b474c8f58cdacd9e757.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/config.sh",
+      "gatedFiles": {},
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "pydeps",
+      "name": "Python + wheels (pydeps, macOS)",
+      "sizeBytes": 157467839,
+      "sha256": "82aac3ab3e3fee5116f22ba9b34ad50a0f6b3c41ff2a48fd912d0ff781ef0e36",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-82aac3ab3e3fee5116f22ba9b34ad50a0f6b3c41ff2a48fd912d0ff781ef0e36.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/pydeps.sh",
+      "gatedFiles": {
+        "python.pkg": "2ec2355c1b3225ce1075fc1b562a6e113017aa6177df87c410667638c1574a09"
+      },
+      "platform": "darwin"
+    },
+    {
+      "remoteId": "extension",
+      "name": "VS Code extensions (Claude Code + шрифт, macOS)",
+      "sizeBytes": 162682568,
+      "sha256": "1c046a33370f155539d85d9f04f84dcab2903b1cd7c79fd6b7a7c3e375a623be",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-darwin-1c046a33370f155539d85d9f04f84dcab2903b1cd7c79fd6b7a7c3e375a623be.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/extension.sh",
+      "gatedFiles": {
+        "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f",
+        "claude-code-arm64.vsix": "e671f210ab9becb2c737e6e937ebb7eb002ced0e2263ebe056077854f8333978",
+        "claude-code-x64.vsix": "f1ac60f5a191edef79d9491d72ee749f72546d43fee0724fddd581cafc1ad52b"
+      },
+      "platform": "darwin"
     }
   ]
 }
