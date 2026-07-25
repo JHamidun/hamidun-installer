@@ -161,11 +161,15 @@ def make_zip(src: Path, zip_prefix: str = "") -> Path:
         return f"{pref}/{name}" if pref else name
 
     src = src.resolve()
-    if src.is_file() and src.suffix.lower() == ".zip":
-        if pref:
-            raise SystemExit("--zip-prefix несовместим с уже готовым .zip-входом")
+    if src.is_file() and src.suffix.lower() == ".zip" and not pref:
+        # Без префикса .zip уезжает как есть — его содержимое и есть содержимое артефакта.
         print(f"  вход уже zip — использую как есть: {src.name}")
         return src
+    # С префиксом .zip НЕ распаковываем: скрипт ждёт САМ файл по пути внутри vendor
+    # (macOS: vscode.sh читает $HM_VENDOR/apps/vscode.zip и распаковывает его сам).
+    # Поэтому кладём его в архив как обычный файл под нужным префиксом — ниже, в
+    # ветке bare-файла. Раньше здесь стоял отказ, из-за которого публикация vscode
+    # для darwin падала целиком.
 
     tmp = Path(tempfile.mkdtemp(prefix="pushcomp_")) / (src.stem.split(".")[0] + ".zip")
 
