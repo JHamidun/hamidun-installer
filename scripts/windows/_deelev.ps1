@@ -196,6 +196,21 @@ function New-HmSecureStagingDir {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
 
+        # Каталог ОБЯЗАН быть ПУСТЫМ.
+        # В фолбэке между CreateDirectory (наследует ACL от ProgramData, где Users имеют
+        # право создавать файлы) и применением защищённого DACL есть окно. Проверки
+        # владельца и ACE ниже смотрят на САМ каталог и о содержимом не знают: малварь
+        # того же юзера может в это окно создать файл и УДЕРЖАТЬ на него хэндл записи —
+        # смена владельца уже выданный хэндл не отзывает. Непустой каталог здесь означает
+        # ровно это, и единственный корректный ответ — отказ (fail-closed).
+        $stray = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)
+        if ($stray.Count -gt 0) {
+            [Console]::Error.WriteLine('HMSECFAIL: в свежесозданном каталоге уже есть объекты (' +
+                (($stray | Select-Object -First 3 | ForEach-Object { $_.Name }) -join ', ') +
+                ') — возможна подмена в момент создания')
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+
         # Владелец УЖЕ задан атомарно в SD выше (не post-icacls — иначе окно с owner=user + WRITE_DAC).
         # Проверка владельца ниже — fail-closed, если атомарное применение владельца не сработало
         # (owner != Administrators -> каталог мог иметь окно -> отбрасываем).
@@ -212,7 +227,7 @@ function New-HmSecureStagingDir {
             try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
             catch { $sid = [string]$ace.IdentityReference }
             if ($allow -notcontains $sid) {
-                [Console]::Error.WriteLine('HMSECFAIL: посторонний ACE в каталоге: ' + $sid)
+                [Console]::Error.WriteLine('HMSECFAIL: посторонний ACE в каталоге: ' + ($sid -replace '^S-1-5-21-[\d-]+$', '<sid>'))
                 # Посторонний ACE. Elevated -> недопустимо (fail-closed). Medium -> нет privesc
                 # (родитель уже medium), но такой ACE не должен появляться при protection on.
                 if ($Elevated) {
@@ -220,7 +235,76 @@ function New-HmSecureStagingDir {
                 }
             }
         }
-        return $dir
+
+        # РАБОЧИЙ каталог создаём ВНУТРИ уже запертого — и отдаём наружу именно его.
+        #
+        # Зачем второй уровень. В фолбэке между «создать каталог» и «применить DACL» есть
+        # окно: каталог рождается с унаследованным от ProgramData доступом (Users могут
+        # создавать объекты, владелец — сам пользователь). Проверки выше ловят подмену
+        # DACL и владельца, но НЕ ловят удержанный дескриптор: Windows проверяет права в
+        # момент ОТКРЫТИЯ, поэтому malware того же юзера может открыть каталог в окне с
+        # полным доступом, ничего не менять — и продолжать писать туда после того, как мы
+        # всё заперли. Следа в DACL при этом не остаётся.
+        #
+        # Внутренний каталог рождается, когда родитель УЖЕ заперт: Users не имеют на него
+        # прав, значит открыть или перечислить внутренний каталог не могут, а удержанный
+        # дескриптор РОДИТЕЛЯ доступа к ребёнку не даёт (права проверяются на самом
+        # объекте, а удалить/переименовать ребёнка без DELETE на нём нельзя).
+        $work = Join-Path $dir 'w'
+        try {
+            [void][System.IO.Directory]::CreateDirectory($work)
+        } catch {
+            [Console]::Error.WriteLine('HMSECFAIL: не удалось создать рабочий подкаталог: ' + $_.Exception.Message)
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+        if (-not (Test-Path -LiteralPath $work)) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+        $wattr = (Get-Item -LiteralPath $work -Force).Attributes
+        if ($wattr -band [System.IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+        # Ребёнок ACE наследует, но наследование и владельца доводим явно — наружу уходит
+        # ИМЕННО этот путь, и он обязан удовлетворять тем же инвариантам, что проверяет
+        # вызывающий (владелец = Administrators, protection on, посторонних ACE нет).
+        try {
+            $wAcl = Get-HmDirAcl -Path $work
+            $wAcl.SetAccessRuleProtection($true, $true)   # снять наследование, СОХРАНИВ уже полученные ACE
+            Set-HmDirAcl -Path $work -Acl $wAcl
+        } catch {
+            [Console]::Error.WriteLine('HMSECFAIL: не удалось запереть рабочий подкаталог: ' + $_.Exception.Message)
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+        if ($Elevated) {
+            $wOwner = (Get-HmDirAcl -Path $work).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if ($wOwner -ne 'S-1-5-32-544') {
+                & $Icacls $work '/setowner' '*S-1-5-32-544' '/T' '/C' *> $null
+                $wOwner = (Get-HmDirAcl -Path $work).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            }
+            if ($wOwner -ne 'S-1-5-32-544') {
+                [Console]::Error.WriteLine('HMSECFAIL: владелец рабочего подкаталога = ' +
+                    ($wOwner -replace '^S-1-5-21-[\d-]+$', '<sid>') + ', ожидался S-1-5-32-544')
+                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            }
+        }
+        $wAclFinal = Get-HmDirAcl -Path $work
+        if (-not $wAclFinal.AreAccessRulesProtected) {
+            [Console]::Error.WriteLine('HMSECFAIL: наследование на рабочем подкаталоге не снято')
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+        }
+        foreach ($ace in $wAclFinal.Access) {
+            $sid = $null
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$ace.IdentityReference }
+            if ($allow -notcontains $sid) {
+                [Console]::Error.WriteLine('HMSECFAIL: посторонний ACE в рабочем подкаталоге: ' +
+                    ($sid -replace '^S-1-5-21-[\d-]+$', '<sid>'))
+                if ($Elevated) {
+                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                }
+            }
+        }
+        return $work
     } catch {
         # Молчаливый $null раньше делал причину невидимой (в lite это «ни один компонент не
         # скачался» без объяснения). Причину пишем в stderr — вызывающий (main.js) подхватывает
