@@ -60,9 +60,24 @@ if [ -f "$COURSE_DIR/CLAUDE.md" ]; then
     fi
   done
 fi
-if ! /usr/bin/unzip -o -q "$ZIP" -d "$TARGET"; then
-  echo "Не удалось распаковать курс."
-  exit 1
+# Распаковка через ditto, а НЕ unzip.
+#
+# Живой случай (установка зависла на 15 минут): в архиве курса есть файл с кириллическим
+# именем (.claude/commands/начать.md) с выставленным флагом UTF-8. Штатный unzip в macOS
+# (Info-ZIP 6.0) этот флаг не понимает: имя превращается в мусор, запись падает, и unzip
+# ЗАДАЁТ ВОПРОС «write error (disk full?). Continue? (y/n/^C)». Ввода у него нет —
+# процесс висит вечно, а человек видит бесконечный спиннер и решает, что всё сломалось.
+# Диск при этом не полон: сообщение unzip — догадка.
+#
+# ditto — родной для macOS распаковщик, кириллицу в именах читает верно и вопросов не
+# задаёт. unzip оставлен запасным путём и ОБЯЗАТЕЛЬНО со stdin из /dev/null: тогда на
+# любом своём вопросе он получит EOF и честно завершится ошибкой вместо зависания.
+if ! /usr/bin/ditto -x -k "$ZIP" "$TARGET" </dev/null 2>/dev/null; then
+  echo "ditto не справился — пробую unzip."
+  if ! /usr/bin/unzip -o -q "$ZIP" -d "$TARGET" </dev/null; then
+    echo "Не удалось распаковать курс."
+    exit 1
+  fi
 fi
 if [ ! -f "$COURSE_DIR/CLAUDE.md" ]; then
   echo "Курс распаковался неожиданно (нет CLAUDE.md в $COURSE_DIR)."

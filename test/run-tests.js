@@ -4444,6 +4444,53 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
   assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
 });
 
+ok('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)', async () => {
+  // Живой случай: установка встала на 15 минут — unzip спросил «write error (disk full?).
+  // Continue? (y/n/^C)», а ответить некуда. По умолчанию Node даёт ребёнку живой пайп на
+  // stdin, который никогда не закрывается, поэтому ЛЮБОЙ вопрос вешает шаг навсегда.
+  const m = EG_MAIN();
+  const i = m.indexOf('const spawnOpts = { env: childEnv');
+  assert(i !== -1, 'нашли спавн компонентных скриптов');
+  assert(/stdio: \['ignore', 'pipe', 'pipe'\]/.test(m.slice(i, i + 200)),
+    'stdin ребёнка = /dev/null: вопрос получает EOF и инструмент честно падает');
+
+  // Проверяем не текст, а ПОВЕДЕНИЕ: спавним процесс, который ждёт ответа.
+  const script = path.join(os.tmpdir(), 'hm-ask-' + Date.now() + '.js');
+  fs.writeFileSync(script,
+    'process.stdin.once("data", () => process.exit(0));' +
+    'process.stdin.on("end", () => process.exit(3));' +
+    'process.stdin.resume();');
+  const { spawn: spawnChild } = require('child_process');
+  const run = (stdio) => new Promise((resolve) => {
+    const child = spawnChild(process.execPath, [script], { stdio });
+    const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } resolve('hang'); }, 4000);
+    child.on('close', (code) => { clearTimeout(kill); resolve('exit:' + code); });
+  });
+  try {
+    assert.strictEqual(await run(['pipe', 'pipe', 'pipe']), 'hang', 'старое поведение действительно вешало');
+    assert.strictEqual(await run(['ignore', 'pipe', 'pipe']), 'exit:3', 'с закрытым stdin процесс завершается сразу');
+  } finally {
+    fs.rmSync(script, { force: true });
+  }
+});
+
+ok('macOS: курс распаковывается ditto — unzip не понимает кириллицу в именах', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'course.sh'), 'utf8');
+  assert(/\/usr\/bin\/ditto -x -k/.test(s), 'основной путь — ditto (родной для macOS, UTF-8-имена)');
+  const di = s.indexOf('/usr/bin/ditto -x -k');
+  const ui = s.indexOf('/usr/bin/unzip');
+  assert(di !== -1 && ui !== -1 && di < ui, 'ditto пробуется ПЕРВЫМ, unzip — запасной');
+  assert(/\/usr\/bin\/unzip[^\n]*<\/dev\/null/.test(s),
+    'у запасного unzip stdin закрыт: иначе он снова подвесит установку своим вопросом');
+  // В архиве курса реально есть кириллическое имя — из-за него всё и встало.
+  const zip = path.join(ROOT, 'vendor', 'course', 'vibecoding-course.zip');
+  if (fs.existsSync(zip)) {
+    const buf = fs.readFileSync(zip);
+    assert(buf.includes(Buffer.from('начать', 'utf8')),
+      'архив содержит имя с кириллицей — значит распаковщик обязан её понимать');
+  }
+});
+
 ok('macOS: установщик чинит карантин САМ — кнопка, а не команда в Терминал', () => {
   const m = EG_MAIN();
   const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');

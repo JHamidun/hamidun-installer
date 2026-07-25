@@ -1023,7 +1023,15 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // macOS: give the child its own process group so killChildren can reap the
       // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
       // we kill the tree via taskkill /T instead, so no detached group is needed.
-      const spawnOpts = { env: childEnv, windowsHide: true };
+      // stdin ЗАКРЫТ (ignore) — это системная защита от зависания.
+      // По умолчанию Node даёт ребёнку живой пайп на stdin, который никогда не получает
+      // данных и никогда не закрывается. Любой инструмент, задавший вопрос, ждёт ответа
+      // ВЕЧНО: человек видит бесконечный спиннер и решает, что всё сломалось. Ровно так
+      // встала установка на 15 минут — unzip спросил «write error… Continue? (y/n/^C)».
+      // С /dev/null на stdin вопрос получает EOF, инструмент честно падает, а шаг
+      // показывает ошибку, которую видно и можно починить. Никто в stdin не пишет
+      // (проверено), поэтому потерь нет.
+      const spawnOpts = { env: childEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] };
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
