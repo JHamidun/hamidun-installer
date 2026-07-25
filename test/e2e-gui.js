@@ -587,7 +587,14 @@ async function clickInstall(page) {
 async function armDownloadWatcher(page) {
   await page.evaluate(() => {
     window.__e2eSawDownload = false;
-    const RE = /Скачиваю|скачив|Докачка|\[↓\]/i;
+    // Ищем ПРОЦЕНТЫ и мегабайты, а не слово «Скачиваю».
+    // Подпись «— Скачиваю…» и строку «[↓] Докачка … из облака» renderer печатает ДО
+    // обращения к main, по одному лишь факту, что компонент числится удалённым. По ним
+    // флаг поднимался бы даже когда не скачано НИ ОДНОГО байта (например, отказ
+    // защищённого каталога) — проверка «докачка стартовала» превращалась во
+    // всегда-истину. Проценты появляются только из события прогресса, то есть после
+    // реально полученных байтов.
+    const RE = /Скачиваю\s+\d+%|\d+\s+из\s+[\d.,]+\s*МБ/i;
     const check = () => {
       const s = document.getElementById('step-list');
       const l = document.getElementById('log');
@@ -780,8 +787,10 @@ async function scenarioOkOrNetfail(ctx) {
     const steps = (await page.textContent('#step-list')) || '';
     const logText = (await page.textContent('#log')) || '';
     // Флаг наблюдателя приоритетнее текста «на финише»: подпись прогресса к этому моменту
-    // уже сменилась на обычную, а журнал в UI подрезан.
-    const sawDownload = (await sawDownloadEver(page)) || /Скачиваю|скачив|Докачка/i.test(steps + logText);
+    // уже сменилась на обычную, а журнал в UI подрезан. Запасной текстовый путь тоже
+    // требует ПРОЦЕНТОВ: слова «Скачиваю»/«Докачка» renderer печатает до обращения к
+    // сети, и по ним проверка была бы всегда-истиной.
+    const sawDownload = (await sawDownloadEver(page)) || /Скачиваю\s+\d+%|\d+\s+из\s+[\d.,]+\s*МБ/i.test(steps + logText);
 
     if (SCENARIO === 'netfail') {
       check('UI честно показал обрыв сети (статус error-net)', terminal.kind === 'error-net',

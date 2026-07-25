@@ -42,7 +42,7 @@
     "shortcutName": "Курс вайбкодинг (Claude Code)"
   },
   "telemetry": {
-    "_comment": "Анонимная статистика установки (opt-out чекбоксом на экране выбора). Один POST по завершении: {event, platform, ok, failed[], duration_sec} — БЕЗ uid и ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
+    "_comment": "Статистика установки (opt-out чекбоксом на экране выбора). События: install_started / installed / open_editor. Тело: {event, platform, edition, ok, failed[], skipped[], errors[{id,stage,error}], duration_sec, uid}. uid — идентификатор в Telegram, если человек пришёл по персональной ссылке бота (main берёт его из имени скачанного файла); тексты ошибок чистятся от ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
     "url": "https://academy.hamidun.com/api/lead"
   },
   "finish": {

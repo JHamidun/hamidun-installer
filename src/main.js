@@ -775,7 +775,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   let secureCacheDir = '';
   const cleanupSecureCache = () => {
     if (!secureCacheDir) return;
-    try { fs.rmSync(secureCacheDir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    try { fs.rmSync(stagingRootOf(secureCacheDir), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
     for (const [rid, d] of SECURE_DIRS) { if (d === secureCacheDir) SECURE_DIRS.delete(rid); }
     secureCacheDir = '';
   };
@@ -1164,8 +1164,10 @@ ipcMain.handle('open-external', (_e, url) => {
   return false;
 });
 
-// ---- анонимная телеметрия установки (opt-out чекбоксом на экране выбора) ----
-// БЕЗ uid и ПД: только событие, платформа, исход, id упавших компонентов и
+// ---- телеметрия установки (opt-out чекбоксом на экране выбора) ----
+// НЕ анонимная, если человек пришёл по персональной ссылке бота: тогда отчёт везёт
+// uid (его идентификатор в Telegram), иначе бот не сможет помочь адресно. Свободные
+// тексты ошибок чистятся scrubText. Событие, платформа, исход, id упавших компонентов и
 // длительность. URL берём ТОЛЬКО из вшитого config.json (renderer URL задать не
 // может — иначе IPC превращается в произвольный POST-прокси), поля санитизируем
 // здесь же. Fire-and-forget: таймаут 5с, ЛЮБЫЕ ошибки глотаем молча — установка
@@ -1356,7 +1358,23 @@ function winDeElevScript() {
 // стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
 let lastSecureDirError = '';
 
+// Защищённый staging = ПАРА каталогов: внешний HmDeElev-<rnd> (заперт) и рабочий `w`
+// внутри него (наружу отдаётся именно рабочий — см. New-HmSecureStagingDir). Убирать
+// надо ВНЕШНИЙ, иначе в ProgramData копятся пустые запертые каталоги.
+function stagingRootOf(p) {
+  try {
+    const s = String(p || '');
+    if (!s) return s;
+    return path.basename(s) === 'w' ? path.dirname(s) : s;
+  } catch (e) { return p; }
+}
+
 async function winMakeSecureDir() {
+  // Сбрасываем на КАЖДОМ входе. Иначе причина от прошлого отказа доживает до следующего
+  // и приклеивается к другому компоненту: половина веток возвращает null молча, и в
+  // тексте шага оказалась бы чужая, уже неверная причина — ровно то, ради чего эта
+  // диагностика и заводилась.
+  lastSecureDirError = '';
   try {
     const pd = remoteFetch.winProgramData();
     if (!pd || !fs.existsSync(pd)) return null;
@@ -1400,8 +1418,13 @@ async function winMakeSecureDir() {
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
       let child;
       try {
+        // env — ДОВЕРЕННЫЙ, а не унаследованный. Инлайн-присваивание $env:PSModulePath
+        // закрывает только подмену модулей, но НЕ COR_ENABLE_PROFILING/COR_PROFILER/
+        // COR_PROFILER_PATH: их CLR читает при старте хоста, ДО разбора строки -Command.
+        // medium-малварь того же юзера пишет их в HKCU\Environment — и получает
+        // загрузку своей DLL в powershell.exe, запущенный НАМИ под администратором.
         child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
-          { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+          { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
       } catch (e) { return done({ error: e }); }
       const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || 'таймаут примитива (20 с)' }); }, 20000);
       child.stdout.on('data', (d) => { so += String(d); });
@@ -1426,7 +1449,7 @@ async function winMakeSecureDir() {
     }
     const dir = m[1].trim();
     if (!dir) return null;
-    const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };
+    const rm = () => { try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ } };
     // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
     // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
     const root = path.resolve(pd);
@@ -1490,7 +1513,7 @@ async function winLaunchDeElevated(exe, folderArg) {
   }
   const cleanup = () => {
     try { runSchtasks(['/Delete', '/TN', tag, '/F']); } catch (e) { /* */ }
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ }
+    try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ }
   };
 
   // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без

@@ -30,7 +30,12 @@ function sanitizeUid(v) {
 function resolveUid(opts) {
   const o = opts || {};
   const env = o.env || process.env;
-  const exePath = o.execPath || process.execPath || '';
+  // КРИТИЧНО для Windows: сборка — самораспаковывающийся portable-exe. Он распаковывает
+  // приложение в %TEMP%\ns<rnd>.tmp\app и запускает ОТТУДА, поэтому process.execPath
+  // указывает на «Hamidun Setup.exe» во временной папке, а НЕ на скачанный
+  // Hamidun-Setup-Windows--u<uid>.exe. Привязка по имени файла молча не работала бы
+  // вообще. Настоящий путь стаб кладёт в PORTABLE_EXECUTABLE_FILE (portable.nsi:78).
+  const exePath = o.execPath || env.PORTABLE_EXECUTABLE_FILE || process.execPath || '';
   try {
     const fromEnv = sanitizeUid(env.HM_UID);
     if (fromEnv) return fromEnv;
@@ -58,12 +63,27 @@ function scrubText(s, opts) {
   const home = o.home || os.homedir();
   const user = o.user || process.env.USERNAME || process.env.USER || '';
   const esc = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  let t = String(s == null ? '' : s);
+  // Режем ВХОД, а не только результат: регулярки ниже (в частности e-mail) на очень
+  // длинной строке из «словных» символов ведут себя квадратично, а сюда приходит текст
+  // ошибки произвольной длины. В телеметрию всё равно уезжает не больше 300 символов.
+  let t = String(s == null ? '' : s).slice(0, 2000);
   // 1) Сначала e-mail и IP. Если делать это ПОСЛЕ имени пользователя, то у человека с
   //    ником «ivan» адрес ivanov@mail.ru превратится в «<user>ov@mail.ru»: адрес
   //    останется, а замена лишь испортит текст.
   t = t.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '<email>');
   t = t.replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, '<ip>');
+  // Диагностика примитива (HMSECFAIL) печатает СЫРЫЕ SID и, если Translate() не смог
+  // достучаться до контроллера домена, строку вида DOMAIN\учётка. И то и другое —
+  // идентификаторы машины/учётной записи, а не наши компонентные данные. Встроенные
+  // SID (S-1-5-18, S-1-5-32-544) оставляем: они одинаковы у всех и как раз объясняют,
+  // ЧТО не сошлось.
+  t = t.replace(/\bS-1-5-21-[\d-]+/g, '<sid>');
+  // DOMAIN\учётка. Границы обязательны: без них правило съело бы обычные пути
+  // («C:\Users\student\AppData» → «C:\<account>\AppData»), то есть уничтожило бы саму
+  // диагностику. Слева не должно быть разделителя пути/двоеточия/буквы, справа —
+  // продолжения пути: тогда под правило попадает только отдельно стоящая пара
+  // «домен\учётка», а многосегментные пути остаются целыми.
+  t = t.replace(/(?<![\\/:\w])[A-Za-z][\w.-]{1,30}\\[A-Za-z][\w.$-]{1,30}(?![\\/\w])/g, '<account>');
   try {
     // 2) Домашний каталог — самое длинное и самое частое совпадение.
     if (home && home.length > 3) {

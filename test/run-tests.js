@@ -4444,6 +4444,72 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
   assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
 });
 
+ok('uid: на Windows берётся PORTABLE_EXECUTABLE_FILE — process.execPath указывает в %TEMP%', () => {
+  // Сборка — самораспаковывающийся portable-exe: он распаковывает приложение в
+  // %TEMP%\ns<rnd>.tmp\app и запускает ОТТУДА. process.execPath = «Hamidun Setup.exe» во
+  // временной папке, а НЕ скачанный Hamidun-Setup-Windows--u<uid>.exe, поэтому привязка
+  // по имени файла молча не работала бы вообще.
+  const real = path.join('C:', 'Users', 'x', 'Downloads', 'Hamidun-Setup-Windows--u272540053.exe');
+  const unpacked = path.join(os.tmpdir(), 'nsABCD.tmp', 'app', 'Hamidun Setup.exe');
+  assert.strictEqual(
+    UIDT.resolveUid({ env: { PORTABLE_EXECUTABLE_FILE: real }, execPath: undefined }), '272540053',
+    'uid берётся из настоящего имени скачанного файла');
+  assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: unpacked }), '',
+    'из распакованного пути uid не выдумывается');
+  const m = EG_MAIN();
+  assert(/PORTABLE_EXECUTABLE_FILE/.test(fs.readFileSync(path.join(ROOT, 'src', 'uid-telemetry.js'), 'utf8')),
+    'источник объявлен в модуле');
+  assert(m.indexOf('uidTelemetry.resolveUid()') !== -1, 'main зовёт резолвинг без ручных аргументов');
+});
+
+ok('телеметрия: SID и доменные учётки не уезжают, а обычные пути не калечатся', () => {
+  const o = { home: 'C:\\Users\\student', user: 'student' };
+  assert(!/S-1-5-21/.test(UIDT.scrubText('владелец = S-1-5-21-333-444-555-1001', o)), 'SID пользователя вычищен');
+  assert(!/petrov/i.test(UIDT.scrubText('посторонний ACE: CORP\\petrov.ivan', o)), 'доменная учётка вычищена');
+  assert(/S-1-5-32-544/.test(UIDT.scrubText('ожидался S-1-5-32-544', o)), 'встроенные SID остаются — они объясняют причину');
+  // Пути — это диагностика, а не ПД: правило «домен\\учётка» не должно их резать.
+  assert.strictEqual(UIDT.scrubText('нет файла vendor\\apps\\git-setup.exe', o),
+    'нет файла vendor\\apps\\git-setup.exe', 'относительный путь цел');
+  assert.strictEqual(UIDT.scrubText('C:\\Windows\\System32\\icacls.exe не найден', o),
+    'C:\\Windows\\System32\\icacls.exe не найден', 'системный путь цел');
+});
+
+ok('телеметрия: согласие и защёлки — повторный прогон снова отчитывается', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/STATE\.telemetryEditorSent/.test(a), 'open_editor защёлкнут (три кнопки ведут в одну отправку)');
+  assert(/STATE\.telemetrySent = false;[\s\S]{0,120}STATE\.telemetryStartSent = false;/.test(a),
+    'новый прогон сбрасывает защёлки — иначе вторая попытка невидима');
+  // Cursor обязан отчитываться ПО ФАКТУ открытия: кнопка рисуется по выбору компонента,
+  // а не по факту установки.
+  const ci = a.indexOf("const cursorBtn");
+  const ch = a.slice(ci, ci + 700);
+  assert(/await window\.installer\.launchCursor\(\)/.test(ch), 'результат запуска Cursor ожидается');
+  assert(/if \(ok\) sendOpenEditorTelemetry\(\)/.test(ch), 'событие только при реально открытом редакторе');
+});
+
+ok('главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf('async function winMakeSecureDir()');
+  const h = m.slice(i, i + 5000);
+  assert(/env: detectSpawnEnv\(\)/.test(h),
+    'spawn получает доверенный env: инлайн $env:PSModulePath не закрывает COR_ENABLE_PROFILING/COR_PROFILER — их CLR читает ДО разбора -Command');
+  assert(/lastSecureDirError = '';/.test(h), 'причина отказа сбрасывается на входе (не липнет к другому компоненту)');
+});
+
+ok('E2E: «докачка стартовала» доказывается ПРОЦЕНТАМИ, а не подписью до обращения к сети', () => {
+  const e = fs.readFileSync(path.join(ROOT, 'test', 'e2e-gui.js'), 'utf8');
+  const i = e.indexOf('async function armDownloadWatcher');
+  const h = e.slice(i, i + 1400);
+  assert(/Скачиваю\\s\+\\d\+%/.test(h), 'наблюдатель ищет проценты');
+  assert(!/\/Скачиваю\|скачив\|Докачка/.test(h),
+    'слова «Скачиваю»/«Докачка» renderer печатает ДО сети — по ним проверка была бы всегда-истиной');
+  // Заморозка окна обязана ронять прогон, а не оставаться предупреждением.
+  const ci = e.indexOf('async function clickInstall');
+  const ch = e.slice(ci, ci + 1500);
+  assert(/check\('интерфейс ответил на клик «Установить»', false/.test(ch),
+    'таймаут клика = проваленная проверка (CI читает код возврата, а не текст лога)');
+});
+
 ok('телеметрия: renderer шлёт старт, финиш с диагностикой и открытие редактора', () => {
   const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   assert(/event: 'install_started'/.test(a), 'событие старта установки');

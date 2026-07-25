@@ -99,8 +99,11 @@ if ($dir) {
     try { [System.IO.File]::WriteAllBytes($probe, [byte[]](1, 2, 3)); $wrote = (Test-Path -LiteralPath $probe) } catch { }
     Check 'запись в каталог работает' $wrote 'процесс не может писать в собственный staging'
 
-    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
-    Check 'каталог удаляется' (-not (Test-Path -LiteralPath $dir)) 'остался мусор в ProgramData'
+    # Убираем ВНЕШНИЙ каталог: примитив отдаёт рабочий `w` внутри запертого
+    # HmDeElev-<rnd>, и снос только рабочего оставил бы пустой запертый каталог.
+    $outer = if ((Split-Path -Leaf $dir) -eq 'w') { Split-Path -Parent $dir } else { $dir }
+    Remove-Item -LiteralPath $outer -Recurse -Force -ErrorAction SilentlyContinue
+    Check 'каталог удаляется' (-not (Test-Path -LiteralPath $outer)) 'остался мусор в ProgramData'
 }
 
 if ($fails.Count -gt 0) {

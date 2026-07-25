@@ -1320,6 +1320,11 @@ async function startInstall() {
   // а не только результат последнего (возможно, одношагового inline-)прогона.
   STATE.badEver = new Map();
   STATE.errorDigest = new Map();
+  // Защёлки телеметрии сбрасываем вместе с остальным состоянием прогона: иначе вторая
+  // попытка (человек починил интернет и запустил установку заново) не отчитается ВООБЩЕ —
+  // ни стартом, ни финишем, — а это как раз тот, кому нужна помощь.
+  STATE.telemetrySent = false;
+  STATE.telemetryStartSent = false;
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -1411,9 +1416,10 @@ function finishInstall(res) {
   $('#btn-finish').classList.remove('hidden');
 }
 
-// Анонимная телеметрия установки: ОДИН POST по завершении (повторные финиши после
+// Телеметрия установки: ОДИН POST по завершении (повторные финиши после
 // «Повторить неустановленное» не шлют — guard telemetrySent). Opt-out — чекбоксом
-// на экране выбора. БЕЗ uid и ПД: только исход, id упавших компонентов и длительность.
+// на экране выбора. Везёт исход, id упавших компонентов с ПРИЧИНОЙ и длительность; uid
+// добавляет main, если установка пришла по персональной ссылке (renderer его не знает).
 // Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
 // renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
 // телеметрии не зависит ни в каком исходе.
@@ -1454,7 +1460,12 @@ function sendStartTelemetry(order) {
 // «Открыл редактор» — единственный сигнал, что человек реально пошёл работать, а не
 // просто получил зелёные галочки и закрыл окно.
 function sendOpenEditorTelemetry() {
-  if (STATE.telemetryConsent === false) return;
+  // Защёлка на прогон: кнопок, ведущих сюда, три (финиш с автозапуском, «Открыть VS
+  // Code», «Открыть Cursor»), а обратной связи у них нет — человек жмёт повторно, пока
+  // окно не появится. Без защёлки один прогон давал бы несколько одинаковых событий и
+  // воронка считала бы их разными людьми.
+  if (STATE.telemetryConsent === false || STATE.telemetryEditorSent) return;
+  STATE.telemetryEditorSent = true;
   try {
     const p = window.installer.sendTelemetry({ event: 'open_editor', ok: true });
     if (p && p.catch) p.catch(() => { /* молча */ });
@@ -1730,9 +1741,13 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   });
   const cursorBtn = $('#ns-cursor');
   if (cursorBtn) {
-    cursorBtn.addEventListener('click', () => {
-      window.installer.launchCursor();
-      sendOpenEditorTelemetry();
+    // Результат ЖДЁМ: кнопка рисуется по ВЫБОРУ компонента, а не по факту установки —
+    // если Cursor не встал, окно не откроется, и слать «открыл редактор» было бы враньём
+    // (бот на этом сигнале решает, что человек пошёл работать). Симметрично VS Code.
+    cursorBtn.addEventListener('click', async () => {
+      let ok = false;
+      try { ok = await window.installer.launchCursor(); } catch (_) { ok = false; }
+      if (ok) sendOpenEditorTelemetry();
     });
   }
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
