@@ -158,18 +158,19 @@ jobs:
               region_name=os.environ['REGRU_S3_REGION'])
           key = 'vibecoding/downloads/Hamidun-Setup-Mac.dmg'
           bucket = os.environ['REGRU_S3_BUCKET']
-          # Квота бакета ~10ГБ: overwrite 2.7ГБ поверх старого dmg требует 2x места →
-          # QuotaExceeded. Поэтому: (1) abort брошенных multipart-частей (едят квоту
-          # невидимо), (2) удалить старый dmg, (3) залить новый. Окно недоступности
-          # ~3 мин приемлемо (есть зеркало Я.Диск в fallback-ссылках лендинга).
+          # СТАРЫЙ dmg НЕ УДАЛЯЕМ — заливаем поверх.
+          # Раньше здесь стоял delete_object: квота бакета была ~10ГБ, и overwrite 2.7ГБ
+          # требовал 2x места → QuotaExceeded. Ценой был ПРОВАЛ боевой ссылки: между
+          # удалением и концом заливки (десятки минут для 2.7ГБ из США в RU-S3) кнопка
+          # «Скачать для macOS» отдавала 404 всем, кто в этот момент зашёл. Квота поднята
+          # до 50ГБ (занято ~12ГБ) — запаса на временное удвоение хватает с избытком,
+          # поэтому окно недоступности больше не нужно и не оправдано.
           # abort ТОЛЬКО orphan'ы своего ключа — чтобы не убить in-flight multipart
           # параллельной заливки (напр. Windows exe) в тот же бакет (root cause гонки).
           for u in s3.list_multipart_uploads(Bucket=bucket).get('Uploads', []):
               if u['Key'] == key:
                   s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
                   print('aborted orphan multipart:', u['Key'])
-          s3.delete_object(Bucket=bucket, Key=key)
-          print('old dmg deleted')
           cfg = TransferConfig(multipart_threshold=64*1024*1024, multipart_chunksize=64*1024*1024, use_threads=True)
           s3.upload_file('release/Hamidun-Setup-Mac.dmg', bucket, key,
               ExtraArgs={'ACL': 'public-read', 'ContentType': 'application/x-apple-diskimage'}, Config=cfg)
