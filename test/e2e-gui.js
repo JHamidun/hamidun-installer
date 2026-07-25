@@ -567,6 +567,33 @@ async function clickInstall(page) {
 /** window.confirm в Electron — НАТИВНОЕ модальное окно, Playwright им не управляет.
  *  Подменяем его в странице и ЗАПОМИНАЕМ тексты: сам факт подтверждения — часть
  *  контракта UI, и мы его проверяем, а не просто обходим. */
+/** Факт докачки надо ловить В МОМЕНТ, когда он виден.
+ *
+ *  Подпись шага «Скачиваю… 42%» и строка «[↓] Докачка … из облака» живут только пока
+ *  идёт загрузка: к концу прогона подпись возвращается к обычной, а журнал в UI
+ *  подрезается. Проверка «в UI виден прогресс скачивания» читала текст ПОСЛЕ финиша и
+ *  падала на исправном продукте — конфиг при этом был реально скачан и разложен.
+ *  Поэтому ставим наблюдателя ДО старта: он поднимает флаг при первом же признаке. */
+async function armDownloadWatcher(page) {
+  await page.evaluate(() => {
+    window.__e2eSawDownload = false;
+    const RE = /Скачиваю|скачив|Докачка|\[↓\]/i;
+    const check = () => {
+      const s = document.getElementById('step-list');
+      const l = document.getElementById('log');
+      const t = ((s && s.textContent) || '') + ((l && l.textContent) || '');
+      if (RE.test(t)) window.__e2eSawDownload = true;
+    };
+    try { new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true }); } catch (e) { /* */ }
+    setInterval(check, 300);   // страховка: MutationObserver не видит правку value/атрибутов
+    check();
+  });
+}
+
+async function sawDownloadEver(page) {
+  try { return !!(await page.evaluate(() => window.__e2eSawDownload)); } catch (e) { return false; }
+}
+
 async function captureConfirms(page) {
   await page.evaluate(() => {
     window.__e2eConfirms = [];
@@ -613,6 +640,7 @@ async function runInstallSession(ctx, opts) {
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));
 
+    await armDownloadWatcher(page);
     await clickInstall(page);
     await page.waitForSelector('#view-progress:not(.hidden)', { timeout: 60000 }).catch(() => {});
     check('экран прогресса открылся', true);
@@ -731,6 +759,7 @@ async function scenarioOkOrNetfail(ctx) {
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));
 
+    await armDownloadWatcher(page);
     await clickInstall(page);
     await page.waitForSelector('#view-progress:not(.hidden)', { timeout: 60000 }).catch(() => {});
     check('экран прогресса открылся', true);
@@ -740,7 +769,9 @@ async function scenarioOkOrNetfail(ctx) {
 
     const steps = (await page.textContent('#step-list')) || '';
     const logText = (await page.textContent('#log')) || '';
-    const sawDownload = /Скачиваю|скачив/i.test(steps + logText);
+    // Флаг наблюдателя приоритетнее текста «на финише»: подпись прогресса к этому моменту
+    // уже сменилась на обычную, а журнал в UI подрезан.
+    const sawDownload = (await sawDownloadEver(page)) || /Скачиваю|скачив|Докачка/i.test(steps + logText);
 
     if (SCENARIO === 'netfail') {
       check('UI честно показал обрыв сети (статус error-net)', terminal.kind === 'error-net',
