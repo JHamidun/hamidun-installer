@@ -4444,6 +4444,31 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
   assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
 });
 
+ok('macOS: команда разблокировки САМА находит образ (жёсткий ~/Downloads запрещён)', () => {
+  // Живой случай: человек сохранил dmg не в «Загрузки», команда падала на первом шаге
+  // («No such file»), карантин не снимался — и инструкция выглядела неработающей.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const txtPath = path.join(ROOT, 'assets', 'mac', 'ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt');
+  const txt = fs.readFileSync(txtPath, 'utf8');
+
+  const hits = app.match(/DMG=\$\(find[^<]*/g) || [];
+  assert.strictEqual(hits.length, 2, 'команда есть и в модалке, и в несмываемом баннере');
+  const decode = (s) => s.replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+  const fromHtml = decode(hits[0]).trim();
+  const fromTxt = (txt.match(/DMG=\$\(find.*/) || [''])[0].trim();
+
+  assert(!/~\/Downloads\/Hamidun-Setup-Mac/.test(app),
+    'жёсткого пути к «Загрузкам» в интерфейсе нет');
+  assert(!/~\/Downloads\/Hamidun-Setup-Mac/.test(txt),
+    'жёсткого пути к «Загрузкам» в файле внутри образа нет');
+  assert(/find ~ -maxdepth \d+ -iname/.test(fromHtml), 'команда ищет образ сама');
+  assert(/for v in \/Volumes\/Hamidun\*/.test(fromHtml),
+    'отцепляются ВСЕ окна образа: при повторных попытках их несколько, и старый вариант закрывал только первое');
+  // Человек копирует команду ИЗ ИНТЕРФЕЙСА — в буфере должно оказаться ровно то же,
+  // что написано в файле внутри образа, иначе две инструкции разойдутся.
+  assert.strictEqual(fromHtml, fromTxt, 'интерфейс и файл в образе дают ОДНУ команду');
+});
+
 ok('uid: на Windows берётся PORTABLE_EXECUTABLE_FILE — process.execPath указывает в %TEMP%', () => {
   // Сборка — самораспаковывающийся portable-exe: он распаковывает приложение в
   // %TEMP%\ns<rnd>.tmp\app и запускает ОТТУДА. process.execPath = «Hamidun Setup.exe» во

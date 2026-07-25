@@ -589,11 +589,11 @@ function renderVendorBlock() {
       '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
       '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
       '<li>Открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter). Вставь <b>ОДНОЙ строкой</b> и Enter:<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code>' +
-      '<br><span style="font-size:12px;opacity:.82">Она снимет карантин, ЗАКРОЕТ старый образ и откроет свежий — это ключевой шаг.</span></li>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code>' +
+      '<br><span style="font-size:12px;opacity:.82">Она сама найдёт образ (даже если он не в «Загрузках»), ЗАКРОЕТ все ранее открытые окна образа и откроет свежий — это ключевой шаг. Если после «Нашёл:» пусто — файла на маке нет, скачай заново.</span></li>' +
       '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
       '</ol>' +
-      '<p style="font-size:12px;opacity:.82">Если dmg не в «Загрузках» — напиши боту-помощнику, пришли скрин. Застрял — @vibecodeguidebot.</p>',
+      '<p style="font-size:12px;opacity:.82">Не получилось — пришли боту-помощнику скрин Терминала целиком: @vibecodeguidebot.</p>',
     closeLabel: 'Понятно',
     blocking: true,
   });
@@ -608,7 +608,7 @@ function renderVendorBlock() {
     b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
     b.innerHTML = '🛑 Установка заблокирована: macOS запускает приложение из карантинной копии. ' +
       'Выполни ОДНОЙ строкой (снимет карантин + перемонтирует образ) и запусти из СВЕЖЕГО окна DMG:<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code><br>' +
       '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
     const hero = document.querySelector('#view-select .hero');
     if (hero) hero.insertAdjacentElement('afterend', b);
