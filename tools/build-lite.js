@@ -64,7 +64,7 @@ const TARGETS = {
   win: {
     platform: 'win32',
     keep: LITE_KEEP_WIN,
-    builderArgs: ['--win'],
+    builderArgs: ['--win', '--publish', 'never'],
     artifactName: 'Hamidun-Setup-Windows-Lite.${ext}',
     artifactFile: 'Hamidun-Setup-Windows-Lite.exe',
     artifactRe: /Lite.*\.exe$/i,
@@ -75,7 +75,7 @@ const TARGETS = {
   mac: {
     platform: 'darwin',
     keep: LITE_KEEP_MAC,
-    builderArgs: ['--mac', '--universal'],
+    builderArgs: ['--mac', '--universal', '--publish', 'never'],
     artifactName: 'Hamidun-Setup-Mac-Lite.${ext}',
     artifactFile: 'Hamidun-Setup-Mac-Lite.dmg',
     artifactRe: /Lite.*\.dmg$/i,

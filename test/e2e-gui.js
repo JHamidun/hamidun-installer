@@ -698,6 +698,14 @@ async function scenarioOkOrNetfail(ctx) {
     } else {
       // Прогресс скачивания есть ТОЛЬКО в lite: офлайн-издание ставит из вшитого vendor,
       // и «докачка» там означала бы, что мы зря тащим байты по сети.
+      // Диагностика: без журнала приложения причину провала докачки не установить —
+      // в интерфейсе видно только «Сеть оборвалась». Печатаем хвост журнала, когда
+      // ожидали докачку, но её не было.
+      if (EXPECT_LITE && !sawDownload) {
+        console.log('[e2e] --- журнал приложения (хвост) ---');
+        console.log(String(logText).slice(-4000) || '(журнал пуст)');
+        console.log('[e2e] --- конец журнала ---');
+      }
       if (EXPECT_LITE) check('lite: докачка стартовала (в UI виден прогресс скачивания)', sawDownload, steps.slice(0, 200));
       else check('offline: установка без докачки (сеть не нужна)', !sawDownload, steps.slice(0, 200));
       check('прогон дошёл до финиша', terminal.kind === 'finish', terminal.kind + ' ' + (terminal.text || ''));
