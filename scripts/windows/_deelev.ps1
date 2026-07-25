@@ -71,6 +71,35 @@ function Test-HmExtInstalled {
     return $false
 }
 
+# --- Чтение/запись DACL БЕЗ модуля Microsoft.PowerShell.Security. ---
+#
+# ПОЧЕМУ НЕ Get-Acl/Set-Acl напрямую: примитив вызывается из установщика с УРЕЗАННЫМ
+# окружением (чистые PATH/PSModulePath — это сознательная защита от module-hijack, env
+# пишется medium-малварью того же юзера). В таком окружении автозагрузка
+# Microsoft.PowerShell.Security падает — «The 'Get-Acl' command was found in the module
+# ..., but the module could not be loaded», — и весь примитив уходил в $null. Снаружи
+# (обычная консоль) всё работало, поэтому сбой было не видно ни в одном ручном прогоне:
+# lite-издание не качало НИЧЕГО, а пользователь читал «Нужны права администратора».
+#
+# .NET-путь модулей не требует вообще: в PS 5.1 (.NET Framework) есть методы
+# DirectoryInfo.GetAccessControl/SetAccessControl, в PS 7 (.NET Core) — extension-класс
+# FileSystemAclExtensions. Cmdlet остаётся последним шансом.
+function Get-HmDirAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $di = New-Object System.IO.DirectoryInfo($Path)
+    try { return $di.GetAccessControl() } catch { }
+    try { return [System.IO.FileSystemAclExtensions]::GetAccessControl($di) } catch { }
+    return (Get-Acl -LiteralPath $Path)
+}
+function Set-HmDirAcl {
+    param([Parameter(Mandatory = $true)][string]$Path,
+          [Parameter(Mandatory = $true)][System.Security.AccessControl.DirectorySecurity]$Acl)
+    $di = New-Object System.IO.DirectoryInfo($Path)
+    try { $di.SetAccessControl($Acl); return } catch { }
+    try { [System.IO.FileSystemAclExtensions]::SetAccessControl($di, $Acl); return } catch { }
+    Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+}
+
 # --- PRIVATE high-integrity staging-каталог под ProgramData. Рождается атомарно с DACL
 #     {SYSTEM,Administrators: FullControl}, protection on (без наследования Users). Elevated
 #     дополнительно ставит владельца = Administrators (иначе owner=self сохраняет неявный
@@ -147,13 +176,13 @@ function New-HmSecureStagingDir {
                 $sdDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
                     $meF, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
             }
-            Set-Acl -LiteralPath $dir -AclObject $sdDacl -ErrorAction Stop
+            Set-HmDirAcl -Path $dir -Acl $sdDacl
         }
         if (-not (Test-Path -LiteralPath $dir)) { return $null }
         # Владелец мог остаться создателем (политика «Object creator») — доводим до
         # Administrators. Если не удалось, финальная проверка владельца ниже отвергнет каталог.
         if ($Elevated) {
-            $ownerNow = (Get-Acl -LiteralPath $dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            $ownerNow = (Get-HmDirAcl -Path $dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             if ($ownerNow -ne 'S-1-5-32-544') {
                 & $Icacls $dir '/setowner' '*S-1-5-32-544' '/T' '/C' *> $null
                 $usedFallback = $true
@@ -170,7 +199,7 @@ function New-HmSecureStagingDir {
         # Владелец УЖЕ задан атомарно в SD выше (не post-icacls — иначе окно с owner=user + WRITE_DAC).
         # Проверка владельца ниже — fail-closed, если атомарное применение владельца не сработало
         # (owner != Administrators -> каталог мог иметь окно -> отбрасываем).
-        $acl = Get-Acl -LiteralPath $dir
+        $acl = Get-HmDirAcl -Path $dir
         if ($Elevated) {
             $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             if ($owner -ne 'S-1-5-32-544') {

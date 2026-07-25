@@ -1209,6 +1209,47 @@ if (powershellAvailable()) {
       assert(/REPARSE=False/.test(out), 'реальная директория, не reparse-point: ' + out);
     }
   });
+
+  // P0 (регресс, боевой сценарий): установщик, запущенный ИЗ ОКРУЖЕНИЯ PowerShell 7
+  // (терминал pwsh, CI-раннер), передавал дочернему powershell.exe 5.1 унаследованный
+  // PSModulePath, указывающий на ...\PowerShell\7\Modules — .NET Core-сборки, которые
+  // 5.1 загрузить не может. Autoload Microsoft.PowerShell.Security падал, примитив уходил
+  // в $null, и lite-издание не качало НИ ОДНОГО компонента («Нужны права администратора»
+  // при полностью корректных правах). Запуск из Explorer работал — поэтому ручные прогоны
+  // сбой не ловили. Защит теперь две, тест проверяет обе разом: ACL читаются/пишутся через
+  // .NET (модуль Security не нужен вовсе) И PSModulePath прибит литералом в main.js.
+  ok('P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)', () => {
+    const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const icacls = path.join(sysRoot, 'System32', 'icacls.exe');
+    const pd = process.env.ProgramData || path.join(path.parse(sysRoot).root, 'ProgramData');
+    const cmd =
+      "$ErrorActionPreference='Stop';" +
+      ". '" + dot + "';" +
+      "$d=New-HmSecureStagingDir -ProgramData '" + pd.replace(/'/g, "''") + "' -Icacls '" + icacls.replace(/'/g, "''") + "' -Elevated $false;" +
+      "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END');Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}";
+    // Ровно тот PSModulePath, который выставляет pwsh 7 — без путей 5.1.
+    const env = Object.assign({}, process.env, {
+      PSModulePath: path.join('C:', 'Program Files', 'PowerShell', '7', 'Modules')
+    });
+    const r = spawnSync(path.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+      { encoding: 'utf8', timeout: 60000, env });
+    const got = /HMSECDIR::([\s\S]+?)::END/.test(String(r.stdout || ''));
+    const err = String(r.stderr || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    assert(got, 'staging-каталог создан при PSModulePath от pwsh 7 (stderr: ' + err.slice(0, 200) + ')');
+    assert(!/Microsoft\.PowerShell\.Security/.test(err), 'нет зависимости от модуля Security: ' + err.slice(0, 200));
+  });
+
+  // Вторая половина той же защиты — на стороне вызывающего: main.js обязан прибивать
+  // PSModulePath литералом, а не полагаться на унаследованный.
+  ok('P0 регресс (main.js): winMakeSecureDir прибивает чистый PSModulePath из валидированного System32', () => {
+    const m = EG_MAIN();
+    const mi = m.indexOf('function winMakeSecureDir(');
+    const mh = m.slice(mi, mi + 3000);
+    assert(/\$env:PSModulePath='/.test(mh), 'инлайн задаёт $env:PSModulePath литералом');
+    assert(/WindowsPowerShell', 'v1\.0', 'Modules'/.test(mh), 'путь модулей строится из System32, а не из env');
+  });
 }
 
 // P2 (launch): mkdir не глушится вслепую — путь подтверждается как директория.

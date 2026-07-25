@@ -1343,8 +1343,21 @@ function winMakeSecureDir() {
     const deLit = String(deelev).replace(/'/g, "''");
     const pdLit = String(pd).replace(/'/g, "''");
     const icLit = String(icacls).replace(/'/g, "''");
+    // PSModulePath ПРИБИВАЕМ литералом к System32\WindowsPowerShell\v1.0\Modules.
+    // Две причины, обе кусаются:
+    //  1) если установщик запущен из окружения PowerShell 7 (терминал pwsh, CI-раннер),
+    //     унаследованный PSModulePath указывает на модули ...\PowerShell\7\Modules —
+    //     .NET Core-сборки, которые powershell.exe 5.1 ЗАГРУЗИТЬ НЕ МОЖЕТ. Autoload
+    //     Microsoft.PowerShell.Security падает, примитив уходит в $null, и lite не качает
+    //     НИ ОДНОГО компонента. Снаружи (запуск из Explorer) всё работает — поэтому
+    //     ручные прогоны этого не ловили, поймал только E2E на раннере.
+    //  2) PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) и является
+    //     штатным вектором module-hijack в elevated-процессе.
+    const s32 = path.dirname(path.dirname(path.dirname(ps)));   // ...\System32 из валидированного powershell.exe
+    const psmLit = path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules').replace(/'/g, "''");
     const inline =
       "$ErrorActionPreference='Stop';" +
+      "$env:PSModulePath='" + psmLit + "';" +
       ". '" + deLit + "';" +
       "$d=New-HmSecureStagingDir -ProgramData '" + pdLit + "' -Icacls '" + icLit + "' -Elevated $true;" +
       "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
