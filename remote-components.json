@@ -318,12 +318,12 @@
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 67760613,
-      "sha256": "c564f603e01387177301c70b7cd924da9fcea01493c2f24df0712ce83f2f24b3",
+      "sizeBytes": 67760090,
+      "sha256": "345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-c564f603e01387177301c70b7cd924da9fcea01493c2f24df0712ce83f2f24b3.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -400,19 +400,19 @@
     {
       "remoteId": "extension",
       "name": "VS Code extensions (Claude Code + шрифт, macOS)",
-      "sizeBytes": 162428647,
-      "sha256": "318934aba30482db992c31cc7b4a7876345ae8da12acc7ae95a80a82a99152d0",
+      "sizeBytes": 162682568,
+      "sha256": "1c046a33370f155539d85d9f04f84dcab2903b1cd7c79fd6b7a7c3e375a623be",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-darwin-318934aba30482db992c31cc7b4a7876345ae8da12acc7ae95a80a82a99152d0.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-darwin-1c046a33370f155539d85d9f04f84dcab2903b1cd7c79fd6b7a7c3e375a623be.zip"
         }
       ],
       "installRelPath": "scripts/macos/extension.sh",
       "gatedFiles": {
         "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f",
-        "claude-code-arm64.vsix": "7657c64f17f612888d6f483dbaac234cd5bc7e2d9dd6dcee6c67480f2a78c53c",
-        "claude-code-x64.vsix": "8079fd6f60a6f9b010d22595d08130e8ff89b2054ee6687da59ce4ab3966efc9"
+        "claude-code-arm64.vsix": "e671f210ab9becb2c737e6e937ebb7eb002ced0e2263ebe056077854f8333978",
+        "claude-code-x64.vsix": "f1ac60f5a191edef79d9491d72ee749f72546d43fee0724fddd581cafc1ad52b"
       },
       "platform": "darwin"
     }
