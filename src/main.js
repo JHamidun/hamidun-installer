@@ -824,7 +824,10 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       }
       if (!cacheDir) cacheDir = winMakeSecureDir();
       if (!cacheDir) {
-        return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось создать защищённый кэш докачки (owner=Administrators + DACL {SYSTEM,Administrators}) — нужны права администратора; установка remote-компонента заблокирована (fail-closed).' };
+        return { id, ok: false, code: -1, stage: 'env',
+        error: 'не удалось подготовить защищённый каталог для загрузки'
+          + (lastSecureDirError ? ' (' + lastSecureDirError + ')' : '')
+          + '. Запусти установщик от имени администратора; если это не помогает — пришли журнал боту.' };
       }
       SECURE_DIRS.set(declared, cacheDir);
       secureCacheDir = cacheDir; // чистим после успешной установки / на выходе
@@ -1322,6 +1325,10 @@ function winDeElevScript() {
 // генерируемый ВНУТРИ примитива (JS его не выбирает и не знает заранее); примитив
 // fail-closed на ERROR_ALREADY_EXISTS и reparse-point и сам верифицирует владельца/ACE.
 // JS перепроверяет (defense-in-depth): путь строго под ProgramData + verifyDirSecureWin.
+// Последняя причина отказа защищённого staging — чтобы в журнале и в тексте ошибки
+// стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
+let lastSecureDirError = '';
+
 function winMakeSecureDir() {
   try {
     const pd = remoteFetch.winProgramData();
@@ -1343,11 +1350,21 @@ function winMakeSecureDir() {
       "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
     let out = '';
     try {
+      // stderr ЛОВИМ, а не глушим: раньше любая причина отказа (недоступный оверлоуд
+      // CreateDirectory, отказ SetOwner, кривой ProgramData) превращалась в молчаливый
+      // null, и пользователь видел «Сеть оборвалась» вместо реальной проблемы.
       out = execFileSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
-        { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] });
-    } catch (e) { return null; }
+        { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      const err = String((e && e.stderr) || (e && e.message) || e).trim().split(/\r?\n/)[0] || '';
+      lastSecureDirError = err.slice(0, 300);
+      return null;
+    }
     const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(out || ''));
-    if (!m) return null;                               // примитив вернул $null -> fail-closed
+    if (!m) {                                          // примитив вернул $null -> fail-closed
+      lastSecureDirError = 'примитив не вернул путь (проверка владельца/ACL не прошла)';
+      return null;
+    }
     const dir = m[1].trim();
     if (!dir) return null;
     const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };

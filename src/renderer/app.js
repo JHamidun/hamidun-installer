@@ -1034,6 +1034,10 @@ function isIntegrityFail(res) {
   return INTEGRITY_ERR_RE.test(String(res.error || ''));
 }
 // Сетевой обрыв докачки = stage 'fetch' И НЕ провал целостности/среды.
+// Отказ СРЕДЫ (не сеть и не подмена): не удалось подготовить защищённый каталог
+// загрузки. Раньше это показывалось как «Сеть оборвалась», и пользователь бесконечно
+// жал «Повторить», хотя чинится это запуском от администратора.
+function isEnvFail(res) { return !!(res && !res.ok && res.stage === 'env'); }
 function isNetFail(res) {
   return !!(res && !res.ok && res.stage === 'fetch' && !isIntegrityFail(res));
 }
@@ -1168,12 +1172,20 @@ async function runComponents(ids, env) {
       // (общий retry/финиш его видят); в graceful-skip НЕ уходит никогда.
       const isNet = isNetFail(res);
       const isIntegrity = isIntegrityFail(res);
-      setStep(id, isNet ? 'error-net' : 'error');
+      const isEnv = isEnvFail(res);
+      setStep(id, (isNet || isEnv) ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
-      badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : 'fail'));
+      badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')));
       const name = STATE.byId[id].name;
-      if (isNet) {
+      if (isEnv) {
+        // Не сеть и не подмена: система не дала подготовить защищённый каталог загрузки.
+        // Говорим ПРАВДУ и подсказываем действие — «Повторить» оставляем (после запуска
+        // от администратора оно сработает), но не врём про интернет.
+        setStepLabel(id, `${name} — Нужны права администратора`);
+        addStepRetry(id);
+        appendLog(`[!] ${name}: ${res.error || 'не удалось подготовить защищённый каталог для загрузки'}`);
+      } else if (isNet) {
         setStepLabel(id, `${name} — Сеть оборвалась`);
         addStepRetry(id);
         appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}. Проверь интернет и нажми «Повторить».`);
