@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld('installer', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   saveStartHere: () => ipcRenderer.invoke('save-start-here'),
+  // Встроенный просмотр памятки: main сам находит вшитый START-HERE.html
+  // (путь из renderer'а НЕ принимается) и отдаёт его содержимое строкой.
+  readStartHere: () => ipcRenderer.invoke('read-start-here'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
   launchVsCode: () => ipcRenderer.invoke('launch-vscode'),

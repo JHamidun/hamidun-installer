@@ -1240,6 +1240,26 @@ ipcMain.handle('save-start-here', () => {
   }
 });
 
+// Встроенный просмотр памятки «Что дальше» прямо в окне установщика: отдаём
+// содержимое вшитого START-HERE.html строкой. Путь считаем ТОЛЬКО здесь из
+// вшитого config.json (renderer НЕ доверенный и путь не передаёт — тот же
+// принцип, что у save-start-here выше: IPC с путём из renderer'а дал бы
+// произвольное чтение файлов из elevated-процесса) и проверяем, что цель
+// не вышла из ресурсов. Ошибки не бросаем — honest {ok:false,error}.
+ipcMain.handle('read-start-here', () => {
+  try {
+    const cfg = readJson('config.json', {});
+    const rel = String((cfg.finish && cfg.finish.startHtmlRelPath) || 'assets/START-HERE.html');
+    const root = path.resolve(resourceRoot());
+    const src = path.resolve(root, rel);
+    if (!src.startsWith(root + path.sep)) return { ok: false, html: '', error: 'bad-path' };
+    if (!fs.existsSync(src)) return { ok: false, html: '', error: 'source-missing' };
+    return { ok: true, html: fs.readFileSync(src, 'utf8'), error: '' };
+  } catch (e) {
+    return { ok: false, html: '', error: e.message };
+  }
+});
+
 // Reveal a file in Explorer/Finder (openPath on a .env silently fails on macOS
 // where .env has no default app — showItemInFolder always works).
 // Renderer НЕ доверенный: путь из него НЕ принимаем (как в open-path/open-external/

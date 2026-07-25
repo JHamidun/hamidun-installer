@@ -111,8 +111,13 @@ async function init() {
   if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
   const whatBtn = $('#btn-what-installs');
   if (whatBtn) whatBtn.addEventListener('click', showWhatInstalls);
+  // «Что будет дальше?» — встроенный просмотр памятки в окне установщика;
+  // внешний браузер — только по явной соседней кнопке (у части людей дефолтный
+  // браузер «холодный» и его онбординг пугает сильнее самой памятки).
   const nextBtn = $('#btn-what-next');
-  if (nextBtn) nextBtn.addEventListener('click', () => openStartHereMemo());
+  if (nextBtn) nextBtn.addEventListener('click', () => showStartHereInline());
+  const nextExtBtn = $('#btn-what-next-ext');
+  if (nextExtBtn) nextExtBtn.addEventListener('click', () => openStartHereMemo());
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
     if (auto && auto.checked) {
@@ -736,6 +741,119 @@ async function openStartHereMemo() {
   }
 }
 
+// Тихая копия памятки на рабочий стол (без открытия чего-либо). На финише зовётся
+// вместо прежнего авто-открытия браузера: артефакт «Что дальше — Hamidun.html» на
+// столе остаётся, а браузер больше не выскакивает сам. Результат кэшируем как в
+// openStartHereMemo; неудача не критична — вшитая копия всегда на месте.
+async function saveStartHereQuiet() {
+  if (STATE.startHerePath) return;
+  try {
+    const r = await window.installer.saveStartHere();
+    if (r && r.ok && r.dest) STATE.startHerePath = r.dest;
+  } catch (e) { /* копия на стол не удалась — не мешаем финишу */ }
+}
+
+// ---- встроенный просмотр памятки «Что дальше» (в окне установщика) ----------
+// Раньше на финише памятка АВТОМАТИЧЕСКИ открывалась во внешнем браузере — у части
+// людей дефолтный браузер стартует «с нуля» (холодный запуск с онбордингом), это
+// раздражает и выглядит, будто установщик запускает что-то постороннее. Теперь
+// памятка читается прямо здесь, в оверлее; браузер — только по явной кнопке.
+// Памятка — статичный документ: <script> вырезаем целиком (его checklist-интерактив
+// в оверлее не нужен, а CSP окна всё равно не дала бы ему исполниться).
+function stripMemoScripts(html) {
+  return String(html)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<script\b[^>]*>/gi, ''); // незакрытый хвостовой <script …> тоже гасим
+}
+
+// CSS памятки писан для отдельного документа (:root / body / html). Внутри Shadow DOM
+// эти селекторы не матчатся НИЧЕМУ — пропали бы все CSS-переменные (весь цвет памятки
+// на var(--…)) и базовая типографика. Переписываем на :host / .memo-doc (обёртка).
+function adaptMemoCss(css) {
+  return String(css)
+    .replace(/:root\b/g, ':host')
+    .replace(/(^|[\s,{}])body\b/g, '$1.memo-doc')
+    .replace(/(^|[\s,{}])html\b/g, '$1.memo-doc');
+}
+
+// Оверлей с памяткой поверх текущего экрана: заголовок, «Открыть в браузере»,
+// крестик/Esc, прокрутка. Контент — в Shadow DOM, чтобы стили памятки и установщика
+// не подрались. Содержимое отдаёт main (read-start-here, путь считает сам).
+async function showStartHereInline() {
+  if (document.getElementById('memo-overlay')) return; // уже открыта
+  const fin = (STATE.config && STATE.config.finish) || {};
+  if (!fin.startHtmlRelPath) return; // памятки в этой сборке нет — кнопки и не рисуем
+
+  const ov = document.createElement('div');
+  ov.id = 'memo-overlay';
+  ov.className = 'modal-overlay memo-overlay';
+  ov.innerHTML =
+    '<div class="memo-card" role="dialog" aria-modal="true" aria-label="Памятка «Что дальше»">' +
+      '<div class="memo-head">' +
+        '<div class="memo-title">📌 Что дальше — памятка</div>' +
+        '<button type="button" id="memo-ext" class="btn-sm">Открыть в браузере</button>' +
+        '<button type="button" id="memo-close" class="memo-close" aria-label="Закрыть" title="Закрыть (Esc)">✕</button>' +
+      '</div>' +
+      '<div class="memo-body"><div id="memo-host"></div></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { document.removeEventListener('keydown', onKey); ov.remove(); };
+  document.addEventListener('keydown', onKey);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('#memo-close').addEventListener('click', close);
+  // «Открыть в браузере» — прежний путь целиком: копия на стол + системное открытие.
+  ov.querySelector('#memo-ext').addEventListener('click', () => openStartHereMemo());
+
+  const sh = ov.querySelector('#memo-host').attachShadow({ mode: 'open' });
+  const fallback = (msg) => {
+    // Честный отказ БЕЗ innerHTML с текстом ошибки (textContent) + путь наружу.
+    sh.textContent = '';
+    const box = document.createElement('div');
+    box.className = 'memo-fallback';
+    box.style.cssText = 'padding:28px 22px;font-size:14.5px;line-height:1.6';
+    const p1 = document.createElement('p');
+    p1.textContent = 'Не получилось показать памятку в этом окне' + (msg ? ' (' + msg + ')' : '') + '.';
+    const p2 = document.createElement('p');
+    p2.style.marginTop = '8px';
+    p2.textContent = 'Нажми «Открыть в браузере» вверху — это та же памятка.';
+    box.appendChild(p1); box.appendChild(p2);
+    sh.appendChild(box);
+  };
+
+  let res = null;
+  try { res = await window.installer.readStartHere(); } catch (e) { res = { ok: false, error: e.message }; }
+  if (!res || !res.ok || !res.html) { fallback((res && res.error) || 'нет данных'); return; }
+
+  const doc = new DOMParser().parseFromString(stripMemoScripts(res.html), 'text/html');
+  const wrap = document.createElement('div');
+  wrap.className = 'memo-doc';
+  // Стили памятки: и из <head>, и из <body> (сейчас они в body) — адаптируем под shadow.
+  Array.from(doc.querySelectorAll('style')).forEach((st) => { st.textContent = adaptMemoCss(st.textContent); });
+  Array.from(doc.head.querySelectorAll('style')).forEach((st) => wrap.appendChild(st));
+  while (doc.body.firstChild) wrap.appendChild(doc.body.firstChild);
+  const base = document.createElement('style');
+  base.textContent = ':host{display:block;min-height:100%} .memo-doc{min-height:100%}';
+  sh.appendChild(base);
+  sh.appendChild(wrap);
+
+  // Ссылки: дефолтную навигацию давим ВСЕГДА (иначе клик увёл бы само окно установщика
+  // с app.js). Якоря скроллим внутри shadow; внешние — через main-IPC openExternal,
+  // где уже стоит allowlist схем (web/почта/telegram).
+  wrap.addEventListener('click', (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    e.preventDefault();
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#')) {
+      const t = href.length > 1 ? sh.getElementById(href.slice(1)) : null;
+      if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (href) {
+      window.installer.openExternal(href);
+    }
+  });
+}
+
 // Task 4b: заметная плашка «Не едет? Напиши боту…» на экране прогресса (и финиша —
 // это тот же view). Ссылка ведёт на бота-спутника из config.links.bot.
 function renderProgressBotBanner() {
@@ -1353,11 +1471,14 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
   // Памятка «Что дальше»: START-HERE.html вшит (finish.startHtmlRelPath). На финише
-  // копируем её на рабочий стол (постоянная, всегда доступна) и открываем один раз.
-  // Кнопка ниже переоткрывает памятку в любой момент.
+  // копируем её на рабочий стол (постоянная, всегда доступна) и один раз показываем
+  // ВСТРОЕННЫЙ просмотр — внешний браузер сам не открываем (холодный дефолтный
+  // браузер со своим онбордингом пугает и выглядит как посторонний запуск).
+  // Кнопки ниже: переоткрыть встроенный просмотр / явно открыть в браузере.
   const startHtmlRel = fin.startHtmlRelPath || '';
   const startBtn = startHtmlRel
-    ? `<button type="button" id="ns-start" class="btn-sm">📌 Открыть памятку «Что дальше»</button>`
+    ? `<button type="button" id="ns-start" class="btn-sm">📌 Памятка «Что дальше»</button>
+       <button type="button" id="ns-start-ext" class="btn-sm">Открыть памятку в браузере</button>`
     : '';
   const logBtn = STATE.logPath ? `<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>` : '';
 
@@ -1560,13 +1681,18 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
   const startBtnEl = $('#ns-start');
   if (startBtnEl && startHtmlRel) {
-    // Открытие памятки — через общий openStartHereMemo (тот же вход, что у кнопки
-    // «Что будет дальше?» на экране выбора): save-на-стол + фолбэк на вшитую копию.
+    // Авто-показ ОДИН раз — встроенный просмотр (Shadow DOM-оверлей), НЕ браузер.
+    // Копию на рабочий стол кладём по-прежнему сразу, но тихо (без открытия).
     if (!STATE.startHereOpened) {
       STATE.startHereOpened = true;
-      openStartHereMemo(); // авто-открытие после установки + копия на рабочий стол
+      saveStartHereQuiet();   // «Что дальше — Hamidun.html» на столе — как раньше
+      showStartHereInline();  // памятка читается прямо в окне установщика
     }
-    startBtnEl.addEventListener('click', () => openStartHereMemo());
+    startBtnEl.addEventListener('click', () => showStartHereInline());
+    // Браузер — осознанная ВОЗМОЖНОСТЬ: прежний путь openStartHereMemo целиком
+    // (копия на стол + системное открытие с фолбэком на вшитую).
+    const startExtEl = $('#ns-start-ext');
+    if (startExtEl) startExtEl.addEventListener('click', () => openStartHereMemo());
   }
   const saveKeysBtn = $('#ns-save-keys');
   if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);
