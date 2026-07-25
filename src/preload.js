@@ -40,5 +40,7 @@ contextBridge.exposeInMainWorld('installer', {
   // Анонимная телеметрия установки ({ok, failed[], durationSec}) — URL зашит в
   // config.json на стороне main; ошибки там глотаются, ответ не важен.
   sendTelemetry: (payload) => ipcRenderer.invoke('send-telemetry', payload),
+  // macOS: снять карантин с образа, перемонтировать и перезапуститься из свежего тома
+  macSelfHeal: () => ipcRenderer.invoke('mac-selfheal'),
   quit: () => ipcRenderer.invoke('quit')
 });

@@ -153,6 +153,15 @@
       <img class="mascot" src="mascot/loading.webp" alt="Омлетон готовит окружение">
     </header>
 
+    <!-- Общий прогресс прогона. Просьба живых пользователей: по одному крутящемуся
+         спиннеру не понять, идёт процесс или всё встало. Проценты тут НАСТОЯЩИЕ —
+         доля завершённых компонентов; внутри шага скрипты прогресс не сообщают,
+         поэтому там показываются секунды, а не выдуманная полоса. -->
+    <div id="run-progress" class="run-progress hidden">
+      <div class="run-progress__bar"><div class="run-progress__fill" id="run-progress-fill"></div></div>
+      <div class="run-progress__label" id="run-progress-label"></div>
+    </div>
+
     <!-- Заметная плашка помощи: заполняется renderProgressBotBanner, видна во время
          установки и на финише (это тот же view). -->
     <div id="progress-bot-banner" class="progress-bot hidden"></div>

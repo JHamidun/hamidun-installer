@@ -588,7 +588,10 @@ function renderVendorBlock() {
       '<p><b>Почему «просто открыть из окна DMG» часто НЕ помогает:</b> если образ уже смонтирован, снятие карантина на него не подействует — образ надо ЗАКРЫТЬ (отмонтировать) и открыть заново. Команда ниже делает всё это сама.</p>' +
       '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
       '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
-      '<li>Открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter). Вставь <b>ОДНОЙ строкой</b> и Enter:<br>' +
+      '<li><b>Проще всего — нажми кнопку ниже</b>, установщик всё сделает сам: найдёт образ, снимет карантин, закроет старые окна образа и откроет свежее, а затем перезапустится из него.<br>' +
+      '<button type="button" id="mac-selfheal" class="btn" style="margin-top:8px">Исправить автоматически</button>' +
+      '<div id="mac-selfheal-status" style="font-size:12px;opacity:.85;margin-top:6px"></div></li>' +
+      '<li><b>Если кнопка не помогла</b> — открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter) и вставь <b>ОДНОЙ строкой</b>:<br>' +
       '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code>' +
       '<br><span style="font-size:12px;opacity:.82">Она сама найдёт образ (даже если он не в «Загрузках»), ЗАКРОЕТ все ранее открытые окна образа и откроет свежий — это ключевой шаг. Если после «Нашёл:» пусто — файла на маке нет, скачай заново.</span></li>' +
       '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
@@ -607,7 +610,9 @@ function renderVendorBlock() {
     b.className = 'preflight-warn';
     b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
     b.innerHTML = '🛑 Установка заблокирована: macOS запускает приложение из карантинной копии. ' +
-      'Выполни ОДНОЙ строкой (снимет карантин + перемонтирует образ) и запусти из СВЕЖЕГО окна DMG:<br>' +
+      '<button type="button" id="mac-selfheal-banner" class="btn-sm" style="margin:6px 8px 6px 0">Исправить автоматически</button>' +
+      '<span id="mac-selfheal-banner-status" style="font-size:12px;opacity:.85"></span><br>' +
+      'Если кнопка не помогла — выполни ОДНОЙ строкой и запусти из СВЕЖЕГО окна DMG:<br>' +
       '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code><br>' +
       '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
     const hero = document.querySelector('#view-select .hero');
@@ -615,6 +620,42 @@ function renderVendorBlock() {
     const rb = document.getElementById('vendorblock-reopen');
     if (rb) rb.addEventListener('click', () => renderVendorBlock());
   }
+  bindMacSelfHeal('mac-selfheal', 'mac-selfheal-status');
+  bindMacSelfHeal('mac-selfheal-banner', 'mac-selfheal-banner-status');
+}
+
+// Кнопка «Исправить автоматически»: установщик сам снимает карантин с образа,
+// перемонтирует его и перезапускается из свежего тома. Просить человека копировать
+// команду в Терминал — плохой путь: живой случай показал, что там ошибаются (образ
+// лежал не в «Загрузках», команда падала, и человек упирался в тупик).
+function bindMacSelfHeal(btnId, statusId) {
+  const btn = document.getElementById(btnId);
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', async () => {
+    const st = document.getElementById(statusId);
+    const say = (s) => { if (st) st.textContent = s; };
+    btn.disabled = true;
+    say('Ищу образ и снимаю карантин…');
+    let res = null;
+    try { res = await window.installer.macSelfHeal(); } catch (e) { res = { ok: false, error: String(e) }; }
+    if (res && res.ok) {
+      say('Готово — открыл свежее окно образа и запускаю установщик оттуда. Это окно можно закрыть.');
+      // Себя закрываем с задержкой: пусть новый экземпляр успеет подняться, иначе
+      // человек увидит, что «всё исчезло», и решит, что сломалось.
+      setTimeout(() => { try { window.installer.quit(); } catch (e) { /* */ } }, 2500);
+      return;
+    }
+    btn.disabled = false;
+    const why = (res && res.error) || 'неизвестно';
+    if (why === 'dmg-not-found') {
+      say('Не нашёл файл образа (Hamidun-Setup-Mac.dmg) — похоже, он удалён. Скачай установщик заново.');
+    } else if (why === 'volume-not-ready' || why === 'open-failed') {
+      say('Образ не открылся сам. Выполни команду ниже в Терминале — она делает то же самое.');
+    } else {
+      say('Автоматически не вышло (' + why + '). Выполни команду ниже в Терминале.');
+    }
+  });
 }
 
 // На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
@@ -978,6 +1019,49 @@ function appendLog(line) {
   log.scrollTop = log.scrollHeight;
 }
 
+// Часы на ИДУЩЕМ шаге. Просьба живых пользователей: «он крутит эту штуку и непонятно,
+// что-то поломалось или процесс идёт». Настоящих процентов у установочных скриптов нет
+// (они не сообщают прогресс), и рисовать выдуманную полосу — врать. Честный минимум:
+// показать, СКОЛЬКО этот шаг уже идёт. Стоящие часы = завис, растущие = живой.
+// Подпись докачки (там проценты настоящие) не трогаем: она перерисовывается своим
+// обработчиком прогресса.
+let STEP_TIMER = null;
+function startStepClock(id, baseLabel) {
+  stopStepClock();
+  const t0 = Date.now();
+  const tick = () => {
+    const step = document.querySelector(`.step[data-id="${id}"]`);
+    if (!step || !step.classList.contains('running')) { stopStepClock(); return; }
+    const spans = step.querySelectorAll('span');
+    const el = spans.length ? spans[spans.length - 1] : null;
+    if (!el) return;
+    // Если докачка уже переписала подпись на «Скачиваю 42%…» — не мешаем ей.
+    if (/%/.test(el.textContent || '')) return;
+    const s = Math.floor((Date.now() - t0) / 1000);
+    el.textContent = baseLabel + ' — идёт ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+  STEP_TIMER = setInterval(tick, 1000);
+}
+function stopStepClock() {
+  if (STEP_TIMER) { clearInterval(STEP_TIMER); STEP_TIMER = null; }
+}
+
+// Общий прогресс прогона в ПРОЦЕНТАХ. Проценты настоящие — доля пройденных
+// компонентов от выбранных; внутри шага скрипты прогресс не сообщают, поэтому там
+// идут секунды (startStepClock), а выдуманную полосу мы не рисуем.
+function setRunProgress(done, total, currentName) {
+  const box = document.getElementById('run-progress');
+  const fill = document.getElementById('run-progress-fill');
+  const label = document.getElementById('run-progress-label');
+  if (!box || !fill || !label) return;
+  box.classList.remove('hidden');
+  const pct = HMFinishLink.runProgressPct(done, total);
+  fill.style.width = pct + '%';
+  label.textContent = currentName
+    ? `${pct}% · ${done} из ${total} · сейчас: ${currentName}`
+    : `${pct}% · ${done} из ${total}`;
+}
+
 function setStep(id, status) {
   const step = document.querySelector(`.step[data-id="${id}"]`);
   if (step) step.className = 'step ' + status;
@@ -1095,11 +1179,15 @@ async function runComponents(ids, env) {
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
+      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
+    startStepClock(id, (STATE.byId[id] && STATE.byId[id].name) || id);
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length,
+      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id);
     // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
     // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
     // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
@@ -1152,7 +1240,9 @@ async function runComponents(ids, env) {
       catch (e) { res = { id, ok: false, code: -1, stage: 'fetch', error: String(e) }; }
     }
 
+    stopStepClock();
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
+    else setStepLabel(id, (STATE.byId[id] && STATE.byId[id].name) || id);   // снять «идёт М:СС»
 
     if (res && res.skipped) {
       // P1: осознанный пропуск (exit 120 — нечего ставить, напр. VS Code не вшит в
@@ -1214,6 +1304,7 @@ async function runComponents(ids, env) {
       }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
   }
   off && off();
   STATE.runActive = false;

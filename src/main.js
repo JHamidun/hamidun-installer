@@ -2774,4 +2774,95 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   return { id, ok: true, code: 0 };
 });
 
+// ---- macOS: САМОЛЕЧЕНИЕ карантина/транслокации --------------------------------
+//
+// Живой случай (двое на маке, кнопка «Установить» серая): человек сохранил образ НЕ в
+// «Загрузки», а на Рабочий стол. Инструкция предлагала выполнить команду с жёстко
+// вбитым ~/Downloads — она падала с «No such file», карантин не снимался, и человек
+// упирался в тупик, хотя всё было исправимо. Просить пользователя копировать команды в
+// Терминал вообще плохо: там ошибётся кто угодно.
+//
+// Установщик знает про себя больше, чем человек: где смонтирован образ, из какого файла
+// он смонтирован (hdiutil info) и что сам он запущен из карантинной копии. Значит может
+// починить сам: снять карантин с ОБРАЗА, отцепить ВСЕ его тома, открыть заново и
+// запуститься из свежего — уже без карантина, а значит без транслокации.
+//
+// Привилегии не нужны: на macOS установщик работает НЕ от администратора, а образ —
+// файл самого пользователя. Все вызовы идут execFile с массивом аргументов (без shell),
+// пути проверяются: только абсолютные, только под /Volumes или домашним каталогом,
+// только имя вида Hamidun-Setup-Mac*.dmg.
+function macFindOurDmg() {
+  const okDmg = (p) => {
+    try {
+      if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
+      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(path.basename(p))) return false;
+      return fs.statSync(p).isFile();
+    } catch (e) { return false; }
+  };
+  // 1) Самый точный источник: смонтированный образ знает свой файл.
+  try {
+    const out = execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8', timeout: 15000 });
+    for (const line of String(out).split(/\r?\n/)) {
+      const m = /^image-path\s*:\s*(.+)$/.exec(line.trim());
+      if (m && okDmg(m[1].trim())) return m[1].trim();
+    }
+  } catch (e) { /* образ мог быть уже отцеплен — идём дальше */ }
+  // 2) Обычные места, куда браузеры кладут скачанное.
+  const home = os.homedir();
+  for (const dir of ['Downloads', 'Desktop', 'Documents', '']) {
+    try {
+      const d = dir ? path.join(home, dir) : home;
+      const hit = fs.readdirSync(d)
+        .filter((f) => /^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(f))
+        .map((f) => path.join(d, f))
+        .filter(okDmg)
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+      if (hit) return hit;
+    } catch (e) { /* каталога может не быть */ }
+  }
+  return '';
+}
+
+ipcMain.handle('mac-selfheal', async () => {
+  if (process.platform !== 'darwin') return { ok: false, error: 'not-darwin' };
+  const dmg = macFindOurDmg();
+  if (!dmg) return { ok: false, error: 'dmg-not-found' };
+  const run = (bin, args, timeout) => {
+    try {
+      execFileSync(bin, args, { encoding: 'utf8', timeout: timeout || 30000, stdio: 'ignore' });
+      return true;
+    } catch (e) { return false; }
+  };
+  // Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной».
+  run('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', dmg]);
+  // Отцепляем ВСЕ наши тома, а не первый: при повторных попытках macOS монтирует
+  // «Hamidun Setup 1», «Hamidun Setup 2»… и человек снова запускался со старого,
+  // ещё карантинного тома.
+  try {
+    for (const v of fs.readdirSync('/Volumes')) {
+      if (!/^Hamidun Setup/i.test(v)) continue;
+      run('/usr/bin/hdiutil', ['detach', path.join('/Volumes', v), '-force'], 20000);
+    }
+  } catch (e) { /* /Volumes нечитаем — не критично */ }
+  // Открываем заново: карантина на образе больше нет → приложение внутри не будет
+  // транслоцировано.
+  if (!run('/usr/bin/open', [dmg], 30000)) return { ok: false, error: 'open-failed', dmg };
+  // Ждём появления .app на свежем томе и запускаем ИМЕННО его.
+  const deadline = Date.now() + 25000;
+  let appPath = '';
+  while (Date.now() < deadline && !appPath) {
+    try {
+      for (const v of fs.readdirSync('/Volumes')) {
+        if (!/^Hamidun Setup/i.test(v)) continue;
+        const cand = path.join('/Volumes', v, 'Hamidun Setup.app');
+        if (fs.existsSync(cand)) { appPath = cand; break; }
+      }
+    } catch (e) { /* том ещё монтируется */ }
+    if (!appPath) await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!appPath) return { ok: false, error: 'volume-not-ready', dmg };
+  if (!run('/usr/bin/open', ['-a', appPath], 30000)) return { ok: false, error: 'relaunch-failed', dmg, appPath };
+  return { ok: true, dmg, appPath };
+});
+
 ipcMain.handle('quit', () => app.quit());

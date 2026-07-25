@@ -4444,6 +4444,75 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
   assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
 });
 
+ok('macOS: установщик чинит карантин САМ — кнопка, а не команда в Терминал', () => {
+  const m = EG_MAIN();
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const p = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+
+  const i = m.indexOf("ipcMain.handle('mac-selfheal'");
+  assert(i !== -1, 'обработчик самолечения есть');
+  const h = m.slice(i, i + 3500);
+  assert(/process\.platform !== 'darwin'/.test(h), 'на не-macOS не срабатывает');
+  // Всё через execFile с МАССИВОМ аргументов: путь к образу приходит из hdiutil/файловой
+  // системы, и склейка в строку shell открыла бы инъекцию через имя файла.
+  assert(!/exec\(|shell:\s*true/.test(h), 'никакого shell — только execFile с массивом');
+  assert(/'\/usr\/bin\/xattr'[\s\S]{0,80}'-dr', 'com\.apple\.quarantine'/.test(h), 'снимает карантин с образа');
+  assert(/hdiutil['"\],\s]+.*detach/.test(h) && /readdirSync\('\/Volumes'\)/.test(h),
+    'отцепляет ВСЕ тома Hamidun, а не первый: при повторных попытках их несколько');
+  assert(/'-a', appPath/.test(h), 'перезапускается из СВЕЖЕГО тома');
+
+  const fi = m.indexOf('function macFindOurDmg');
+  const fh = m.slice(fi, fi + 1800);
+  assert(/hdiutil['"\],\s]+.*info/.test(fh), 'путь к образу берётся у самого смонтированного образа');
+  assert(/Hamidun-Setup-Mac\[A-Za-z0-9\._-\]\*\\\.dmg/.test(fh), 'имя образа проверяется по шаблону');
+  assert(/Downloads['",\s]+.*Desktop/.test(fh),
+    'ищем не только в «Загрузках» — живой случай: образ лежал на Рабочем столе');
+
+  assert(/macSelfHeal: \(\) => ipcRenderer\.invoke\('mac-selfheal'\)/.test(p), 'проброшено в renderer');
+  assert(/id="mac-selfheal"/.test(a) && /id="mac-selfheal-banner"/.test(a),
+    'кнопка есть и в модалке, и в несмываемом баннере');
+  assert(/window\.installer\.macSelfHeal\(\)/.test(a), 'кнопка вызывает самолечение');
+  assert(/dmg-not-found/.test(a), 'если образа нет — человеку говорят скачать заново, а не молчат');
+});
+
+ok('прогресс: полоса в ПРОЦЕНТАХ по прогону, проценты настоящие', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'styles.css'), 'utf8');
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const view = html.slice(html.indexOf('<main id="view-progress"'), html.indexOf('</main>', html.indexOf('<main id="view-progress"')));
+  assert(/id="run-progress-fill"/.test(view) && /id="run-progress-label"/.test(view),
+    'полоса и подпись живут в экране установки');
+  assert(/\.run-progress__fill/.test(css), 'стили полосы описаны');
+
+  // Арифметика вынесена в тестируемый модуль (тот же приём, что у finish-link).
+  assert.strictEqual(HMFinish.runProgressPct(0, 8), 0);
+  assert.strictEqual(HMFinish.runProgressPct(3, 8), 38, 'процент считается от пройденных компонентов');
+  assert.strictEqual(HMFinish.runProgressPct(8, 8), 100);
+  assert.strictEqual(HMFinish.runProgressPct(0, 0), 0, 'пустой набор не даёт NaN');
+  assert.strictEqual(HMFinish.runProgressPct(9, 8), 100, 'больше 100% не показываем');
+  assert.strictEqual(HMFinish.runProgressPct(-1, 8), 0, 'отрицательное не уводит полосу в минус');
+  assert(/HMFinishLink\.runProgressPct\(done, total\)/.test(a), 'интерфейс использует ТУ ЖЕ функцию, что проверена тестом');
+  assert(/сейчас: \$\{currentName\}/.test(a), 'в подписи видно, какой компонент идёт сейчас');
+
+  // Полоса обязана двигаться и когда компонент ПРОПУЩЕН из-за зависимости, иначе она
+  // застынет и человек снова решит, что всё зависло.
+  const runFn = a.slice(a.indexOf('async function runComponents'));
+  assert((runFn.match(/setRunProgress\(/g) || []).length >= 3,
+    'обновляется на старте шага, после шага и в ветке пропуска по зависимости');
+});
+
+ok('прогресс: на идущем шаге тикают часы (спиннер не отличить от зависания)', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/function startStepClock/.test(a) && /function stopStepClock/.test(a), 'часы есть');
+  assert(/startStepClock\(id,/.test(a), 'запускаются при переходе шага в работу');
+  assert(/stopStepClock\(\);\s*\n\s*if \(offP\)/.test(a), 'останавливаются по завершении шага');
+  // Настоящих процентов у установочных скриптов нет — выдуманную полосу рисовать нельзя.
+  const ci = a.indexOf('function startStepClock');
+  const ch = a.slice(ci, ci + 1200);
+  assert(/if \(\/%\/\.test/.test(ch), 'подпись докачки с НАСТОЯЩИМИ процентами не перетирается');
+  assert(/идёт /.test(ch), 'показывается время, а не выдуманный процент');
+});
+
 ok('macOS: команда разблокировки САМА находит образ (жёсткий ~/Downloads запрещён)', () => {
   // Живой случай: человек сохранил dmg не в «Загрузки», команда падала на первом шаге
   // («No such file»), карантин не снимался — и инструкция выглядела неработающей.
