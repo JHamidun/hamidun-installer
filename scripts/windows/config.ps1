@@ -79,7 +79,15 @@ if ($haveBundled) {
     # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог пред-
     # создать $clone\.git с core.fsmonitor/hooksPath = payload → code-exec под нашим git.
     # Всегда СВЕЖИЙ clone + hardening-флаги (командные -c перебивают repo-local config).
-    $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false')
+    # credential.helper ПУСТОЙ + запрет интерактива — иначе Git Credential Manager
+    # (он на Windows стоит по умолчанию) поднимает ГРАФИЧЕСКОЕ окно «введите логин»
+    # при любом отказе доступа: прокси, перехват трафика, лимит GitHub. Установщик
+    # ждал бы ответа ВЕЧНО — то же зависание, что было с вопросом unzip, только
+    # окно может всплыть за окном установщика и остаться незамеченным.
+    # Репозиторий конфига ПУБЛИЧНЫЙ: любой запрос кредов = сломанная ситуация,
+    # и правильный исход — быстро упасть с понятной ошибкой, а не висеть.
+    $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false',
+                 '-c','credential.helper=','-c','credential.interactive=false')
     if (Test-Path $clone) { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }
     Write-Host "Скачиваю конфиг с GitHub ($url)..."
     New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null

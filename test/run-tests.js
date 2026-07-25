@@ -4444,6 +4444,31 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
   assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
 });
 
+ok('git НИКОГДА не спрашивает креды — иначе окно помощника вешает установку', () => {
+  // Найдено вживую: Git Credential Manager (на Windows стоит по умолчанию) поднял
+  // ГРАФИЧЕСКОЕ окно «введите логин», и вызвавший процесс встал намертво. У установщика
+  // та же схема — он клонирует конфиг, а окно может всплыть ЗА окном установщика.
+  // Все наши источники ПУБЛИЧНЫЕ: запрос кредов = сломанная ситуация, и правильный
+  // исход — быстро упасть с понятной ошибкой.
+  const m = EG_MAIN();
+  const i = m.indexOf('const NONINTERACTIVE_ENV');
+  assert(i !== -1, 'набор «никакого интерактива» объявлен');
+  const h = m.slice(i, i + 900);
+  for (const k of ['GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GCM_INTERACTIVE', 'SSH_ASKPASS']) {
+    assert(new RegExp(k).test(h), 'заглушено: ' + k);
+  }
+  // Должно попадать в окружение НА ОБЕИХ платформах, а не только на Windows.
+  assert((m.match(/Object\.assign\(out, NONINTERACTIVE_ENV\)/g) || []).length >= 2,
+    'применяется и в Windows-, и в POSIX-ветке buildInstallEnv');
+
+  const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
+  assert(/credential\.helper=/.test(ps) && /credential\.interactive=false/.test(ps),
+    'сам git-вызов на Windows тоже обезврежен (env могут не унаследовать)');
+  assert(/credential\.helper= -c credential\.interactive=false/.test(sh),
+    'и на macOS');
+});
+
 ok('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)', async () => {
   // Живой случай: установка встала на 15 минут — unzip спросил «write error (disk full?).
   // Continue? (y/n/^C)», а ответить некуда. По умолчанию Node даёт ребёнку живой пайп на

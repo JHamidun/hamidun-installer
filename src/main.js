@@ -646,6 +646,26 @@ const WIN_SYS_ENV_KEYS = [
   'SESSIONNAME', 'LOGONSERVER', 'USERDNSDOMAIN'
 ];
 
+// Переменные, глушащие ЛЮБОЙ интерактивный запрос у инструментов, которые мы запускаем.
+// Повод — живой случай: Git Credential Manager (на Windows он ставится по умолчанию)
+// поднял ГРАФИЧЕСКОЕ окно «введите логин» при обращении к репозиторию, и процесс,
+// который его вызвал, встал намертво. У установщика ровно та же схема: он делает
+// git clone конфига, а окно может всплыть ЗА окном установщика — человек увидит
+// вечный спиннер и ничего больше. Все наши источники ПУБЛИЧНЫЕ: запрос кредов всегда
+// означает сломанную ситуацию (прокси, перехват, лимит), и правильный исход — быстро
+// упасть с понятной ошибкой.
+const NONINTERACTIVE_ENV = {
+  GIT_TERMINAL_PROMPT: '0',          // git не спрашивает логин в терминале
+  GIT_ASKPASS: 'echo',               // и не зовёт графический askpass
+  GCM_INTERACTIVE: 'never',          // Git Credential Manager: без окон
+  SSH_ASKPASS: 'echo',
+  SSH_ASKPASS_REQUIRE: 'never',
+  DEBIAN_FRONTEND: 'noninteractive',
+  PIP_DISABLE_PIP_VERSION_CHECK: '1',
+  npm_config_yes: 'true',            // npx/npm не спрашивают подтверждение установки
+  CI: '1',                           // общепринятый сигнал «интерактива нет»
+};
+
 function buildInstallEnv(rendererEnv) {
   rendererEnv = rendererEnv || {};
   if (IS_WIN) {
@@ -686,6 +706,7 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'WindowsPowerShell', 'Modules')
     ].join(';');                                                    // только системные модули (анти-module-hijack)
     if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC;.PS1';
+    Object.assign(out, NONINTERACTIVE_ENV);
     return out;
   }
   // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
@@ -693,6 +714,7 @@ function buildInstallEnv(rendererEnv) {
   // никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
   const out = Object.assign({}, process.env);
   Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
+  Object.assign(out, NONINTERACTIVE_ENV);
   return out;
 }
 

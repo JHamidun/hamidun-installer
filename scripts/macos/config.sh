@@ -72,7 +72,11 @@ else
   rm -rf "$CLONE"
   echo "Скачиваю конфиг с GitHub ($URL)..."
   mkdir -p "$(dirname "$CLONE")"
-  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
+  # credential.helper ПУСТОЙ + запрет интерактива: иначе помощник кредов (в macOS это
+  # osxkeychain, а при установленном GCM — графическое окно) при любом отказе доступа
+  # ждёт ввода, и установка виснет ВЕЧНО. Репозиторий конфига публичный: запрос
+  # кредов = сломанная ситуация, правильный исход — быстро упасть с ошибкой.
+  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false \n    -c credential.helper= -c credential.interactive=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
 fi
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.sh
