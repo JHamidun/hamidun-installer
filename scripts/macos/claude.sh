@@ -22,7 +22,22 @@ if [ -n "${HM_VENDOR:-}" ] && [ -d "$HM_VENDOR/npm-cache" ] && have npm; then
     chmod -R u+w "$NPMTMP/npm-cache" 2>/dev/null || true
     if npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' \
          --offline --cache "$NPMTMP/npm-cache" --no-audit --no-fund; then
-      INSTALLED=1
+      # НУЛЕВОЙ КОД ВОЗВРАТА ЗДЕСЬ НИЧЕГО НЕ ДОКАЗЫВАЕТ.
+      # Настоящий бинарь Claude ставится ПЛАТФОРМЕННЫМ optional-пакетом
+      # (@anthropic-ai/claude-code-darwin-<arch>). Если его в кэше нет, npm считает
+      # optional-зависимость необязательной, ОТЧИТЫВАЕТСЯ УСПЕХОМ и оставляет обёртку,
+      # чей bin печатает «claude native binary not installed» и выходит с ошибкой.
+      # Человек увидел бы зелёную галочку и нерабочий claude — худший исход из всех.
+      # Поэтому проверяем не код, а РАБОТУ: команда обязана ответить своей версией.
+      if "$HOME/.local/bin/claude" --version >/dev/null 2>&1; then
+        INSTALLED=1
+      else
+        echo "Офлайн-установка отчиталась успехом, но claude не запускается (в кеше нет платформенного бинаря) — пробую онлайн-фолбэк."
+        # Убираем нерабочую обёртку: иначе она перехватит PATH и «claude» будет падать
+        # даже после успешной онлайн-установки в другой каталог.
+        rm -f "$HOME/.local/bin/claude" 2>/dev/null
+        rm -rf "$HOME/.local/lib/node_modules/@anthropic-ai/claude-code" 2>/dev/null
+      fi
     else
       echo "Офлайн-установка не удалась — пробую онлайн-фолбэк."
     fi

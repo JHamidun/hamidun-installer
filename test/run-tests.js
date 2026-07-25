@@ -21,6 +21,21 @@ const SKILLS_CANDS = [
 ];
 const SKILLS_DIR = SKILLS_CANDS.find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } }) || SKILLS_CANDS[0];
 
+// «A идёт РАНЬШЕ B» — с обязательной проверкой, что оба вообще есть.
+//
+// Голое `hay.indexOf(a) < hay.indexOf(b)` — ПУСТАЯ проверка: если A пропал, indexOf даёт
+// -1, а -1 меньше любого индекса, и тест остаётся зелёным на ИСЧЕЗНУВШЕЙ защите. Так и
+// было: гейт сверки SHA-256 дерева nomad заменили на `if false` — все тесты прошли.
+// Большинство таких сравнений стерегут проверки подписи и целостности, то есть ровно то,
+// что молча пропадать не должно.
+function assertOrder(hay, first, second, msg) {
+  const i = hay.indexOf(first);
+  const j = hay.indexOf(second);
+  assert(i !== -1, (msg || 'порядок') + ': пропало «' + String(first).slice(0, 70) + '»');
+  assert(j !== -1, (msg || 'порядок') + ': пропало «' + String(second).slice(0, 70) + '»');
+  assert(i < j, msg || 'нарушен порядок');
+}
+
 let pass = 0, fail = 0;
 function ok(name, fn) {
   try { fn(); console.log('  ✅ ' + name); pass++; }
@@ -43,7 +58,7 @@ ok('installOrder: deps before dependents (all selected)', () => {
   const order = HMDeps.installOrder(selected, byId);
   Object.keys(byId).forEach((id) => {
     (byId[id].requires || []).forEach((r) => {
-      assert(order.indexOf(r) < order.indexOf(id), `${r} must come before ${id}`);
+      assertOrder(order, r, id, `${r} must come before ${id}`);
     });
   });
 });
@@ -836,7 +851,7 @@ ok('claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпи�
   // НЕТ spoofable substring-пина издателя (старый '-notmatch $PUBLISHER' убран).
   assert(!/-notmatch \$PUBLISHER/.test(s) && !/\$subject -notmatch/.test(s), 'НЕТ подстрочного -notmatch пина издателя (spoofable)');
   // ГЕЙТ ПОРЯДКА: надёжная проверка ДО запуска ТОГО ЖЕ $installer (без ре-резолва).
-  assert(s.indexOf('Test-HmSignerTrusted -Path $installer') < s.indexOf('Start-Process -FilePath $installer'),
+  assertOrder(s, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
     'Test-HmSignerTrusted($installer) ИДЁТ ДО Start-Process $installer (проверяем тот же бинарь)');
   assert(/Start-Process -FilePath \$installer -WorkingDirectory \$cache/.test(s), 'запуск ИЗ защищённого кэша (CWD=кэш, run-from-protected)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
@@ -860,7 +875,7 @@ ok('chatgpt-desktop.ps1: winget PublisherId 8wekyb3d8bbwe + БЕЗ Get-Command f
   assert(/\^Microsoft\\\.DesktopAppInstaller_/.test(s), 'имя пакета якорится ПОЛНОСТЬЮ (^...$), не подстрока');
   assert(!/Get-Command winget/.test(s), 'УБРАН Get-Command winget fallback (user-writable alias)');
   assert(/--exact/.test(s), 'winget install --exact (нет подмены id по совпадению/монике)');
-  assert(s.indexOf('Test-HmSignerTrusted') < s.indexOf('& $winget install'),
+  assertOrder(s, 'Test-HmSignerTrusted', '& $winget install',
     'подпись winget.exe проверяется ДО его запуска');
   assert(/--source msstore/.test(s) && /9NT1R1C2HH7J/.test(s), 'ставит из Microsoft Store (Store ID)');
   assert(/Test-ChatGptDesktopInstalled/.test(s) && /Get-AppxPackage/.test(s), 'идемпотентность: детект MSIX-пакета');
@@ -878,7 +893,7 @@ ok('claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl 
   assert(/"\$SPCTL" --assess --type execute/.test(s), 'нотаризация ОБЯЗАТЕЛЬНА (spctl вызывается всегда)');
   assert(/Q6L2SF6YDW/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'пин Team ID Anthropic через нативный designated requirement (certificate leaf[subject.OU], не -dv парсинг)');
   assert(/com\.anthropic\.claudefordesktop/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
-  assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+  assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
     'подпись проверяется ДО установки (ditto)');
   assert(/curl -fsSL --proto '=https'/.test(s), 'скачивание только по HTTPS (без http-downgrade)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
@@ -899,7 +914,7 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
   assert(/com\.openai\.chat/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
   assert(!/grep -q "Authority=Developer ID Application: \$PUBLISHER"/.test(s),
     'НЕТ authority-substring как контроля (любой Dev ID с «OpenAI» иначе прошёл бы)');
-  assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+  assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
     'подпись проверяется ДО установки (ditto)');
   assert(/curl -fsSL --proto '=https'/.test(s), 'скачивание только по HTTPS');
   assert(/persistent\.oaistatic\.com/.test(s), 'официальный OpenAI CDN (oaistatic.com)');
@@ -911,7 +926,7 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
 ok('grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи', () => {
   const cps = DT_CLAUDE_PS1();
   // Windows Claude: единственный запуск скачанного бинаря — Start-Process $installer, и он ПОСЛЕ надёжной проверки.
-  assert(cps.indexOf('Test-HmSignerTrusted -Path $installer') < cps.indexOf('Start-Process -FilePath $installer'),
+  assertOrder(cps, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
     'claude-desktop.ps1: установщик не запускается до надёжного гейта подписи');
   // Никаких -OutFile в TEMP.
   [DT_CLAUDE_PS1(), DT_CHATGPT_PS1()].forEach((s) => {
@@ -919,7 +934,7 @@ ok('grep-инвариант: нет download-в-user-writable + нет запу�
   });
   // mac: ditto (установка) — строго после verify_desktop_app.
   [DT_CLAUDE_SH(), DT_CHATGPT_SH()].forEach((s) => {
-    assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+    assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
       'mac: установка (ditto) только после проверки подписи+нотаризации');
   });
 });
@@ -1907,7 +1922,7 @@ ok('config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $pre
   assert(/\$weAdded = \(-not \$preExisting\.ContainsKey\(\$_\.Name\)\) -or \$ourPrev\.ContainsKey\(\$_\.Name\)/.test(s),
     'guard $weAdded: скилл юзера, бывший ДО раскладки, не удаляем; НАШ из прошлого прогона (.hamidun-skills.txt) — прунится, иначе снятие пака работает лишь раз');
   assert(/\$ourListPath = Join-Path \$claudeHome '\.hamidun-skills\.txt'/.test(s), 'маркер «наших» скиллов пишется/читается в ~/.claude/.hamidun-skills.txt');
-  assert(s.indexOf("$ourPrev = @{}") < s.indexOf('robocopy $srcClaude $claudeHome'), 'прошлый список «наших» читается ДО merge-copy');
+  assertOrder(s, "$ourPrev = @{}", 'robocopy $srcClaude $claudeHome', 'прошлый список «наших» читается ДО merge-copy');
   assert(/\$preExisting\[\$_\.Name\] = \$true/.test(s), 'инвентарь пред-существующих скиллов собирается ДО merge-copy');
   assert(/-ErrorAction Stop \| ForEach-Object \{/.test(s), 'перечисление с -ErrorAction Stop (fail-closed)');
   assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$reparseSkills \+= \$_\.Name \}/.test(s),
@@ -2933,7 +2948,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/использую как есть/.test(nsh), 'nomad.sh: старой ветки «использую как есть» нет');
   // Установка гейтится доверием ДО секции uv.
   assert(/if \[ "\$SRC_TRUSTED" != "1" \]; then/.test(nsh), 'nomad.sh: гейт SRC_TRUSTED');
-  assert(nsh.indexOf('SRC_TRUSTED" != "1" ]; then') !== -1 && nsh.indexOf('SRC_TRUSTED" != "1" ]; then') < nsh.indexOf('uv tool install'),
+  assertOrder(nsh, 'SRC_TRUSTED" != "1" ]; then', 'uv tool install',
     'nomad.sh: skip-гейт (exit 120) ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
@@ -2946,7 +2961,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/--force/.test(nps), 'nomad.ps1: НЕТ --force');
   assert(!/использую как есть/.test(nps), 'nomad.ps1: старой ветки «использую как есть» нет');
   assert(/if \(-not \$DRY -and -not \$srcTrusted\) \{/.test(nps), 'nomad.ps1: гейт $srcTrusted');
-  assert(nps.indexOf('-not $srcTrusted) {') !== -1 && nps.indexOf('-not $srcTrusted) {') < nps.indexOf('tool install --python 3.12 "$src"'),
+  assertOrder(nps, '-not $srcTrusted) {', 'tool install --python 3.12 "$src"',
     'nomad.ps1: skip-гейт (exit 120) ПЕРЕД uv tool install');
 });
 
@@ -2960,13 +2975,21 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
   assert(/uv tool install --python 3\.12 "\$BUILD_SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
   assert(/BUILD_SRC="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/hm-nomad-build\.XXXXXX"\)"/.test(nsh), 'nomad.sh: сборка из приватного mktemp-каталога (0700), не из read-only vendor');
   assert(/cp -R "\$SRC\/\." "\$BUILD_SRC\/"/.test(nsh), 'nomad.sh: копия проверенного дерева в temp');
-  assert(nsh.indexOf('TREE_GOT" != "$TREE_WANT"') < nsh.indexOf('BUILD_SRC="$(mktemp'), 'nomad.sh: порядок verify → copy → install (fail-closed сохранён)');
+  // ПУСТАЯ ПРОВЕРКА БЫЛА ЗДЕСЬ: сравнение indexOf без проверки на -1. Когда гейт
+  // целостности исчезал, indexOf возвращал -1, а -1 < 6748 — истина, и тест оставался
+  // зелёным на ОТКЛЮЧЁННОЙ защите. Проверено мутацией: гейт заменяли на `if false` —
+  // все 283 теста проходили. Теперь сначала требуем НАЛИЧИЕ, потом порядок.
+  const iGate = nsh.indexOf('TREE_GOT" != "$TREE_WANT"');
+  const iBuild = nsh.indexOf('BUILD_SRC="$(mktemp');
+  assert(iGate !== -1, 'nomad.sh: гейт сверки SHA-256 дерева НА МЕСТЕ (без него vendor можно подменить)');
+  assert(iBuild !== -1, 'nomad.sh: сборка из приватного temp-каталога на месте');
+  assert(iGate < iBuild, 'nomad.sh: порядок verify → copy → install (fail-closed сохранён)');
   assert(nsh.indexOf('UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"') !== -1, 'nomad.sh: проверяется uv-tool nomad-agent');
   assert(nsh.indexOf('[ -e "$HOME/.local/bin/nmd" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-agent" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-acp" ]') !== -1,
     'nomad.sh: проверяются шимы nmd/nomad-agent/nomad-acp');
   const guardSh = nsh.slice(nsh.indexOf('UV_TOOL_NA='), nsh.indexOf('UV_TOOL_NA=') + 800);
   assert(/exit 120/.test(guardSh), 'nomad.sh: существующий тул/шим → exit 120');
-  assert(nsh.indexOf('UV_TOOL_NA=') !== -1 && nsh.indexOf('UV_TOOL_NA=') < nsh.indexOf('uv tool install'),
+  assertOrder(nsh, 'UV_TOOL_NA=', 'uv tool install',
     'nomad.sh: guard ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
@@ -2978,7 +3001,7 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
     'nomad.ps1: проверяются шимы nmd/nomad-agent/nomad-acp(.exe)');
   const guardPs = nps.slice(nps.indexOf('$existingNomad = @('), nps.indexOf('$existingNomad = @(') + 900);
   assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
-  assert(nps.indexOf('$existingNomad = @(') !== -1 && nps.indexOf('$existingNomad = @(') < nps.indexOf('tool install --python 3.12 "$src"'),
+  assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$src"',
     'nomad.ps1: guard ПЕРЕД uv tool install');
 });
 
