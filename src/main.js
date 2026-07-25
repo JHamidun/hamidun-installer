@@ -124,6 +124,13 @@ function readJson(name, fallback) {
   }
 }
 
+// ---- uid: связь установки с конкретным человеком ---------------------
+// Резолвинг uid и очистка текстов от ПД живут в отдельном модуле (src/uid-telemetry.js):
+// это граница доверия — значения уходят на сервер и проверяются тестами напрямую.
+const uidTelemetry = require('./uid-telemetry');
+const scrubText = uidTelemetry.scrubText;
+const INSTALL_UID = uidTelemetry.resolveUid();
+
 // ---- install log (~/.hamidun-setup/install.log) ----------------------
 // Every line streamed to the renderer is also appended here, so a user can
 // send one file to support when something goes wrong.
@@ -1169,15 +1176,35 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
     const url = String((cfg.telemetry && cfg.telemetry.url) || '');
     if (!/^https:\/\//i.test(url)) return { ok: false }; // пустой url = выключено
     const p = (payload && typeof payload === 'object') ? payload : {};
-    // failed: только компонентные id (латиница/цифры/_/-), ≤20 штук, ≤64 символа.
-    const failed = Array.isArray(p.failed)
-      ? p.failed.slice(0, 20).map((s) => String(s).slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'))
-      : [];
+    // Тип события задаёт renderer, но ТОЛЬКО из закрытого списка — иначе IPC становится
+    // генератором произвольных событий в воронке.
+    const EVENTS = ['installed', 'install_started', 'open_editor'];
+    const event = EVENTS.indexOf(String(p.event || 'installed')) !== -1 ? String(p.event) : 'installed';
+    // ids: только компонентные id (латиница/цифры/_/-), ≤20 штук, ≤64 символа.
+    const ids = (v) => (Array.isArray(v)
+      ? v.slice(0, 20).map((s) => String(s).slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'))
+      : []);
     const body = JSON.stringify({
-      event: 'installed',
+      event,
       platform: IS_WIN ? 'win' : 'mac',
+      // uid определяет ГЛАВНЫЙ процесс (имя файла/файл рядом/env) — renderer его задать
+      // не может: иначе он бы приписывал установки чужим людям.
+      uid: INSTALL_UID || null,
+      edition: isLiteEdition() ? 'lite' : 'offline',
       ok: !!p.ok,
-      failed,
+      failed: ids(p.failed),
+      skipped: ids(p.skipped),
+      selected: ids(p.selected),
+      // Почему упало — иначе бот видит «упал git» и не знает, сеть это, права или
+      // целостность, а именно это определяет совет человеку. Тексты чистятся от ПД
+      // (имя пользователя и домашний каталог) в scrubText.
+      errors: Array.isArray(p.errors)
+        ? p.errors.slice(0, 10).map((e) => ({
+          id: String((e && e.id) || '').slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'),
+          stage: String((e && e.stage) || '').slice(0, 24).replace(/[^a-z-]/g, ''),
+          error: scrubText(String((e && e.error) || '')).slice(0, 300),
+        }))
+        : [],
       // duration_sec клампим в [0, 24ч] — мусорные значения не улетают.
       duration_sec: Math.max(0, Math.min(86400, Math.round(Number(p.durationSec) || 0))),
     });

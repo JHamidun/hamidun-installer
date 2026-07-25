@@ -138,10 +138,14 @@ jobs:
             }
           }
 
+      # Компонент — config, а НЕ git: на раннере Git уже стоит (2.55), скрипт это видит и
+      # выходит без докачки, из-за чего проверка «докачка стартовала» падала на исправном
+      # продукте. Конфиг-пак качается всегда и проверяется по факту: >100 скиллов в
+      # изолированном ~/.claude. Это сильнее, чем «в UI мелькнул прогресс».
       - name: E2E ok — реальная докачка с S3 и установка
         shell: pwsh
         env:
-          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
           HM_E2E_EXPECT_LITE: '1'
           HM_E2E_TIMEOUT: '900000'
         run: node test/e2e-gui.js ok

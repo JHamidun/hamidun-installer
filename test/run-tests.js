@@ -4364,6 +4364,92 @@ ok('finish-link: botUrl пустой без базы/пейлоада, инач�
   assert.strictEqual(HMFinish.botUrl('https://t.me/bot', 'installed_win'), 'https://t.me/bot?start=installed_win');
 });
 
+// ---- телеметрия с привязкой к человеку (uid) --------------------------------
+// Установщик стал слать uid и диагностику ошибок, чтобы бот мог помочь адресно
+// («вижу, упало на шаге X по причине Y»). Всё, что уходит наружу, — граница доверия:
+// uid определяет ТОЛЬКО главный процесс, тип события берётся из закрытого списка,
+// а тексты ошибок чистятся от персональных данных.
+
+const UIDT = require(path.join(ROOT, 'src', 'uid-telemetry.js'));
+
+ok('uid: принимаем только [A-Za-z0-9_-]{1,32}, мусор отбрасываем целиком', () => {
+  assert.strictEqual(UIDT.sanitizeUid('272540053'), '272540053');
+  assert.strictEqual(UIDT.sanitizeUid(' a-b_C9 '), 'a-b_C9', 'пробелы по краям срезаются');
+  for (const bad of ['', ' ', 'a b', 'x'.repeat(33), 'a;drop', '../etc', '<script>', null, undefined, {}]) {
+    assert.strictEqual(UIDT.sanitizeUid(bad), '', 'мусор отбрасывается: ' + JSON.stringify(bad));
+  }
+});
+
+ok('uid: источники — env, файл рядом, имя файла; « (1)» от Windows не ломает привязку', () => {
+  const exe = path.join(os.tmpdir(), 'hm-uid-' + Date.now(), 'Hamidun-Setup-Windows--u272540053 (1).exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  try {
+    // Имя файла: суффикс --u<uid>, повторное скачивание Windows (« (1)») привязку НЕ теряет.
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: exe }), '272540053');
+    // Файл рядом сильнее имени файла.
+    fs.writeFileSync(path.join(path.dirname(exe), 'hamidun-uid.txt'), 'from_file\n');
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: exe }), 'from_file');
+    // Окружение сильнее всего (отладка и автотесты).
+    assert.strictEqual(UIDT.resolveUid({ env: { HM_UID: 'from_env' }, execPath: exe }), 'from_env');
+    // Мусор в источнике не проходит дальше — уезжает пустая привязка, а не грязь.
+    assert.strictEqual(UIDT.resolveUid({ env: { HM_UID: 'плохой uid' }, execPath: path.join(os.tmpdir(), 'x.exe') }), '');
+    // Обычное имя без суффикса — просто анонимно.
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: path.join(os.tmpdir(), 'Hamidun-Setup-Windows.exe') }), '');
+  } finally {
+    fs.rmSync(path.dirname(exe), { recursive: true, force: true });
+  }
+});
+
+ok('телеметрия: uid ставит ГЛАВНЫЙ процесс, renderer его подменить не может', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf("ipcMain.handle('send-telemetry'");
+  const h = m.slice(i, i + 2600);
+  assert(/uid: INSTALL_UID \|\| null/.test(h), 'в тело идёт INSTALL_UID, вычисленный в main');
+  assert(!/p\.uid/.test(h), 'uid из payload renderer НЕ читается (иначе он приписал бы установку чужому человеку)');
+});
+
+ok('телеметрия: тип события — из закрытого списка, произвольный не пролезает', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf("ipcMain.handle('send-telemetry'");
+  const h = m.slice(i, i + 2600);
+  assert(/const EVENTS = \['installed', 'install_started', 'open_editor'\]/.test(h), 'список событий закрыт');
+  assert(/EVENTS\.indexOf\(String\(p\.event.*!== -1 \? String\(p\.event\) : 'installed'/.test(h),
+    'неизвестное событие схлопывается в installed, а не улетает как есть');
+});
+
+ok('телеметрия: тексты ошибок чистятся от ПД (домашний каталог, имя пользователя, e-mail, IP)', () => {
+  // Фиксированные home/user, чтобы проверка не зависела от машины, на которой её гоняют.
+  const o = { home: 'C:\\Users\\ivan', user: 'ivan' };
+  const out = UIDT.scrubText(
+    'ENOENT C:\\Users\\ivan\\AppData\\x.zip; чужой путь C:\\Users\\petr\\y.zip; ' +
+    'пользователь ivan; почта a.b@mail.ru; узел 10.1.2.3', o);
+  assert(!/ivan/i.test(out), 'ни имени пользователя, ни его каталога: ' + out);
+  assert(!/petr/i.test(out), 'чужие домашние каталоги тоже вычищены: ' + out);
+  assert(!/a\.b@mail\.ru/.test(out), 'e-mail вычищен: ' + out);
+  assert(!/10\.1\.2\.3/.test(out), 'IP вычищен: ' + out);
+  // Ник «ivan» встречается внутри слова «Ivanovo-Setup.exe» — это НЕ ПД, и калечить
+  // название нельзя: иначе вместо диагностики бот получает кашу.
+  assert.strictEqual(UIDT.scrubText('файл Ivanovo-Setup.exe не подписан', o),
+    'файл Ivanovo-Setup.exe не подписан');
+  // POSIX-домашние каталоги.
+  assert.strictEqual(UIDT.scrubText('нет доступа к /home/ivan/.claude', o), 'нет доступа к ~/.claude');
+  assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
+});
+
+ok('телеметрия: renderer шлёт старт, финиш с диагностикой и открытие редактора', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/event: 'install_started'/.test(a), 'событие старта установки');
+  assert(/event: 'open_editor'/.test(a), 'событие «открыл редактор»');
+  assert(/errors: Array\.from\(STATE\.errorDigest\.values\(\)\)/.test(a), 'финиш везёт диагностику ошибок');
+  assert(/STATE\.errorDigest\.set\(id, \{/.test(a), 'диагностика собирается на каждом провале');
+  assert(/STATE\.errorDigest\.delete\(id\)/.test(a), 'успех/пропуск закрывают запись — не шлём вылеченные ошибки');
+  // Согласие уважается всеми тремя отправками, а не только финишной.
+  const starts = a.indexOf('function sendStartTelemetry');
+  const opens = a.indexOf('function sendOpenEditorTelemetry');
+  assert(/STATE\.telemetryConsent === false/.test(a.slice(starts, starts + 400)), 'старт уважает opt-out');
+  assert(/STATE\.telemetryConsent === false/.test(a.slice(opens, opens + 400)), 'open_editor уважает opt-out');
+});
+
 asyncTests().then(() => {
   console.log(`\nИТОГ: ${pass} прошло, ${fail} упало`);
   process.exit(fail ? 1 : 0);

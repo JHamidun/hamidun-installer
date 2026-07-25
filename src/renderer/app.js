@@ -24,6 +24,10 @@ let STATE = {
   netProbeDone: true,  // lite: false, пока main пробует сервер докачки (гейт «Установить»)
   netOnline: true,     // lite: false = сервер докачки недоступен (жёлтый баннер + «Проверить снова»)
   runActive: false,    // идёт прогон установки (гейт inline-кнопок «Повторить» на шагах)
+  // id → {id, stage, error}: почему компонент не встал. Едет в телеметрию, чтобы бот
+  // мог сказать «упало на шаге X, причина Y», а не «что-то не получилось». Кумулятивная
+  // (как badEver): inline-«Повторить» одного шага не должен стирать картину остальных.
+  errorDigest: new Map(),
 };
 
 // Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
@@ -123,6 +127,7 @@ async function init() {
     if (auto && auto.checked) {
       let ok = false;
       try { ok = await window.installer.launchVsCode(); } catch (_) {}
+      if (ok) sendOpenEditorTelemetry();
       // #7: не закрываемся МОЛЧА, если VS Code не открылся (нет в сборке / не встал) —
       // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе. Показываем
       // ту же подсказку, что и главная CTA, и НЕ квитим.
@@ -1158,10 +1163,12 @@ async function runComponents(ids, env) {
       bad.add(id);
       runtimeSkipped.add(id);
       badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
+      STATE.errorDigest.delete(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
       badEver.delete(id); // встало — проблема закрыта
+      STATE.errorDigest.delete(id);   // поставилось с ретрая — в отчёт ошибка не едет
       // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
       // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
       STATE.installedEver.add(id);
@@ -1176,6 +1183,14 @@ async function runComponents(ids, env) {
       setStep(id, (isNet || isEnv) ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
+      // Диагностика для бота: id + стадия + текст. Без стадии «упал git» не отличить от
+      // «нет интернета», «нет прав» и «подменён файл», а совет человеку в этих случаях
+      // РАЗНЫЙ. Текст чистится от ПД в главном процессе (scrubText) перед отправкой.
+      STATE.errorDigest.set(id, {
+        id,
+        stage: isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')),
+        error: String((res && res.error) || ('код ' + (res ? res.code : '?'))),
+      });
       badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')));
       const name = STATE.byId[id].name;
       if (isEnv) {
@@ -1304,6 +1319,7 @@ async function startInstall() {
   // (retryFailed её НЕ сбрасывает): по ней финиш видит ВЕСЬ остаточный набор провалов,
   // а не только результат последнего (возможно, одношагового inline-)прогона.
   STATE.badEver = new Map();
+  STATE.errorDigest = new Map();
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -1315,6 +1331,7 @@ async function startInstall() {
   buildSteps(order);
   startTips();
   LAST_ENV = envForRun();
+  sendStartTelemetry(order);
   const res = await runComponents(order, LAST_ENV);
   finishInstall(res);
 }
@@ -1410,13 +1427,38 @@ function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
     // gracefulSkipped едет отдельным полем (симметрично тому, как main санитизирует
     // failed) — и НЕ влияет на ok: осознанный «не входит в сборку» это не провал.
     const p = window.installer.sendTelemetry({
+      event: 'installed',
       ok: !!okAll,
       failed: (failed || []).slice(),
       skipped: (gracefulSkipped || []).slice(),
+      // Почему именно упало — без этого помощь человеку сводится к «пришли лог».
+      errors: Array.from(STATE.errorDigest.values()),
       durationSec,
     });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
+}
+
+// Событие ОТДЕЛЬНО от завершения: кто начал ставить и что выбрал. Без него не видно
+// людей, у которых установка не дошла до финиша (закрыл окно, упало намертво,
+// перезагрузился) — а это как раз те, кому нужна помощь. Шлётся один раз за прогон.
+function sendStartTelemetry(order) {
+  if (STATE.telemetryStartSent || STATE.telemetryConsent === false) return;
+  STATE.telemetryStartSent = true;
+  try {
+    const p = window.installer.sendTelemetry({ event: 'install_started', selected: (order || []).slice() });
+    if (p && p.catch) p.catch(() => { /* молча */ });
+  } catch (e) { /* телеметрия никогда не ломает установку */ }
+}
+
+// «Открыл редактор» — единственный сигнал, что человек реально пошёл работать, а не
+// просто получил зелёные галочки и закрыл окно.
+function sendOpenEditorTelemetry() {
+  if (STATE.telemetryConsent === false) return;
+  try {
+    const p = window.installer.sendTelemetry({ event: 'open_editor', ok: true });
+    if (p && p.catch) p.catch(() => { /* молча */ });
+  } catch (e) { /* никогда не мешаем запуску редактора */ }
 }
 
 function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed) {
@@ -1656,6 +1698,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   vscodeBtnEl.addEventListener('click', async () => {
     let ok = false;
     try { ok = await window.installer.launchVsCode(); } catch (_) {}
+    if (ok) sendOpenEditorTelemetry();
     if (!ok) {
       let hint = vscodeBtnEl.parentElement.querySelector('.ns-vscode-err');
       if (!hint) {
@@ -1686,7 +1729,12 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     }
   });
   const cursorBtn = $('#ns-cursor');
-  if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
+  if (cursorBtn) {
+    cursorBtn.addEventListener('click', () => {
+      window.installer.launchCursor();
+      sendOpenEditorTelemetry();
+    });
+  }
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
   $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
   const logBtnEl = $('#ns-log');
