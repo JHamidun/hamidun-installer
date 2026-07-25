@@ -342,8 +342,11 @@ ok('main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only
   const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const h = m.slice(m.indexOf("let remoteCache = ''"), m.indexOf('remoteCache = fr.path'));
   assert(h.length > 0, 'нашли remote-ветку run-component');
-  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = winMakeSecureDir\(\)/.test(h),
-    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив)');
+  // await обязателен: примитив асинхронный (spawn, не spawnSync — иначе главный процесс
+  // морозится на каждом артефакте и окно перестаёт отвечать). Без await в cacheDir лёг бы
+  // Promise, и «защищённый каталог» молча превратился бы в мусорный путь.
+  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = await winMakeSecureDir\(\)/.test(h),
+    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив), вызов awaited');
   assert(/secureCacheDir = cacheDir/.test(h), 'win32: каталог помечен для очистки');
   assert(/cacheDir = remoteCacheDir\(declared\)/.test(h), 'POSIX: remoteCacheDir (uv неэлевейтед)');
   assert(/if \(remoteCache\) childEnv\.HM_REMOTE_CACHE = remoteCache/.test(m),

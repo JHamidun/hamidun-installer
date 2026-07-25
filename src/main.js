@@ -822,7 +822,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         try { stillSafe = fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir); } catch (e) { stillSafe = false; }
         if (!stillSafe) { SECURE_DIRS.delete(declared); cacheDir = ''; }
       }
-      if (!cacheDir) cacheDir = winMakeSecureDir();
+      if (!cacheDir) cacheDir = await winMakeSecureDir();
       if (!cacheDir) {
         return { id, ok: false, code: -1, stage: 'env',
         error: 'не удалось подготовить защищённый каталог для загрузки'
@@ -1329,7 +1329,7 @@ function winDeElevScript() {
 // стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
 let lastSecureDirError = '';
 
-function winMakeSecureDir() {
+async function winMakeSecureDir() {
   try {
     const pd = remoteFetch.winProgramData();
     if (!pd || !fs.existsSync(pd)) return null;
@@ -1361,12 +1361,27 @@ function winMakeSecureDir() {
       ". '" + deLit + "';" +
       "$d=New-HmSecureStagingDir -ProgramData '" + pdLit + "' -Icacls '" + icLit + "' -Elevated $true;" +
       "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
-    // spawnSync, а НЕ execFileSync: примитив на отказе НЕ бросает, он возвращает $null и
-    // пишет причину (HMSECFAIL) в stderr. У execFileSync stderr доступен только в catch,
-    // то есть при успешном exit-коде причина молча терялась — и пользователь получал
-    // бесполезное «примитив не вернул путь» вместо «Set-Acl упал по привилегиям».
-    const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
-      { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+    // АСИНХРОННО (spawn, не spawnSync). Каталог рождается на КАЖДЫЙ докачиваемый артефакт,
+    // а старт powershell.exe — это секунды; синхронный вызов морозил главный процесс, и окно
+    // установщика переставало отвечать на каждом компоненте (прогресс замирал, клики
+    // копились). Ждём результат через промис — UI живёт.
+    // Читаем stderr, а не только stdout: примитив на отказе НЕ бросает, он возвращает $null
+    // и пишет причину (HMSECFAIL) в stderr. Раньше причина молча терялась, и пользователь
+    // получал бесполезное «примитив не вернул путь».
+    const r = await new Promise((resolve) => {
+      let so = '', se = '', settled = false;
+      const done = (res) => { if (!settled) { settled = true; resolve(res); } };
+      let child;
+      try {
+        child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+          { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) { return done({ error: e }); }
+      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || 'таймаут примитива (20 с)' }); }, 20000);
+      child.stdout.on('data', (d) => { so += String(d); });
+      child.stderr.on('data', (d) => { se += String(d); });
+      child.on('error', (e) => { clearTimeout(kill); done({ error: e }); });
+      child.on('close', () => { clearTimeout(kill); done({ stdout: so, stderr: se }); });
+    });
     const out = String((r && r.stdout) || '');
     // Берём ПОСЛЕДНЮЮ строку HMSECFAIL: их может быть несколько (посторонние ACE
     // перечисляются по одному), и последняя — та, что решила исход.
@@ -1414,7 +1429,7 @@ function winMakeSecureDir() {
 // (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил.
 // Иначе (210 refused / 211 start-fail / нет подтверждения / любой сбой) -> folder-only fallback.
 // Возвращает Promise<boolean> (опрос неблокирующий — UI не морозим).
-function winLaunchDeElevated(exe, folderArg) {
+async function winLaunchDeElevated(exe, folderArg) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
   const folderFallback = () => {
@@ -1439,7 +1454,7 @@ function winLaunchDeElevated(exe, folderArg) {
 
   const s32 = path.join(sysRoot, 'System32');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
-  const dir = winMakeSecureDir();
+  const dir = await winMakeSecureDir();
   if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
   const xmlFile = path.join(dir, 'task.xml');
   function runSchtasks(args) {

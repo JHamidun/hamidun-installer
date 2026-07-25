@@ -221,6 +221,15 @@ function trustedEnv() {
     const p = [s32, root, path.join(s32, 'WindowsPowerShell', 'v1.0')].join(';');
     return {
       SystemRoot: root, windir: root, PATH: p, Path: p,
+      // PSModulePath задаём ЯВНО. Унаследованный ломает всё дважды:
+      //  * запуск из окружения PowerShell 7 (терминал pwsh) подсовывает 5.1 модули из
+      //    ...\PowerShell\7\Modules — .NET Core-сборки, которые 5.1 загрузить не может,
+      //    и любой cmdlet из Microsoft.PowerShell.Security (Get-Acl) падает. Проверка
+      //    защищённости каталога возвращала бы false на ИСПРАВНОМ каталоге, и докачка
+      //    умирала бы «по соображениям безопасности»;
+      //  * PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) —
+      //    штатный вектор module-hijack в elevated-процессе.
+      PSModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'),
       TEMP: process.env.TEMP || process.env.TMP || '',
       TMP: process.env.TMP || process.env.TEMP || ''
     };
@@ -256,7 +265,14 @@ function verifyDirSecureWin(dir, log) {
     "$ErrorActionPreference='Stop';" +
     "$d=$env:HM_VERIFY_DIR;" +
     "$allow=@('S-1-5-18','S-1-5-32-544');" +
-    "$acl=Get-Acl -LiteralPath $d;" +
+    // ACL читаем через .NET, а НЕ Get-Acl: cmdlet тянет модуль Microsoft.PowerShell.Security,
+    // который в 5.1 не грузится при PSModulePath от PowerShell 7. Тогда проверка падала бы
+    // на ИСПРАВНОМ каталоге и докачка умирала «по соображениям безопасности». Cmdlet
+    // остаётся последним шансом (окружение мы и так чиним в trustedEnv).
+    "$acl=$null;" +
+    "try{$acl=(New-Object System.IO.DirectoryInfo($d)).GetAccessControl()}catch{}" +
+    "if($null -eq $acl){try{$acl=[System.IO.FileSystemAclExtensions]::GetAccessControl((New-Object System.IO.DirectoryInfo($d)))}catch{}};" +
+    "if($null -eq $acl){$acl=Get-Acl -LiteralPath $d};" +
     "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
     "if($allow -notcontains $o){Write-Output ('INSECURE:owner='+$o);exit 0};" +
     "foreach($a in $acl.Access){" +
