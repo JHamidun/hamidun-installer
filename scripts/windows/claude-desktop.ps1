@@ -224,8 +224,17 @@ try {
     Write-Host "Подпись подтверждена: цепочка к машинному корню + O='$PUBLISHER_O' + Code Signing EKU. Запускаю проверенный установщик из защищённого кэша..."
 
     # --- 4. ЗАПУСК проверенного установщика ИЗ ЗАЩИЩЁННОГО КЭША (CWD = кэш, анти DLL-planting) ---
+    # БЕЗ -Wait. Ключевое: -Wait ждёт не процесс, а ВСЁ ДЕРЕВО потомков. Установщик
+    # Claude Desktop — Squirrel: он докручивает установку асинхронно И САМ ЗАПУСКАЕТ
+    # приложение, а Claude на Windows при закрытии окна уходит в трей и продолжает жить.
+    # То есть шаг ждал бы до тех пор, пока человек не выгрузит программу из трея —
+    # практически вечно, с бесконечным спиннером и без единого объяснения.
+    # Ровно этот баг уже был пойман и починен для Cursor (cursor.ps1) — здесь тот же
+    # рецепт: -PassThru нужен только чтобы прибрать Admins-only кэш после реального
+    # выхода установщика, а факт установки подтверждает опрос Test-ClaudeDesktopInstalled.
+    $cdProc = $null
     try {
-        Start-Process -FilePath $installer -WorkingDirectory $cache -Wait -ErrorAction Stop
+        $cdProc = Start-Process -FilePath $installer -WorkingDirectory $cache -PassThru -ErrorAction Stop
     } catch {
         Write-Host "Установщик Claude Desktop не запустился ($($_.Exception.Message)) — пропускаю."
         exit 120
@@ -248,7 +257,12 @@ try {
         $rc = 120
     }
 } finally {
-    # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
+    # Кэш чистим ПОСЛЕ реального выхода установщика: пока его образ залочен, Remove-Item
+    # тихо не срабатывает и каталог в ProgramData остаётся навсегда (owner=Administrators,
+    # человеку он недоступен). Ждём ОГРАНИЧЕННО — вечное ожидание мы как раз и убираем.
+    if ($cdProc) {
+        try { $cdProc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue } catch { }
+    }
     if ($cache) { try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
 }
 exit $rc

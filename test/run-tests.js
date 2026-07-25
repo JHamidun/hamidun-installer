@@ -4502,6 +4502,33 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   }
 });
 
+ok('Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait', () => {
+  // -Wait ждёт не процесс, а ВСЁ ДЕРЕВО потомков. Claude Desktop (Squirrel) сам
+  // запускает приложение, а оно уходит в трей и живёт — шаг висел бы до тех пор, пока
+  // человек не выгрузит программу. Для Cursor это уже было поймано и починено, на
+  // Claude Desktop правило не перенесли.
+  const cd = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude-desktop.ps1'), 'utf8');
+  const i = cd.indexOf('Start-Process -FilePath $installer');
+  assert(i !== -1, 'нашли запуск установщика Claude Desktop');
+  const line = cd.slice(i, cd.indexOf('\n', i));
+  assert(!/-Wait\b/.test(line), 'без -Wait: иначе шаг ждёт трей-приложение вечно — ' + line.trim());
+  assert(/-PassThru/.test(line), '-PassThru нужен, чтобы прибрать Admins-only кэш после выхода установщика');
+  assert(/Wait-Process -Timeout/.test(cd), 'ожидание выхода установщика ОГРАНИЧЕНО по времени');
+
+  // Остальные -Wait допустимы ТОЛЬКО с тихим флагом и без автозапуска приложения.
+  const SILENT = /\/VERYSILENT|\/quiet|\/qn|\/S\b/;
+  for (const f of ['git.ps1', 'node.ps1', 'pydeps.ps1', 'vscode.ps1']) {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8');
+    for (const l of s.split(/\r?\n/)) {
+      if (!/Start-Process/.test(l) || !/-Wait\b/.test(l)) continue;
+      assert(SILENT.test(l), f + ': -Wait допустим только с тихим флагом — ' + l.trim().slice(0, 120));
+    }
+  }
+  // У VS Code автозапуск отключён явно — иначе он бы тоже держал шаг.
+  const vs = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), 'utf8');
+  assert(/!runcode/.test(vs), 'VS Code не запускается сам после установки (MERGETASKS=!runcode)');
+});
+
 ok('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)', async () => {
   // Живой случай: установка встала на 15 минут — unzip спросил «write error (disk full?).
   // Continue? (y/n/^C)», а ответить некуда. По умолчанию Node даёт ребёнку живой пайп на
