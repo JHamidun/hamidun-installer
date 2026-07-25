@@ -106,6 +106,29 @@ jobs:
           }
           Write-Host 'реестр зеркал чист — можно гонять сценарии с реальной докачкой'
 
+      # Раннеры GitHub стоят в США, а оба наших зеркала — российские. Если докачка
+      # недоступна из этой сети, сценарии с реальным стримингом бессмысленны — надо
+      # знать это явно, а не гадать по «Сеть оборвалась».
+      - name: Диагностика зеркал (доступны ли S3 из сети раннера)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $urls = @(
+            'https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Windows.exe',
+            'https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding/downloads/Hamidun-Setup-Windows.exe'
+          )
+          foreach ($u in $urls) {
+            $t0 = Get-Date
+            try {
+              $r = Invoke-WebRequest -Uri $u -Method Head -TimeoutSec 30 -UseBasicParsing
+              $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+              Write-Host ("OK   {0} → HTTP {1}, {2} байт, {3} мс" -f $u, $r.StatusCode, $r.Headers['Content-Length'], $ms)
+            } catch {
+              $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+              Write-Host ("FAIL {0} → {1} ({2} мс)" -f $u, $_.Exception.Message, $ms)
+            }
+          }
+
       - name: E2E ok — реальная докачка с S3 и установка
         shell: pwsh
         env:
