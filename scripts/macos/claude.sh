@@ -9,12 +9,27 @@ INSTALLED=0
 
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$HM_VENDOR/npm-cache" ] && have npm; then
   echo "Claude Code CLI из встроенного npm-кеша (офлайн)..."
-  if npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' \
-       --offline --cache "$HM_VENDOR/npm-cache" --no-audit --no-fund; then
-    INSTALLED=1
+  # npm ТРЕБУЕТ записываемый кэш: он пишет туда логи, локи и _cacache/tmp даже в режиме
+  # --offline. На macOS vendor лежит на ОБРАЗЕ ТОЛЬКО ДЛЯ ЧТЕНИЯ (/Volumes/...), поэтому
+  # прямой --cache на него давал «ENOTCACHED» и «Log files were not written to
+  # .../npm-cache/_logs» — офлайн-установка падала ВСЕГДА, спасал только онлайн-фолбэк,
+  # то есть «офлайн-издание» на маке офлайн не работало. Копируем кэш в записываемый
+  # временный каталог и ставим уже из копии.
+  NPMTMP="$(mktemp -d "${TMPDIR:-/tmp}/hm-npmcache.XXXXXX" 2>/dev/null || echo '')"
+  if [ -n "$NPMTMP" ] && cp -R "$HM_VENDOR/npm-cache" "$NPMTMP/npm-cache" 2>/dev/null; then
+    # Права на копии доводим явно: файлы на образе могут прийти без права записи, и
+    # тогда npm упрётся в то же самое уже во временном каталоге.
+    chmod -R u+w "$NPMTMP/npm-cache" 2>/dev/null || true
+    if npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' \
+         --offline --cache "$NPMTMP/npm-cache" --no-audit --no-fund; then
+      INSTALLED=1
+    else
+      echo "Офлайн-установка не удалась — пробую онлайн-фолбэк."
+    fi
   else
-    echo "Офлайн-установка не удалась — пробую онлайн-фолбэк."
+    echo "Не удалось подготовить временный npm-кеш — пробую онлайн-фолбэк."
   fi
+  [ -n "$NPMTMP" ] && rm -rf "$NPMTMP"
 fi
 
 if [ "$INSTALLED" -eq 0 ]; then
