@@ -60,6 +60,14 @@ jobs:
             Write-Host "ВНИМАНИЕ: runner НЕ элевейтед — докачка упрётся в fail-closed staging."
           }
 
+      # Сбой этого примитива в lite выглядит как «ни один компонент не скачался», и
+      # диагностировать его через полный GUI-прогон = десятки минут на попытку. Гейт
+      # стоит ПЕРВЫМ: проверяет ровно то, что раньше молча возвращало $null, и в том
+      # же integrity, в котором работает установщик.
+      - name: Гейт — защищённый staging-каталог (elevated)
+        shell: pwsh
+        run: pwsh -NoProfile -File test/staging-primitive.ps1
+
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         shell: pwsh
         run: |

@@ -133,7 +133,21 @@ function New-HmSecureStagingDir {
             $usedFallback = $true
             [void][System.IO.Directory]::CreateDirectory($dir)
             if (-not (Test-Path -LiteralPath $dir)) { return $null }
-            Set-Acl -LiteralPath $dir -AclObject $sd -ErrorAction Stop
+            # ВАЖНО: у $sd задан владелец Administrators, а Set-Acl попытается применить и
+            # его — и упадёт по привилегиям, обнулив весь фолбэк. Поэтому применяем DACL
+            # ОТДЕЛЬНЫМ дескриптором БЕЗ владельца, а владельца ставим ниже через icacls.
+            $sdDacl = New-Object System.Security.AccessControl.DirectorySecurity
+            $sdDacl.SetAccessRuleProtection($true, $false)
+            $sdDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $admins, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+            $sdDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $system, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+            if (-not $Elevated) {
+                $meF = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $sdDacl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $meF, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+            }
+            Set-Acl -LiteralPath $dir -AclObject $sdDacl -ErrorAction Stop
         }
         if (-not (Test-Path -LiteralPath $dir)) { return $null }
         # Владелец мог остаться создателем (политика «Object creator») — доводим до
@@ -160,6 +174,7 @@ function New-HmSecureStagingDir {
         if ($Elevated) {
             $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             if ($owner -ne 'S-1-5-32-544') {
+                [Console]::Error.WriteLine('HMSECFAIL: владелец каталога = ' + $owner + ', ожидался S-1-5-32-544 (Administrators)')
                 Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
             }
         }
@@ -168,6 +183,7 @@ function New-HmSecureStagingDir {
             try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
             catch { $sid = [string]$ace.IdentityReference }
             if ($allow -notcontains $sid) {
+                [Console]::Error.WriteLine('HMSECFAIL: посторонний ACE в каталоге: ' + $sid)
                 # Посторонний ACE. Elevated -> недопустимо (fail-closed). Medium -> нет privesc
                 # (родитель уже medium), но такой ACE не должен появляться при protection on.
                 if ($Elevated) {
@@ -176,7 +192,13 @@ function New-HmSecureStagingDir {
             }
         }
         return $dir
-    } catch { return $null }
+    } catch {
+        # Молчаливый $null раньше делал причину невидимой (в lite это «ни один компонент не
+        # скачался» без объяснения). Причину пишем в stderr — вызывающий (main.js) подхватывает
+        # её в текст ошибки шага и в журнал установки.
+        [Console]::Error.WriteLine('HMSECFAIL: ' + $_.Exception.Message)
+        return $null
+    }
 }
 
 # --- НАДЁЖНЫЙ гейт Authenticode для ОНЛАЙН-скачанных установщиков (git/node/cursor/python).
