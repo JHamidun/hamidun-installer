@@ -1508,7 +1508,9 @@ async function winLaunchDeElevated(exe, folderArg) {
   if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
   const xmlFile = path.join(dir, 'task.xml');
   function runSchtasks(args) {
-    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore' }); return true; }
+    // env доверенный: schtasks — тот же класс привилегированного вызова, что и
+    // powershell выше (унаследованное окружение = вектор подсадки через COR_*).
+    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore', env: detectSpawnEnv() }); return true; }
     catch (e) { return false; }
   }
   const cleanup = () => {
@@ -1559,7 +1561,7 @@ async function winLaunchDeElevated(exe, folderArg) {
   function readLastResult() {
     try {
       const out = execFileSync(schtasks, ['/Query', '/TN', tag, '/HRESULT', '/FO', 'CSV', '/NH', '/V'],
-        { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+        { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], env: detectSpawnEnv() });
       const line = String(out || '').split(/\r?\n/).find((l) => l.indexOf('"') !== -1);
       if (!line) return null;
       const fields = []; const re = /"([^"]*)"/g; let m;
