@@ -342,6 +342,7 @@ async function launchApp(ctx) {
   const app = await electron.launch(launchOpts);
   const page = await app.firstWindow({ timeout: 120000 });
   await page.waitForLoadState('domcontentloaded');
+  LAST_PAGE = page;                       // чтобы аварийный выход оставил улики
   log('окно поднялось:', await page.title());
   return { app, page };
 }
@@ -510,6 +511,59 @@ async function shot(page, name) {
   log('скриншот:', p);
 }
 
+// Последняя живая страница — чтобы АВАРИЙНЫЙ выход (исключение, а не проваленная
+// проверка) тоже оставлял улики. Без этого падение вроде «page.click: Timeout»
+// не даёт ни скриншота, ни журнала: приходится гонять весь прогон заново вслепую.
+let LAST_PAGE = null;
+
+async function dumpForensics(tag) {
+  const page = LAST_PAGE;
+  if (!page) { console.log('[e2e] улик нет: окно не поднялось'); return; }
+  try {
+    await shot(page, tag + '-fatal');
+    const state = await page.evaluate(() => ({
+      view: ['welcome', 'select', 'progress', 'finish']
+        .find((v) => { const el = document.querySelector('#view-' + v); return el && !el.classList.contains('hidden'); }) || '?',
+      steps: (document.querySelector('#step-list') || {}).textContent || '',
+      log: (document.querySelector('#log') || {}).textContent || '',
+    })).catch(() => null);
+    if (state) {
+      console.log('[e2e] --- экран: ' + state.view + ' ---');
+      console.log('[e2e] --- шаги ---');
+      console.log(String(state.steps).trim().slice(0, 2000) || '(пусто)');
+      console.log('[e2e] --- журнал приложения (хвост) ---');
+      console.log(String(state.log).slice(-4000) || '(пусто)');
+      console.log('[e2e] --- конец улик ---');
+    }
+  } catch (e) {
+    console.log('[e2e] улики снять не удалось: ' + (e && e.message));
+  }
+}
+
+/** Нажатие «Установить».
+ *
+ *  Playwright ждёт от браузера подтверждения обработки ввода. Главный процесс установщика
+ *  во время старта делает СИНХРОННУЮ работу (spawnSync powershell на каждый защищённый
+ *  staging-каталог), и на медленной машине подтверждение приходит с большой задержкой —
+ *  сам клик при этом доходит. Раньше это давало «page.click: Timeout» и прогон падал ещё
+ *  до установки, хотя продукт работал.
+ *
+ *  Поэтому: сначала НАСТОЯЩИЙ клик (полная проверка доступности элемента). Если ответ не
+ *  пришёл за 15 с — это НЕ замаскировано: пишем предупреждение о заморозке интерфейса
+ *  (реальный дефект UX: окно не отвечает, пока идёт синхронный вызов) и дожимаем событием,
+ *  чтобы проверить остальной сценарий, а не потерять весь прогон. */
+async function clickInstall(page) {
+  await page.waitForSelector('#btn-install:not([disabled])', { timeout: 60000 });
+  try {
+    await page.click('#btn-install', { timeout: 15000 });
+    return;
+  } catch (e) {
+    console.log('[e2e] ⚠ интерфейс не подтвердил клик за 15 с — главный процесс занят ' +
+      'синхронной работой (окно в этот момент не отвечает). Дожимаем событием.');
+  }
+  await page.locator('#btn-install').dispatchEvent('click');
+}
+
 /** window.confirm в Electron — НАТИВНОЕ модальное окно, Playwright им не управляет.
  *  Подменяем его в странице и ЗАПОМИНАЕМ тексты: сам факт подтверждения — часть
  *  контракта UI, и мы его проверяем, а не просто обходим. */
@@ -559,7 +613,7 @@ async function runInstallSession(ctx, opts) {
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));
 
-    await page.click('#btn-install');
+    await clickInstall(page);
     await page.waitForSelector('#view-progress:not(.hidden)', { timeout: 60000 }).catch(() => {});
     check('экран прогресса открылся', true);
 
@@ -677,7 +731,7 @@ async function scenarioOkOrNetfail(ctx) {
     const summary2 = (await page.textContent('#summary')) || '';
     log('summary после выбора:', summary2.trim().slice(0, 160));
 
-    await page.click('#btn-install');
+    await clickInstall(page);
     await page.waitForSelector('#view-progress:not(.hidden)', { timeout: 60000 }).catch(() => {});
     check('экран прогресса открылся', true);
 
@@ -1051,7 +1105,12 @@ async function main() {
 // Запуск как CLI — единственный штатный режим. При `require()` (отладка/смоук
 // отдельных шагов) ничего не выполняем и отдаём внутренние функции наружу.
 if (require.main === module) {
-  main().catch((e) => { console.error('[e2e] ФАТАЛЬНО:', e && e.stack || e); process.exit(2); });
+  main().catch(async (e) => {
+    console.error('[e2e] ФАТАЛЬНО:', e && e.stack || e);
+    // Улики снимаем ДО выхода: иначе диагностика такого падения = ещё один слепой прогон.
+    await dumpForensics(SCENARIO).catch(() => {});
+    process.exit(2);
+  });
 } else {
   module.exports = {
     makeContext, cleanupContext, launchApp, gotoSelect, selectExactly, collectSteps,
