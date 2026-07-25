@@ -1152,8 +1152,17 @@ ok('P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::Cre
   const iCreate = d.indexOf('[System.IO.Directory]::CreateDirectory($dir, $sd)');
   assert(iSetOwner !== -1 && iCreate !== -1 && iSetOwner < iCreate,
     '$sd.SetOwner($admins) стоит ДО CreateDirectory (владелец атомарен, не post-icacls)');
-  assert(!/&\s*\$Icacls\s+\$dir\s+'\/setowner'/.test(d) && !/setowner.*S-1-5-32-544/.test(d),
-    'НЕТ post-icacls /setowner (окно owner=user устранено)');
+  // Фолбэк icacls /setowner РАЗРЕШЁН, но ТОЛЬКО когда атомарный владелец не применился:
+  // Windows по умолчанию делает владельцем создателя, и без фолбэка докачка не работала
+  // ВООБЩЕ. Требуем: (1) фолбэк стоит ПОСЛЕ проверки текущего владельца, (2) финальный
+  // гейт владельца/ACE ниже остаётся обязательным (он и закрывает окно).
+  const iOwnerNow = d.indexOf("$ownerNow -ne 'S-1-5-32-544'");
+  const iFallbackOwner = d.search(/&\s*\$Icacls\s+\$dir\s+'\/setowner'/);
+  if (iFallbackOwner !== -1) {
+    assert(iOwnerNow !== -1 && iOwnerNow < iFallbackOwner,
+      'post-icacls /setowner вызывается ТОЛЬКО если владелец не Administrators (не безусловно)');
+    assert(/HMSECNOTE/.test(d), 'использование фолбэка ЗАМЕТНО в логе (HMSECNOTE), а не молча');
+  }
   assert(/\$owner -ne 'S-1-5-32-544'/.test(d),
     'verify владельца строго == Administrators, fail-closed если атомарный owner не применился');
   // fail-closed на уже существующий каталог (CREATE_NEW-семантика) и на reparse-point (junction).

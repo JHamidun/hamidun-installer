@@ -110,8 +110,42 @@ function New-HmSecureStagingDir {
         # Ставить владельца ПОСЛЕ (icacls) = окно уязвимости. Здесь — в момент создания.
         if ($Elevated) { $sd.SetOwner($admins) }
         # Рождаем каталог СРАЗУ с этим SD (DACL + владелец применяются атомарно при создании).
-        [void][System.IO.Directory]::CreateDirectory($dir, $sd)
+        # ГЛАВНЫЙ путь. Но он работает НЕ ВСЕГДА:
+        #   • Windows по умолчанию делает владельцем создателя («Object creator»), а поставить
+        #     владельцем Administrators без включённого SeRestorePrivilege нельзя → CreateDirectory
+        #     возвращает ERROR_INVALID_OWNER и .NET бросает;
+        #   • в .NET Core/PowerShell 7 перегрузки CreateDirectory(path, SD) вообще нет.
+        # Раньше любой из этих случаев давал $null → докачка НЕ РАБОТАЛА ВООБЩЕ (в lite это
+        # значит «ни один компонент не скачался»). Поэтому есть фолбэк: создать каталог,
+        # применить тот же защищённый DACL и назначить владельца через icacls. Окно между
+        # созданием и назначением закрывает ФИНАЛЬНАЯ проверка ниже (владелец + отсутствие
+        # посторонних ACE + protection on + не reparse) на каталоге со СЛУЧАЙНЫМ именем —
+        # подделать его атакующему нужно успеть в считанные миллисекунды И не оставить следа
+        # в DACL, что проверка отвергнет.
+        $usedFallback = $false
+        try {
+            [void][System.IO.Directory]::CreateDirectory($dir, $sd)
+        } catch {
+            $usedFallback = $true
+        }
+        if ((-not (Test-Path -LiteralPath $dir)) -or $usedFallback) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            $usedFallback = $true
+            [void][System.IO.Directory]::CreateDirectory($dir)
+            if (-not (Test-Path -LiteralPath $dir)) { return $null }
+            Set-Acl -LiteralPath $dir -AclObject $sd -ErrorAction Stop
+        }
         if (-not (Test-Path -LiteralPath $dir)) { return $null }
+        # Владелец мог остаться создателем (политика «Object creator») — доводим до
+        # Administrators. Если не удалось, финальная проверка владельца ниже отвергнет каталог.
+        if ($Elevated) {
+            $ownerNow = (Get-Acl -LiteralPath $dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+            if ($ownerNow -ne 'S-1-5-32-544') {
+                & $Icacls $dir '/setowner' '*S-1-5-32-544' '/T' '/C' *> $null
+                $usedFallback = $true
+            }
+        }
+        if ($usedFallback) { [Console]::Error.WriteLine('HMSECNOTE: владелец/ACL назначены фолбэком (icacls) — атомарный путь недоступен на этой системе') }
 
         # Отвергаем reparse-point (junction-подмена).
         $attr = (Get-Item -LiteralPath $dir -Force).Attributes
