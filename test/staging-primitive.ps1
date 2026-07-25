@@ -34,19 +34,32 @@ function Check([string]$name, [bool]$ok, [string]$detail) {
     }
 }
 
-# stderr примитива ловим отдельным потоком — иначе он тонет и причина сбоя невидима.
-$errFile = Join-Path $env:TEMP ("hm-stagetest-" + [guid]::NewGuid().ToString('N') + ".err")
+# Диагностику примитива ловим ПОДМЕНОЙ консольного stderr, а НЕ через «2>файл».
+# Причина: примитив пишет через [Console]::Error.WriteLine — это stderr-хэндл ПРОЦЕССА,
+# а `2>` перенаправляет поток ошибок PowerShell (ErrorRecord). Здесь примитив вызывается
+# в ТОМ ЖЕ процессе, поэтому файл всегда оставался пустым, и блок разбора был мёртвым.
+# (В main.js та же запись перехватывается штатно — там это ДОЧЕРНИЙ процесс и читается
+# его пайп.)
+$errBuf = New-Object System.IO.StringWriter
+$prevErr = [Console]::Error
 $dir = $null
 try {
-    $dir = New-HmSecureStagingDir -ProgramData $pd -Icacls $icacls -Elevated $elevated 2>$errFile
+    [Console]::SetError($errBuf)
+    try {
+        $dir = New-HmSecureStagingDir -ProgramData $pd -Icacls $icacls -Elevated $elevated
+    } finally {
+        [Console]::SetError($prevErr)
+    }
 } catch {
+    [Console]::SetError($prevErr)
     Write-Host ("  [FAIL] примитив бросил исключение: " + $_.Exception.Message)
     $fails += 'exception'
 }
-if (Test-Path -LiteralPath $errFile) {
-    $errTxt = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
-    if ($errTxt -and $errTxt.Trim()) { Write-Host "--- stderr примитива ---"; Write-Host $errTxt.Trim() }
-    Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+$errTxt = $errBuf.ToString()
+if ($errTxt -and $errTxt.Trim()) {
+    Write-Host "--- диагностика примитива (stderr) ---"
+    Write-Host $errTxt.Trim()
+    Write-Host "--- конец диагностики ---"
 }
 
 Check 'каталог создан (не $null)' ([bool]$dir) 'примитив вернул $null — докачка в lite не заработает'

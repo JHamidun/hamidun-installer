@@ -4425,6 +4425,14 @@ ok('телеметрия: тексты ошибок чистятся от ПД (
     'пользователь ivan; почта a.b@mail.ru; узел 10.1.2.3', o);
   assert(!/ivan/i.test(out), 'ни имени пользователя, ни его каталога: ' + out);
   assert(!/petr/i.test(out), 'чужие домашние каталоги тоже вычищены: ' + out);
+  // Имя профиля С ПРОБЕЛОМ — норма на Windows («C:\Users\John Smith»). Проверка с
+  // ником без пробела этого не ловила: регулярка обрывалась на пробеле и оставляла
+  // фамилию в тексте («~ Smith\AppData\…»).
+  const spaced = UIDT.scrubText('ENOENT C:\\Users\\John Smith\\AppData\\Local\\hm.zip', o);
+  assert(!/Smith/i.test(spaced), 'профиль с пробелом в имени вычищен целиком: ' + spaced);
+  assert.strictEqual(spaced, 'ENOENT ~\\AppData\\Local\\hm.zip', 'путь после профиля уцелел: ' + spaced);
+  const spacedPosix = UIDT.scrubText('нет доступа к /Users/John Smith/.claude', o);
+  assert.strictEqual(spacedPosix, 'нет доступа к ~/.claude', 'то же на POSIX: ' + spacedPosix);
   assert(!/a\.b@mail\.ru/.test(out), 'e-mail вычищен: ' + out);
   assert(!/10\.1\.2\.3/.test(out), 'IP вычищен: ' + out);
   // Ник «ivan» встречается внутри слова «Ivanovo-Setup.exe» — это НЕ ПД, и калечить
