@@ -34,9 +34,18 @@ jobs:
           # создании) или включится фолбэк через icacls — по логу это должно быть видно.
           & "$env:SystemRoot\System32\whoami.exe" /priv | Select-String 'SeRestore|SeTakeOwnership|SeBackup'
 
-      - name: Тест примитива
-        shell: pwsh
-        run: pwsh -NoProfile -File test/staging-primitive.ps1
+      # В БОЮ примитив исполняет Windows PowerShell 5.1 (winPowershellPath() ->
+      # System32\WindowsPowerShell\v1.0\powershell.exe), а не pwsh 7. Разница
+      # принципиальная: в 5.1 (.NET Framework) перегрузка CreateDirectory(path, SD)
+      # СУЩЕСТВУЕТ, в pwsh 7 (.NET Core) — нет. То есть ветки кода разные, и зелёный
+      # pwsh ничего не говорит о боевом пути. Гоняем обе.
+      - name: Тест примитива — Windows PowerShell 5.1 (боевая оболочка)
+        shell: cmd
+        run: '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File test\staging-primitive.ps1'
+
+      - name: Тест примитива — pwsh 7
+        shell: cmd
+        run: pwsh -NoProfile -File test\staging-primitive.ps1
 
       # Диагностика запускается ТОЛЬКО при падении: показывает фактические ACL на
       # ProgramData, из-за которых наследование/владелец могли не примениться.

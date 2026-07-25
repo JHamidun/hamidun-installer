@@ -1,4 +1,4 @@
-# staging-primitive.ps1 — прямой тест New-HmSecureStagingDir (Windows).
+﻿# staging-primitive.ps1 — прямой тест New-HmSecureStagingDir (Windows).
 #
 # ЗАЧЕМ ОТДЕЛЬНО ОТ GUI-E2E: сбой примитива в lite-редакции выглядит как «ни один компонент
 # не скачался», и полный GUI-прогон тратит на диагностику десятки минут. Здесь проверяется

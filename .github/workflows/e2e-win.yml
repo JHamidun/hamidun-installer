@@ -64,9 +64,10 @@ jobs:
       # диагностировать его через полный GUI-прогон = десятки минут на попытку. Гейт
       # стоит ПЕРВЫМ: проверяет ровно то, что раньше молча возвращало $null, и в том
       # же integrity, в котором работает установщик.
-      - name: Гейт — защищённый staging-каталог (elevated)
-        shell: pwsh
-        run: pwsh -NoProfile -File test/staging-primitive.ps1
+      # Именно Windows PowerShell 5.1 — та оболочка, в которой примитив работает в бою.
+      - name: Гейт — защищённый staging-каталог (elevated, PS 5.1)
+        shell: cmd
+        run: '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File test\staging-primitive.ps1'
 
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         shell: pwsh

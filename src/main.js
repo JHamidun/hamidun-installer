@@ -1348,21 +1348,25 @@ function winMakeSecureDir() {
       ". '" + deLit + "';" +
       "$d=New-HmSecureStagingDir -ProgramData '" + pdLit + "' -Icacls '" + icLit + "' -Elevated $true;" +
       "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
-    let out = '';
-    try {
-      // stderr ЛОВИМ, а не глушим: раньше любая причина отказа (недоступный оверлоуд
-      // CreateDirectory, отказ SetOwner, кривой ProgramData) превращалась в молчаливый
-      // null, и пользователь видел «Сеть оборвалась» вместо реальной проблемы.
-      out = execFileSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
-        { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (e) {
-      const err = String((e && e.stderr) || (e && e.message) || e).trim().split(/\r?\n/)[0] || '';
-      lastSecureDirError = err.slice(0, 300);
+    // spawnSync, а НЕ execFileSync: примитив на отказе НЕ бросает, он возвращает $null и
+    // пишет причину (HMSECFAIL) в stderr. У execFileSync stderr доступен только в catch,
+    // то есть при успешном exit-коде причина молча терялась — и пользователь получал
+    // бесполезное «примитив не вернул путь» вместо «Set-Acl упал по привилегиям».
+    const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+      { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = String((r && r.stdout) || '');
+    // Берём ПОСЛЕДНЮЮ строку HMSECFAIL: их может быть несколько (посторонние ACE
+    // перечисляются по одному), и последняя — та, что решила исход.
+    const errLines = String((r && r.stderr) || '').trim().split(/\r?\n/).filter(Boolean);
+    const secFail = errLines.filter((l) => /HMSECFAIL/.test(l)).pop() || '';
+    if (r && r.error) {
+      lastSecureDirError = String(r.error.message || r.error).slice(0, 300);
       return null;
     }
-    const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(out || ''));
+    const m = /HMSECDIR::([\s\S]+?)::END/.exec(out);
     if (!m) {                                          // примитив вернул $null -> fail-closed
-      lastSecureDirError = 'примитив не вернул путь (проверка владельца/ACL не прошла)';
+      lastSecureDirError = (secFail || errLines[errLines.length - 1]
+        || 'примитив не вернул путь (проверка владельца/ACL не прошла)').replace(/^HMSECFAIL:\s*/, '').slice(0, 300);
       return null;
     }
     const dir = m[1].trim();
