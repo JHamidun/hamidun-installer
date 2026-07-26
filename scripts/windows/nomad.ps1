@@ -169,7 +169,12 @@ if (-not $uv -and -not $uvPlannedOffline) {
     Write-Host "uv не найден, офлайн-источник (vendor\apps\uv) недоступен — ставлю uv ОНЛАЙН с astral.sh (нужен интернет; это последний фолбэк)..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://astral.sh/uv/install.ps1 | iex (онлайн-фолбэк)" }
     else {
-        try { Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression }
+        # -TimeoutSec ОБЯЗАТЕЛЕН: по умолчанию у Invoke-RestMethod он 0, то есть
+        # бесконечность. На плохом канале или при DPI-перехвате вызов висит молча, а
+        # watchdog установщика намеренно НЕ убивает процессы — шаг стоял бы вечно.
+        # Это был единственный сетевой вызов в scripts/windows/ без таймаута; у всех
+        # соседей он есть.
+        try { Invoke-RestMethod https://astral.sh/uv/install.ps1 -TimeoutSec 120 | Invoke-Expression }
         catch { Write-Host "uv не установился: $($_.Exception.Message)"; exit 1 }
     }
     Update-Path

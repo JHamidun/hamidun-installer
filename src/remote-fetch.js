@@ -718,16 +718,23 @@ function unpackZip(zipPath, destDir) {
         "[System.IO.Compression.ZipFile]::ExtractToDirectory('" + zp + "','" + dp + "')";
       const r = spawnSync(ps,
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-        { windowsHide: true, encoding: 'utf8', env });
+        { windowsHide: true, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
       if (r.error) return { ok: false, error: String(r.error.message || r.error) };
       if (r.status !== 0) {
         return { ok: false, error: String((r.stderr || r.stdout || ('powershell exit ' + r.status)) || '').trim() };
       }
     } else {
-      let r = spawnSync('/usr/bin/unzip', ['-o', '-q', zipPath, '-d', destDir], { encoding: 'utf8', env });
+      // ditto ПЕРВЫМ, unzip — запасным. Причина из живой установки: в архивах есть
+      // файлы с кириллическими именами и флагом UTF-8, а штатный unzip в macOS
+      // (Info-ZIP 6.0) флаг не понимает — имя превращается в мусор, запись падает, и
+      // unzip ЗАДАЁТ ВОПРОС «Continue? (y/n)», подвешивая шаг навсегда. ditto — родной
+      // распаковщик, имена читает верно и вопросов не задаёт.
+      // stdin закрыт у ОБОИХ: любой вопрос получает EOF и процесс честно падает.
+      let r = spawnSync('/usr/bin/ditto', ['-x', '-k', zipPath, destDir],
+        { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
       if (r.error || r.status !== 0) {
-        // Фолбэк для macOS без unzip в PATH — ditto по абсолютному пути.
-        r = spawnSync('/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { encoding: 'utf8', env });
+        r = spawnSync('/usr/bin/unzip', ['-o', '-q', zipPath, '-d', destDir],
+          { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
         if (r.error || r.status !== 0) {
           return { ok: false, error: String((r.stderr || (r.error && r.error.message) || 'распаковка не удалась')).trim() };
         }

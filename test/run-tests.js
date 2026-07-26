@@ -4538,6 +4538,26 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   }
 });
 
+ok('Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)', () => {
+  // У Invoke-RestMethod/Invoke-WebRequest таймаут по умолчанию 0 — бесконечный. На
+  // плохом канале или при перехвате трафика вызов висит молча, а watchdog установщика
+  // НАМЕРЕННО не убивает процессы: шаг стоял бы вечно, человек видел бы спиннер.
+  // Один такой вызов уже нашёлся (nomad.ps1), у всех соседей таймаут был.
+  const dir = path.join(ROOT, 'scripts', 'windows');
+  const offenders = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.ps1'))) {
+    const s = fs.readFileSync(path.join(dir, f), 'utf8');
+    s.split(/\r?\n/).forEach((l, n) => {
+      if (/^\s*#/.test(l)) return;                                  // комментарий
+      if (!/Invoke-RestMethod|Invoke-WebRequest/.test(l)) return;
+      if (/-TimeoutSec/.test(l)) return;
+      offenders.push(f + ':' + (n + 1) + ' ' + l.trim().slice(0, 90));
+    });
+  }
+  assert.strictEqual(offenders.length, 0,
+    'сетевые вызовы без таймаута:\n    ' + offenders.join('\n    '));
+});
+
 ok('Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait', () => {
   // -Wait ждёт не процесс, а ВСЁ ДЕРЕВО потомков. Claude Desktop (Squirrel) сам
   // запускает приложение, а оно уходит в трей и живёт — шаг висел бы до тех пор, пока
