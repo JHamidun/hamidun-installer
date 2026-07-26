@@ -37,6 +37,39 @@ $vsix = ''
 if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\claude-code.vsix'; if (Test-Path $cand) { $vsix = $cand } }
 if ($vsix -and -not $DRY) { Confirm-HmArtifact $vsix }
 
+# Расширение ставится ДЕ-ЭЛЕВИРОВАННО (редакторный CLI запускается от пользователя), а в
+# лёгком издании vsix лежит в СКАЧАННОМ паке, распакованном в admins-only каталог
+# (%ProgramData%\HmDeElev-*\w\unpacked-*, DACL {SYSTEM, Administrators} без ACE
+# пользователя). Medium-процесс такой файл ПРОЧИТАТЬ НЕ МОЖЕТ — установка расширения
+# срывалась бы в офлайн-пути и молча уходила в Marketplace (а без интернета — никуда).
+# Поэтому кладём ПРОВЕРЕННЫЙ vsix в читаемое пользователем место и ставим оттуда.
+# Эскалации это не даёт: vsix и так исполняется редактором при MEDIUM integrity, а
+# целостность подтверждена ВЫШЕ, под админом, до копирования.
+$vsixTemp = ''
+if ($vsix -and -not $DRY) {
+    try {
+        $userTmp = [System.IO.Path]::GetTempPath()
+        $vsixTemp = Join-Path $userTmp ('hm-claude-code-' + [guid]::NewGuid().ToString('N') + '.vsix')
+        Copy-Item -LiteralPath $vsix -Destination $vsixTemp -Force -ErrorAction Stop
+        # Убеждаемся, что копия действительно читается: если нет — лучше честно уйти в
+        # Marketplace, чем ставить из файла, к которому у пользователя нет доступа.
+        $null = [System.IO.File]::OpenRead($vsixTemp).Close()
+        $vsix = $vsixTemp
+    } catch {
+        Write-Host "  Не удалось подготовить читаемую копию vsix ($($_.Exception.Message)) — попробую Marketplace."
+        if ($vsixTemp) { Remove-Item -LiteralPath $vsixTemp -Force -ErrorAction SilentlyContinue; $vsixTemp = '' }
+        $vsix = ''
+    }
+}
+
+# Копия vsix (до 80 МБ) не должна оставаться в %TEMP% — убираем на КАЖДОМ выходе.
+function Remove-HmVsixTemp {
+    if ($script:vsixTemp) {
+        Remove-Item -LiteralPath $script:vsixTemp -Force -ErrorAction SilentlyContinue
+        $script:vsixTemp = ''
+    }
+}
+
 # Cursor должен быть ЗАКРЫТ, иначе --install-extension падает с 'aborted' (баг с теста).
 # НО не убиваем силой Cursor, открытый ПОЛЬЗОВАТЕЛЕМ — это потеря несохранённой работы.
 # Наш собственный авто-запуск (если такой будет) помечается HM_CURSOR_AUTOSTARTED — его гасить безопасно.
@@ -178,10 +211,11 @@ if (-not $installed -and -not $DRY -and $userCursorSpared -and (Get-Process Curs
     if (Install-Into $cursorCli 'Cursor') { $installed = $true }
 }
 
-if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; exit 0 }
+if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; Remove-HmVsixTemp; exit 0 }
 # Cursor нет вообще — делать нечего (панель Claude в VS Code ставит компонент vscode). Не провал.
 if (-not $cursorCli) {
     Write-Host "Cursor не установлен — пропускаю. Панель Claude Code уже в VS Code (компонент vscode)."
+    Remove-HmVsixTemp
     exit 0
 }
 # Cursor есть, но расширение не встало.
@@ -190,4 +224,5 @@ if ($script:DeElevFailed) {
 } else {
     Write-Host "Расширение в Cursor не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
 }
+Remove-HmVsixTemp
 exit 1

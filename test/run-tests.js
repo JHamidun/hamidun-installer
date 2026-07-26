@@ -4538,6 +4538,29 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   }
 });
 
+ok('Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)', () => {
+  // Расширения ставит CLI редактора при MEDIUM integrity, а в лёгком издании vsix лежит
+  // в скачанном паке, распакованном в admins-only каталог (%ProgramData%\HmDeElev-*,
+  // DACL {SYSTEM, Administrators}). Medium-процесс его ПРОЧИТАТЬ НЕ МОЖЕТ — офлайн-путь
+  // срывался бы в Marketplace, а без интернета панель не ставилась бы вовсе.
+  for (const f of ['vscode.ps1', 'extension.ps1']) {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8');
+    assert(/GetTempPath\(\)/.test(s) && /\.vsix'\)/.test(s),
+      f + ': проверенный vsix копируется в пользовательский temp');
+    assert(/OpenRead\(/.test(s),
+      f + ': копия проверяется на ЧИТАЕМОСТЬ — иначе честно уходим в Marketplace');
+    assert(/Confirm-HmArtifact/.test(s), f + ': целостность подтверждается ДО копирования');
+    // Уборка: копии по 80 МБ не должны копиться в %TEMP%.
+    const rm = /function (Remove-HmVsixTemps?)/.exec(s);
+    assert(rm, f + ': есть уборка временных копий');
+    const decl = s.indexOf('function ' + rm[1]);
+    const firstUse = s.split(/\r?\n/).findIndex((l) => l.includes(rm[1]) && !l.trim().startsWith('function'));
+    const declLine = s.slice(0, decl).split(/\r?\n/).length - 1;
+    assert(declLine < firstUse,
+      f + ': функция объявлена ДО первого вызова — в PowerShell иначе ранний выход падает «команда не найдена»');
+  }
+});
+
 ok('Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)', () => {
   // У Invoke-RestMethod/Invoke-WebRequest таймаут по умолчанию 0 — бесконечный. На
   // плохом канале или при перехвате трафика вызов висит молча, а watchdog установщика

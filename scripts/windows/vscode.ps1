@@ -21,6 +21,15 @@ function Update-Path {
 }
 Update-Path
 
+# Временные копии vsix и их уборка объявлены ДО первого exit: в PowerShell функция
+# должна существовать к моменту вызова, иначе ранний выход упадёт «команда не найдена».
+$script:VsixTemps = @()
+# Копии vsix (до 80 МБ каждая) не должны оставаться в %TEMP%.
+function Remove-HmVsixTemps {
+    foreach ($f in $script:VsixTemps) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    $script:VsixTemps = @()
+}
+
 $DRY = [bool]$env:HM_DRY_RUN
 
 # CLI VS Code — НАСТОЯЩИЙ code.cmd (не курсоровский шим, отдающий VS Code 1.67.1).
@@ -51,6 +60,7 @@ if ($present) {
     # Офлайн-инсталлятор не вшит И VS Code не установлен — как скрепка (mascot): грациозный
     # пропуск (exit 120). Всё остальное работает; VS Code можно поставить позже.
     Write-Host "VS Code не вошёл в эту сборку и не установлен — пропускаю. Остальное работает без него (поставь VS Code позже с code.visualstudio.com)."
+    Remove-HmVsixTemps
     exit 120
 } elseif ($DRY) {
     Write-Host "  [dry-run] WOULD: SHA-256 vscode-setup.exe, тихая установка /VERYSILENT /NORESTART /MERGETASKS=!runcode,addtopath, PATH, затем расширения anthropic.claude-code + openai.chatgpt"
@@ -109,13 +119,32 @@ function Get-VsCodeCli {
 # module-hijack), integrity-check обёртки (fail-closed при не-medium). Дот-сорсится выше.
 
 # Вшитый .vsix (офлайн). vsix исполняется как код внутри VS Code -> целостность ДО установки (fail-closed).
+
 function Get-Vsix($name) {
-    if ($env:HM_VENDOR) {
-        $p = Join-Path $env:HM_VENDOR ('apps\' + $name)
-        if (Test-Path $p) { if (-not $DRY) { Confirm-HmArtifact $p }; return $p }
+    if (-not $env:HM_VENDOR) { return '' }
+    $p = Join-Path $env:HM_VENDOR ('apps\' + $name)
+    if (-not (Test-Path $p)) { return '' }
+    if ($DRY) { return $p }
+    Confirm-HmArtifact $p
+    # Расширения ставятся ДЕ-ЭЛЕВИРОВАННО (CLI редактора работает от пользователя), а в
+    # лёгком издании vsix лежит в СКАЧАННОМ паке, распакованном в admins-only каталог
+    # (%ProgramData%\HmDeElev-*, DACL {SYSTEM, Administrators} без ACE пользователя).
+    # Medium-процесс такой файл ПРОЧИТАТЬ НЕ МОЖЕТ — офлайн-установка панели срывалась бы
+    # и молча уходила в Marketplace, а без интернета не ставилась бы вовсе.
+    # Кладём ПРОВЕРЕННУЮ копию туда, где у пользователя есть доступ. Эскалации нет: vsix
+    # и так исполняется редактором при MEDIUM, а целостность подтверждена выше под админом.
+    try {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-vsix-' + [guid]::NewGuid().ToString('N') + '.vsix')
+        Copy-Item -LiteralPath $p -Destination $tmp -Force -ErrorAction Stop
+        $null = [System.IO.File]::OpenRead($tmp).Close()   # копия ДЕЙСТВИТЕЛЬНО читается
+        $script:VsixTemps += $tmp
+        return $tmp
+    } catch {
+        Write-Host "  Не удалось подготовить читаемую копию $name ($($_.Exception.Message)) — останется путь Marketplace."
+        return ''
     }
-    return ''
 }
+
 
 $script:DeElevFailed = $false
 
@@ -181,6 +210,7 @@ if (-not $codeCli) { $codeCli = Find-CodeCli }
 
 if (-not $codeCli -and -not $DRY) {
     Write-Host "CLI VS Code (code.cmd) не найден — расширения не поставить автоматически. Открой VS Code, панель Extensions -> найди 'Claude Code' и 'ChatGPT - Codex' -> Install."
+    Remove-HmVsixTemps
     exit 1
 }
 
@@ -202,6 +232,7 @@ if ($okClaude -and $okCodex) { exit 0 }
 if ($okClaude -and -not $okCodex -and -not $codexVsix) {
     Write-Host "Codex (openai.chatgpt) не вошёл в эту сборку и ставится только из Marketplace (нужен интернет) — пропускаю."
     Write-Host "  VS Code и панель Claude Code установлены. Codex поставишь позже: VS Code -> Extensions -> 'ChatGPT - Codex' -> Install."
+    Remove-HmVsixTemps
     exit 0
 }
 $missing = @()
@@ -212,4 +243,5 @@ if ($script:DeElevFailed) {
 } else {
     Write-Host "Не установились расширения: $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
 }
+Remove-HmVsixTemps
 exit 1
