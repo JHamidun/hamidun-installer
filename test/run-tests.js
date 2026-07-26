@@ -36,8 +36,17 @@ function assertOrder(hay, first, second, msg) {
   assert(i < j, msg || 'нарушен порядок');
 }
 
+// Async-колбэк в СИНХРОННОМ ok() — мнимый страж: галочка печатается не дожидаясь
+// результата, процесс успевает выйти, и провал не всплывает НИКОГДА. Такой тест уже
+// сторожил главный фикс дня (закрытый stdin) и был зелёным при нарочно сломанном
+// ожидании. Ловим это на входе: async идёт только в okAsync.
 let pass = 0, fail = 0;
 function ok(name, fn) {
+  if (fn && fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    console.log('  ❌ ' + name + '  -> async-тест передан в синхронный ok(): используй okAsync + await');
+    fail++;
+    return;
+  }
   try { fn(); console.log('  ✅ ' + name); pass++; }
   catch (e) { console.log('  ❌ ' + name + '  -> ' + e.message); fail++; }
 }
@@ -4124,6 +4133,10 @@ function makeTransport(port) {
 }
 
 async function asyncTests() {
+  // Асинхронные тесты ОБЯЗАНЫ идти через okAsync и await — иначе галочка печатается
+  // до результата, и провал теряется.
+  await okAsync('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)',
+    testNoChildPromptCanHang);
   const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-rf-test-'));
 
@@ -4552,7 +4565,12 @@ ok('Windows: установщики, САМИ запускающие прило�
   assert(/!runcode/.test(vs), 'VS Code не запускается сам после установки (MERGETASKS=!runcode)');
 });
 
-ok('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)', async () => {
+// ВНИМАНИЕ: тест АСИНХРОННЫЙ → только okAsync, вызывается из asyncTests().
+// Переданный в синхронный ok() async-колбэк печатает ✅ НЕ ДОЖИДАЯСЬ результата:
+// процесс успевает выйти раньше, чем тело разрешится, и провал не всплывает НИКОГДА.
+// Проверено запуском: с нарочно сломанным ожиданием тест всё равно был зелёным.
+// Это стерегло главный фикс дня (закрытый stdin) — то есть страж был мнимым.
+async function testNoChildPromptCanHang() {
   // Живой случай: установка встала на 15 минут — unzip спросил «write error (disk full?).
   // Continue? (y/n/^C)», а ответить некуда. По умолчанию Node даёт ребёнку живой пайп на
   // stdin, который никогда не закрывается, поэтому ЛЮБОЙ вопрос вешает шаг навсегда.
@@ -4580,7 +4598,7 @@ ok('НИ ОДИН вопрос дочернего процесса не може
   } finally {
     fs.rmSync(script, { force: true });
   }
-});
+}
 
 ok('macOS: курс распаковывается ditto — unzip не понимает кириллицу в именах', () => {
   const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'course.sh'), 'utf8');
