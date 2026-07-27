@@ -33,7 +33,7 @@ if [ -n "${HM_DRY_RUN:-}" ]; then
   else
     echo "  [dry-run] WOULD: git clone/fetch конфига с GitHub (в dry-run НЕ выполняется)"
   fi
-  echo "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна)"
+  echo "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна; секреты — ключи/tg-сессия — в бэкап НЕ кладутся)"
   if [ "$ADDITIVE" -eq 1 ]; then
     echo "  [dry-run] WOULD (add-missing): скопировать ТОЛЬКО недостающие файлы (существующее НЕ трогать); ~/.claude НЕ переносится и не стирается; preserve-list исключён"
   else
@@ -47,19 +47,36 @@ if [ "$HAVE_BUNDLED" -eq 1 ]; then
   echo "Использую встроенный конфиг (офлайн): $BUNDLED"
   CLONE="$BUNDLED"
 else
-  if ! have git; then echo "Встроенный конфиг не найден и Git недоступен — выберите Git или пересоберите установщик."; exit 1; fi
-  URL="${HM_CONFIG_REPO_URL:-https://github.com/JHamidun/claude-code-config-pack}"
+  # #13: НЕ запускаем /usr/bin/git-шим на чистом маке без Command Line Tools (он сам
+  # открывает GUI-диалог «установить инструменты разработчика»). Предпочитаем портативный
+  # git.sh (~/.local/bin/git), иначе рабочий git (не шим ИЛИ CLT установлены).
+  GIT_BIN=""
+  if [ -x "$HOME/.local/bin/git" ]; then GIT_BIN="$HOME/.local/bin/git";
+  elif have git && { [ "$(command -v git)" != "/usr/bin/git" ] || xcode-select -p >/dev/null 2>&1; }; then GIT_BIN="$(command -v git)"; fi
+  if [ -z "$GIT_BIN" ]; then echo "Встроенный конфиг не найден и рабочий Git недоступен — выберите компонент Git или пересоберите установщик офлайн."; exit 1; fi
+  # Источник конфига разворачивается в ~/.claude (settings.json + hooks), поэтому URL из
+  # окружения принимаем ТОЛЬКО как https://github.com/... — второй рубеж к авторитетному
+  # override в main (renderer не должен уводить клон на чужой хост). Всё остальное —
+  # откат на источник по умолчанию, а не clone откуда попало.
+  URL_DEFAULT="https://github.com/JHamidun/claude-code-config-pack"
+  URL="${HM_CONFIG_REPO_URL:-$URL_DEFAULT}"
+  case "$URL" in
+    https://github.com/?*) ;;
+    *) echo "ВНИМАНИЕ: источник конфига ($URL) не с https://github.com/ — использую источник по умолчанию."; URL="$URL_DEFAULT" ;;
+  esac
   BRANCH="${HM_CONFIG_REPO_BRANCH:-main}"
   CLONE="$HOME/.hamidun-setup/config-repo"
-  if [ -d "$CLONE/.git" ]; then
-    echo "Обновляю конфиг с GitHub..."
-    git -C "$CLONE" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1
-    git -C "$CLONE" reset --hard "origin/$BRANCH" >/dev/null 2>&1
-  else
-    echo "Скачиваю конфиг с GitHub ($URL)..."
-    mkdir -p "$(dirname "$CLONE")"
-    git clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
-  fi
+  # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог
+  # пред-создать $CLONE/.git с core.fsmonitor/hooksPath = payload → code-exec под нашим
+  # git. Всегда СВЕЖИЙ clone + hardening-флаги (командные -c перебивают repo-local).
+  rm -rf "$CLONE"
+  echo "Скачиваю конфиг с GitHub ($URL)..."
+  mkdir -p "$(dirname "$CLONE")"
+  # credential.helper ПУСТОЙ + запрет интерактива: иначе помощник кредов (в macOS это
+  # osxkeychain, а при установленном GCM — графическое окно) при любом отказе доступа
+  # ждёт ввода, и установка виснет ВЕЧНО. Репозиторий конфига публичный: запрос
+  # кредов = сломанная ситуация, правильный исход — быстро упасть с ошибкой.
+  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false -c credential.helper= -c credential.interactive=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
 fi
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.sh
@@ -81,12 +98,37 @@ PRESERVE_DIR_GLOBS="--exclude=memory/ --exclude=projects/ --exclude=todos/ --exc
 # ВАЖНО: неполный бэкап НЕ фатален — оригинал ~/.claude НЕ переносится и не стирается,
 # данные на месте. Предупреждаем и ПРОДОЛЖАЕМ (это иначе, чем раньше, где бэкап был
 # единственной копией перед wipe).
+# СЕКРЕТЫ В БЭКАП НЕ КЛАДЁМ (зеркало config.ps1: robocopy /XF в бэкапе): копий хранится
+# 3 ротируемых, то есть ключи и telegram-сессия РАЗМНОЖАЛИСЬ БЫ в трёх экземплярах рядом
+# с ~/.claude. Список исключений — РОВНО тот же, что в Windows-версии:
+# .credentials.master.env, .credentials.json, tg_session.session* (глоб покрывает
+# -wal/-shm/-journal). Оригиналы остаются в ~/.claude нетронутыми (preserve-list merge их
+# не перезаписывает) — бэкап без них полноценно выполняет роль сейф-нета.
+BACKUP_EXCLUDES="--exclude=.credentials.master.env --exclude=.credentials.json --exclude=tg_session.session*"
 if [ -d "$CLAUDE_HOME" ]; then
   STAMP=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="$CLAUDE_HOME.backup.$STAMP"
-  echo "Резервная копия ~/.claude → $BACKUP_DIR ..."
-  if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
-    SRC_N=$(find "$CLAUDE_HOME" 2>/dev/null | wc -l | tr -d ' ')
+  echo "Резервная копия ~/.claude → $BACKUP_DIR (без ключей и tg-сессии; храню 3 последние, старые удаляю)..."
+  BACKUP_OK=0
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a $BACKUP_EXCLUDES "$CLAUDE_HOME/" "$BACKUP_DIR/" 2>/dev/null && BACKUP_OK=1
+  else
+    # Fallback без rsync: cp -R копирует ВСЁ, затем вычищаем секреты из КОПИИ тем же
+    # списком (robocopy /XF режет имена на любой глубине — find -name делает то же).
+    if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
+      if find "$BACKUP_DIR" \( -name '.credentials.master.env' -o -name '.credentials.json' -o -name 'tg_session.session*' \) -exec rm -f {} + 2>/dev/null; then
+        BACKUP_OK=1
+      else
+        # Секреты вычистить не удалось — бэкап с ключами держать нельзя (fail-closed).
+        rm -rf "$BACKUP_DIR" 2>/dev/null
+        echo "ВНИМАНИЕ: не удалось исключить секреты из бэкапа — копия удалена (оригинал ~/.claude цел)."
+      fi
+    fi
+  fi
+  if [ "$BACKUP_OK" -eq 1 ]; then
+    # Сверка полноты считает источник БЕЗ исключённых секретов — иначе каждый бэкап
+    # с ключами ложно рапортовал бы «неполный».
+    SRC_N=$(find "$CLAUDE_HOME" ! -name '.credentials.master.env' ! -name '.credentials.json' ! -name 'tg_session.session*' 2>/dev/null | wc -l | tr -d ' ')
     DST_N=$(find "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ')
     if [ "${DST_N:-0}" -lt "${SRC_N:-0}" ]; then
       echo "ВНИМАНИЕ: неполный бэкап ~/.claude (часть файлов недоступна). НЕ критично: оригинал НЕ переносится и не стирается — данные на месте. Продолжаю."
@@ -94,6 +136,15 @@ if [ -d "$CLAUDE_HOME" ]; then
   else
     echo "ВНИМАНИЕ: бэкап ~/.claude снять не удалось. НЕ критично: оригинал ~/.claude на месте (не переносится/не стирается). Продолжаю."
   fi
+  # Ретенция: держим 3 ПОСЛЕДНИЕ копии. Без неё каждый прогон (repair/повтор/ручной
+  # перезапуск) оставлял полную копию ~/.claude навсегда — гигабайты, о которых юзер не
+  # знает и которые никто не чистит (деинсталляция config не поддерживается). Имена —
+  # $CLAUDE_HOME.backup.<YYYYMMDD-HHMMSS>, лексикографический sort = хронологический.
+  ls -d "$CLAUDE_HOME".backup.* 2>/dev/null | sort -r | tail -n +4 | while IFS= read -r old; do
+    case "$old" in
+      "$CLAUDE_HOME".backup.*) [ -d "$old" ] && rm -rf "$old" ;;
+    esac
+  done
 fi
 
 # hm_copy — копирование из вшитого/клонированного source ПОВЕРХ ~/.claude, БЕЗ переноса.

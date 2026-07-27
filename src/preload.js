@@ -21,9 +21,15 @@ contextBridge.exposeInMainWorld('installer', {
     ipcRenderer.on('remote-progress', handler);
     return () => ipcRenderer.removeListener('remote-progress', handler);
   },
+  // PREFLIGHT LITE: доступность сервера докачки. Сеть трогает ТОЛЬКО main
+  // (CSP renderer'а запрещает fetch); renderer аргументов не передаёт.
+  probeRemote: () => ipcRenderer.invoke('probe-remote'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   openPath: (p) => ipcRenderer.invoke('open-path', p),
   saveStartHere: () => ipcRenderer.invoke('save-start-here'),
+  // Встроенный просмотр памятки: main сам находит вшитый START-HERE.html
+  // (путь из renderer'а НЕ принимается) и отдаёт его содержимое строкой.
+  readStartHere: () => ipcRenderer.invoke('read-start-here'),
   revealPath: (p) => ipcRenderer.invoke('reveal-path', p),
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
   launchVsCode: () => ipcRenderer.invoke('launch-vscode'),
@@ -34,5 +40,10 @@ contextBridge.exposeInMainWorld('installer', {
   // Анонимная телеметрия установки ({ok, failed[], durationSec}) — URL зашит в
   // config.json на стороне main; ошибки там глотаются, ответ не важен.
   sendTelemetry: (payload) => ipcRenderer.invoke('send-telemetry', payload),
+  // macOS: снять карантин с образа, перемонтировать и перезапуститься из свежего тома
+  macSelfHeal: () => ipcRenderer.invoke('mac-selfheal'),
+  // Чем закончилась ПРОШЛАЯ попытка починки: её хвост работает уже после нашего
+  // выхода, и без этой крошки любой его отказ был бы невидим.
+  macSelfHealStatus: () => ipcRenderer.invoke('mac-selfheal-status'),
   quit: () => ipcRenderer.invoke('quit')
 });

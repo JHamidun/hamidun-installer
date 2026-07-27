@@ -21,10 +21,17 @@
   "bridge": {
     "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер.",
     "enrollEndpoint": "",
-    "pacDomains": ["claude.ai", "anthropic.com", "openai.com", "chatgpt.com", "oaistatic.com",
+    "pacDomains": [
+      "claude.ai",
+      "anthropic.com",
+      "openai.com",
+      "chatgpt.com",
+      "oaistatic.com",
       "oaiusercontent.com",
       "claudeusercontent.com",
-      "sora.com", "higgsfield.ai"]
+      "sora.com",
+      "higgsfield.ai"
+    ]
   },
   "claudeCodeExtensionId": "anthropic.claude-code",
   "course": {
@@ -35,7 +42,7 @@
     "shortcutName": "Курс вайбкодинг (Claude Code)"
   },
   "telemetry": {
-    "_comment": "Анонимная статистика установки (opt-out чекбоксом на экране выбора). Один POST по завершении: {event, platform, ok, failed[], duration_sec} — БЕЗ uid и ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
+    "_comment": "Статистика установки (opt-out чекбоксом на экране выбора). События: install_started / installed / open_editor. Тело: {event, platform, edition, ok, failed[], skipped[], errors[{id,stage,error}], duration_sec, uid}. uid — идентификатор в Telegram, если человек пришёл по персональной ссылке бота (main берёт его из имени скачанного файла); тексты ошибок чистятся от ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
     "url": "https://academy.hamidun.com/api/lead"
   },
   "finish": {

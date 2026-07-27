@@ -10,52 +10,126 @@
     "start": "electron .",
     "fetch:config": "node tools/fetch-config.js",
     "fetch:vendor": "powershell -ExecutionPolicy Bypass -NoProfile -File tools/fetch-vendor.ps1",
-    "dist": "npm run fetch:config && npm run fetch:vendor && electron-builder",
-    "dist:win": "npm run fetch:config && npm run fetch:vendor && electron-builder --win",
-    "dist:win:lite": "npm run fetch:config && electron-builder --win",
+    "assert:clean": "node -e \"const p=require('./package.json');const r=(p.build.win.extraResources||[]).find(x=>x.to==='vendor');const dirty=!r||r.from!=='vendor'||/Lite/.test(p.build.win.artifactName||'')||/Lite/.test((p.build.portable||{}).artifactName||'');if(dirty)throw new Error('package.json ostalsya mutirovannym posle dist:win:lite (from=vendor-lite / artifactName ...-Lite) — vosstanovi: git checkout package.json config.json && rm -rf vendor-lite');console.log('[assert:clean] package.json chistyy — sobirayu OFFLINE izdanie iz vendor/.')\"",
+    "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && electron-builder",
+    "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && electron-builder --win",
+    "dist:win:lite": "node tools/build-lite.js",
     "dist:mac": "npm run fetch:config && electron-builder --mac",
+    "dist:mac:lite": "node tools/build-lite.js --mac",
     "postinstall": "electron-builder install-app-deps",
     "test": "node test/run-tests.js"
   },
   "devDependencies": {
     "electron": "^32.0.0",
-    "electron-builder": "^25.0.0"
+    "electron-builder": "^25.0.0",
+    "playwright-core": "^1.61.1"
+  },
+  "_buildNotes": {
+    "win.extraResources.filter !apps/chatgpt.vsix": [
+      "ОСОЗНАННОЕ исключение, НЕ забытый мусор. Портабл-exe офлайн-издания = 1 849 889 559 байт;",
+      "chatgpt.vsix (338 520 262 байт, уже сжатый zip — compression:maximum его не ужмёт) вывел бы сборку",
+      "на ~2.19 ГБ, а 32-битный makensis падает на mmap при >2 ГБ (та же причина, что у !playwright-browsers).",
+      "СЛЕДСТВИЕ, которое обязаны знать все, кто трогает vscode.ps1/components.json: в ОФЛАЙН-издании",
+      "расширение Codex (openai.chatgpt) НЕ вшито — оно ставится из Marketplace, т.е. требует интернет.",
+      "Поэтому отсутствие chatgpt.vsix в vendor НЕ должно валить компонент vscode (иначе рекомендуемый",
+      "компонент красный у 100% офлайн-установок без сети, а зависимый extension уходит в dep-skip).",
+      "Панель Claude (claude-code.vsix) вшита и ставится офлайн — офлайн-обещание держится на ней.",
+      "ЧЕМ НЕЛЬЗЯ ЗАМЕНИТЬ ИСКЛЮЧЕНИЕ: apps/cursor-setup.exe (196 986 056 байт) — у компонента cursor",
+      "нет онлайн-фолбэка (cursor.ps1 fail-closed без вшитого инсталлятора), а у Codex он есть (Marketplace);",
+      "к тому же 1.85 - 0.197 + 0.338 ≈ 1.99 ГБ — впритык к тому же лимиту. Хочешь Codex офлайн — сначала",
+      "уменьшай базу (напр. npm-cache/pywheels), а не меняй одно исключение на другое."
+    ]
   },
   "build": {
     "appId": "com.hamidun.setup",
     "productName": "Hamidun Setup",
     "compression": "maximum",
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "src/**/*"
     ],
     "extraResources": [
-      { "from": "scripts", "to": "scripts" },
-      { "from": "agent", "to": "agent", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"] },
-      { "from": "config.json", "to": "config.json" },
-      { "from": "components.json", "to": "components.json" },
-      { "from": "remote-components.json", "to": "remote-components.json" },
-      { "from": "packs.json", "to": "packs.json" },
-      { "from": "assets/starter-project", "to": "assets/starter-project" },
-      { "from": "assets/START-HERE.html", "to": "assets/START-HERE.html" }
+      {
+        "from": "scripts",
+        "to": "scripts"
+      },
+      {
+        "from": "agent",
+        "to": "agent",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "config.json",
+        "to": "config.json"
+      },
+      {
+        "from": "components.json",
+        "to": "components.json"
+      },
+      {
+        "from": "remote-components.json",
+        "to": "remote-components.json"
+      },
+      {
+        "from": "packs.json",
+        "to": "packs.json"
+      },
+      {
+        "from": "assets/starter-project",
+        "to": "assets/starter-project"
+      },
+      {
+        "from": "assets/START-HERE.html",
+        "to": "assets/START-HERE.html"
+      }
     ],
     "win": {
       "icon": "build/icon.ico",
-      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
       "extraResources": [
-        { "from": "vendor", "to": "vendor", "filter": ["**/*", "!playwright-browsers/**", "!playwright-browsers-*/**"] }
+        {
+          "from": "vendor",
+          "to": "vendor",
+          "filter": [
+            "**/*",
+            "!playwright-browsers/**",
+            "!playwright-browsers-*/**",
+            "!apps/chatgpt.vsix"
+          ]
+        }
       ]
     },
     "portable": {
       "requestExecutionLevel": "admin",
-      "artifactName": "Hamidun-Setup-Windows.${ext}"
+      "artifactName": "Hamidun-Setup-Windows.${ext}",
+      "unpackDirName": true
     },
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
       "icon": "build/icon.png",
-      "target": [{ "target": "dmg", "arch": ["universal"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
       "category": "public.app-category.developer-tools",
       "artifactName": "Hamidun-Setup-Mac.${ext}",
       "hardenedRuntime": true,
@@ -69,9 +143,22 @@
     },
     "dmg": {
       "contents": [
-        { "x": 140, "y": 260 },
-        { "x": 400, "y": 260, "type": "link", "path": "/Applications" },
-        { "x": 270, "y": 110, "type": "file", "path": "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" }
+        {
+          "x": 140,
+          "y": 260
+        },
+        {
+          "x": 400,
+          "y": 260,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 110,
+          "type": "file",
+          "path": "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+        }
       ]
     }
   }

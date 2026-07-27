@@ -87,6 +87,15 @@ function isOfflineEdition() {
   catch (e) { return false; }
 }
 
+// Лёгкое (стриминг с S3) издание? Маркер edition:'lite' в config.json ставит
+// prep-lite.js на сборке. В lite тяжёлые компоненты НЕ вшиты — main докачивает их
+// из реестра (loadRemoteMaps авто-выводит remote по наличию записи, id==remoteId),
+// кроме bundled-only (uv, P1-A). Офлайн-издание маркера lite НЕ имеет → всё из vendor.
+function isLiteEdition() {
+  try { return readJson('config.json', {}).edition === 'lite'; }
+  catch (e) { return false; }
+}
+
 // Жёсткий стоп ДО установки (только упакованный mac-.app):
 //   • translocation — Gatekeeper исполняет .app из read-only AppTranslocation, sibling-
 //     vendor оторван: заведомо сломанный офлайн-запуск → блок ВСЕГДА (не зависит от
@@ -115,17 +124,35 @@ function readJson(name, fallback) {
   }
 }
 
+// ---- uid: связь установки с конкретным человеком ---------------------
+// Резолвинг uid и очистка текстов от ПД живут в отдельном модуле (src/uid-telemetry.js):
+// это граница доверия — значения уходят на сервер и проверяются тестами напрямую.
+const uidTelemetry = require('./uid-telemetry');
+const scrubText = uidTelemetry.scrubText;
+const INSTALL_UID = uidTelemetry.resolveUid();
+
 // ---- install log (~/.hamidun-setup/install.log) ----------------------
 // Every line streamed to the renderer is also appended here, so a user can
 // send one file to support when something goes wrong.
 const LOG_DIR = path.join(os.homedir(), '.hamidun-setup');
 const LOG_PATH = path.join(LOG_DIR, 'install.log');
 let logDirReady = false;
+// Дескриптор держим ОТКРЫТЫМ. fs.appendFileSync открывает и закрывает файл на
+// КАЖДОЙ строке, а установочные скрипты (pip, uv, npm) выдают их десятками тысяч:
+// это десятки тысяч синхронных open/write/close в главном процессе — он же качает
+// насос сообщений окна. Один открытый дескриптор убирает две трети работы и
+// сохраняет главное свойство журнала: строка на диске сразу, переживает падение.
+let logFd = null;
 function logToFile(id, line) {
   try {
     if (!logDirReady) { fs.mkdirSync(LOG_DIR, { recursive: true }); logDirReady = true; }
-    fs.appendFileSync(LOG_PATH, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
-  } catch (e) { /* logging must never break the install */ }
+    if (logFd === null) logFd = fs.openSync(LOG_PATH, 'a');
+    fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
+  } catch (e) {
+    // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
+    // строка откроет заново. Журналирование НИКОГДА не должно ломать установку.
+    if (logFd !== null) { try { fs.closeSync(logFd); } catch (e2) { /* ignore */ } logFd = null; }
+  }
 }
 
 let mainWindow = null;
@@ -133,6 +160,16 @@ let mainWindow = null;
 // Track live installer child processes so we can kill orphans if the window
 // closes mid-install (otherwise silent installers keep running invisibly).
 const CHILDREN = new Set();
+
+// win32: Admins-only staging-каталоги докачки, ЖИВЫЕ в этом процессе (remoteId → dir).
+// Нужны для двух вещей: (1) ретрай компонента в той же сессии переиспользует УЖЕ
+// скачанный и sha-проверенный <remoteId>.zip (remote-fetch сам ловит идемпотентность)
+// вместо повторной закачки сотен МБ; (2) гарантированная уборка на выходе — иначе
+// закрытие окна посреди докачки оставляет в %ProgramData% до ~1.6 ГБ, которые обычный
+// пользователь без админа удалить НЕ может. Модель угроз не меняется: каталог рождён
+// НАМИ атомарно (owner=Administrators, DACL {SYSTEM,Admins}), имя случайное, а
+// remote-fetch.ensureCacheSecure перепроверяет защищённость перед КАЖДЫМ использованием.
+const SECURE_DIRS = new Map();
 // Kill the whole process TREE of each tracked child, not just the shell wrapper.
 // The shell (powershell/bash) spawns msiexec, pip, curl, hdiutil… as its own
 // children; killing only the wrapper orphans them and they keep running unseen.
@@ -221,19 +258,90 @@ function createWindow() {
 // не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
 let _frontedForInstall = false;
 
-app.whenReady().then(() => {
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Уборка Admins-only staging-каталогов ЭТОГО процесса (см. SECURE_DIRS): закрытие окна
+// посреди докачки не должно оставлять пользователю нестираемые гигабайты в %ProgramData%.
+function cleanupAllSecureDirs() {
+  for (const d of SECURE_DIRS.values()) {
+    // ВНЕШНИЙ каталог, а не рабочий подкаталог «w»: staging двухуровневый, и
+    // удаление только «w» оставляло в %ProgramData% запертый Admins-only
+    // HmDeElev-*, который пользователь не может стереть сам. Ровно для этого
+    // и заведён stagingRootOf — здесь его забыли применить.
+    try { fs.rmSync(stagingRootOf(d), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+  }
+  SECURE_DIRS.clear();
+}
+
+// Сборка мусора от ПРОШЛЫХ запусков (краш/убийство антивирусом/выключение питания —
+// before-quit тогда не отработал). Гейты, чтобы элевейтед-удаление не превратилось в
+// arbitrary-delete примитив (%ProgramData% доступен Users на создание — malware может
+// пред-создать HmDeElev-* junction): строгий шаблон имени, НЕ reparse-point, каталог
+// защищён (owner=Admins, посторонних ACE нет) и «остыл» (ничего не менялось 6 часов —
+// живая докачка другого инстанса обновляет mtime своего .part).
+function pruneStaleSecureDirs() {
+  if (!IS_WIN) return;
+  try {
+    const pd = remoteFetch.winProgramData();
+    if (!pd || !fs.existsSync(pd)) return;
+    const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+    for (const name of fs.readdirSync(pd)) {
+      if (!/^HmDeElev-[0-9a-f]{32}$/i.test(name)) continue;
+      const dir = path.join(pd, name);
+      let st;
+      try { st = fs.lstatSync(dir); } catch (e) { continue; }
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;      // junction-подмена → не трогаем
+      let newest = st.mtimeMs;
+      try {
+        for (const child of fs.readdirSync(dir)) {
+          try { newest = Math.max(newest, fs.lstatSync(path.join(dir, child)).mtimeMs); } catch (e) { /* ignore */ }
+        }
+      } catch (e) { /* ignore */ }
+      if (newest > cutoff) continue;                                // возможно живой каталог другого инстанса
+      if (!remoteFetch.verifyDirSecureWin(dir)) continue;           // не наш/не защищён → не удаляем
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    }
+  } catch (e) { /* уборка мусора не должна ломать запуск */ }
+}
+
+// Второй запуск установщика недопустим. Целевая аудитория — новички: первый клик
+// даёт запрос прав и ~минуту тишины на распаковке, и человек кликает ещё раз.
+// Два элевейтед-экземпляра параллельно ставили бы одно и то же в ~/.claude,
+// npm prefix и uv tools, а portable-стаб вдобавок рекурсивно чистит ОБЩИЙ каталог
+// распаковки — то есть второй запуск выдёргивал ресурсы из-под первого.
+// Поднимаем уже открытое окно вместо запуска второй копии.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const wins = BrowserWindow.getAllWindows();
+    const w = wins.length ? wins[0] : null;
+    if (!w) return;
+    try {
+      if (w.isMinimized()) w.restore();
+      w.show();
+      w.focus();
+    } catch (e) { /* окно могло закрыться — не роняем установку */ }
   });
-});
+
+  app.whenReady().then(() => {
+    createWindow();
+    try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ }
+    // Прерванное удаление (антивирус убил процесс, пропало питание) оставляло
+    // маркер переименованным — и кнопка «Удалить» исчезала навсегда. Возвращаем
+    // маркер, чтобы человек мог просто повторить удаление.
+    try { receipts.recoverOrphanTombstones(os.homedir()); } catch (e) { /* best-effort */ }
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   killChildren();
+  cleanupAllSecureDirs();
   if (!IS_MAC) app.quit();
 });
 
-app.on('before-quit', killChildren);
+app.on('before-quit', () => { killChildren(); cleanupAllSecureDirs(); });
 
 // ---- IPC -------------------------------------------------------------
 
@@ -326,6 +434,14 @@ ipcMain.handle('bootstrap', () => {
     // BUG #11: платформо-гейтнутые компоненты (uv=win32-only) на чужой ОС не отдаём.
     components: componentsForPlatform(),
     packs: readJson('packs.json', { core: [], packs: [] }),
+    // Лёгкое (стриминг с S3) издание? Renderer по этому полю решает, показывать ли
+    // превью размера докачки («Скачается: ~X МБ») и гонять ли preflight probe-remote.
+    edition: isLiteEdition() ? 'lite' : 'offline',
+    // Превью МБ докачки: componentId → ТОЧНЫЙ sizeBytes архива из вшитого реестра
+    // remote-components.json — ровно для тех компонентов, которые ЭТО издание реально
+    // докачивает (loadRemoteMaps: явный remote-флаг ИЛИ lite-авто-remote, кроме
+    // bundled-only). Рукописный sizeHint для суммирования НЕ используется (врёт).
+    remoteSizes: remoteSizesForRenderer(),
     logPath: LOG_PATH,
     freeGB,
     osRelease: os.release(),
@@ -416,15 +532,111 @@ function loadRemoteMaps() {
   const reg = loadRemoteRegistry();
   const ids = new Set();
   for (const e of (reg.components || [])) { if (e && e.remoteId) ids.add(e.remoteId); }
-  const compRemote = new Map(); // component id → remoteId (из components.json)
+  const compRemote = new Map(); // component id → remoteId
   const data = readJson('components.json', { groups: [] });
+  // В lite-издании тяжёлые компоненты НЕ вшиты → авто-выводим remote по наличию
+  // записи в реестре (id==remoteId, так публикует publish-vendor.py), КРОМЕ
+  // bundled-only (uv — P1-A, мал, едет внутри lite). Так components.json остаётся
+  // чистым и в офлайн-, и в lite-издании (remote — не файловый флаг, а edition+реестр).
+  const lite = isLiteEdition();
+  const BUNDLED_ONLY = new Set(['uv']);
   for (const g of (data.groups || [])) {
     for (const c of (g.components || [])) {
-      if (c && c.remote && c.remoteId) compRemote.set(c.id, c.remoteId);
+      if (!c || !c.id) continue;
+      if (c.remote && c.remoteId) {
+        compRemote.set(c.id, c.remoteId);                     // явный флаг (совместимость)
+      } else if (lite && ids.has(c.id) && !BUNDLED_ONLY.has(c.id)) {
+        compRemote.set(c.id, c.id);                           // lite: авто-remote по реестру
+      }
     }
   }
   return { reg, ids, compRemote };
 }
+
+// Превью размера докачки для renderer (bootstrap.remoteSizes): componentId →
+// sizeBytes архива из реестра. Карта следует loadRemoteMaps (какие id remote в
+// ЭТОМ издании) × pickEntry (платформенная запись). В офлайн-издании compRemote
+// без явных remote-флагов пуст → превью пустое (ничего не качаем — не показываем).
+function remoteSizesForRenderer() {
+  const out = {};
+  try {
+    const { reg, compRemote } = loadRemoteMaps();
+    for (const [cid, rid] of compRemote) {
+      const entry = remoteFetch.pickEntry(reg, rid, process.platform);
+      const sz = entry ? Number(entry.sizeBytes) : 0;
+      if (sz > 0) out[cid] = sz;
+    }
+  } catch (e) { /* превью размеров не должно ломать bootstrap */ }
+  return out;
+}
+
+// PREFLIGHT LITE: доступность сервера докачки (S3/CDN) ДО активации «Установить».
+// CSP renderer'а запрещает fetch — сеть пробует ТОЛЬКО main через этот IPC.
+// Renderer аргументов не передаёт; пробуем зеркала ПЕРВОГО платформенного
+// remote-компонента реестра (probeMirror: https-only + анти-SSRF, Range bytes=0-0,
+// абсолютный дедлайн 8с). Любое живое зеркало → online:true (установка пойдёт —
+// fetchRemote сам выберет живое зеркало). Не lite / нечего качать → online:true.
+ipcMain.handle('probe-remote', async () => {
+  try {
+    if (!isLiteEdition()) return { online: true, skipped: true };
+    const { reg, compRemote } = loadRemoteMaps();
+    let entry = null;
+    for (const rid of new Set(compRemote.values())) {
+      entry = remoteFetch.pickEntry(reg, rid, process.platform);
+      if (entry) break;
+    }
+    if (!entry) return { online: true, skipped: true }; // качать нечего — сеть не нужна
+    const urls = (entry.mirrors || []).map((m) => m && m.url).filter((u) => remoteFetch.isFetchableUrl(u));
+    if (!urls.length) return { online: false };
+    const settled = await Promise.allSettled(urls.map((u) => remoteFetch.probeMirror(u, 8000)));
+    const online = settled.some((r) => r.status === 'fulfilled' && r.value && r.value.ok);
+    return { online };
+  } catch (e) {
+    return { online: false, error: String((e && e.message) || e) };
+  }
+});
+
+// vendor-first гейт: id remote-компонента → его ОСНОВНОЙ вшитый артефакт
+// (относительно vendorRoot). Если он есть в bundled vendor — это ОФЛАЙН-издание,
+// докачка НЕ запускается (даже при remote:true в components.json): существующий
+// vendor/ имеет приоритет, сеть не трогается. Путь = та же vendor-раскладка, что
+// публикует tools/publish-vendor.py (zip повторяет её 1:1) → HM_VENDOR=staging.
+const COMPONENT_VENDOR_ARTIFACT = {
+  git: 'apps/git-setup.exe',
+  node: 'apps/node-lts.msi',
+  vscode: 'apps/vscode-setup.exe',
+  cursor: 'apps/cursor-setup.exe',
+  claude: 'npm-cache',
+  uv: 'apps/uv',
+  mascot: 'apps/claude-mascot',
+  nomad: 'nomad-src',
+  config: 'config-pack',
+  // NB: ключа 'playwright-browsers' здесь НЕТ намеренно — карта ключуется по id
+  // КОМПОНЕНТА (components.json), а компонента с таким id не существует: браузеры
+  // Playwright ставит pydeps.ps1 (офлайн из $HM_VENDOR\playwright-browsers, иначе
+  // онлайн-фолбэк `playwright install chromium`). Мёртвый ключ вводил в заблуждение.
+  pydeps: 'apps/python-setup.exe',
+  extension: 'apps/claude-code.vsix',
+};
+
+// Дедлайн скачивания = f(sizeBytes): консервативные ~300 КБ/с (медленный РФ-канал)
+// + 30% запас, но не меньше 20 мин. 786МБ npm-cache в дефолтные 20 мин не лезет.
+function downloadDeadlineFor(sizeBytes) {
+  const sz = Number(sizeBytes) || 0;
+  const est = Math.ceil((sz / (300 * 1024)) * 1000 * 1.3);
+  return Math.max(20 * 60 * 1000, est);
+}
+
+// Компоненты, чей install-скрипт имеет СОБСТВЕННЫЙ онлайн-фолбэк (winget / прямая
+// загрузка с github/vendor CDN; у config это укреплённый `git clone` из config.ps1/
+// config.sh с АВТОРИТЕТНЫМИ координатами репозитория — см. блок id==='config' ниже).
+// В lite при неудачной докачке с S3 НЕ роняем их жёстко — даём скрипту попробовать
+// системный установщик (как в офлайн-издании, где они не declared-remote и скрипт
+// всегда запускается). Компоненты БЕЗ такого фолбэка (nomad/pydeps/extension/claude)
+// остаются fail-closed. ВАЖНО: провал докачки запоминается (fetchFellBack) — тогда
+// graceful-skip скрипта (exit 120) НЕ выдаётся за успех, а превращается в честную
+// ошибку с ретраем (иначе сорванная докачка vscode = тихий «пропущено»).
+const SCRIPT_ONLINE_FALLBACK = new Set(['git', 'node', 'vscode', 'cursor', 'config']);
 
 // Куда докачивать (ADMIN-OWNED STAGING):
 //   Windows: НЕ ИСПОЛЬЗУЕТСЯ (P0 Codex круг 6). Предсказуемый %ProgramData%\HamidunSetup\
@@ -474,6 +686,26 @@ const WIN_SYS_ENV_KEYS = [
   'SESSIONNAME', 'LOGONSERVER', 'USERDNSDOMAIN'
 ];
 
+// Переменные, глушащие ЛЮБОЙ интерактивный запрос у инструментов, которые мы запускаем.
+// Повод — живой случай: Git Credential Manager (на Windows он ставится по умолчанию)
+// поднял ГРАФИЧЕСКОЕ окно «введите логин» при обращении к репозиторию, и процесс,
+// который его вызвал, встал намертво. У установщика ровно та же схема: он делает
+// git clone конфига, а окно может всплыть ЗА окном установщика — человек увидит
+// вечный спиннер и ничего больше. Все наши источники ПУБЛИЧНЫЕ: запрос кредов всегда
+// означает сломанную ситуацию (прокси, перехват, лимит), и правильный исход — быстро
+// упасть с понятной ошибкой.
+const NONINTERACTIVE_ENV = {
+  GIT_TERMINAL_PROMPT: '0',          // git не спрашивает логин в терминале
+  GIT_ASKPASS: 'echo',               // и не зовёт графический askpass
+  GCM_INTERACTIVE: 'never',          // Git Credential Manager: без окон
+  SSH_ASKPASS: 'echo',
+  SSH_ASKPASS_REQUIRE: 'never',
+  DEBIAN_FRONTEND: 'noninteractive',
+  PIP_DISABLE_PIP_VERSION_CHECK: '1',
+  npm_config_yes: 'true',            // npx/npm не спрашивают подтверждение установки
+  CI: '1',                           // общепринятый сигнал «интерактива нет»
+};
+
 function buildInstallEnv(rendererEnv) {
   rendererEnv = rendererEnv || {};
   if (IS_WIN) {
@@ -500,8 +732,10 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'nodejs'),
       path.join(pf86, 'Git', 'cmd')
     ];
-    const vroot = vendorRoot();
-    if (vroot) dirs.push(path.join(vroot, 'apps'));
+    // ВНИМАНИЕ: НЕ добавляем vendor/apps в elevated PATH — portable-exe распаковывает
+    // vendor в user-writable %TEMP%, medium-малварь того же юзера подсадила бы туда
+    // node.exe/git.exe и получила бы запуск под АДМИНОМ через bare-команду. Vendor-
+    // артефакты потребляются ТОЛЬКО по абсолютному HM_VENDOR-пути в install-скриптах.
     const seen = new Set(); const uniq = [];
     for (const d of dirs) { const key = String(d).toLowerCase(); if (d && !seen.has(key)) { seen.add(key); uniq.push(d); } }
     const trustedPath = uniq.join(';');
@@ -512,6 +746,7 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'WindowsPowerShell', 'Modules')
     ].join(';');                                                    // только системные модули (анти-module-hijack)
     if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC;.PS1';
+    Object.assign(out, NONINTERACTIVE_ENV);
     return out;
   }
   // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
@@ -519,6 +754,7 @@ function buildInstallEnv(rendererEnv) {
   // никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
   const out = Object.assign({}, process.env);
   Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
+  Object.assign(out, NONINTERACTIVE_ENV);
   return out;
 }
 
@@ -601,13 +837,33 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   let secureCacheDir = '';
   const cleanupSecureCache = () => {
     if (!secureCacheDir) return;
-    try { fs.rmSync(secureCacheDir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    try { fs.rmSync(stagingRootOf(secureCacheDir), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    for (const [rid, d] of SECURE_DIRS) { if (d === secureCacheDir) SECURE_DIRS.delete(rid); }
     secureCacheDir = '';
   };
+  // Провал докачки, «прощённый» из-за собственного онлайн-фолбэка скрипта (см.
+  // SCRIPT_ONLINE_FALLBACK). Заполнен → graceful-skip скрипта (exit 120) НЕ считается
+  // успехом: компонент честно краснеет со stage:'fetch' и получает авто-ретрай.
+  let fetchFellBack = '';
+  let stagingVendor = '';       // задан → HM_VENDOR указывает СЮДА (sha-проверенный staging докачки)
   const { reg, compRemote } = loadRemoteMaps();
   const declared = compRemote.get(id);
+  // vendor-first: если основной артефакт компонента уже вшит в bundled vendor —
+  // это офлайн-издание, докачку НЕ запускаем (защита от remote-флагов).
+  const bundledVendorEarly = vendorRoot();
+  const bundledRel = COMPONENT_VENDOR_ARTIFACT[id];
+  const vendorHasArtifact = !!(bundledRel && fs.existsSync(path.join(bundledVendorEarly, bundledRel)));
+  // Офлайн-издание НИКОГДА не качает (защита от remote-флагов в общей components.json;
+  // и mac-офлайн, где win-артефактов по этим путям нет, не должен идти в докачку —
+  // darwin-записей в реестре пока нет). Lite-издание (offlineEdition=false) без вшитого
+  // артефакта — качает.
+  const useBundled = vendorHasArtifact || isOfflineEdition();
   if (declared && isDryRun) {
     send('[dry-run] Докачка «' + declared + '» пропущена — ничего не скачиваем.');
+  } else if (declared && useBundled) {
+    const why = vendorHasArtifact ? 'уже вшит в установщик' : 'офлайн-издание';
+    send('[локально] «' + declared + '» ' + why + ' — докачка не нужна.');
+    logLine('vendor-first: ' + declared + ' (' + why + ') — download пропущен.');
   } else if (declared) {
     const entry = remoteFetch.pickEntry(reg, declared, process.platform);
     if (!entry) {
@@ -620,14 +876,30 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // Users писать туда НЕ могут ПО КОНСТРУКЦИИ: medium-малварь ТОГО ЖЕ юзера не может ни
     // пред-создать <id>.zip, ни держать write-handle, ни подменить содержимое между
     // SHA-256 и распаковкой (owner/DACL-window + ZIP-TOCTOU закрыты). Пред-существующее
-    // НЕ переиспользуем. fs.mkdirSync+post-icacls запрещён (окно наследования ProgramData).
+    // НА ДИСКЕ (чужое) НЕ переиспользуем НИКОГДА. Переиспользуем ТОЛЬКО каталог, который
+    // РОДИЛИ САМИ в ЭТОМ процессе (SECURE_DIRS) — иначе ретрай компонента качал бы те же
+    // сотни МБ заново, хотя валидный <remoteId>.zip уже лежит рядом. Защищённость всё
+    // равно перепроверяется в fetchRemote (ensureCacheSecure) перед каждым использованием.
+    // fs.mkdirSync+post-icacls запрещён (окно наследования ProgramData).
     let cacheDir;
     if (IS_WIN) {
-      cacheDir = winMakeSecureDir();
-      if (!cacheDir) {
-        return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось создать защищённый кэш докачки (owner=Administrators + DACL {SYSTEM,Administrators}) — нужны права администратора; установка remote-компонента заблокирована (fail-closed).' };
+      // Каталог ЭТОГО процесса переиспользуем только если он всё ещё существует И
+      // всё ещё защищён (owner=Admins, посторонних ACE нет) — иначе рождаем новый.
+      cacheDir = SECURE_DIRS.get(declared) || '';
+      if (cacheDir) {
+        let stillSafe = false;
+        try { stillSafe = fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir); } catch (e) { stillSafe = false; }
+        if (!stillSafe) { SECURE_DIRS.delete(declared); cacheDir = ''; }
       }
-      secureCacheDir = cacheDir; // чистим после установки
+      if (!cacheDir) cacheDir = await winMakeSecureDir();
+      if (!cacheDir) {
+        return { id, ok: false, code: -1, stage: 'env',
+        error: 'не удалось подготовить защищённый каталог для загрузки'
+          + (lastSecureDirError ? ' (' + lastSecureDirError + ')' : '')
+          + '. Запусти установщик от имени администратора; если это не помогает — пришли журнал боту.' };
+      }
+      SECURE_DIRS.set(declared, cacheDir);
+      secureCacheDir = cacheDir; // чистим после успешной установки / на выходе
     } else {
       cacheDir = remoteCacheDir(declared);
     }
@@ -638,6 +910,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         entry,
         cacheDir,
         timeoutMs: 20000,
+        downloadDeadlineMs: downloadDeadlineFor(entry.sizeBytes),
         onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total }),
         // Лог докачки идёт в ТОТ ЖЕ канал, что и вывод компонента — попадает в
         // общий лог естественно, атрибутируется по id, ничего не ломает.
@@ -645,15 +918,44 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       });
     } catch (e) {
       logLine('[ERROR] fetch-remote: ' + String(e));
-      cleanupSecureCache();
-      return { id, ok: false, code: -1, stage: 'fetch', error: String(e.message || e) };
+      fr = { ok: false, error: String(e.message || e) };
     }
     logLine('=== fetch-remote result: ' + (fr && fr.ok ? ('ok ' + fr.path) : ('FAIL ' + (fr && fr.error))) + ' ===');
     if (!fr || !fr.ok) {
-      cleanupSecureCache();
-      return { id, ok: false, code: -1, stage: 'fetch', error: (fr && fr.error) || 'докачка не удалась' };
+      // Каталог НЕ сносим: частично скачанное/уже проверенное переживёт ретрай в этой
+      // же сессии (см. SECURE_DIRS); финальная уборка — при успехе или на выходе.
+      const errMsg = (fr && fr.error) || 'докачка не удалась';
+      if (SCRIPT_ONLINE_FALLBACK.has(id)) {
+        // Не роняем жёстко: у скрипта есть свой онлайн-фолбэк (winget/прямая загрузка/
+        // git clone для config). stagingVendor остаётся '' → HM_VENDOR=bundled (артефакта
+        // нет) → скрипт уйдёт в фолбэк. Проваливаемся дальше к spawn (как офлайн-издание).
+        // Помним, что фолбэк вызван ПРОВАЛОМ ДОКАЧКИ: если скрипт всё же скажет «нечего
+        // ставить» (exit 120), это НЕ успех, а невосстановленная докачка (см. close).
+        fetchFellBack = errMsg;
+        const m = '[докачка] «' + declared + '» не удалась (' + errMsg + ') — пробую системный установщик компонента (winget/прямая загрузка).';
+        send(m); logLine(m);
+      } else {
+        // Стадию классифицируем ЗДЕСЬ (авторитетно), а не регексом в renderer: только
+        // реальное расхождение sha/манифеста — это 'integrity' (подмена артефакта,
+        // повтор бессмыслен). Сеть, недоступные зеркала, отказ создать staging и прочая
+        // среда — 'fetch': пользователю честно предлагаем «Повторить».
+        const integrity = /sha-?256|checksums\.json|не совпал|подмен/i.test(errMsg);
+        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg };
+      }
+    } else {
+      remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
+      // Второй fail-closed рубеж (Confirm-HmArtifact/verify_artifact) читает
+      // $HM_VENDOR/checksums.json по basename. Staging станет HM_VENDOR → кладём туда
+      // КОПИЮ вшитого checksums.json (покрывает артефакты по basename). Не смогли —
+      // fail-closed: без второго гейта remote-компонент не пускаем.
+      try {
+        fs.copyFileSync(path.join(bundledVendorEarly, 'checksums.json'), path.join(fr.path, 'checksums.json'));
+      } catch (e) {
+        cleanupSecureCache();
+        return { id, ok: false, code: -1, stage: 'fetch', error: 'не удалось положить checksums.json в staging (второй гейт целостности не сработает): ' + String(e.message || e) };
+      }
+      stagingVendor = fr.path;   // HM_VENDOR укажет СЮДА (а не в bundled vendor)
     }
-    remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
   }
 
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
@@ -665,11 +967,48 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // remoteCache (для оставшихся/будущих remote-компонентов).
   delete childEnv.HM_REMOTE_CACHE;
   // Paths to assets baked into the installer at build time (offline sources).
-  const vroot = vendorRoot();
+  // Для remote-компонента (докачан в staging) HM_VENDOR указывает на sha-проверенный
+  // staging (структурирован как vendor/), иначе — на bundled vendor. Так все 18
+  // install-скриптов (source-agnostic через HM_VENDOR) + второй checksums-гейт
+  // работают без правок и на офлайн-, и на lite-издании.
+  const vroot = stagingVendor || bundledVendorEarly;
+  // LITE-ГОЧА (иначе половина компонентов ломается): staging несёт артефакты ТОЛЬКО
+  // СВОЕГО компонента, поэтому он ЗАСЛОНЯЕТ вшитый vendor. HM_VENDOR по-прежнему
+  // указывает на staging (там лежат sha-проверенные байты этого компонента и копия
+  // checksums.json — второй гейт), а вот пути к КОНКРЕТНЫМ файлам резолвим по факту
+  // существования: есть в staging → берём оттуда, иначе → из bundled vendor. Без этого
+  // pydeps в lite искал requirements.txt в staging pydeps (там его нет) и падал
+  // «сначала установите конфиг», а nomad не видел nomad-src при чужом staging.
+  const vendorPick = (rel) => {
+    try {
+      const inStaging = path.join(vroot, rel);
+      if (fs.existsSync(inStaging)) return inStaging;
+    } catch (e) { /* ignore */ }
+    return path.join(bundledVendorEarly, rel);
+  };
+  // LITE-ГОЧА №2 (nomad): его архив несёт только исходники агента, а uv вшит в
+  // установщик (bundled-only) и в staging не попадает НИКОГДА → nomad.ps1 не находил
+  // $HM_VENDOR\apps\uv\uv.exe и уходил в `irm https://astral.sh/uv/install.ps1 | iex`
+  // ПОД АДМИНОМ, обнуляя офлайн/sha-гарантию для байтов, физически лежащих внутри
+  // установщика. Докладываем вшитый uv в staging этого компонента: источник —
+  // read-only bundled vendor внутри exe, приёмник — Admins-only staging, новых окон
+  // подмены нет, а второй гейт проходит (Confirm-HmArtifact резолвит по basename, и
+  // uv.exe/uvx.exe есть в скопированном туда checksums.json).
+  if (stagingVendor && id === 'nomad') {
+    try {
+      const uvSrc = path.join(bundledVendorEarly, 'apps', 'uv');
+      const uvDst = path.join(stagingVendor, 'apps', 'uv');
+      if (fs.existsSync(uvSrc) && !fs.existsSync(uvDst)) {
+        fs.mkdirSync(path.dirname(uvDst), { recursive: true });
+        fs.cpSync(uvSrc, uvDst, { recursive: true });
+        logLine('[vendor] вшитый uv доложен в staging nomad (офлайн-путь uv.ps1 вместо онлайн-установки).');
+      }
+    } catch (e) { logLine('[vendor] не удалось доложить uv в staging: ' + String(e && e.message || e)); }
+  }
   childEnv.HM_VENDOR = vroot;
-  childEnv.HM_BUNDLED_CONFIG = path.join(vroot, 'config-pack');
+  childEnv.HM_BUNDLED_CONFIG = vendorPick('config-pack');
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
-  childEnv.HM_NOMAD_SRC = path.join(vroot, 'nomad-src');
+  childEnv.HM_NOMAD_SRC = vendorPick('nomad-src');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
   // HM_REMOTE_CACHE ставим ТОЛЬКО из проверенного пути (или не ставим вовсе).
   if (remoteCache) childEnv.HM_REMOTE_CACHE = remoteCache;
@@ -696,6 +1035,16 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     const msg = '[режим конфига] ' + (mode === 'additive' ? 'АДДИТИВНЫЙ (только недостающее)' : 'чистая установка') +
       ' — ' + det.reason;
     send(msg); logLine(msg);
+    // Координаты репозитория конфига — АВТОРИТЕТНО из вшитого config.json, НИКОГДА из
+    // renderer'а (install-env пропускает любые HM_*, поэтому HM_CONFIG_REPO_URL/BRANCH
+    // были renderer-управляемыми). Это обязательное условие того, что config попал в
+    // SCRIPT_ONLINE_FALLBACK: онлайн-фолбэк config.ps1/config.sh делает `git clone` —
+    // подменяемый URL означал бы клонирование чужого репозитория в ~/.claude.
+    const appCfg = readJson('config.json', {});
+    const repoUrl = String(appCfg.configRepoUrl || '');
+    childEnv.HM_CONFIG_REPO_URL = /^https:\/\/github\.com\/JHamidun\//i.test(repoUrl)
+      ? repoUrl : 'https://github.com/JHamidun/claude-code-config-pack';
+    childEnv.HM_CONFIG_REPO_BRANCH = String(appCfg.configRepoBranch || 'main');
   }
 
   let cmd, args;
@@ -736,7 +1085,15 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // macOS: give the child its own process group so killChildren can reap the
       // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
       // we kill the tree via taskkill /T instead, so no detached group is needed.
-      const spawnOpts = { env: childEnv, windowsHide: true };
+      // stdin ЗАКРЫТ (ignore) — это системная защита от зависания.
+      // По умолчанию Node даёт ребёнку живой пайп на stdin, который никогда не получает
+      // данных и никогда не закрывается. Любой инструмент, задавший вопрос, ждёт ответа
+      // ВЕЧНО: человек видит бесконечный спиннер и решает, что всё сломалось. Ровно так
+      // встала установка на 15 минут — unzip спросил «write error… Continue? (y/n/^C)».
+      // С /dev/null на stdin вопрос получает EOF, инструмент честно падает, а шаг
+      // показывает ошибку, которую видно и можно починить. Никто в stdin не пишет
+      // (проверено), поэтому потерь нет.
+      const spawnOpts = { env: childEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] };
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
@@ -751,27 +1108,57 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // фильтруются из UI-лога. Как источник целей удаления они НЕ используются:
     // квитанция — маркер {id, version, installedAt}, а цели удаления вычисляет
     // доверенный код по зашитому аллоулисту (src/uninstall-targets.js).
-    const onData = (buf) => {
-      buf
-        .toString()
-        .split(/\r?\n/)
-        .forEach((l) => {
-          if (l.length) {
-            const ri = receipts.parseReceiptLine(l);
-            if (ri) { logLine(l); return; }
-            send(l);
-            logLine(l);
-          }
-        });
+    const emitLine = (l) => {
+      if (!l.length) return;
+      const ri = receipts.parseReceiptLine(l);
+      if (ri) { logLine(l); return; }
+      send(l);
+      logLine(l);
     };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
+    // buf.toString() на КАЖДОМ чанке рвал многобайтовую кириллицу на границе чанка и
+    // терял склейку незавершённой строки (обильный вывод pip/robocopy → «кракозябры»).
+    // StringDecoder держит хвост многобайтовой последовательности, а tail — хвост строки.
+    let lastOut = Date.now();
+    const mkLineReader = () => {
+      const dec = new (require('string_decoder').StringDecoder)('utf8');
+      let tail = '';
+      return {
+        push: (buf) => {
+          lastOut = Date.now();
+          const parts = (tail + dec.write(buf)).split(/\r?\n/);
+          tail = parts.pop();
+          parts.forEach(emitLine);
+        },
+        flush: () => { const rest = tail + dec.end(); tail = ''; rest.split(/\r?\n/).forEach(emitLine); }
+      };
+    };
+    const outR = mkLineReader();
+    const errR = mkLineReader();
+    child.stdout.on('data', (b) => outR.push(b));
+    child.stderr.on('data', (b) => errR.push(b));
+    // Watchdog БЕЗ убийства: msiexec/pip/playwright легально идут десятками минут, а
+    // kill посреди MSI-транзакции хуже висяка. Но молчащий шаг без единого признака
+    // жизни — это «установщик завис, что делать?»: раз в 10 минут честно говорим.
+    let stallWarned = 0;
+    const stallTimer = setInterval(() => {
+      const mins = Math.floor((Date.now() - lastOut) / 60000);
+      if (mins >= 10 && mins >= stallWarned + 10) {
+        stallWarned = mins;
+        const m = '[внимание] шаг «' + id + '» не выдаёт вывод ' + mins + ' мин. Возможно, ' +
+          'системный установщик ждёт другую установку Windows. Если так и останется — закройте ' +
+          'окно установщика (дочерние процессы будут остановлены) и запустите его ещё раз.';
+        send(m); logLine(m);
+      }
+    }, 60000);
+    if (stallTimer.unref) stallTimer.unref();
     child.on('error', (e) => {
       send(`[ERROR] ${e.message}`);
       logLine(`[ERROR] ${e.message}`);
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
+      try { clearInterval(stallTimer); } catch (e) { /* ignore */ }
+      try { outR.flush(); errR.flush(); } catch (e) { /* ignore */ }  // последняя строка без \n
       logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
       // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
@@ -782,9 +1169,27 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // и любой ненулевой код маркер НЕ пишут (иначе фантомная кнопка «Удалить» → снос
       // чужого venv/шимов при деинсталляции). Манифест справочный; grund-truth — детекция.
       if (receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))) {
-        const ver = (meta && meta.version) || '';
+        let ver = (meta && meta.version) || '';
         try {
           const src = remoteCache ? 'remote' : (vendorAvailable() ? 'bundled' : 'online');
+          // FIX #17: аддитивная переустановка config НЕ трогает уже изменённые базовые
+          // файлы (robocopy /XC пропускает существующие), поэтому нельзя продвигать
+          // записанную версию до currentVersion — иначе updateAvailable погаснет, а
+          // базовый скилл со старым багом останется, и пользователь решит, что обновился.
+          // Когда запуск был АДДИТИВНЫМ (HM_ADDITIVE='1') И обновление реально было
+          // доступно (прежняя записанная версия строго старше currentVersion) — держим
+          // прежнюю installedVersion. Тогда isOutdated() остаётся true и UI продолжает
+          // предлагать «Переустановить начисто» (repair/clean реально применит обновление).
+          if (id === 'config' && childEnv.HM_ADDITIVE === '1') {
+            const prev = manifest.getEntry(os.homedir(), id);
+            const prevVer = prev ? (prev.version || '') : '';
+            if (prevVer && manifest.isOutdated(prevVer, ver)) {
+              logLine('[manifest] config additive + доступно обновление (' + prevVer +
+                ' → ' + ver + '): версию НЕ продвигаем, оставляем ' + prevVer +
+                ' — updateAvailable сохраняется, нужна чистая переустановка (repair).');
+              ver = prevVer;
+            }
+          }
           manifest.recordInstall(os.homedir(), id, ver, src);
         } catch (e) { logLine('[manifest] запись версии не удалась: ' + String(e)); }
         // Installed-маркер (id/version/installedAt) — только при успехе, не в dry-run,
@@ -795,9 +1200,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       } else if (skipped && !isDryRun) {
         logLine(`=== компонент «${id}» пропущен (код ${code}, нечего ставить) — маркер/манифест НЕ записаны ===`);
       }
-      // win32: удаляем СВЕЖИЙ Admins-only кэш докачки (25МБ zip+распаковка) — компонент
-      // уже отработал (из кэша запущен/скопирован), больше он не нужен. Best-effort.
-      cleanupSecureCache();
+      // win32: удаляем СВЕЖИЙ Admins-only кэш докачки (zip+распаковка) — компонент
+      // отработал успешно, больше кэш не нужен. Best-effort. При НЕуспехе каталог
+      // оставляем: повтор шага переиспользует уже скачанный sha-проверенный архив
+      // (уборка гарантированно произойдёт на выходе, см. cleanupAllSecureDirs).
+      if (okRun || skipped) cleanupSecureCache();
+      // Graceful-skip (exit 120) ПОСЛЕ провала докачки — не «нечего ставить», а
+      // «докачка не доехала, системный установщик тоже не сработал»: отдаём честную
+      // сетевую ошибку (авто-ретрай + inline «Повторить»), а не тихое «пропущено».
+      if (skipped && fetchFellBack) {
+        resolve({ id, ok: false, code, stage: 'fetch',
+          error: 'докачка не удалась (' + fetchFellBack + '), а системный установщик компонента недоступен' });
+        return;
+      }
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
       resolve({ id, ok: okRun || skipped, code, skipped });
@@ -805,10 +1220,24 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   });
 });
 
-ipcMain.handle('open-external', (_e, url) => { if (url) shell.openExternal(url); return true; });
+ipcMain.handle('open-external', (_e, url) => {
+  // Renderer НЕ доверенный: без allowlist схем file:/UNC(file://host)/ms-msdt:/
+  // search-ms:/HKCU-зарегистрированные хендлеры дали бы запуск произвольного через
+  // elevated shell.openExternal. Пропускаем только веб/почту/telegram (нужны кнопкам).
+  try {
+    const u = new URL(String(url));
+    if (['http:', 'https:', 'mailto:', 'tg:'].includes(u.protocol)) {
+      shell.openExternal(u.href);
+      return true;
+    }
+  } catch (e) { /* невалидный url */ }
+  return false;
+});
 
-// ---- анонимная телеметрия установки (opt-out чекбоксом на экране выбора) ----
-// БЕЗ uid и ПД: только событие, платформа, исход, id упавших компонентов и
+// ---- телеметрия установки (opt-out чекбоксом на экране выбора) ----
+// НЕ анонимная, если человек пришёл по персональной ссылке бота: тогда отчёт везёт
+// uid (его идентификатор в Telegram), иначе бот не сможет помочь адресно. Свободные
+// тексты ошибок чистятся scrubText. Событие, платформа, исход, id упавших компонентов и
 // длительность. URL берём ТОЛЬКО из вшитого config.json (renderer URL задать не
 // может — иначе IPC превращается в произвольный POST-прокси), поля санитизируем
 // здесь же. Fire-and-forget: таймаут 5с, ЛЮБЫЕ ошибки глотаем молча — установка
@@ -819,15 +1248,35 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
     const url = String((cfg.telemetry && cfg.telemetry.url) || '');
     if (!/^https:\/\//i.test(url)) return { ok: false }; // пустой url = выключено
     const p = (payload && typeof payload === 'object') ? payload : {};
-    // failed: только компонентные id (латиница/цифры/_/-), ≤20 штук, ≤64 символа.
-    const failed = Array.isArray(p.failed)
-      ? p.failed.slice(0, 20).map((s) => String(s).slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'))
-      : [];
+    // Тип события задаёт renderer, но ТОЛЬКО из закрытого списка — иначе IPC становится
+    // генератором произвольных событий в воронке.
+    const EVENTS = ['installed', 'install_started', 'open_editor'];
+    const event = EVENTS.indexOf(String(p.event || 'installed')) !== -1 ? String(p.event) : 'installed';
+    // ids: только компонентные id (латиница/цифры/_/-), ≤20 штук, ≤64 символа.
+    const ids = (v) => (Array.isArray(v)
+      ? v.slice(0, 20).map((s) => String(s).slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'))
+      : []);
     const body = JSON.stringify({
-      event: 'installed',
+      event,
       platform: IS_WIN ? 'win' : 'mac',
+      // uid определяет ГЛАВНЫЙ процесс (имя файла/файл рядом/env) — renderer его задать
+      // не может: иначе он бы приписывал установки чужим людям.
+      uid: INSTALL_UID || null,
+      edition: isLiteEdition() ? 'lite' : 'offline',
       ok: !!p.ok,
-      failed,
+      failed: ids(p.failed),
+      skipped: ids(p.skipped),
+      selected: ids(p.selected),
+      // Почему упало — иначе бот видит «упал git» и не знает, сеть это, права или
+      // целостность, а именно это определяет совет человеку. Тексты чистятся от ПД
+      // (имя пользователя и домашний каталог) в scrubText.
+      errors: Array.isArray(p.errors)
+        ? p.errors.slice(0, 10).map((e) => ({
+          id: String((e && e.id) || '').slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-'),
+          stage: String((e && e.stage) || '').slice(0, 24).replace(/[^a-z-]/g, ''),
+          error: scrubText(String((e && e.error) || '')).slice(0, 300),
+        }))
+        : [],
       // duration_sec клампим в [0, 24ч] — мусорные значения не улетают.
       duration_sec: Math.max(0, Math.min(86400, Math.round(Number(p.durationSec) || 0))),
     });
@@ -851,8 +1300,17 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
 ipcMain.handle('open-path', async (_e, p) => {
   if (!p) return { ok: false, error: 'empty-path' };
+  // Renderer НЕ доверенный: без confine он мог бы попросить открыть \\attacker\share\x.exe
+  // или подсаженный в user-writable путь → shell.openPath запустит его под АДМИНОМ.
+  // Разрешаем ТОЛЬКО доверенные цели: install.log, памятку «Что дальше» на столе,
+  // файлы внутри ресурсов установщика (вшитый START-HERE.html).
   try {
-    const err = await shell.openPath(p);
+    const rp = path.resolve(String(p));
+    const root = path.resolve(resourceRoot());
+    const desktopMemo = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    const allowed = rp === path.resolve(LOG_PATH) || rp === desktopMemo || rp.startsWith(root + path.sep);
+    if (!allowed) return { ok: false, error: 'bad-path' };
+    const err = await shell.openPath(rp);
     return { ok: !err, error: err || '' };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -884,9 +1342,44 @@ ipcMain.handle('save-start-here', () => {
   }
 });
 
+// Встроенный просмотр памятки «Что дальше» прямо в окне установщика: отдаём
+// содержимое вшитого START-HERE.html строкой. Путь считаем ТОЛЬКО здесь из
+// вшитого config.json (renderer НЕ доверенный и путь не передаёт — тот же
+// принцип, что у save-start-here выше: IPC с путём из renderer'а дал бы
+// произвольное чтение файлов из elevated-процесса) и проверяем, что цель
+// не вышла из ресурсов. Ошибки не бросаем — honest {ok:false,error}.
+ipcMain.handle('read-start-here', () => {
+  try {
+    const cfg = readJson('config.json', {});
+    const rel = String((cfg.finish && cfg.finish.startHtmlRelPath) || 'assets/START-HERE.html');
+    const root = path.resolve(resourceRoot());
+    const src = path.resolve(root, rel);
+    if (!src.startsWith(root + path.sep)) return { ok: false, html: '', error: 'bad-path' };
+    if (!fs.existsSync(src)) return { ok: false, html: '', error: 'source-missing' };
+    return { ok: true, html: fs.readFileSync(src, 'utf8'), error: '' };
+  } catch (e) {
+    return { ok: false, html: '', error: e.message };
+  }
+});
+
 // Reveal a file in Explorer/Finder (openPath on a .env silently fails on macOS
 // where .env has no default app — showItemInFolder always works).
-ipcMain.handle('reveal-path', (_e, p) => { try { if (p) shell.showItemInFolder(p); } catch (e) { /* ignore */ } return true; });
+// Renderer НЕ доверенный: путь из него НЕ принимаем (как в open-path/open-external/
+// save-start-here). Иначе elevated shell.showItemInFolder биндил бы shell-namespace
+// на \\attacker\share (UNC/WebDAV, HKCU-shell-extension). Легитимная цель ровно одна —
+// файл ключей из вшитого config.json; собираем её здесь, аргумент игнорируем.
+ipcMain.handle('reveal-path', () => {
+  try {
+    const cfg = readJson('config.json', {});
+    const rel = String((cfg.finish && cfg.finish.credentialsRelPath) || '.claude/.credentials.master.env');
+    const home = path.resolve(os.homedir());
+    const target = path.resolve(home, rel);
+    if (!target.startsWith(home + path.sep)) return false;   // rel с ../ или UNC
+    if (!fs.existsSync(target)) return false;
+    shell.showItemInFolder(target);
+    return true;
+  } catch (e) { return false; }
+});
 
 ipcMain.handle('launch-cursor', () => {
   try {
@@ -931,7 +1424,27 @@ function winDeElevScript() {
 // генерируемый ВНУТРИ примитива (JS его не выбирает и не знает заранее); примитив
 // fail-closed на ERROR_ALREADY_EXISTS и reparse-point и сам верифицирует владельца/ACE.
 // JS перепроверяет (defense-in-depth): путь строго под ProgramData + verifyDirSecureWin.
-function winMakeSecureDir() {
+// Последняя причина отказа защищённого staging — чтобы в журнале и в тексте ошибки
+// стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
+let lastSecureDirError = '';
+
+// Защищённый staging = ПАРА каталогов: внешний HmDeElev-<rnd> (заперт) и рабочий `w`
+// внутри него (наружу отдаётся именно рабочий — см. New-HmSecureStagingDir). Убирать
+// надо ВНЕШНИЙ, иначе в ProgramData копятся пустые запертые каталоги.
+function stagingRootOf(p) {
+  try {
+    const s = String(p || '');
+    if (!s) return s;
+    return path.basename(s) === 'w' ? path.dirname(s) : s;
+  } catch (e) { return p; }
+}
+
+async function winMakeSecureDir() {
+  // Сбрасываем на КАЖДОМ входе. Иначе причина от прошлого отказа доживает до следующего
+  // и приклеивается к другому компоненту: половина веток возвращает null молча, и в
+  // тексте шага оказалась бы чужая, уже неверная причина — ровно то, ради чего эта
+  // диагностика и заводилась.
+  lastSecureDirError = '';
   try {
     const pd = remoteFetch.winProgramData();
     if (!pd || !fs.existsSync(pd)) return null;
@@ -945,21 +1458,74 @@ function winMakeSecureDir() {
     const deLit = String(deelev).replace(/'/g, "''");
     const pdLit = String(pd).replace(/'/g, "''");
     const icLit = String(icacls).replace(/'/g, "''");
+    // PSModulePath ПРИБИВАЕМ литералом к System32\WindowsPowerShell\v1.0\Modules.
+    // Две причины, обе кусаются:
+    //  1) если установщик запущен из окружения PowerShell 7 (терминал pwsh, CI-раннер),
+    //     унаследованный PSModulePath указывает на модули ...\PowerShell\7\Modules —
+    //     .NET Core-сборки, которые powershell.exe 5.1 ЗАГРУЗИТЬ НЕ МОЖЕТ. Autoload
+    //     Microsoft.PowerShell.Security падает, примитив уходит в $null, и lite не качает
+    //     НИ ОДНОГО компонента. Снаружи (запуск из Explorer) всё работает — поэтому
+    //     ручные прогоны этого не ловили, поймал только E2E на раннере.
+    //  2) PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) и является
+    //     штатным вектором module-hijack в elevated-процессе.
+    const s32 = path.dirname(path.dirname(path.dirname(ps)));   // ...\System32 из валидированного powershell.exe
+    const psmLit = path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules').replace(/'/g, "''");
     const inline =
+      // Кодировку консоли задаём ПЕРВОЙ командой. powershell 5.1 пишет stdout и stderr
+      // в кодовой странице консоли (CP866 на русской Windows), а Node читает трубу как
+      // UTF-8 — и причина отказа («Отказано в доступе») приезжала пользователю, в лог и
+      // в телеметрию кракозябрами. Для компонентных скриптов это уже делается (см. выше).
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" +
+      "$OutputEncoding=[System.Text.Encoding]::UTF8;" +
       "$ErrorActionPreference='Stop';" +
+      "$env:PSModulePath='" + psmLit + "';" +
       ". '" + deLit + "';" +
       "$d=New-HmSecureStagingDir -ProgramData '" + pdLit + "' -Icacls '" + icLit + "' -Elevated $true;" +
       "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
-    let out = '';
-    try {
-      out = execFileSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
-        { encoding: 'utf8', windowsHide: true, timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] });
-    } catch (e) { return null; }
-    const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(out || ''));
-    if (!m) return null;                               // примитив вернул $null -> fail-closed
+    // АСИНХРОННО (spawn, не spawnSync). Каталог рождается на КАЖДЫЙ докачиваемый артефакт,
+    // а старт powershell.exe — это секунды; синхронный вызов морозил главный процесс, и окно
+    // установщика переставало отвечать на каждом компоненте (прогресс замирал, клики
+    // копились). Ждём результат через промис — UI живёт.
+    // Читаем stderr, а не только stdout: примитив на отказе НЕ бросает, он возвращает $null
+    // и пишет причину (HMSECFAIL) в stderr. Раньше причина молча терялась, и пользователь
+    // получал бесполезное «примитив не вернул путь».
+    const r = await new Promise((resolve) => {
+      let so = '', se = '', settled = false;
+      const done = (res) => { if (!settled) { settled = true; resolve(res); } };
+      let child;
+      try {
+        // env — ДОВЕРЕННЫЙ, а не унаследованный. Инлайн-присваивание $env:PSModulePath
+        // закрывает только подмену модулей, но НЕ COR_ENABLE_PROFILING/COR_PROFILER/
+        // COR_PROFILER_PATH: их CLR читает при старте хоста, ДО разбора строки -Command.
+        // medium-малварь того же юзера пишет их в HKCU\Environment — и получает
+        // загрузку своей DLL в powershell.exe, запущенный НАМИ под администратором.
+        child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+          { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
+      } catch (e) { return done({ error: e }); }
+      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || 'таймаут примитива (20 с)' }); }, 20000);
+      child.stdout.on('data', (d) => { so += String(d); });
+      child.stderr.on('data', (d) => { se += String(d); });
+      child.on('error', (e) => { clearTimeout(kill); done({ error: e }); });
+      child.on('close', () => { clearTimeout(kill); done({ stdout: so, stderr: se }); });
+    });
+    const out = String((r && r.stdout) || '');
+    // Берём ПОСЛЕДНЮЮ строку HMSECFAIL: их может быть несколько (посторонние ACE
+    // перечисляются по одному), и последняя — та, что решила исход.
+    const errLines = String((r && r.stderr) || '').trim().split(/\r?\n/).filter(Boolean);
+    const secFail = errLines.filter((l) => /HMSECFAIL/.test(l)).pop() || '';
+    if (r && r.error) {
+      lastSecureDirError = String(r.error.message || r.error).slice(0, 300);
+      return null;
+    }
+    const m = /HMSECDIR::([\s\S]+?)::END/.exec(out);
+    if (!m) {                                          // примитив вернул $null -> fail-closed
+      lastSecureDirError = (secFail || errLines[errLines.length - 1]
+        || 'примитив не вернул путь (проверка владельца/ACL не прошла)').replace(/^HMSECFAIL:\s*/, '').slice(0, 300);
+      return null;
+    }
     const dir = m[1].trim();
     if (!dir) return null;
-    const rm = () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ } };
+    const rm = () => { try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ } };
     // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
     // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
     const root = path.resolve(pd);
@@ -989,7 +1555,7 @@ function winMakeSecureDir() {
 // (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил.
 // Иначе (210 refused / 211 start-fail / нет подтверждения / любой сбой) -> folder-only fallback.
 // Возвращает Promise<boolean> (опрос неблокирующий — UI не морозим).
-function winLaunchDeElevated(exe, folderArg) {
+async function winLaunchDeElevated(exe, folderArg) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
   const folderFallback = () => {
@@ -1014,16 +1580,18 @@ function winLaunchDeElevated(exe, folderArg) {
 
   const s32 = path.join(sysRoot, 'System32');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
-  const dir = winMakeSecureDir();
+  const dir = await winMakeSecureDir();
   if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
   const xmlFile = path.join(dir, 'task.xml');
   function runSchtasks(args) {
-    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore' }); return true; }
+    // env доверенный: schtasks — тот же класс привилегированного вызова, что и
+    // powershell выше (унаследованное окружение = вектор подсадки через COR_*).
+    try { execFileSync(schtasks, args, { windowsHide: true, timeout: 20000, stdio: 'ignore', env: detectSpawnEnv() }); return true; }
     catch (e) { return false; }
   }
   const cleanup = () => {
     try { runSchtasks(['/Delete', '/TN', tag, '/F']); } catch (e) { /* */ }
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* */ }
+    try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ }
   };
 
   // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без
@@ -1069,7 +1637,7 @@ function winLaunchDeElevated(exe, folderArg) {
   function readLastResult() {
     try {
       const out = execFileSync(schtasks, ['/Query', '/TN', tag, '/HRESULT', '/FO', 'CSV', '/NH', '/V'],
-        { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+        { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], env: detectSpawnEnv() });
       const line = String(out || '').split(/\r?\n/).find((l) => l.indexOf('"') !== -1);
       if (!line) return null;
       const fields = []; const re = /"([^"]*)"/g; let m;
@@ -1171,19 +1739,14 @@ ipcMain.handle('launch-course', () => {
 // running) Electron process still carries the stale PATH. Re-read Machine +
 // User PATH from the registry and add the places `claude` lands in.
 function regQueryValue(keyPath, valueName) {
-  try {
-    // reg.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
-    const reg = remoteFetch.sysBin('reg.exe');
-    if (!reg) return '';
-    // timeout ОБЯЗАТЕЛЕН: без него зависший reg.exe (агрессивный AV/EDR песочит
-    // консольные бинари, повреждённый куст реестра) вешает main-процесс Electron
-    // навсегда — detect-state не резолвится, кнопка «Установить» никогда не
-    // включается. Двойник regQueryValueTyped уже имеет timeout:20000.
-    const out = execFileSync(reg, ['query', keyPath, '/v', valueName],
-      { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const m = out.match(new RegExp('^\\s*' + valueName + '\\s+REG(?:_EXPAND)?_SZ\\s+(.+)$', 'im'));
-    return m ? m[1].trim() : '';
-  } catch (e) { return ''; }
+  // Через .NET, а не через консольный вывод reg.exe: тот печатает в кодовой
+  // странице консоли (CP866 на русской Windows), и путь вида
+  // C:\Users\Жемал\AppData\... приезжал сюда мусором — собранный PATH получался
+  // с битыми записями, и claude из терминала не находился.
+  // У regQueryValueTyped есть таймаут: без него зависший запрос (агрессивный
+  // AV/EDR, повреждённый куст) морозил бы main-процесс навсегда.
+  const r = regQueryValueTyped(keyPath, valueName);
+  return (r && r.ok && r.found) ? String(r.data || '').trim() : '';
 }
 
 // npm global prefix БЕЗ спавна npm через shell (FIX-E: убираем shell-строки).
@@ -1244,10 +1807,46 @@ function freshWindowsPath() {
   return joined;
 }
 
+// ---- кэши ОДНОГО прохода детекции --------------------------------------
+// Кэшировать на весь процесс НЕЛЬЗЯ: PATH меняется ПОСЛЕ установки, и пере-детекция
+// (renderer зовёт detect-state снова) обязана читать свежий реестр. Поэтому кэш
+// сбрасывается в начале КАЖДОГО прохода detectComponents: внутри прохода 8-10 пар
+// спавнов reg.exe схлопываются в одну, а Get-Acl по одному и тому же бинарю — в один.
+let _detPathCache = '';
+let _detOwnerCache = null;
+function detResetCaches() { _detPathCache = ''; _detOwnerCache = new Map(); }
+function freshWindowsPathCached() {
+  if (!_detPathCache) _detPathCache = freshWindowsPath();
+  return _detPathCache;
+}
+
+// Окружение для ДЕТЕКЦИОННЫХ спавнов (Windows). Установщик elevated, поэтому
+// наследовать process.env нельзя: HKCU\Environment пишется medium-малварью того же
+// юзера, а интерпретаторы/хосты исполняют код из env (PYTHONPATH/PYTHONSTARTUP →
+// import чужого .py; PSModulePath/COR_PROFILER → загрузка в powershell.exe). Здесь —
+// авторитетные системные значения (валидированный SystemRoot, не из env) + профильные
+// пути, которые НУЖНЫ для корректной детекции (python user site-packages ставится
+// `pip install --user` в %APPDATA%). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
+function detectSpawnEnv() {
+  const root = remoteFetch.winSystemRoot() || process.env.SystemRoot || 'C:\\Windows';
+  const s32 = path.join(root, 'System32');
+  const out = {
+    SystemRoot: root,
+    windir: root,
+    SystemDrive: (path.parse(root).root || 'C:\\').replace(/[\\/]+$/, ''),
+    PATH: s32, Path: s32,
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    PSModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')
+  };
+  for (const k of ['USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'USERNAME']) {
+    if (process.env[k] !== undefined) out[k] = process.env[k];
+  }
+  return out;
+}
+
 ipcMain.handle('open-claude-terminal', async () => {
   try {
     if (IS_WIN) {
-      const freshPath = freshWindowsPath();
       const startDir = path.join(os.homedir(), 'HamidunStart');
       try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
       // #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся ПЕРВАЯ сессия
@@ -1281,14 +1880,11 @@ ipcMain.handle('open-claude-terminal', async () => {
         spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
         return true;
       }
-      // Фолбэк (explorer недоступен): прежний путь, но хотя бы с фиксированным cwd.
-      const cmdExe = remoteFetch.sysBin('cmd.exe');
-      if (!cmdExe) return false;
-      const env = Object.assign({}, process.env, { PATH: freshPath, Path: freshPath });
-      const child = spawn(cmdExe, ['/c', 'start', 'Claude Code', 'cmd', '/k', 'claude'],
-        { env, cwd: startDir, detached: true, stdio: 'ignore', windowsHide: true });
-      child.unref();
-      return true;
+      // Фолбэк (explorer недоступен, крайне редко): НЕ запускаем claude под elevated-
+      // токеном с user-writable PATH (freshPath несёт ~/.local/bin, %APPDATA%\npm →
+      // claude.cmd юзера выполнился бы под АДМИНОМ). Возвращаем false → renderer покажет
+      // ручную инструкцию «открой обычный терминал и набери claude».
+      return false;
     }
     if (IS_MAC) {
       // #3: НЕ fire-and-forget с вечным true. На hardened-runtime без Apple-Events-
@@ -1327,7 +1923,20 @@ ipcMain.handle('save-credentials', (_e, obj) => {
     const file = path.join(dir, '.credentials.master.env');
     fs.mkdirSync(dir, { recursive: true });
     let text = '';
-    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { text = ''; }
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      // ENOENT — файла ещё нет, это норма (создадим). ЛЮБАЯ другая ошибка чтения
+      // (EBUSY/EACCES/EIO/ELOOP/EMFILE, cloud-placeholder OneDrive) означает «файл,
+      // возможно, ЕСТЬ, но мы его не прочитали» → писать НЕЛЬЗЯ: writeFileSync ниже
+      // затёр бы все ранее сохранённые ключи одной новой строкой (необратимо, без
+      // бэкапа, да ещё под {ok:true}). Fail-closed — как probePath в install-mode.js.
+      if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) {
+        return { ok: false, error: 'Не удалось прочитать существующий файл ключей (' +
+          ((e && e.code) || String(e)) + '). Ключи НЕ сохранены, чтобы не потерять уже записанные.' };
+      }
+      text = '';
+    }
     const saved = [];
     for (const key of Object.keys(obj || {})) {
       if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue; // sane env-var names only
@@ -1345,7 +1954,15 @@ ipcMain.handle('save-credentials', (_e, obj) => {
       }
       saved.push(key);
     }
-    if (saved.length) fs.writeFileSync(file, text, 'utf8');
+    if (saved.length) {
+      // Атомарная замена: без tmp+rename падение посреди writeFileSync (диск полон,
+      // антивирус) оставило бы ОБРЕЗАННЫЙ файл ключей. rename в пределах того же
+      // каталога атомарен и переживает такой сбой.
+      const tmp = file + '.tmp-' + process.pid;
+      fs.writeFileSync(tmp, text, 'utf8');
+      try { fs.renameSync(tmp, file); }
+      catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } throw e; }
+    }
     return { ok: true, saved, path: file };
   } catch (e) {
     return { ok: false, error: String(e) };
@@ -1357,11 +1974,119 @@ ipcMain.handle('save-credentials', (_e, obj) => {
 // НИКОГДА не манифестом. Манифест даёт лишь версию для показа/сравнения обновлений.
 // Кросс-платформенно (win + mac). Read-only: ничего не пишет, безопасно в dry-run.
 
-// Windows Program Files из env — только для ЧТЕНИЯ путей детекции (не elevated exec),
-// поэтому spoofing здесь безвреден (в отличие от buildInstallEnv, где значения строгие).
-function winPF() { return process.env.ProgramFiles || 'C:\\Program Files'; }
-function winPF86() { return process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'; }
+// Windows Program Files — НЕ из env: значение попадает в extraDirs резолвинга бинарей,
+// а результат резолвинга запускается под elevated-токеном (probeVersion). Подменённый
+// HKCU\Environment\ProgramFiles поставил бы каталог атакующего ПЕРВЫМ в порядке поиска.
+// Выводим из валидированного системного корня. Цена: у admin'а, перенёсшего Program Files
+// на другой диск, компонент может не задетектиться → предложим переустановку (скрипты
+// идемпотентны) — безопасный ложно-отрицательный вместо запуска чужого бинаря.
+function winSysDrive() {
+  try { return path.parse(remoteFetch.winSystemRoot() || 'C:\\Windows').root || 'C:\\'; }
+  catch (e) { return 'C:\\'; }
+}
+function winPF() { return path.join(winSysDrive(), 'Program Files'); }
+function winPF86() { return path.join(winSysDrive(), 'Program Files (x86)'); }
 function winLocalAppData() { return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'); }
+
+// БЕЗОПАСНОСТЬ (детекция под ELEVATED-токеном): путь ведёт в admin-owned корень
+// (Program Files / System32 / Windows)? Medium-юзер туда писать не может → запускать
+// бинарь оттуда для probe-версии безопасно. Всё прочее (LOCALAPPDATA/APPDATA/home/
+// WindowsApps) — user-writable: medium-малварь того же юзера подсадила бы туда fake
+// (git.exe/node.exe/python.exe/uv.exe) на PATH и получила бы RCE под АДМИНОМ при
+// авто-детекции на старте. Такие бинари НЕ запускаем (детект по существованию цел).
+// КРИТИЧНО: корни выводим ТОЛЬКО из ВАЛИДИРОВАННОГО winSystemRoot(), НИКОГДА из
+// launch-env. Иначе medium-малварь пишет HKCU\Environment\ProgramFiles=C:\Users\v\evil,
+// кладёт туда evil\Git\cmd\git.exe — и префикс-проверка вернула бы true, а winSafeToExec
+// (`winPathAdminOwned(...) || winFileAdminOwned(...)`) короткозамкнулся бы ДО честной
+// проверки владельца → запуск чужого бинаря под АДМИНОМ на старте детекции.
+// Program Files, перенесённый админом в нестандартное место, по-прежнему проходит —
+// через owner-фолбэк winFileAdminOwned (его файлы принадлежат Administrators/SYSTEM).
+function winPathAdminOwned(p) {
+  try {
+    const winRoot = remoteFetch.winSystemRoot() || 'C:\\Windows';
+    const drv = path.parse(winRoot).root || 'C:\\';
+    const rp = path.resolve(String(p)).toLowerCase();
+    const roots = [path.join(drv, 'Program Files'), path.join(drv, 'Program Files (x86)'), winRoot]
+      .map((r) => path.resolve(String(r)).toLowerCase().replace(/[\\/]+$/, '') + path.sep);
+    return roots.some((r) => rp.startsWith(r));
+  } catch (e) { return false; }
+}
+
+// Владелец ФАЙЛА — admin-принципал (SYSTEM / Administrators / TrustedInstaller)?
+// Тогда medium-малварь его не создавала/подменяла (её файлы user-owned) → безопасно
+// запускать под elevated-токеном ГДЕ БЫ он ни лежал (в т.ч. admin-установленный инструмент
+// в нестандартной локации вне Program Files — иначе его версия не детектилась бы). Дороже
+// (spawn powershell Get-Acl), поэтому зовём ТОЛЬКО когда путь НЕ в очевидном admin-корне.
+// ВАЖНО: одного ВЛАДЕЛЬЦА мало. Файл, созданный элевейтед-процессом в user-writable
+// каталоге (%LOCALAPPDATA%\Programs\…, ~\.local\bin), наследует DACL родителя с Full
+// Control для интерактивного юзера, а владельцем остаётся Administrators: medium-малварь
+// ПЕРЕЗАПИСЫВАЕТ такой файл НА МЕСТЕ (владелец не меняется!) → гейт пропускал бы payload
+// под elevated-токеном. Поэтому дополнительно требуем, чтобы у НЕ-admin принципалов не
+// было write-класса прав ни на файл, ни на его родительский каталог — это же закрывает
+// и TOCTOU-окно между проверкой и exec (подменить нечем). Любая ошибка/таймаут → false.
+function winFileAdminOwned(p) {
+  const key = String(p).toLowerCase();
+  if (_detOwnerCache && _detOwnerCache.has(key)) return _detOwnerCache.get(key);
+  const remember = (v) => { if (_detOwnerCache) _detOwnerCache.set(key, v); return v; };
+  try {
+    const ps = remoteFetch.winPowershellPath();
+    if (!ps) return remember(false);
+    const script =
+      "$ErrorActionPreference='Stop';" +
+      // SYSTEM, Administrators, TrustedInstaller — принципалы, писать под которыми medium-юзер не может.
+      "$allow=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464');" +
+      // NB: [IO.Path]::GetDirectoryName, а НЕ Split-Path: в PS 5.1 «-LiteralPath … -Parent»
+      // не резолвится (AmbiguousParameterSet), а «-Path» глобит [квадратные] скобки в пути.
+      "$f=$env:HM_CHK_FILE;$par=[System.IO.Path]::GetDirectoryName($f);" +
+      // write-класс: WriteData/CreateFiles 0x2, AppendData/CreateDirs 0x4, WriteEA 0x10,
+      // WriteAttributes 0x100, Delete 0x10000, WriteDAC 0x40000, WriteOwner 0x80000 +
+      // generic-формы GENERIC_ALL 0x10000000 / GENERIC_WRITE 0x40000000; для каталога
+      // дополнительно DeleteSubdirectoriesAndFiles 0x40 (им удаляют НАШ файл).
+      "foreach($it in @($f,$par)){" +
+      "$m=if($it -eq $par){0x500C0156}else{0x500C0116};" +
+      "$a=Get-Acl -LiteralPath $it;" +
+      "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
+      "if($allow -notcontains $o){Write-Output 'USER';exit 0}" +
+      // GetAccessRules(...[SecurityIdentifier]) отдаёт ACE СРАЗУ в SID-виде. Через
+      // $a.Access + .Translate() нельзя: локализованные псевдо-принципалы («ЦЕНТР
+      // ПАКЕТОВ ПРИЛОЖЕНИЙ\ВСЕ ПАКЕТЫ ПРИЛОЖЕНИЙ» на ru-RU) НЕ транслируются обратно,
+      // и проверка вырождалась бы в вечный USER — то есть в мёртвый код (проверено).
+      // Inherit-only ACE (PropagationFlags -band 2) к самому объекту не применяются —
+      // иначе штатный CREATOR OWNER (OI)(CI)(IO)(F) в System32 давал бы ложный USER.
+      "foreach($ace in $a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){" +
+      "if($ace.AccessControlType -ne 'Allow'){continue}" +
+      "if(([int]$ace.PropagationFlags -band 2) -ne 0){continue}" +
+      "if($allow -contains $ace.IdentityReference.Value){continue}" +
+      "if(([int]$ace.FileSystemRights -band $m) -ne 0){Write-Output 'USER';exit 0}" +
+      "}}" +
+      "Write-Output 'ADMIN'";
+    // env — доверенный (см. detectSpawnEnv): унаследованный process.env позволял бы
+    // medium-юзеру подсунуть свой PSModulePath/COR_PROFILER в powershell.exe ВНУТРИ
+    // самой проверки, которая и отвечает на вопрос ADMIN/USER.
+    const env = IS_WIN
+      ? Object.assign(detectSpawnEnv(), { HM_CHK_FILE: String(p) })
+      : Object.assign({}, process.env, { HM_CHK_FILE: String(p) });
+    const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 8000, env });
+    return remember(!r.error && r.status === 0 && /(^|\n)ADMIN$/.test(String(r.stdout || '').trim()));
+  } catch (e) { return remember(false); }
+}
+
+// Безопасно ли запускать этот бинарь под elevated-токеном при детекции: путь в admin-owned
+// корне (быстро, без subprocess) ИЛИ сам файл admin-owned (точная проверка для нестандартных
+// admin-локаций). Иначе — не запускаем (user-owned fake = RCE-вектор), детект по существованию.
+function winSafeToExec(bin) {
+  if (!IS_WIN) return true;
+  // КАНОНИЗАЦИЯ ОБЯЗАТЕЛЬНА: строковый префикс-тест обходится симлинком/junction из
+  // admin-корня в user-writable каталог (nvm-windows штатно делает C:\Program Files\
+  // nodejs → %APPDATA%\nvm\v<ver>) — CreateProcess пойдёт через reparse-точку и
+  // исполнит подменённый бинарь ПОД АДМИНОМ. Проверяем РЕАЛЬНЫЙ путь; не удалось
+  // канонизировать → fail-closed (ложно-негатив безвреден: детект по существованию цел).
+  let real;
+  try { real = (fs.realpathSync.native || fs.realpathSync)(String(bin)); }
+  catch (e) { return false; }
+  return winPathAdminOwned(real) || winFileAdminOwned(real);
+}
 
 // Ищем исполняемый файл: известные абсолютные каталоги, затем свежий PATH (перечитан
 // из реестра на Windows) / POSIX-каталоги. Возвращает путь или ''.
@@ -1369,7 +2094,11 @@ function resolveExecutable(names, extraDirs) {
   const dirs = [];
   (extraDirs || []).forEach((d) => { if (d) dirs.push(d); });
   if (IS_WIN) {
-    freshWindowsPath().split(';').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
+    // Кэш на ОДИН проход детекции: иначе каждый resolveExecutable = 2 спавна reg.exe
+    // (8-10 за проход, под EDR это секунды заморозки main-процесса при выключенной
+    // кнопке «Установить»). Сбрасывается в начале detectComponents — PATH после
+    // установки перечитывается заново.
+    freshWindowsPathCached().split(';').forEach((d) => { const t = d.trim(); if (t) dirs.push(t); });
   } else {
     ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin',
       path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.cargo', 'bin')]
@@ -1395,10 +2124,18 @@ function resolveExecutable(names, extraDirs) {
 // Запускает bin с args и достаёт версию regex'ом (1-я группа). Ошибка/таймаут → ''.
 function probeVersion(bin, args, re) {
   if (!bin) return '';
+  // Под elevated-токеном НЕ запускаем бинарь, который мог подменить medium-юзер (RCE):
+  // разрешаем admin-owned (путь в Program Files/System32 ИЛИ владелец файла = admin).
+  // Прочее → пустая версия (существование детектится отдельно; переустановка безопасна).
+  if (!winSafeToExec(bin)) return '';
   try {
-    const out = execFileSync(bin, args, {
+    const opts = {
       encoding: 'utf8', windowsHide: true, timeout: 6000, stdio: ['ignore', 'pipe', 'ignore']
-    });
+    };
+    // Windows: спавним с ДОВЕРЕННЫМ окружением (см. detectSpawnEnv) — унаследованный
+    // process.env под elevated-токеном нёс бы HKCU-переменные medium-юзера.
+    if (IS_WIN) opts.env = detectSpawnEnv();
+    const out = execFileSync(bin, args, opts);
     const m = String(out || '').match(re);
     if (m) return (m[1] || m[0]).trim();
     return out ? String(out).trim().split(/\r?\n/)[0] : '';
@@ -1468,6 +2205,7 @@ function xcodeCltPresent() {
 }
 
 function detectComponents() {
+  detResetCaches();   // свежий PATH и свежие owner-проверки на КАЖДЫЙ проход детекции
   const home = os.homedir();
   const claudeHome = path.join(home, '.claude');
   const out = {};
@@ -1556,10 +2294,26 @@ function detectComponents() {
     // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
     // пакеты через framework/uv-python без окон Apple).
     const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
-    if (py && !pyShim) {
+    // Windows: НЕ запускаем python под elevated-токеном, если он мог быть подменён medium-
+    // юзером (тот же RCE-вектор, что probeVersion; admin-owned — можно). Ложно-негатив
+    // безвреден (pydeps.ps1 идемпотентен).
+    const pyExecSafe = py && !pyShim && winSafeToExec(py);
+    if (pyExecSafe) {
       try {
-        execFileSync(py, ['-c', 'import PIL, requests'],
-          { windowsHide: true, timeout: 6000, stdio: 'ignore' });
+        // `-E` + доверенный env: без них PYTHONPATH/PYTHONSTARTUP из HKCU\Environment
+        // (пишет medium-малварь того же юзера) заставили бы интерпретатор ИМПОРТИРОВАТЬ
+        // чужой PIL.py ПОД АДМИНОМ — авто-детекция на старте, до единого клика.
+        // `-I` НЕ используем: он выключает и user site-packages, а pydeps ставит пакеты
+        // через `pip install --user` → детекция стала бы вечно ложно-отрицательной.
+        // cwd в System32: для `-c` sys.path[0]='' = ТЕКУЩИЙ каталог, а portable-exe
+        // запускается из user-writable Downloads (подмена модуля по cwd).
+        const opts = { windowsHide: true, timeout: 6000, stdio: 'ignore' };
+        const pyArgs = IS_WIN ? ['-E', '-c', 'import PIL, requests'] : ['-c', 'import PIL, requests'];
+        if (IS_WIN) {
+          opts.env = detectSpawnEnv();
+          opts.cwd = path.join(remoteFetch.winSystemRoot() || 'C:\\Windows', 'System32');
+        }
+        execFileSync(py, pyArgs, opts);
         found = true;
       } catch (e) { found = false; }
     }
@@ -1707,12 +2461,202 @@ ipcMain.handle('detect-state', () => {
 //   { ok:true, found:true, type, data } | { ok:true, found:false } | { ok:false, error }.
 // «Нет значения» НЕ смешивается с ошибкой запуска/кода/парсера — любая ошибка у
 // вызывающих обязана дать failed (fail-closed), а НЕ absent.
-function regQueryValueTyped(keyPath, valueName) {
+// Соответствие .NET RegistryValueKind ↔ имена типов reg.exe (их ждут вызывающие).
+const REG_KIND_TO_TYPE = {
+  String: 'REG_SZ', ExpandString: 'REG_EXPAND_SZ', DWord: 'REG_DWORD',
+  QWord: 'REG_QWORD', Binary: 'REG_BINARY', MultiString: 'REG_MULTI_SZ',
+};
+const REG_TYPE_TO_KIND = {
+  REG_SZ: 'String', REG_EXPAND_SZ: 'ExpandString', REG_DWORD: 'DWord',
+  REG_QWORD: 'QWord', REG_BINARY: 'Binary', REG_MULTI_SZ: 'MultiString',
+};
+
+// Запустить однострочник PowerShell и получить ответ в виде base64-строки.
+// ЗАЧЕМ base64: reg.exe и сам powershell 5.1 печатают в кодировке КОНСОЛИ
+// (CP866 на русской Windows), Node читает трубу как UTF-8 — кириллица
+// превращается в «?». Для PATH это было разрушительно: чужая запись
+// «C:\Программы\Python\Scripts» после нашей перезаписи навсегда становилась
+// «C:\?????\Python\Scripts». base64 — чистый ASCII, кодировка перестаёт
+// участвовать в разговоре вообще.
+function winPsPayload(inline) {
+  const ps = remoteFetch.winPowershellPath();
+  if (!ps) return { ok: false, error: 'PowerShell не найден в System32 (fail-closed)' };
+  const r = spawnSync(ps, ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-NonInteractive', '-Command', inline],
+    { encoding: 'ascii', windowsHide: true, timeout: 20000, env: detectSpawnEnv() });
+  if (r.error) return { ok: false, error: String(r.error.message || r.error) };
+  const out = String(r.stdout || '');
+  const m = out.match(/HMREG1:([A-Za-z0-9+/=]+)/);
+  if (!m) return { ok: false, error: 'реестр: пустой ответ (код ' + r.status + ')' };
+  try {
+    return { ok: true, payload: JSON.parse(Buffer.from(m[1], 'base64').toString('utf8')) };
+  } catch (e) {
+    return { ok: false, error: 'реестр: неразбираемый ответ' };
+  }
+}
+
+// Разбор пути вида «HKCU\Environment» / «HKLM\SYSTEM\...». Запись разрешена
+// ТОЛЬКО в HKCU (см. regWriteValueTyped/regDeleteValueTyped — там hive обязан
+// быть CurrentUser); HKLM читается для машинного PATH.
+// Неизвестный куст или пустой подключ → null (вызывающий отказывает, fail-closed).
+function regPathParts(keyPath) {
+  const m = String(keyPath || '').match(/^(HKCU|HKEY_CURRENT_USER|HKLM|HKEY_LOCAL_MACHINE)\\(.+)$/i);
+  if (!m) return null;
+  const hive = /^HKLM|^HKEY_LOCAL_MACHINE/i.test(m[1]) ? 'LocalMachine' : 'CurrentUser';
+  return { hive, sub: m[2] };
+}
+
+// Только HKCU — для операций записи/удаления.
+function hkcuSubkeyOf(keyPath) {
+  const m = String(keyPath || '').match(/^(?:HKCU|HKEY_CURRENT_USER)\\(.+)$/i);
+  return m ? m[1] : '';
+}
+
+// Кодовая страница консоли — ОДИН раз за сессию (chcp.com ~30 мс).
+// reg.exe печатает в ней, и именно её отсутствие делало кириллицу мусором.
+let _consoleCp;
+function consoleCodePage() {
+  if (_consoleCp !== undefined) return _consoleCp;
+  _consoleCp = 0;
+  try {
+    const chcp = remoteFetch.sysBin('chcp.com');
+    if (chcp) {
+      const r = spawnSync(chcp, [], { encoding: 'latin1', windowsHide: true, timeout: 8000 });
+      const m = String(r.stdout || '').match(/(\d{3,5})/);
+      if (m) _consoleCp = parseInt(m[1], 10) || 0;
+    }
+  } catch (e) { /* не определили — читаем медленным, но заведомо верным путём */ }
+  return _consoleCp;
+}
+
+let _cpDecoder;
+function cpDecoder() {
+  if (_cpDecoder !== undefined) return _cpDecoder;
+  _cpDecoder = null;
+  const cp = consoleCodePage();
+  if (!cp) return _cpDecoder;
+  for (const label of ['cp' + cp, 'ibm' + cp, 'windows-' + cp]) {
+    try { _cpDecoder = new TextDecoder(label); return _cpDecoder; } catch (e) { /* следующий */ }
+  }
+  return _cpDecoder;
+}
+
+// БЫСТРОЕ чтение через reg.exe (~30 мс против ~830 мс у .NET-пути: тот поднимает
+// целый powershell.exe на КАЖДОЕ значение и морозил главный процесс на секунды —
+// окно уходило в «не отвечает» на старте и после каждого удаления).
+// Корректность обеспечивает декодирование РЕАЛЬНОЙ кодовой страницей консоли:
+// беда была не в reg.exe, а в чтении его вывода как UTF-8.
+// Возвращает результат ТОЛЬКО когда он однозначен; во всех сомнительных случаях —
+// null, и решает медленный, но авторитетный .NET-путь (в т.ч. «значения нет»,
+// чтобы не зависеть от языка сообщений reg.exe).
+function regQueryFast(keyPath, valueName) {
+  const dec = cpDecoder();
+  if (!dec) return null;
   const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { ok: false, error: 'reg.exe не найден в System32 (fail-closed)' };
-  const r = spawnSync(reg, ['query', keyPath, '/v', valueName],
-    { encoding: 'utf8', windowsHide: true, timeout: 20000 });
-  return uninstallExec.classifyRegQuery(valueName, r);
+  if (!reg) return null;
+  let r;
+  try {
+    r = spawnSync(reg, ['query', keyPath, '/v', valueName],
+      { windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) { return null; }
+  if (!r || r.error || r.status !== 0) return null;   // «нет значения» и ошибки — .NET-пути
+  let out;
+  try { out = dec.decode(r.stdout || Buffer.alloc(0)); } catch (e) { return null; }
+  const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp('^\\s*' + esc + '\\s{2,}(REG_[A-Z_]+)\\s{2,}(.*)$', 'im').exec(out);
+  if (!m) return null;
+  const type = m[1];
+  // Многострочные и двоичные типы через текстовый вывод разбирать нельзя.
+  if (type !== 'REG_SZ' && type !== 'REG_EXPAND_SZ') return null;
+  const data = m[2].replace(/\s+$/, '');
+  // Символ замены = вывод декодировался неверно. Молчаливо принять такое нельзя:
+  // именно испорченное значение однажды затирало чужие записи PATH.
+  if (data.indexOf('�') >= 0) return null;
+  // И «?» — тоже потеря, только более коварная. reg.exe САМ подменяет им символы,
+  // непредставимые в кодовой странице консоли, ещё ДО того как мы что-то
+  // декодируем: на русской консоли «C:\Ωμέγα\bin» приезжает как «C:\?????\bin»,
+  // причём совершенно «чистой» строкой без единого признака порчи.
+  // Проверено запуском. В путях Windows «?» недопустим, так что ложных отказов
+  // почти не будет, а цена отказа — лишь уход на медленный .NET-путь, который
+  // читает верно.
+  if (data.indexOf('?') >= 0) return null;
+  return { ok: true, found: true, type, data };
+}
+
+function regQueryValueTyped(keyPath, valueName) {
+  const fast = IS_WIN ? regQueryFast(keyPath, valueName) : null;
+  if (fast) return fast;
+  return regQueryValueDotNet(keyPath, valueName);
+}
+
+// Авторитетное чтение через .NET: медленно, но без единой зависимости от кодовой
+// страницы и от языка системы. Сюда попадают «значения нет», ошибки и всё,
+// в чём быстрый путь не уверен.
+function regQueryValueDotNet(keyPath, valueName) {
+  const parts = regPathParts(keyPath);
+  if (!parts) return { ok: false, error: 'реестр: неподдерживаемый ключ (' + keyPath + ')' };
+  const sub = parts.sub;
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::" + parts.hive + ".OpenSubKey(" + q(sub) + ",$false);" +
+    "if ($null -eq $k) { $o=@{found=$false} } else {" +
+    "  $has=@($k.GetValueNames() | Where-Object { $_ -eq " + q(valueName) + " }).Count -gt 0;" +
+    "  if (-not $has) { $o=@{found=$false} } else {" +
+    // DoNotExpandEnvironmentNames: REG_EXPAND_SZ обязан прийти СЫРЫМ, иначе чужие
+    // %VAR% раскроются и мы запишем обратно уже развёрнутый мусор.
+    "    $v=$k.GetValue(" + q(valueName) + ",$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);" +
+    "    $o=@{found=$true; kind=$k.GetValueKind(" + q(valueName) + ").ToString(); data=[string]$v} } }" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  const p = r.payload || {};
+  if (p.error) return { ok: false, error: 'реестр: ' + p.error };
+  if (!p.found) return { ok: true, found: false };
+  const type = REG_KIND_TO_TYPE[p.kind] || p.kind;
+  return { ok: true, found: true, type, data: String(p.data == null ? '' : p.data) };
+}
+
+// Запись значения HKCU через .NET. Значение передаётся в base64 — иначе длинный
+// PATH с кириллицей и кавычками не пережил бы ни командную строку, ни CP866.
+function regWriteValueTyped(keyPath, valueName, data, type) {
+  const sub = hkcuSubkeyOf(keyPath);
+  if (!sub) return { ok: false, error: 'реестр: поддерживается только HKCU (' + keyPath + ')' };
+  const kind = REG_TYPE_TO_KIND[type];
+  if (!kind) return { ok: false, error: 'реестр: неизвестный тип значения ' + type };
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const b64 = Buffer.from(String(data), 'utf8').toString('base64');
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(" + q(sub) + ",$true);" +
+    "if ($null -eq $k) { throw 'нет ключа " + sub.replace(/'/g, '') + "' }" +
+    "$val=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + b64 + "'));" +
+    "$k.SetValue(" + q(valueName) + ",$val,[Microsoft.Win32.RegistryValueKind]::" + kind + ");" +
+    "$o=@{ok=$true}" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  if (r.payload && r.payload.error) return { ok: false, error: 'реестр: ' + r.payload.error };
+  return { ok: true };
+}
+
+// Удаление значения HKCU через .NET (та же причина — кодировка диагностики).
+function regDeleteValueTyped(keyPath, valueName) {
+  const sub = hkcuSubkeyOf(keyPath);
+  if (!sub) return { ok: false, error: 'реестр: поддерживается только HKCU (' + keyPath + ')' };
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(" + q(sub) + ",$true);" +
+    "if ($null -eq $k) { throw 'нет ключа' }" +
+    "$k.DeleteValue(" + q(valueName) + ",$false); $o=@{ok=$true}" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  if (r.payload && r.payload.error) return { ok: false, error: 'реестр: ' + r.payload.error };
+  return { ok: true };
 }
 
 // Разрешённые HKCU-ключи для удаления значений — ТОЛЬКО автозапуск Run.
@@ -1725,19 +2669,14 @@ function winRegDeleteValue(t) {
   if (!WIN_REG_ALLOWED_KEYS.has(String(t.key).toLowerCase())) {
     return { status: 'failed', message: 'ЗАЩИТА: ключ реестра вне аллоулиста: ' + t.key };
   }
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
   const keyPath = 'HKCU\\' + t.key;
   // P1-7: tri-state — ошибка чтения/парсинга ≠ «значения нет» (та давала бы absent
   // и ложный успех). Любая ошибка → failed.
   const q0 = regQueryValueTyped(keyPath, t.value);
-  if (!q0.ok) return { status: 'failed', message: 'reg query: ' + q0.error };
+  if (!q0.ok) return { status: 'failed', message: 'чтение реестра: ' + q0.error };
   if (!q0.found) return { status: 'absent', message: 'значения нет' };
-  try {
-    execFileSync(reg, ['delete', keyPath, '/v', t.value, '/f'], { windowsHide: true, stdio: 'ignore' });
-  } catch (e) {
-    return { status: 'failed', message: 'reg delete: ' + String((e && e.message) || e) };
-  }
+  const del = regDeleteValueTyped(keyPath, t.value);
+  if (!del.ok) return { status: 'failed', message: 'удаление значения: ' + del.error };
   const q1 = regQueryValueTyped(keyPath, t.value);
   if (!q1.ok) return { status: 'failed', message: 'верификация reg: ' + q1.error };
   if (q1.found) return { status: 'failed', message: 'значение реестра осталось' };
@@ -1763,24 +2702,25 @@ function winRemoveUserPathEntry(t, guardOpts) {
       return { status: 'failed', message: 'проверка каталога PATH-записи: ' + String((e && e.code) || e) };
     }
   }
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
   // P1-7: tri-state — ошибка чтения PATH ≠ «PATH нет» (иначе ложный absent).
   const cur = regQueryValueTyped('HKCU\\Environment', 'Path');
   if (!cur.ok) return { status: 'failed', message: 'чтение PATH: ' + cur.error };
   if (!cur.found) return { status: 'absent', message: 'пользовательского PATH нет' };
+  // Гейт на порчу: чужая запись важнее нашей. Если в прочитанном PATH есть
+  // символ замены U+FFFD или «?» там, где мы ждём путь, — значит значение
+  // приехало испорченным, и переписывать его НЕЛЬЗЯ ни при каких условиях:
+  // лучше оставить нашу лишнюю запись, чем стереть чужой кириллический путь.
+  if (/�/.test(cur.data)) {
+    return { status: 'failed', message: 'PATH прочитан с потерей символов — не переписываю (сохранность чужих записей важнее)' };
+  }
   const upd = uninstallExec.computeUserPathWithout(cur.data, dir);
   if (!upd.changed) return { status: 'absent', message: 'записи в PATH нет' };
-  try {
-    execFileSync(reg, ['add', 'HKCU\\Environment', '/v', 'Path', '/t', cur.type, '/d', upd.value, '/f'],
-      { windowsHide: true, stdio: 'ignore' });
-  } catch (e) {
-    return { status: 'failed', message: 'запись PATH: ' + String((e && e.message) || e) };
-  }
+  const w = regWriteValueTyped('HKCU\\Environment', 'Path', upd.value, cur.type);
+  if (!w.ok) return { status: 'failed', message: 'запись PATH: ' + w.error };
   const after = regQueryValueTyped('HKCU\\Environment', 'Path');
   if (!after.ok || !after.found || after.data !== upd.value) {
     // Верификация не сошлась — пробуем вернуть исходное значение (не теряем PATH).
-    try { execFileSync(reg, ['add', 'HKCU\\Environment', '/v', 'Path', '/t', cur.type, '/d', cur.data, '/f'], { windowsHide: true, stdio: 'ignore' }); } catch (e) { /* лучшее из возможного */ }
+    regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);
     return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — вернул исходный' };
   }
   return { status: 'removed', message: 'убрал «' + dir + '» из пользовательского PATH' };
@@ -2089,6 +3029,160 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   say('Деинсталляция «' + id + '» завершена.');
   logLine('=== uninstall done ===');
   return { id, ok: true, code: 0 };
+});
+
+// ---- macOS: САМОЛЕЧЕНИЕ карантина/транслокации --------------------------------
+//
+// Живой случай (двое на маке, кнопка «Установить» серая): человек сохранил образ НЕ в
+// «Загрузки», а на Рабочий стол. Инструкция предлагала выполнить команду с жёстко
+// вбитым ~/Downloads — она падала с «No such file», карантин не снимался, и человек
+// упирался в тупик, хотя всё было исправимо. Просить пользователя копировать команды в
+// Терминал вообще плохо: там ошибётся кто угодно.
+//
+// Установщик знает про себя больше, чем человек: где смонтирован образ, из какого файла
+// он смонтирован (hdiutil info) и что сам он запущен из карантинной копии. Значит может
+// починить сам: снять карантин с ОБРАЗА, отцепить ВСЕ его тома, открыть заново и
+// запуститься из свежего — уже без карантина, а значит без транслокации.
+//
+// Привилегии не нужны: на macOS установщик работает НЕ от администратора, а образ —
+// файл самого пользователя. Все вызовы идут execFile с массивом аргументов (без shell),
+// пути проверяются: только абсолютные, только под /Volumes или домашним каталогом,
+// только имя вида Hamidun-Setup-Mac*.dmg.
+function macFindOurDmg() {
+  const okDmg = (p) => {
+    try {
+      if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
+      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(path.basename(p))) return false;
+      return fs.statSync(p).isFile();
+    } catch (e) { return false; }
+  };
+  // 1) Самый точный источник: смонтированный образ знает свой файл.
+  try {
+    const out = execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8', timeout: 15000 });
+    for (const line of String(out).split(/\r?\n/)) {
+      const m = /^image-path\s*:\s*(.+)$/.exec(line.trim());
+      if (m && okDmg(m[1].trim())) return m[1].trim();
+    }
+  } catch (e) { /* образ мог быть уже отцеплен — идём дальше */ }
+  // 2) Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
+  //    Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
+  //    и плоский обход находил образ только если тот лежал ровно в корне. Глубину
+  //    ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
+  const home = os.homedir();
+  const SKIP = /^(Library|Applications|\.Trash|node_modules|\.git|Pictures|Music|Movies)$/i;
+  const found = [];
+  const walk = (d, depth) => {
+    if (depth < 0 || found.length >= 40) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name.startsWith('.') || SKIP.test(e.name)) continue;
+        walk(p, depth - 1);
+      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(e.name) && okDmg(p)) {
+        found.push(p);
+      }
+    }
+  };
+  for (const dir of ['Downloads', 'Desktop', 'Documents']) walk(path.join(home, dir), 2);
+  if (!found.length) walk(home, 1);          // корень профиля — без углубления
+  if (!found.length) return '';
+  // Самый свежий: человек мог скачать заново, и чинить надо именно новый образ.
+  found.sort((a, b) => {
+    try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch (e) { return 0; }
+  });
+  return found[0];
+}
+
+ipcMain.handle('mac-selfheal', async () => {
+  if (process.platform !== 'darwin') return { ok: false, error: 'not-darwin' };
+  const dmg = macFindOurDmg();
+  if (!dmg) return { ok: false, error: 'dmg-not-found' };
+  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» —
+  //    и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
+  //    «Готово», закрывали окно, и он получал ровно тот же заблокированный
+  //    установщик. Отсутствие исключения — не доказательство.
+  try {
+    execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', dmg],
+      { timeout: 20000, stdio: 'ignore' });
+  } catch (e) { /* атрибута могло и не быть — проверяем ниже */ }
+  let quarantined = false;
+  try {
+    // Код 0 = атрибут ЕСТЬ (значит снять не удалось), ненулевой = атрибута нет.
+    execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', dmg],
+      { timeout: 10000, stdio: 'ignore' });
+    quarantined = true;
+  } catch (e) { quarantined = false; }
+  if (quarantined) return { ok: false, error: 'quarantine-not-cleared', dmg };
+
+  // 2) Хвост операции выполняет ОТЦЕПЛЁННЫЙ помощник, переживающий наш выход.
+  //    Нельзя отцеплять том из процесса, который с этого тома и запущен: при
+  //    штатном сценарии (человек запустил приложение прямо из окна образа)
+  //    `hdiutil detach -force` выдёргивает backing store у собственного
+  //    исполняемого файла, и установщик умирает посреди «починки» — окно просто
+  //    исчезает, без свежего образа и без объяснений.
+  //    Помощник: ждёт нашего выхода → отцепляет ВСЕ тома Hamidun → открывает
+  //    образ → дожидается ПОЯВЛЕНИЯ тома → запускает приложение оттуда.
+  //    `open -n` обязателен: без него macOS просто активировала бы уже
+  //    запущенный экземпляр того же bundle id вместо запуска с нового тома.
+  const helper = [
+    'DMG="$1"; PID="$2"; ST="$3";',
+    // Ждём выхода установщика. Дождаться ОБЯЗАТЕЛЬНО: пока мы живы, наш замок
+    // единственного экземпляра не отпущен, и запущенный помощником свежий
+    // установщик просто закроется сам. Потолок щедрый — 120 с.
+    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
+    'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
+    // Монтируем САМИ и берём точку монтирования ИЗ ВЫВОДА. Раньше том искали
+    // перебором /Volumes/Hamidun*, полагаясь на то, что старые уже отцеплены.
+    // Но том держит Finder (человек как раз из окна образа и запускался), detach
+    // не проходит, macOS монтирует «Hamidun Setup 1» рядом — а перебор брал
+    // первый по алфавиту, то есть СТАРЫЙ, всё ещё карантинный том. Человек
+    // получал тот же экран блокировки и надпись «Готово». Свой mount-point
+    // такой ошибки не допускает: он заведомо от ЭТОГО монтирования.
+    'MP=$(/usr/bin/hdiutil attach -nobrowse "$DMG" 2>/dev/null | /usr/bin/sed -n "s|.*\\(/Volumes/.*\\)$|\\1|p" | /usr/bin/tail -1);',
+    'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
+    // open -n обязателен: без него macOS активировала бы уже запущенный
+    // экземпляр того же bundle id вместо запуска с нового тома.
+    'if /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf ok > "$ST"; exit 0; fi;',
+    'printf relaunch-failed > "$ST"; exit 1',
+  ].join(' ');
+  // Хлебная крошка: помощник работает уже после нашего выхода, и без неё любой
+  // его отказ был бы невидим — окно просто исчезало бы навсегда. Свежий
+  // экземпляр читает этот файл при старте и показывает, что пошло не так.
+  const statusFile = path.join(os.homedir(), 'Library', 'Application Support',
+    'HamidunSetup', 'selfheal.status');
+  try {
+    fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+    fs.writeFileSync(statusFile, 'started');
+  } catch (e) { /* без крошки починка всё равно поедет */ }
+  try {
+    // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
+    // в имени файла бывают пробелы и скобки («… (1).dmg»).
+    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile],
+      { detached: true, stdio: 'ignore' });
+    child.unref();
+  } catch (e) {
+    return { ok: false, error: 'helper-failed', dmg };
+  }
+  // ok здесь означает «карантин снят и починка ЗАПУЩЕНА», а не «всё готово»:
+  // остальное произойдёт уже после нашего выхода. Renderer обязан говорить
+  // человеку именно это, а не «открыл свежее окно образа».
+  return { ok: true, dmg, handoff: true };
+});
+
+// Что рассказал о себе прошлый прогон самолечения. Читаем при старте: если
+// починка провалилась уже после нашего выхода, человек обязан увидеть причину,
+// а не пустоту.
+ipcMain.handle('mac-selfheal-status', () => {
+  if (process.platform !== 'darwin') return { status: '' };
+  const p = path.join(os.homedir(), 'Library', 'Application Support',
+    'HamidunSetup', 'selfheal.status');
+  try {
+    const s = String(fs.readFileSync(p, 'utf8')).trim().slice(0, 40);
+    try { fs.rmSync(p, { force: true }); } catch (e) { /* прочитали — и хватит */ }
+    return { status: s };
+  } catch (e) { return { status: '' }; }
 });
 
 ipcMain.handle('quit', () => app.quit());

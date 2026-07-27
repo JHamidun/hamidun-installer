@@ -43,5 +43,18 @@
       : 'Бот-помощник: что дальше?';
   }
 
-  return { botStartPayload: botStartPayload, botUrl: botUrl, botButtonLabel: botButtonLabel };
+  // Процент общего прогресса прогона. Живёт здесь, а не в app.js, потому что это
+  // ЧИСТАЯ арифметика, которую надо проверять тестом напрямую (в app.js она была бы
+  // заперта внутри DOM-функции). Пустой набор компонентов не должен давать NaN.
+  function runProgressPct(done, total) {
+    var d = Number(done) || 0;
+    var n = Number(total) || 0;
+    if (n <= 0) return 0;
+    if (d < 0) d = 0;
+    if (d > n) d = n;
+    return Math.round((d / n) * 100);
+  }
+
+  return { botStartPayload: botStartPayload, botUrl: botUrl, botButtonLabel: botButtonLabel,
+    runProgressPct: runProgressPct };
 });

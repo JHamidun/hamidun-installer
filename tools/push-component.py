@@ -70,6 +70,59 @@ def platform_to_script(remote_id, platform):
     return f"scripts/windows/{remote_id}.ps1"
 
 
+def gated_files_map(zip_path: Path, platform):
+    """{базовое имя файла: sha256} для членов архива, которые ПРОВЕРЯЕТ второй гейт.
+
+    Второй гейт — вшитый vendor/checksums.json (Confirm-HmArtifact в install-скриптах,
+    ключ = БАЗОВОЕ имя файла). Его манифест уезжает в exe, а содержимое опубликованного
+    архива фиксируется здесь: пересобрал vendor и собрал lite без перепубликации — и у
+    пользователя докачка проходит, а установка падает с «файл подменён». Записываем
+    фактические sha, чтобы tools/build-lite.js мог сверить это ДО релиза.
+    """
+    chk_path = REPO_ROOT / "vendor" / "checksums.json"
+    if not chk_path.exists():
+        if platform in (None, "win32"):
+            raise SystemExit(
+                "[fail] нет vendor/checksums.json — не с чем сверять целостность публикуемого архива.\n"
+                "       Запусти `npm run fetch:vendor` (он генерит манифест) и повтори публикацию."
+            )
+        return {}
+    manifest = json.loads(chk_path.read_text(encoding="utf-8")).get("files", {})
+    # Манифест checksums.json описывает АРТЕФАКТЫ УСТАНОВЩИКА (vendor/apps/*, course/*,
+    # nomad-src) — их и проверяет Confirm-HmArtifact/verify_artifact по базовому имени.
+    # Контентные деревья ниже — это то, что ставится пользователю (конфиг-пак, npm-кэш,
+    # колёса); их файлы НИКОМУ не передаются в гейт, а совпадение базового имени там
+    # закономерно и безобидно: config-pack несёт свой canvas-fonts/JetBrainsMono-*.ttf,
+    # а манифест — совсем другой шрифт из vendor/apps для терминала. Без этого исключения
+    # сборка ложно падала бы «рассинхрон манифеста» на файле, который никто не верифицирует.
+    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/")
+    gated = {}
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            if info.filename.startswith(CONTENT_TREES):
+                continue
+            name = info.filename.rsplit("/", 1)[-1]
+            if name not in manifest:
+                continue
+            h = hashlib.sha256()
+            with z.open(info) as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            digest = h.hexdigest().lower()
+            prev = gated.get(name)
+            if prev and prev != digest:
+                # Рантайм-гейт ключуется базовым именем — два разных файла с одним именем
+                # в одном архиве сделали бы проверку недетерминированной.
+                raise SystemExit(
+                    f"[fail] в архиве два разных файла с именем «{name}» — второй гейт "
+                    f"(checksums.json) ключуется базовым именем и стал бы неоднозначным."
+                )
+            gated[name] = digest
+    return gated
+
+
 def snapshot_bytes(path: Path):
     """Снимок байтов архива ОДИН раз (в память) + его sha256/size. Дальше во ВСЕ
     зеркала и в реестр идут ИМЕННО эти байты — sha не может «разъехаться» с тем,
@@ -79,26 +132,53 @@ def snapshot_bytes(path: Path):
     return data, sha, len(data)
 
 
-def make_zip(src: Path) -> Path:
+def _zip_add(z, arcname, filepath):
+    """Детерминированная запись файла в zip: фиксированный mtime (1980-01-01) + права
+    0644. Байты архива воспроизводимы при идентичном содержимом → sha (content-addressed
+    ключ) стабилен между прогонами, перезалив того же контента идемпотентен (иначе mtime
+    исходников менял бы sha при байт-идентичном содержимом → объекты-сироты в S3)."""
+    zi = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
+    zi.compress_type = zipfile.ZIP_DEFLATED
+    zi.external_attr = 0o644 << 16
+    with open(filepath, "rb") as f:
+        z.writestr(zi, f.read())
+
+
+def make_zip(src: Path, zip_prefix: str = "") -> Path:
     """Возвращает путь к zip-архиву. Правила:
     - .zip файл -> используем как есть;
     - директория -> zip её содержимого (корень = содержимое папки);
     - .tar.gz/.tgz -> распаковываем и перепаковываем в zip;
     - любой иной файл -> zip с этим единственным файлом в корне.
+
+    zip_prefix (напр. "apps" или "npm-cache") — путь ВНУТРИ архива, под который
+    кладётся содержимое. Нужен, чтобы zip повторял vendor/-раскладку без копирования
+    в staging: git.ps1 читает HM_VENDOR/apps/git-setup.exe, значит объект git должен
+    содержать apps/git-setup.exe. remote-fetch распакует в staging=HM_VENDOR → 1:1.
     """
+    pref = zip_prefix.strip("/")
+    def arc(name):
+        return f"{pref}/{name}" if pref else name
+
     src = src.resolve()
-    if src.is_file() and src.suffix.lower() == ".zip":
+    if src.is_file() and src.suffix.lower() == ".zip" and not pref:
+        # Без префикса .zip уезжает как есть — его содержимое и есть содержимое артефакта.
         print(f"  вход уже zip — использую как есть: {src.name}")
         return src
+    # С префиксом .zip НЕ распаковываем: скрипт ждёт САМ файл по пути внутри vendor
+    # (macOS: vscode.sh читает $HM_VENDOR/apps/vscode.zip и распаковывает его сам).
+    # Поэтому кладём его в архив как обычный файл под нужным префиксом — ниже, в
+    # ветке bare-файла. Раньше здесь стоял отказ, из-за которого публикация vscode
+    # для darwin падала целиком.
 
     tmp = Path(tempfile.mkdtemp(prefix="pushcomp_")) / (src.stem.split(".")[0] + ".zip")
 
     if src.is_dir():
-        print(f"  упаковываю папку в zip: {src}")
+        print(f"  упаковываю папку в zip{(' под ' + pref + '/') if pref else ''}: {src}")
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             for p in sorted(src.rglob("*")):
                 if p.is_file():
-                    z.write(p, p.relative_to(src).as_posix())
+                    _zip_add(z, arc(p.relative_to(src).as_posix()), p)
         return tmp
 
     name = src.name.lower()
@@ -136,13 +216,13 @@ def make_zip(src: Path) -> Path:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
             for p in sorted(exdir.rglob("*")):
                 if p.is_file():
-                    z.write(p, p.relative_to(exdir).as_posix())
+                    _zip_add(z, arc(p.relative_to(exdir).as_posix()), p)
         return tmp
 
     # bare-файл (напр. одиночный бинарь)
-    print(f"  оборачиваю одиночный файл в zip: {src.name}")
+    print(f"  оборачиваю одиночный файл в zip{(' под ' + pref + '/') if pref else ''}: {src.name}")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(src, src.name)
+        _zip_add(z, arc(src.name), src)
     return tmp
 
 
@@ -231,11 +311,21 @@ def main():
     ap.add_argument("--platform", choices=["win32", "darwin", "linux"], default=None)
     ap.add_argument("--name", default=None)
     ap.add_argument("--dry-run", action="store_true", help="не заливать, только показать план")
+    ap.add_argument("--zip-prefix", default="", help="путь внутри zip под содержимое (напр. apps, npm-cache) — чтобы объект повторял vendor/-раскладку")
     args = ap.parse_args()
 
     src = Path(args.source)
     if not src.exists():
         print(f"ОШИБКА: источник не найден: {src}", file=sys.stderr)
+        sys.exit(1)
+
+    # Запись реестра всегда указывает на install-скрипт (main.js берёт его по id). Если
+    # скрипта нет — компонент упал бы у пользователя с «Script not found» после докачки
+    # сотен МБ. Проверяем ДО заливки: реестр не должен содержать недостижимых записей.
+    script_rel = platform_to_script(args.remoteId, args.platform or "win32")
+    if not (REPO_ROOT / script_rel).exists():
+        print(f"ОШИБКА: нет install-скрипта {script_rel} для «{args.remoteId}» — публиковать нечего "
+              f"(после докачки установщик не нашёл бы, что запускать).", file=sys.stderr)
         sys.exit(1)
 
     creds = load_creds()
@@ -248,7 +338,7 @@ def main():
 
     # 1. Упаковка в zip
     print(f"[1/5] Готовлю архив для «{args.remoteId}»…")
-    zip_path = make_zip(src)
+    zip_path = make_zip(src, args.zip_prefix)
 
     # 2. Снимок байтов ОДИН раз → sha256+size из НИХ (P1-3). Эти же байты уходят
     #    во все зеркала и в реестр — рассинхрон sha/контента исключён.
@@ -256,6 +346,11 @@ def main():
     data, sha, size = snapshot_bytes(zip_path)
     print(f"  sha256={sha}")
     print(f"  size={size} байт ({size/1024/1024:.2f} МБ)")
+    # sha файлов архива, которые потом проверит вшитый checksums.json (второй гейт) —
+    # чтобы build-lite мог поймать рассинхрон «архив опубликован / vendor пересобран».
+    gated = gated_files_map(zip_path, args.platform)
+    print(f"  файлов под вторым гейтом (checksums.json): {len(gated)}"
+          + (f" — {', '.join(sorted(gated))}" if gated else ""))
 
     # Ключ объекта CONTENT-ADDRESSED / IMMUTABLE: sha в имени (P1-2). Перезалив
     # того же контента идемпотентен; выпущенные установщики не ломаются.
@@ -279,16 +374,30 @@ def main():
 
     mirrors = [{"host": "regru", "url": regru_url}]
 
-    r2_up = s3_upload(creds, "R2", key, data) if (creds.get("R2_ACCESS_KEY") or creds.get("R2_S3_ACCESS_KEY")) else None
-    if r2_up:
-        r2_base = creds.get("R2_PUBLIC_BASE", "").rstrip("/")
-        r2_url = f"{r2_base}/{key}" if r2_base else r2_up
-        mirrors.append({"host": "r2", "url": r2_url})
-        print(f"  R2: {r2_url}")
+    # Второе зеркало — Yandex Cloud Object Storage (storage.yandexcloud.net,
+    # публично-читаемый бакет). Критично для РФ-аудитории: падение/троттлинг
+    # Reg.ru S3 не кладёт лёгкую редакцию — remote-fetch пробьёт второе зеркало.
+    # Загружаем ТЕ ЖЕ снятые байты (P1-3), ключ тот же content-addressed.
+    yc_url = None
+    if creds.get("YCLOUD_S3_ACCESS_KEY") and creds.get("YCLOUD_S3_BUCKET"):
+        print("  Заливаю в Yandex Cloud (2-е зеркало)…")
+        # Yandex НЕ фатален: любое исключение (EndpointConnectionError/SSL/таймаут —
+        # НЕ ClientError, s3_upload их не глотает) приравниваем к «зеркало пропущено»,
+        # иначе сбой 2-го зеркала уронил бы публикацию ПОСЛЕ успешного Reg.ru и компонент
+        # не попал бы в реестр. Первичное зеркало живо — публикуем с одним regru.
+        try:
+            yc_up = s3_upload(creds, "YCLOUD_S3", key, data)
+        except Exception as e:  # noqa: BLE001 — транспорт/ACL/креды
+            print(f"  [warn] Yandex Cloud upload исключение ({e!r}) — второе зеркало пропущено.")
+            yc_up = None
+        if yc_up:
+            yc_url = f"{creds['YCLOUD_S3_ENDPOINT'].rstrip('/')}/{creds['YCLOUD_S3_BUCKET']}/{key}"
+            mirrors.append({"host": "yandex", "url": yc_url})
+            print(f"  Yandex Cloud: {yc_url}")
+        else:
+            print("  [warn] Yandex Cloud upload не удался — второе зеркало пропущено.")
     else:
-        # R2 пока не подключён — плейсхолдер (remote-fetch его молча игнорирует).
-        mirrors.append({"host": "r2", "url": f"https://R2-PLACEHOLDER-NOT-CONFIGURED/{key}"})
-        print("  R2: не настроен — записан плейсхолдер (докачка его игнорирует).")
+        print("  Yandex Cloud: YCLOUD_S3_* креды не заданы — второе зеркало пропущено.")
 
     # 4. Проверка публичной анонимной доступности ПЕРЕД записью реестра (P2):
     #    установщик качает без кредов — приватный объект дал бы ему 403/mismatch.
@@ -299,7 +408,19 @@ def main():
               f"  Реестр НЕ обновлён (иначе установщик получил бы битую ссылку).\n"
               f"  Проверь public-read ACL бакета/объекта: {regru_url}", file=sys.stderr)
         sys.exit(4)
-    print("  Публичная загрузка OK (200, размер и sha совпали).")
+    print("  Reg.ru: публичная загрузка OK (200, размер и sha совпали).")
+
+    # Yandex-зеркало проверяем тоже; если оно не читается анонимно/не совпало —
+    # НЕ роняем публикацию (Reg.ru жив), а УБИРАЕМ битое зеркало из реестра, чтобы
+    # remote-fetch не пробовал мёртвый url. Реестр никогда не содержит битую ссылку.
+    if yc_url:
+        ok_yc, dyc = verify_public_get(yc_url, sha, size)
+        if ok_yc:
+            print("  Yandex Cloud: публичная загрузка OK (200, размер и sha совпали).")
+        else:
+            print(f"  [warn] Yandex-зеркало не прошло анонимную проверку ({dyc}) — "
+                  f"убираю его из реестра (остаётся только Reg.ru).")
+            mirrors[:] = [m for m in mirrors if m.get("host") != "yandex"]
 
     # 5. upsert реестра
     print("[5/5] Обновляю remote-components.json…")
@@ -310,7 +431,11 @@ def main():
         "sizeBytes": size,
         "sha256": sha,
         "mirrors": mirrors,
-        "installRelPath": platform_to_script(args.remoteId, args.platform or "win32"),
+        "installRelPath": script_rel,
+        # Build-time (рантайм его игнорирует): {имя файла: sha256} для членов архива,
+        # которые проверяет вшитый vendor/checksums.json. tools/build-lite.js сверяет
+        # это с манифестом, который уезжает в exe, и не даёт выпустить рассинхрон.
+        "gatedFiles": gated,
     }
     if args.platform:
         entry["platform"] = args.platform

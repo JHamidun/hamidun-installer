@@ -1,0 +1,371 @@
+name: E2E — чистая Windows / macOS (GUI, реальная докачка и установка)
+
+# Прогоняет НАСТОЯЩИЙ GUI установщика на ДЕВСТВЕННОЙ машине (runner windows-latest:
+# чистая ОС, ничего из нашего стека не установлено, процесс работает с правами
+# администратора — значит Admins-only staging докачки создаётся штатно).
+#
+# Сценарии (node test/e2e-gui.js <mode>):
+#   netfail   — зеркала подменены на мёртвый хост: UI обязан ЧЕСТНО показать обрыв
+#               сети и кнопку «Повторить», а не выдать провал за успех.
+#   ok        — реальная докачка компонента с живых S3-зеркал → установка → проверка
+#               результата в изолированном профиле.
+#   preserve  — установка поверх НЕПУСТОГО профиля: пользовательские файлы обязаны
+#               уцелеть (ничего не затёрто и не удалено).
+#   rerun     — повторный прогон по уже установленному: идемпотентность, никаких
+#               дублей и «установим ещё раз то же самое».
+#   uninstall — откат: после деинсталляции в профиле не остаётся следов.
+#   full      — ВСЕ компоненты разом (~1.4 ГБ докачки). Тяжёлый, поэтому вынесен
+#               в отдельный ручной джоб (workflow_dispatch → run_full=true).
+#
+# Изоляция: e2e-gui.js подменяет USERPROFILE/HOME/APPDATA/LOCALAPPDATA на временный
+# каталог — реальный ~/.claude и система не затрагиваются ни в одном сценарии.
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Компонент для E2E (config | git | node). Пусто = git для netfail/ok, config для preserve/rerun/uninstall'
+        required: false
+        default: ''
+      run_full:
+        description: 'Гонять тяжёлый сценарий full (~1.4 ГБ докачки, отдельный джоб)'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: ['e2e/**']
+
+jobs:
+  e2e:
+    name: Windows (lite) — netfail / ok / preserve / rerun / uninstall
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Проверка прав (E2E требует элевации для staging докачки)
+        shell: pwsh
+        run: |
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $p  = New-Object Security.Principal.WindowsPrincipal($id)
+          Write-Host "Пользователь: $($id.Name)"
+          Write-Host "IsAdmin: $($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+          if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Host "ВНИМАНИЕ: runner НЕ элевейтед — докачка упрётся в fail-closed staging."
+          }
+
+      # Сбой этого примитива в lite выглядит как «ни один компонент не скачался», и
+      # диагностировать его через полный GUI-прогон = десятки минут на попытку. Гейт
+      # стоит ПЕРВЫМ: проверяет ровно то, что раньше молча возвращало $null, и в том
+      # же integrity, в котором работает установщик.
+      # Именно Windows PowerShell 5.1 — та оболочка, в которой примитив работает в бою.
+      - name: Гейт — защищённый staging-каталог (elevated, PS 5.1)
+        shell: cmd
+        run: '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File test\staging-primitive.ps1'
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          Copy-Item test/fixtures/checksums-e2e.json vendor/checksums.json -Force
+          $cfg = Get-Content config.json -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName edition -NotePropertyValue 'lite' -Force
+          $cfg | Add-Member -NotePropertyName offlineEdition -NotePropertyValue $false -Force
+          ($cfg | ConvertTo-Json -Depth 12) | Set-Content config.json -Encoding UTF8
+          Write-Host "config.json: edition=lite, offlineEdition=false; vendor/checksums.json на месте"
+
+      # Информативно: часть guard-тестов деинсталляции падает на раннере из-за
+      # 8.3/junction-путей TEMP (канонический путь не совпадает), а де-элевация
+      # требует интерактивной сессии. Это среда, а не регрессия — не блокируем
+      # GUI-E2E, но результат виден в логе.
+      - name: Юнит-тесты (информативно)
+        continue-on-error: true
+        run: npm test
+
+      # --- Сценарии. continue-on-error НЕ ставим НИГДЕ: падение сценария обязано
+      # ронять джоб, иначе тест перестаёт быть тестом. ---
+
+      - name: E2E netfail — обрыв сети (мёртвые зеркала → error-net + «Повторить»)
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'git' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '420000'
+        run: node test/e2e-gui.js netfail
+
+      # netfail портит remote-components.json прямо в дереве (source-mode). Все
+      # последующие сценарии качают по-настоящему — реестр обязан быть чистым.
+      # if: always() — чтобы отравленный реестр не уезжал дальше даже при падении
+      # netfail (сам джоб при этом всё равно останется красным).
+      - name: Восстановить реестр зеркал после netfail
+        if: always()
+        shell: pwsh
+        run: |
+          git checkout -- remote-components.json
+          git diff --exit-code -- remote-components.json
+          if ($LASTEXITCODE -ne 0) { throw 'remote-components.json НЕ восстановлен после netfail' }
+          if (Select-String -Path remote-components.json -Pattern 'hm-e2e-dead-host' -Quiet) {
+            throw 'в реестре остались мёртвые зеркала netfail — дальнейшие сценарии качали бы в никуда'
+          }
+          Write-Host 'реестр зеркал чист — можно гонять сценарии с реальной докачкой'
+
+      # Раннеры GitHub стоят в США, а оба наших зеркала — российские. Если докачка
+      # недоступна из этой сети, сценарии с реальным стримингом бессмысленны — надо
+      # знать это явно, а не гадать по «Сеть оборвалась».
+      - name: Диагностика зеркал (доступны ли S3 из сети раннера)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $urls = @(
+            'https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Windows.exe',
+            'https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding/downloads/Hamidun-Setup-Windows.exe'
+          )
+          foreach ($u in $urls) {
+            $t0 = Get-Date
+            try {
+              $r = Invoke-WebRequest -Uri $u -Method Head -TimeoutSec 30 -UseBasicParsing
+              $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+              Write-Host ("OK   {0} → HTTP {1}, {2} байт, {3} мс" -f $u, $r.StatusCode, $r.Headers['Content-Length'], $ms)
+            } catch {
+              $ms = [int]((Get-Date) - $t0).TotalMilliseconds
+              Write-Host ("FAIL {0} → {1} ({2} мс)" -f $u, $_.Exception.Message, $ms)
+            }
+          }
+
+      # Компонент — config, а НЕ git: на раннере Git уже стоит (2.55), скрипт это видит и
+      # выходит без докачки, из-за чего проверка «докачка стартовала» падала на исправном
+      # продукте. Конфиг-пак качается всегда и проверяется по факту: >100 скиллов в
+      # изолированном ~/.claude. Это сильнее, чем «в UI мелькнул прогресс».
+      - name: E2E ok — реальная докачка с S3 и установка
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js ok
+
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: E2E uninstall — откат не оставляет следов в профиле
+        shell: pwsh
+        env:
+          HM_E2E_COMPONENT: ${{ github.event.inputs.component || 'config' }}
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js uninstall
+
+      - name: Артефакты (скриншоты GUI всех сценариев)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-win
+          path: release/e2e-*.png
+          if-no-files-found: ignore
+
+  # Полный прогон «все компоненты сразу» (~1.4 ГБ докачки, десятки минут).
+  # Ручной/опциональный: только workflow_dispatch с run_full=true, чтобы обычный
+  # прогон на push оставался быстрым.
+  e2e-full:
+    name: Windows (lite) — full (все компоненты, ~1.4 ГБ) [ручной]
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_full == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force vendor | Out-Null
+          Copy-Item test/fixtures/checksums-e2e.json vendor/checksums.json -Force
+          $cfg = Get-Content config.json -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName edition -NotePropertyValue 'lite' -Force
+          $cfg | Add-Member -NotePropertyName offlineEdition -NotePropertyValue $false -Force
+          ($cfg | ConvertTo-Json -Depth 12) | Set-Content config.json -Encoding UTF8
+          Write-Host "config.json: edition=lite, offlineEdition=false; vendor/checksums.json на месте"
+
+      - name: E2E full — все компоненты разом
+        shell: pwsh
+        env:
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '5400000'
+        run: node test/e2e-gui.js full
+
+      - name: Артефакты (скриншоты GUI)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-win-full
+          path: release/e2e-*.png
+          if-no-files-found: ignore
+
+  # macOS: dmg — ОФЛАЙН-издание (весь vendor вшит), поэтому здесь проверяется
+  # bundled-путь: конфиг берётся из вшитого config-pack, а не стримится. Докачки
+  # нет вообще → HM_E2E_EXPECT_LITE=0 (превью «Скачается» показывать нечего).
+  # config-pack публичный → клонируем его в vendor на чистой машине.
+  e2e-mac:
+    name: macOS (offline) — ok / preserve / rerun / uninstall
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовка офлайн-издания (vendor/config-pack из публичного репо)
+        run: |
+          mkdir -p vendor
+          cp test/fixtures/checksums-e2e.json vendor/checksums.json
+          git clone --depth 1 https://github.com/JHamidun/claude-code-config-pack vendor/config-pack
+          rm -rf vendor/config-pack/.git
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('config.json','utf8'));c.offlineEdition=true;delete c.edition;fs.writeFileSync('config.json',JSON.stringify(c,null,2));console.log('offlineEdition=true')"
+          echo "скиллов в vendor/config-pack: $(ls vendor/config-pack/.claude/skills | wc -l)"
+
+      - name: Юнит-тесты (информативно)
+        continue-on-error: true
+        run: npm test
+
+      # continue-on-error НЕ ставим: падение сценария обязано ронять джоб.
+
+      - name: E2E ok — GUI на чистом macOS (bundled-конфиг → изолированный ~/.claude)
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js ok
+
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: E2E uninstall — откат не оставляет следов в профиле
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '0'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js uninstall
+
+      - name: Артефакты (скриншоты GUI всех сценариев)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-mac
+          path: release/e2e-*.png
+          if-no-files-found: ignore
+
+  # ── macOS, ЛЁГКОЕ издание: РЕАЛЬНАЯ докачка с S3 ────────────────────────────
+  #
+  # Джоб выше гоняет ОФЛАЙН-издание: оно ставит из вшитого vendor и сеть не трогает,
+  # то есть про стриминг на macOS не доказывает НИЧЕГО. Ровно эта дыра на Windows
+  # обернулась тем, что лёгкая версия не качала ни одного компонента, а сбой был виден
+  # только на чистой машине. Пока этот джоб не зелёный, лёгкую версию для macOS нельзя
+  # ставить дефолтной ссылкой.
+  e2e-mac-lite:
+    name: macOS (lite) — реальная докачка с S3
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
+        run: |
+          mkdir -p vendor
+          cp test/fixtures/checksums-e2e.json vendor/checksums.json
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('config.json','utf8'));c.edition='lite';c.offlineEdition=false;fs.writeFileSync('config.json',JSON.stringify(c,null,2));console.log('edition=lite')"
+          node -e "const r=require('./remote-components.json');const n=Object.values(r.components||r).filter(Boolean).length;console.log('записей в реестре докачки:',n)"
+
+      - name: Юнит-тесты (информативно)
+        continue-on-error: true
+        run: npm test
+
+      # Раннеры GitHub стоят в США, оба зеркала — российские. Если S3 из этой сети
+      # недоступен, надо знать это явно, а не гадать по «Сеть оборвалась».
+      - name: Диагностика зеркал (доступны ли S3 из сети раннера)
+        continue-on-error: true
+        run: |
+          for u in \
+            "https://s3.regru.cloud/hamidun-academy-materials/vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg" \
+            "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding/downloads/Hamidun-Setup-Windows.exe" ; do
+            code=$(curl -so /dev/null -w '%{http_code}' --max-time 30 -r 0-0 "$u" || echo "нет ответа")
+            echo "$code  $u"
+          done
+
+      # config качается ВСЕГДА (в lite он не вшит) и проверяется по факту: >100 скиллов
+      # в изолированном профиле. Это сильнее, чем «в UI мелькнул прогресс».
+      - name: E2E ok — реальная докачка с S3 и установка
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js ok
+
+      - name: E2E preserve — установка поверх непустого профиля (файлы юзера целы)
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js preserve
+
+      - name: E2E rerun — повторная установка идемпотентна
+        env:
+          HM_E2E_COMPONENT: 'config'
+          HM_E2E_EXPECT_LITE: '1'
+          HM_E2E_TIMEOUT: '900000'
+        run: node test/e2e-gui.js rerun
+
+      - name: Артефакты (скриншоты GUI)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-mac-lite
+          path: release/e2e-*.png
+          if-no-files-found: ignore

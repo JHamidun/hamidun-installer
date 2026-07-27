@@ -122,10 +122,13 @@ install_ext "$CODE_CLI" "openai.chatgpt" "$CODEX_VSIX" && EXT_OK_CODEX=1
 
 [ "$EXT_OK_CLAUDE" -eq 1 ] && echo "OK: панель Claude Code в VS Code установлена."
 [ "$EXT_OK_CODEX" -eq 1 ] && echo "OK: Codex (openai.chatgpt) в VS Code установлен."
-# P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
-if [ "$EXT_OK_CLAUDE" -eq 1 ] && [ "$EXT_OK_CODEX" -eq 1 ]; then exit 0; fi
-missing=""
-[ "$EXT_OK_CLAUDE" -eq 1 ] || missing="Claude Code (anthropic.claude-code)"
-[ "$EXT_OK_CODEX" -eq 1 ]  || missing="${missing:+$missing, }Codex (openai.chatgpt)"
-echo "Не установились расширения: $missing. Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
+# Успех (exit 0) — по ОБЯЗАТЕЛЬНОМУ расширению Claude. Codex ОПЦИОНАЛЕН: сборка его не
+# гейтит (chatgpt-*.vsix не входит в completeness-проверку fetch-vendor-mac.sh, «поставится
+# онлайн»), verify.sh его не проверяет — значит его отсутствие НЕ должно красить компонент
+# и утаскивать в dep-skip зависимый «Расширение». Пишем честное предупреждение.
+if [ "$EXT_OK_CODEX" -ne 1 ]; then
+  echo "ПРЕДУПРЕЖДЕНИЕ: Codex (openai.chatgpt) не установился — это опциональная панель. Поставить позже: VS Code -> Extensions -> 'ChatGPT - Codex' -> Install."
+fi
+if [ "$EXT_OK_CLAUDE" -eq 1 ]; then exit 0; fi
+echo "Не установилось расширение Claude Code (anthropic.claude-code). Открой VS Code -> Extensions -> найди по имени -> Install. Claude Code также работает в терминале командой 'claude'."
 exit 1

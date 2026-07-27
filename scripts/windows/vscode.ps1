@@ -17,10 +17,18 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'Microsoft VS Code\bin')
     }
     if ($env:LOCALAPPDATA) { $parts += (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\bin') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
+
+# Временные копии vsix и их уборка объявлены ДО первого exit: в PowerShell функция
+# должна существовать к моменту вызова, иначе ранний выход упадёт «команда не найдена».
+$script:VsixTemps = @()
+# Копии vsix (до 80 МБ каждая) не должны оставаться в %TEMP%.
+function Remove-HmVsixTemps {
+    foreach ($f in $script:VsixTemps) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    $script:VsixTemps = @()
+}
 
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -52,6 +60,7 @@ if ($present) {
     # Офлайн-инсталлятор не вшит И VS Code не установлен — как скрепка (mascot): грациозный
     # пропуск (exit 120). Всё остальное работает; VS Code можно поставить позже.
     Write-Host "VS Code не вошёл в эту сборку и не установлен — пропускаю. Остальное работает без него (поставь VS Code позже с code.visualstudio.com)."
+    Remove-HmVsixTemps
     exit 120
 } elseif ($DRY) {
     Write-Host "  [dry-run] WOULD: SHA-256 vscode-setup.exe, тихая установка /VERYSILENT /NORESTART /MERGETASKS=!runcode,addtopath, PATH, затем расширения anthropic.claude-code + openai.chatgpt"
@@ -110,13 +119,32 @@ function Get-VsCodeCli {
 # module-hijack), integrity-check обёртки (fail-closed при не-medium). Дот-сорсится выше.
 
 # Вшитый .vsix (офлайн). vsix исполняется как код внутри VS Code -> целостность ДО установки (fail-closed).
+
 function Get-Vsix($name) {
-    if ($env:HM_VENDOR) {
-        $p = Join-Path $env:HM_VENDOR ('apps\' + $name)
-        if (Test-Path $p) { if (-not $DRY) { Confirm-HmArtifact $p }; return $p }
+    if (-not $env:HM_VENDOR) { return '' }
+    $p = Join-Path $env:HM_VENDOR ('apps\' + $name)
+    if (-not (Test-Path $p)) { return '' }
+    if ($DRY) { return $p }
+    Confirm-HmArtifact $p
+    # Расширения ставятся ДЕ-ЭЛЕВИРОВАННО (CLI редактора работает от пользователя), а в
+    # лёгком издании vsix лежит в СКАЧАННОМ паке, распакованном в admins-only каталог
+    # (%ProgramData%\HmDeElev-*, DACL {SYSTEM, Administrators} без ACE пользователя).
+    # Medium-процесс такой файл ПРОЧИТАТЬ НЕ МОЖЕТ — офлайн-установка панели срывалась бы
+    # и молча уходила в Marketplace, а без интернета не ставилась бы вовсе.
+    # Кладём ПРОВЕРЕННУЮ копию туда, где у пользователя есть доступ. Эскалации нет: vsix
+    # и так исполняется редактором при MEDIUM, а целостность подтверждена выше под админом.
+    try {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-vsix-' + [guid]::NewGuid().ToString('N') + '.vsix')
+        Copy-Item -LiteralPath $p -Destination $tmp -Force -ErrorAction Stop
+        $null = [System.IO.File]::OpenRead($tmp).Close()   # копия ДЕЙСТВИТЕЛЬНО читается
+        $script:VsixTemps += $tmp
+        return $tmp
+    } catch {
+        Write-Host "  Не удалось подготовить читаемую копию $name ($($_.Exception.Message)) — останется путь Marketplace."
+        return ''
     }
-    return ''
 }
+
 
 $script:DeElevFailed = $false
 
@@ -158,13 +186,20 @@ function Install-ExtSafe($cli, $extId, $vsix) {
         return $false
     }
     if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте."; return $true }
-    if ($vsix) {
+    # Ретрай через Marketplace — ТОЛЬКО когда первая задача ДОКАЗАННО завершилась (Gate='medium').
+    # При Gate='unknown' (родитель не дождался Last Result) установка, возможно, ещё идёт:
+    # вторая задача пошла бы поверх неё в тот же ~/.vscode/extensions (конкурентная запись).
+    if ($vsix -and $r.Gate -eq 'medium') {
         Write-Host "  ${extId}: vsix не подтвердился — пробую Marketplace..."
         $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
         if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
         if (Confirm-ExtInstalled $extId $dirs) { Write-Host "  ${extId}: на месте (Marketplace)."; return $true }
     }
-    Write-Host "  ${extId}: не подтвердилось."
+    if ($r.Gate -eq 'unknown') {
+        Write-Host "  ${extId}: установка пока не отчиталась (возможно, ещё идёт в фоне) — второй запуск НЕ делаю, проверь панель Extensions позже."
+    } else {
+        Write-Host "  ${extId}: не подтвердилось."
+    }
     return $false
 }
 
@@ -173,27 +208,47 @@ function Install-ExtSafe($cli, $extId, $vsix) {
 $codeCli = Get-VsCodeCli
 if (-not $codeCli) { $codeCli = Find-CodeCli }
 
-if (-not $codeCli -and -not $DRY) {
-    Write-Host "CLI VS Code (code.cmd) не найден — расширения не поставить автоматически. Открой VS Code, панель Extensions -> найди 'Claude Code' и 'ChatGPT - Codex' -> Install."
+# Весь блок расширений — в try/finally: копии vsix (их создаёт Get-Vsix, до 80 МБ каждая)
+# убираются на ЛЮБОМ выходе — exit 0/1 И необработанное исключение. Раньше уборка стояла
+# «руками перед каждым exit», и самый частый выход — оба расширения встали -> exit 0 —
+# оказался пропущен: КАЖДЫЙ успешный прогон (включая повторный, когда ничего не ставится)
+# оставлял ~82 МБ мусора в %TEMP%. В PowerShell exit внутри try исполняет finally,
+# поэтому уборка гарантирована на всех путях разом, а не перечислением.
+try {
+    if (-not $codeCli -and -not $DRY) {
+        Write-Host "CLI VS Code (code.cmd) не найден — расширения не поставить автоматически. Открой VS Code, панель Extensions -> найди 'Claude Code' и 'ChatGPT - Codex' -> Install."
+        exit 1
+    }
+
+    $claudeVsix = Get-Vsix 'claude-code.vsix'
+    $codexVsix  = Get-Vsix 'chatgpt.vsix'
+    $okClaude = Install-ExtSafe $codeCli 'anthropic.claude-code' $claudeVsix
+    $okCodex  = Install-ExtSafe $codeCli 'openai.chatgpt' $codexVsix
+
+    if ($okClaude) { Write-Host "OK: панель Claude Code в VS Code установлена." }
+    if ($okCodex)  { Write-Host "OK: Codex (openai.chatgpt) в VS Code установлен." }
+
+    # P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
+    if ($okClaude -and $okCodex) { exit 0 }
+    # ИСКЛЮЧЕНИЕ: Codex-vsix (chatgpt.vsix) намеренно НЕ вшит в эту сборку (лимит makensis 2 ГБ —
+    # package.json build.win.extraResources исключает apps/chatgpt.vsix). Тогда единственный путь —
+    # Marketplace, а он требует интернета: на офлайн-машине компонент проваливался ВСЕГДА, хотя
+    # VS Code и ОБЯЗАТЕЛЬНАЯ панель Claude вставали нормально. Codex здесь ОПЦИОНАЛЕН: предупреждаем
+    # и завершаемся успехом. Если vsix в сборке ЕСТЬ и просто не встал — строгое поведение сохраняется.
+    if ($okClaude -and -not $okCodex -and -not $codexVsix) {
+        Write-Host "Codex (openai.chatgpt) не вошёл в эту сборку и ставится только из Marketplace (нужен интернет) — пропускаю."
+        Write-Host "  VS Code и панель Claude Code установлены. Codex поставишь позже: VS Code -> Extensions -> 'ChatGPT - Codex' -> Install."
+        exit 0
+    }
+    $missing = @()
+    if (-not $okClaude) { $missing += 'Claude Code (anthropic.claude-code)' }
+    if (-not $okCodex)  { $missing += 'Codex (openai.chatgpt)' }
+    if ($script:DeElevFailed) {
+        Write-Host "Не удалось безопасно доставить расширения (де-элевация недоступна): $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install."
+    } else {
+        Write-Host "Не установились расширения: $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
+    }
     exit 1
+} finally {
+    Remove-HmVsixTemps
 }
-
-$claudeVsix = Get-Vsix 'claude-code.vsix'
-$codexVsix  = Get-Vsix 'chatgpt.vsix'
-$okClaude = Install-ExtSafe $codeCli 'anthropic.claude-code' $claudeVsix
-$okCodex  = Install-ExtSafe $codeCli 'openai.chatgpt' $codexVsix
-
-if ($okClaude) { Write-Host "OK: панель Claude Code в VS Code установлена." }
-if ($okCodex)  { Write-Host "OK: Codex (openai.chatgpt) в VS Code установлен." }
-
-# P1: успех (exit 0) ТОЛЬКО когда встали ОБА расширения. Иначе называем отсутствующее.
-if ($okClaude -and $okCodex) { exit 0 }
-$missing = @()
-if (-not $okClaude) { $missing += 'Claude Code (anthropic.claude-code)' }
-if (-not $okCodex)  { $missing += 'Codex (openai.chatgpt)' }
-if ($script:DeElevFailed) {
-    Write-Host "Не удалось безопасно доставить расширения (де-элевация недоступна): $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install."
-} else {
-    Write-Host "Не установились расширения: $($missing -join ', '). Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'."
-}
-exit 1

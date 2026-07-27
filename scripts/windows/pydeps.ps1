@@ -21,7 +21,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
@@ -88,17 +87,20 @@ if (-not $py) {
                 if (Test-Path -LiteralPath $pyDl) {
                     # Гейт подписи ДО запуска (fail-closed) — зеркало пина PSF Team ID в macos/pydeps.sh:
                     # elevated-запуск неподтверждённого exe недопустим даже из secure-cache.
-                    $sig = Get-AuthenticodeSignature -LiteralPath $pyDl
-                    if ($sig -and $sig.Status -eq 'Valid' -and $sig.SignerCertificate -and "$($sig.SignerCertificate.Subject)" -match 'Python Software Foundation') {
+                    # Одного Status='Valid' МАЛО: цепочку строит ПОЛЬЗОВАТЕЛЬСКИЙ chain-engine, и
+                    # корень из HKCU\...\SystemCertificates\Root (пишется medium-малварью того же
+                    # юзера БЕЗ UAC) тоже дал бы 'Valid'. Требуем корень в LocalMachine\Root + EKU
+                    # Code Signing (Test-HmTrustedSigner), СОХРАНЯЯ прежний пин издателя PSF.
+                    $why = Test-HmTrustedSigner -Path $pyDl -ExpectedSubjectMatch 'Python Software Foundation'
+                    if (-not $why) {
                         Start-Process -FilePath $pyDl -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1' -WorkingDirectory $cache -Wait
                         Update-Path; $py = Get-Py
                     } else {
-                        $st = if ($sig) { $sig.Status } else { 'нет подписи' }
-                        Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика python.org не подтвердилась ($st) — НЕ запускаю (fail-closed)."
+                        Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика python.org не подтвердилась ($why) — НЕ запускаю (fail-closed)."
                     }
                 }
                 # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
-                try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                Remove-HmSecureStagingDir -Path $cache
             } else {
                 Write-Host "  Не удалось создать защищённый кэш для скачивания — пропускаю онлайн-фолбэк Python."
             }
@@ -108,12 +110,35 @@ if (-not $py) {
 if ($DRY -and -not $py) { Write-Host "[dry-run] Python: install-ветка выбрана, без изменений."; exit 0 }
 if (-not $py) { Write-Host "Python не найден и не установился — пропускаю зависимости."; exit 1 }
 
-if ($env:HM_BUNDLED_CONFIG -and (Test-Path (Join-Path $env:HM_BUNDLED_CONFIG 'requirements.txt'))) {
-    $req = Join-Path $env:HM_BUNDLED_CONFIG 'requirements.txt'
-} else {
-    $req = Join-Path $env:USERPROFILE '.hamidun-setup\config-repo\requirements.txt'
+# Список пакетов ищем в НЕСКОЛЬКИХ местах. В лёгком (lite) издании pydeps — remote-компонент,
+# и HM_BUNDLED_CONFIG указывает на staging САМОГО pydeps, где config-pack нет (он приезжает в
+# staging компонента config) — из-за этого шаг падал ВСЕГДА. Порядок кандидатов: сначала
+# admin-owned источники (staging/вшитый vendor), и только потом легаси user-writable клон конфига.
+$reqCands = New-Object System.Collections.Generic.List[string]
+if ($env:HM_BUNDLED_CONFIG) { $reqCands.Add((Join-Path $env:HM_BUNDLED_CONFIG 'requirements.txt')) }
+if ($env:HM_VENDOR)         { $reqCands.Add((Join-Path $env:HM_VENDOR 'config-pack\requirements.txt')) }
+if ($env:HM_VENDOR_BUNDLED) { $reqCands.Add((Join-Path $env:HM_VENDOR_BUNDLED 'config-pack\requirements.txt')) }
+# Вшитый vendor рядом со скриптами (<resources>\scripts\windows -> <resources>\vendor):
+# в упакованном приложении это Program Files (admin-owned), в lite там лежит vendor-lite.
+try {
+    $bundledVendorGuess = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor'
+    $reqCands.Add((Join-Path $bundledVendorGuess 'config-pack\requirements.txt'))
+} catch { }
+# Легаси: клон конфига с GitHub (user-writable — поэтому ПОСЛЕДНИЙ, не основной источник).
+$reqCands.Add((Join-Path $env:USERPROFILE '.hamidun-setup\config-repo\requirements.txt'))
+$req = ''
+foreach ($cand in $reqCands) {
+    if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) { $req = $cand; break }
 }
-if (-not (Test-Path $req)) { Write-Host "requirements.txt не найден ($req) — сначала установите конфиг."; exit 1 }
+if (-not $req) {
+    # Списка пакетов нет НЕ по вине пользователя (он не входит в эту сборку/редакцию) — это наша
+    # ошибка упаковки. Красный крест здесь вводит в заблуждение: Python уже установлен и работает.
+    # Честный graceful skip (120): main не пишет маркер установки, пользователь видит «пропущено».
+    Write-Host "Список Python-пакетов (requirements.txt) не входит в эту сборку — пропускаю установку библиотек."
+    Write-Host "  Проверенные пути: $($reqCands -join '; ')"
+    Write-Host "  Python установлен и работает; библиотеки можно доставить позже, повторив этот компонент в обновлённой сборке."
+    exit 120
+}
 
 Write-Host "Использую Python: $py"
 $wheels = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'pywheels' } else { '' }

@@ -17,13 +17,14 @@
 
 2. Открой Терминал: нажми Cmd + Пробел, набери «Терминал», Enter.
 
-3. Вставь ОДНОЙ строкой (снимет карантин, ЗАКРОЕТ старый образ и откроет
-   свежий) и нажми Enter:
+3. Вставь ОДНОЙ строкой (сама найдёт образ, снимет карантин, ЗАКРОЕТ старые
+   окна образа и откроет свежее) и нажми Enter:
 
-   xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg
+   DMG=$(find ~ -maxdepth 4 -iname "Hamidun-Setup-Mac*.dmg" 2>/dev/null | head -1); echo "Нашёл: $DMG"; for v in /Volumes/Hamidun*; do hdiutil detach "$v" -force 2>/dev/null; done; xattr -dr com.apple.quarantine "$DMG"; open "$DMG"
 
    (Если про xattr ответит «No such xattr» — карантина уже нет, это нормально:
-   команда всё равно перемонтирует образ и откроет свежее окно.)
+   команда всё равно перемонтирует образ и откроет свежее окно.
+   Если после «Нашёл:» пусто — образа на маке нет, скачай заново.)
 
 4. В открывшемся СВЕЖЕМ окне DMG запусти «Hamidun Setup» ДВОЙНЫМ КЛИКОМ
    ПРЯМО В ЭТОМ ОКНЕ. Кнопка «Установить» станет активной.

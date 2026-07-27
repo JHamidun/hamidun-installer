@@ -86,8 +86,13 @@ else
   EXT="${HM_CLAUDE_EXT_ID:-anthropic.claude-code}"
   EXT_LC="$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')"
   EXT_OK=0
+  # Редактор бывает и в ~/Applications (user-install без админа) — иначе «CHECK fail
+  # Расширение» при реально установленном расширении. Порядок «сначала /Applications»
+  # сохраняет прежнее поведение на обычных машинах.
   for CLI in "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" \
-             "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
+             "$HOME/Applications/Cursor.app/Contents/Resources/app/bin/cursor" \
+             "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+             "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
     [ -x "$CLI" ] || continue
     if "$CLI" --list-extensions 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -Fx "$EXT_LC" >/dev/null; then
       echo "  расширение найдено через: $CLI"

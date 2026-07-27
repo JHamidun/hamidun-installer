@@ -156,6 +156,33 @@ function Test-ClaudeDesktopInstalled {
     return $false
 }
 
+# --- Вердикт «установлено?» — по ФАКТИЧЕСКОМУ результату, не по гонке с установщиком. ---
+# Пойманный дефект: снятый -Wait (убран нарочно — он ждёт всё ДЕРЕВО потомков, а приложение
+# живёт в трее => вечное зависание) превратил ожидание в гонку: фиксированный опрос 90 с
+# выносил «не подтвердилось», пока установщик ЕЩЁ РАБОТАЛ. Правила этой функции:
+#   • пока процесс установщика ЖИВ — ждём (маркер может появиться в любой момент);
+#   • после его выхода Squirrel докручивает асинхронно — даём грейс $GraceSec;
+#   • бесконечного ожидания НЕТ: жёсткий потолок $CapSec. Смотрим ТОЛЬКО на сам процесс
+#     ($Proc.HasExited), а не на дерево потомков — трей приложения нас не держит.
+# Возвращает $true, если установка подтверждена маркером (Test-ClaudeDesktopInstalled).
+function Wait-HmClaudeDesktopVerdict {
+    param($Proc, [int]$CapSec = 300, [int]$GraceSec = 90)
+    $deadline  = (Get-Date).AddSeconds($CapSec)
+    $graceLeft = $GraceSec
+    while ((Get-Date) -lt $deadline) {
+        if (Test-ClaudeDesktopInstalled) { return $true }
+        $exited = $true
+        try { if ($Proc) { $exited = $Proc.HasExited } } catch { }
+        if ($exited) {
+            if ($graceLeft -le 0) { return $false }
+            $graceLeft--
+        }
+        Start-Sleep -Seconds 1
+    }
+    # Потолок исчерпан (установщик так и не вышел) — последний взгляд на маркер.
+    return (Test-ClaudeDesktopInstalled)
+}
+
 if (Test-ClaudeDesktopInstalled) {
     Write-Host "Claude Desktop уже установлен — пропускаю (ничего не скачиваю)."
     exit 0
@@ -224,19 +251,27 @@ try {
     Write-Host "Подпись подтверждена: цепочка к машинному корню + O='$PUBLISHER_O' + Code Signing EKU. Запускаю проверенный установщик из защищённого кэша..."
 
     # --- 4. ЗАПУСК проверенного установщика ИЗ ЗАЩИЩЁННОГО КЭША (CWD = кэш, анти DLL-planting) ---
+    # БЕЗ -Wait. Ключевое: -Wait ждёт не процесс, а ВСЁ ДЕРЕВО потомков. Установщик
+    # Claude Desktop — Squirrel: он докручивает установку асинхронно И САМ ЗАПУСКАЕТ
+    # приложение, а Claude на Windows при закрытии окна уходит в трей и продолжает жить.
+    # То есть шаг ждал бы до тех пор, пока человек не выгрузит программу из трея —
+    # практически вечно, с бесконечным спиннером и без единого объяснения.
+    # Ровно этот баг уже был пойман и починен для Cursor (cursor.ps1) — здесь тот же
+    # рецепт: -PassThru нужен только чтобы прибрать Admins-only кэш после реального
+    # выхода установщика, а факт установки подтверждает опрос Test-ClaudeDesktopInstalled.
+    $cdProc = $null
     try {
-        Start-Process -FilePath $installer -WorkingDirectory $cache -Wait -ErrorAction Stop
+        $cdProc = Start-Process -FilePath $installer -WorkingDirectory $cache -PassThru -ErrorAction Stop
     } catch {
         Write-Host "Установщик Claude Desktop не запустился ($($_.Exception.Message)) — пропускаю."
         exit 120
     }
 
-    # Ждём появления приложения (Squirrel докручивает установку асинхронно).
-    $installed = $false
-    for ($i = 0; $i -lt 90; $i++) {
-        if (Test-ClaudeDesktopInstalled) { $installed = $true; break }
-        Start-Sleep -Seconds 1
-    }
+    # Вердикт — по ФАКТУ (Wait-HmClaudeDesktopVerdict): ждём, пока установщик работает
+    # (потолок 300 с, НЕ бесконечно), после его выхода даём Squirrel 90 с докрутить
+    # асинхронную часть. Раньше здесь был фиксированный опрос 90 с, оторванный от процесса:
+    # медленный (но живой) установщик получал «не подтвердилось» ДО своего завершения.
+    $installed = Wait-HmClaudeDesktopVerdict -Proc $cdProc -CapSec 300 -GraceSec 90
     if ($installed) {
         Write-Host "OK: Claude Desktop установлен."
         # Квитанция владения (для справки; авто-удаление чужого приложения НЕ делаем).
@@ -244,11 +279,22 @@ try {
         if (Test-Path -LiteralPath $appDir) { Write-Host "HM-RECEIPT path $appDir" }
         $rc = 0
     } else {
-        Write-Host "Установщик Claude Desktop отработал, но приложение не подтвердилось за 90 с — возможно, оно ещё докручивает установку. Проверь меню «Пуск»; при необходимости поставь заново с claude.com/download."
+        $stillRunning = $false
+        try { $stillRunning = ($cdProc -and -not $cdProc.HasExited) } catch { }
+        if ($stillRunning) {
+            Write-Host "Установщик Claude Desktop не завершился за 300 с и приложение не подтвердилось — успех НЕ рапортую. Дождись окончания установщика и проверь меню «Пуск»; при необходимости поставь заново с claude.com/download."
+        } else {
+            Write-Host "Установщик Claude Desktop завершился, но приложение не подтвердилось за 90 с после его выхода. Проверь меню «Пуск»; при необходимости поставь заново с claude.com/download."
+        }
         $rc = 120
     }
 } finally {
-    # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
-    if ($cache) { try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+    # Кэш чистим ПОСЛЕ реального выхода установщика: пока его образ залочен, Remove-Item
+    # тихо не срабатывает и каталог в ProgramData остаётся навсегда (owner=Administrators,
+    # человеку он недоступен). Ждём ОГРАНИЧЕННО — вечное ожидание мы как раз и убираем.
+    if ($cdProc) {
+        try { $cdProc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue } catch { }
+    }
+    if ($cache) { Remove-HmSecureStagingDir -Path $cache }
 }
 exit $rc

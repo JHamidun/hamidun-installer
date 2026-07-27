@@ -16,6 +16,32 @@ function Get-HmFileSha256 {
     return ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
 }
 
+# Детерминированный SHA-256 ДЕРЕВА каталога (nomad-src: pyproject.toml/любой .py мог быть
+# подменён medium-малварью того же юзера до `uv tool install` под АДМИНОМ). Рецепт:
+# относительные пути (сорт ORDINAL, locale-независимо) + per-file SHA-256 → хеш конкатенации.
+# ОБЯЗАН совпадать между tools/fetch-vendor.ps1 (пишет манифест) и scripts/windows/_verify.ps1
+# (верифицирует). Self-contained (не зависит от Get-HmFileSha256).
+function Get-HmTreeSha256 {
+    param([string]$Root)
+    $root = (Resolve-Path -LiteralPath $Root).Path
+    $lines = New-Object System.Collections.Generic.List[string]
+    $sha1 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {
+            $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
+            $fs = [IO.File]::OpenRead($_.FullName)
+            try { $fh = $sha1.ComputeHash($fs) } finally { $fs.Dispose() }
+            $lines.Add($rel + ':' + (([BitConverter]::ToString($fh) -replace '-', '').ToLower()))
+        }
+    } finally { $sha1.Dispose() }
+    $arr = $lines.ToArray()
+    [System.Array]::Sort($arr, [System.StringComparer]::Ordinal)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($arr -join "`n") + "`n")
+    $sha2 = [System.Security.Cryptography.SHA256]::Create()
+    try { $hb = $sha2.ComputeHash($bytes) } finally { $sha2.Dispose() }
+    return ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
+}
+
 # Достаёт { sha256, bytes } для имени файла из checksums.json (regex, без ConvertFrom-Json).
 function Get-HmChecksumEntry {
     param([string]$ChkPath, [string]$Name)

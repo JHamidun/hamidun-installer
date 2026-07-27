@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /* Pre-flight tests — pure logic + data integrity. Run: node test/run-tests.js */
 const assert = require('assert');
 const fs = require('fs');
@@ -21,14 +21,50 @@ const SKILLS_CANDS = [
 ];
 const SKILLS_DIR = SKILLS_CANDS.find((p) => { try { return fs.existsSync(p); } catch (e) { return false; } }) || SKILLS_CANDS[0];
 
-let pass = 0, fail = 0;
+// «A идёт РАНЬШЕ B» — с обязательной проверкой, что оба вообще есть.
+//
+// Голое `hay.indexOf(a) < hay.indexOf(b)` — ПУСТАЯ проверка: если A пропал, indexOf даёт
+// -1, а -1 меньше любого индекса, и тест остаётся зелёным на ИСЧЕЗНУВШЕЙ защите. Так и
+// было: гейт сверки SHA-256 дерева nomad заменили на `if false` — все тесты прошли.
+// Большинство таких сравнений стерегут проверки подписи и целостности, то есть ровно то,
+// что молча пропадать не должно.
+function assertOrder(hay, first, second, msg) {
+  const i = hay.indexOf(first);
+  const j = hay.indexOf(second);
+  assert(i !== -1, (msg || 'порядок') + ': пропало «' + String(first).slice(0, 70) + '»');
+  assert(j !== -1, (msg || 'порядок') + ': пропало «' + String(second).slice(0, 70) + '»');
+  assert(i < j, msg || 'нарушен порядок');
+}
+
+// Async-колбэк в СИНХРОННОМ ok() — мнимый страж: галочка печатается не дожидаясь
+// результата, процесс успевает выйти, и провал не всплывает НИКОГДА. Такой тест уже
+// сторожил главный фикс дня (закрытый stdin) и был зелёным при нарочно сломанном
+// ожидании. Ловим это на входе: async идёт только в okAsync.
+let pass = 0, fail = 0, skipped = 0;
+// ЧЕСТНЫЙ пропуск: тест, который не может выполниться в этой среде (не та ОС,
+// занят живой Cursor, чужие задачи в планировщике), НЕ печатает ✅ — иначе он
+// «зелёный», хотя не стерёг НИЧЕГО. SKIP() бросает помеченную ошибку, ok/okAsync
+// показывают её как ⏭ и считают отдельно от pass/fail.
+const HM_SKIP = Symbol('hm-skip');
+function SKIP(reason) { const e = new Error(reason || 'пропуск'); e[HM_SKIP] = true; throw e; }
 function ok(name, fn) {
+  if (fn && fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    console.log('  ❌ ' + name + '  -> async-тест передан в синхронный ok(): используй okAsync + await');
+    fail++;
+    return;
+  }
   try { fn(); console.log('  ✅ ' + name); pass++; }
-  catch (e) { console.log('  ❌ ' + name + '  -> ' + e.message); fail++; }
+  catch (e) {
+    if (e && e[HM_SKIP]) { console.log('  ⏭  ' + name + '  -> ПРОПУЩЕН: ' + e.message); skipped++; return; }
+    console.log('  ❌ ' + name + '  -> ' + e.message); fail++;
+  }
 }
 async function okAsync(name, fn) {
   try { await fn(); console.log('  ✅ ' + name); pass++; }
-  catch (e) { console.log('  ❌ ' + name + '  -> ' + e.message); fail++; }
+  catch (e) {
+    if (e && e[HM_SKIP]) { console.log('  ⏭  ' + name + '  -> ПРОПУЩЕН: ' + e.message); skipped++; return; }
+    console.log('  ❌ ' + name + '  -> ' + e.message); fail++;
+  }
 }
 
 // Build byId from components.
@@ -43,7 +79,7 @@ ok('installOrder: deps before dependents (all selected)', () => {
   const order = HMDeps.installOrder(selected, byId);
   Object.keys(byId).forEach((id) => {
     (byId[id].requires || []).forEach((r) => {
-      assert(order.indexOf(r) < order.indexOf(id), `${r} must come before ${id}`);
+      assertOrder(order, r, id, `${r} must come before ${id}`);
     });
   });
 });
@@ -239,6 +275,19 @@ ok('offline: uv вшит — НЕ remote-компонент (нет remote:true/
   const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
   assert(rf.pickEntry(remoteReg, 'uv', 'win32'), 'запись uv/win32 в реестре осталась (спящий фолбэк)');
 });
+// Lite-издание: main авто-выводит remote по реестру (id==remoteId), кроме bundled-only.
+// Проверяем ДАННЫЕ, на которые опирается loadRemoteMaps (isLiteEdition-ветка): тяжёлые
+// компоненты имеют запись в реестре, uv остаётся вшитым, безартефактные — не remote.
+ok('lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only', () => {
+  const regIds = new Set((remoteReg.components || []).map((e) => e.remoteId));
+  ['git', 'node', 'vscode', 'cursor', 'claude', 'extension', 'config', 'pydeps', 'nomad', 'mascot'].forEach((id) => {
+    assert(byId[id], `компонент ${id} существует`);
+    assert(regIds.has(id), `lite: ${id} обязан иметь запись в реестре (id==remoteId) для авто-докачки`);
+  });
+  ['course', 'bridge', 'verify', 'claude-desktop', 'chatgpt-desktop'].forEach((id) => {
+    if (byId[id]) assert(!regIds.has(id), `${id} без vendor-артефакта не должен иметь remote-запись в реестре`);
+  });
+});
 
 console.log('== Round-3 fixes: winSystemRoot (#6), openStream redirect (#8), install-env (#4) ==');
 
@@ -329,8 +378,11 @@ ok('main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only
   const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const h = m.slice(m.indexOf("let remoteCache = ''"), m.indexOf('remoteCache = fr.path'));
   assert(h.length > 0, 'нашли remote-ветку run-component');
-  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = winMakeSecureDir\(\)/.test(h),
-    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив)');
+  // await обязателен: примитив асинхронный (spawn, не spawnSync — иначе главный процесс
+  // морозится на каждом артефакте и окно перестаёт отвечать). Без await в cacheDir лёг бы
+  // Promise, и «защищённый каталог» молча превратился бы в мусорный путь.
+  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = await winMakeSecureDir\(\)/.test(h),
+    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив), вызов awaited');
   assert(/secureCacheDir = cacheDir/.test(h), 'win32: каталог помечен для очистки');
   assert(/cacheDir = remoteCacheDir\(declared\)/.test(h), 'POSIX: remoteCacheDir (uv неэлевейтед)');
   assert(/if \(remoteCache\) childEnv\.HM_REMOTE_CACHE = remoteCache/.test(m),
@@ -400,17 +452,40 @@ ok('#4 allowlist: NODE_OPTIONS/npm_config_*/GIT_EXEC_PATH/NODE_PATH/произв
   assert(Object.keys(out).length === 0, 'ни один не-HM_ ключ не должен пройти: ' + JSON.stringify(out));
 });
 
-// (2) легитимные HM_* сохраняются (happy-path не теряет нужные переменные).
-ok('#4 allowlist: HM_SELECTED и прочие HM_* сохраняются', () => {
+// (2) легитимные (реально эмитимые envForRun) HM_* сохраняются, а HM_*, которых
+// renderer НЕ эмитит никогда (HM_COURSE_TARGET — путь раскладки курса под админом),
+// отбрасываются: allowlist — ЯВНЫЙ СПИСОК КЛЮЧЕЙ, а не префикс-тест HM_.
+ok('#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен', () => {
   const out = installEnv.filterRendererEnv({
     HM_SELECTED: 'git,node,claude',
-    HM_COURSE_TARGET: 'C:\\Users\\x\\HamidunCourse',
+    HM_COURSE_TARGET: 'C:\\Program Files\\Common Files',
     HM_KEEP_SKILLS: 'a,b,c',
     HM_HOME: 'C:\\Users\\x'
   });
   assert(out.HM_SELECTED === 'git,node,claude', 'HM_SELECTED должен сохраниться');
-  assert(out.HM_COURSE_TARGET && out.HM_KEEP_SKILLS && out.HM_HOME, 'все HM_* должны сохраниться');
-  assert(Object.keys(out).length === 4, 'ровно 4 HM_* ключа: ' + JSON.stringify(out));
+  assert(out.HM_KEEP_SKILLS && out.HM_HOME, 'эмитимые HM_* должны сохраниться');
+  assert(!('HM_COURSE_TARGET' in out), 'HM_COURSE_TARGET (renderer его не эмитит) обязан быть отброшен');
+  assert(Object.keys(out).length === 3, 'ровно 3 разрешённых ключа: ' + JSON.stringify(out));
+});
+
+// (2b) allowlist ПОКРЫВАЕТ ровно то, что эмитит src/renderer/app.js → envForRun:
+// новый HM_-ключ в envForRun без строки в allowlist молча не доедет до скрипта.
+ok('#4 allowlist: список ключей совпадает с envForRun (app.js) — ни одного лишнего/недостающего', () => {
+  const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const envFn = appSrc.slice(appSrc.indexOf('function envForRun'), appSrc.indexOf('function appendLog'));
+  const emitted = Array.from(new Set((envFn.match(/HM_[A-Z0-9_]+/g) || [])));
+  assert(emitted.length >= 12, 'envForRun должен эмитить свои HM_-ключи, найдено: ' + emitted.length);
+  emitted.forEach((k) => {
+    assert(installEnv.isAllowedRendererEnvKey(k), k + ' эмитится envForRun, но не разрешён allowlist-ом');
+  });
+  const envSrc = fs.readFileSync(path.join(ROOT, 'src', 'install-env.js'), 'utf8');
+  const listed = (envSrc.match(/'hm_[a-z0-9_]+'/g) || []).map((s) => s.replace(/'/g, '').toUpperCase());
+  listed.forEach((k) => {
+    assert(emitted.indexOf(k) !== -1, k + ' разрешён allowlist-ом, но envForRun его не эмитит');
+  });
+  assert(!installEnv.isAllowedRendererEnvKey('HM_COURSE_TARGET'), 'HM_COURSE_TARGET не должен проходить');
+  assert(!installEnv.isAllowedRendererEnvKey('HM_NOMAD_CLOUD_BASEURL'), 'HM_NOMAD_CLOUD_BASEURL не должен проходить');
+  assert(!installEnv.isAllowedRendererEnvKey('HM_BRIDGE_TOKEN'), 'HM_BRIDGE_TOKEN не должен проходить');
 });
 
 // (3) HM_REMOTE_CACHE из renderer отбрасывается — его ставит ТОЛЬКО main из проверенного пути.
@@ -797,12 +872,17 @@ ok('claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпи�
   // НЕТ spoofable substring-пина издателя (старый '-notmatch $PUBLISHER' убран).
   assert(!/-notmatch \$PUBLISHER/.test(s) && !/\$subject -notmatch/.test(s), 'НЕТ подстрочного -notmatch пина издателя (spoofable)');
   // ГЕЙТ ПОРЯДКА: надёжная проверка ДО запуска ТОГО ЖЕ $installer (без ре-резолва).
-  assert(s.indexOf('Test-HmSignerTrusted -Path $installer') < s.indexOf('Start-Process -FilePath $installer'),
+  assertOrder(s, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
     'Test-HmSignerTrusted($installer) ИДЁТ ДО Start-Process $installer (проверяем тот же бинарь)');
   assert(/Start-Process -FilePath \$installer -WorkingDirectory \$cache/.test(s), 'запуск ИЗ защищённого кэша (CWD=кэш, run-from-protected)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
   assert(/Test-ClaudeDesktopInstalled/.test(s), 'идемпотентность: детект уже установленного');
-  assert(/Remove-Item -LiteralPath \$cache -Recurse -Force/.test(s), 'secure-cache чистится (finally)');
+  // Уборка идёт через общий помощник: голый Remove-Item сносил РАБОЧИЙ подкаталог
+  // «w», а внешний запертый HmDeElev-* оставался в ProgramData навсегда —
+  // пользователь стереть его не может. Помощник поднимается к внешнему каталогу
+  // и удаляет только имя строго вида HmDeElev-<32 hex> (иначе fail-closed no-op).
+  assert(/Remove-HmSecureStagingDir -Path \$cache/.test(s), 'secure-cache чистится общим помощником');
+  assert(!/Remove-Item -LiteralPath \$cache -Recurse/.test(s), 'голого сноса подкаталога не осталось');
   assert(/https:\/\/claude\.ai\/api\/desktop/.test(s), 'официальный Anthropic-endpoint');
 });
 
@@ -821,7 +901,7 @@ ok('chatgpt-desktop.ps1: winget PublisherId 8wekyb3d8bbwe + БЕЗ Get-Command f
   assert(/\^Microsoft\\\.DesktopAppInstaller_/.test(s), 'имя пакета якорится ПОЛНОСТЬЮ (^...$), не подстрока');
   assert(!/Get-Command winget/.test(s), 'УБРАН Get-Command winget fallback (user-writable alias)');
   assert(/--exact/.test(s), 'winget install --exact (нет подмены id по совпадению/монике)');
-  assert(s.indexOf('Test-HmSignerTrusted') < s.indexOf('& $winget install'),
+  assertOrder(s, 'Test-HmSignerTrusted', '& $winget install',
     'подпись winget.exe проверяется ДО его запуска');
   assert(/--source msstore/.test(s) && /9NT1R1C2HH7J/.test(s), 'ставит из Microsoft Store (Store ID)');
   assert(/Test-ChatGptDesktopInstalled/.test(s) && /Get-AppxPackage/.test(s), 'идемпотентность: детект MSIX-пакета');
@@ -839,7 +919,7 @@ ok('claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl 
   assert(/"\$SPCTL" --assess --type execute/.test(s), 'нотаризация ОБЯЗАТЕЛЬНА (spctl вызывается всегда)');
   assert(/Q6L2SF6YDW/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'пин Team ID Anthropic через нативный designated requirement (certificate leaf[subject.OU], не -dv парсинг)');
   assert(/com\.anthropic\.claudefordesktop/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
-  assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+  assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
     'подпись проверяется ДО установки (ditto)');
   assert(/curl -fsSL --proto '=https'/.test(s), 'скачивание только по HTTPS (без http-downgrade)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
@@ -860,7 +940,7 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
   assert(/com\.openai\.chat/.test(s) && /and identifier /.test(s), 'пин bundle identifier в designated requirement');
   assert(!/grep -q "Authority=Developer ID Application: \$PUBLISHER"/.test(s),
     'НЕТ authority-substring как контроля (любой Dev ID с «OpenAI» иначе прошёл бы)');
-  assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+  assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
     'подпись проверяется ДО установки (ditto)');
   assert(/curl -fsSL --proto '=https'/.test(s), 'скачивание только по HTTPS');
   assert(/persistent\.oaistatic\.com/.test(s), 'официальный OpenAI CDN (oaistatic.com)');
@@ -872,7 +952,7 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
 ok('grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи', () => {
   const cps = DT_CLAUDE_PS1();
   // Windows Claude: единственный запуск скачанного бинаря — Start-Process $installer, и он ПОСЛЕ надёжной проверки.
-  assert(cps.indexOf('Test-HmSignerTrusted -Path $installer') < cps.indexOf('Start-Process -FilePath $installer'),
+  assertOrder(cps, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
     'claude-desktop.ps1: установщик не запускается до надёжного гейта подписи');
   // Никаких -OutFile в TEMP.
   [DT_CLAUDE_PS1(), DT_CHATGPT_PS1()].forEach((s) => {
@@ -880,7 +960,7 @@ ok('grep-инвариант: нет download-в-user-writable + нет запу�
   });
   // mac: ditto (установка) — строго после verify_desktop_app.
   [DT_CLAUDE_SH(), DT_CHATGPT_SH()].forEach((s) => {
-    assert(s.indexOf('verify_desktop_app "$APP"') < s.indexOf('ditto "$APP" "$STAGING"'),
+    assertOrder(s, 'verify_desktop_app "$APP"', 'ditto "$APP" "$STAGING"',
       'mac: установка (ditto) только после проверки подписи+нотаризации');
   });
 });
@@ -1116,13 +1196,47 @@ ok('P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::Cre
   const iCreate = d.indexOf('[System.IO.Directory]::CreateDirectory($dir, $sd)');
   assert(iSetOwner !== -1 && iCreate !== -1 && iSetOwner < iCreate,
     '$sd.SetOwner($admins) стоит ДО CreateDirectory (владелец атомарен, не post-icacls)');
-  assert(!/&\s*\$Icacls\s+\$dir\s+'\/setowner'/.test(d) && !/setowner.*S-1-5-32-544/.test(d),
-    'НЕТ post-icacls /setowner (окно owner=user устранено)');
+  // Фолбэк icacls /setowner РАЗРЕШЁН, но ТОЛЬКО когда атомарный владелец не применился:
+  // Windows по умолчанию делает владельцем создателя, и без фолбэка докачка не работала
+  // ВООБЩЕ. Требуем: (1) фолбэк стоит ПОСЛЕ проверки текущего владельца, (2) финальный
+  // гейт владельца/ACE ниже остаётся обязательным (он и закрывает окно).
+  const iOwnerNow = d.indexOf("$ownerNow -ne 'S-1-5-32-544'");
+  const iFallbackOwner = d.search(/&\s*\$Icacls\s+\$dir\s+'\/setowner'/);
+  if (iFallbackOwner !== -1) {
+    assert(iOwnerNow !== -1 && iOwnerNow < iFallbackOwner,
+      'post-icacls /setowner вызывается ТОЛЬКО если владелец не Administrators (не безусловно)');
+    assert(/HMSECNOTE/.test(d), 'использование фолбэка ЗАМЕТНО в логе (HMSECNOTE), а не молча');
+  }
   assert(/\$owner -ne 'S-1-5-32-544'/.test(d),
     'verify владельца строго == Administrators, fail-closed если атомарный owner не применился');
   // fail-closed на уже существующий каталог (CREATE_NEW-семантика) и на reparse-point (junction).
-  assert(/if \(Test-Path -LiteralPath \$dir\) \{ return \$null \}/.test(d), 'fail на ERROR_ALREADY_EXISTS (каталог занят)');
-  assert(/ReparsePoint/.test(d) && /Remove-Item -LiteralPath \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
+  // Имя каталога занято → отказ (CREATE_NEW-семантика). Проверяем сам факт отказа,
+  // а не форму записи: раньше сюда была вбита однострочная версия, и добавление
+  // причины отказа в stderr красило тест без единого изменения поведения.
+  {
+    const i = d.indexOf('$dir = Join-Path $ProgramData');
+    assert(i > 0, 'формирование имени staging-каталога найдено');
+    const near = d.slice(i, i + 400);
+    assert(/Test-Path -LiteralPath \$dir/.test(near) && /return \$null/.test(near),
+      'fail на ERROR_ALREADY_EXISTS (каталог занят)');
+  }
+  // И причина отказа обязана уходить наружу: молчаливый $null давал человеку
+  // бесполезное «примитив не вернул путь» вместо настоящей причины.
+  {
+    const s = d.indexOf('function New-HmSecureStagingDir');
+    const e = d.indexOf('\nfunction ', s + 10);
+    const body = d.slice(s, e > 0 ? e : d.length);
+    const silent = body.split('\n').filter((line, idx, all) => {
+      if (!/return \$null/.test(line)) return false;
+      return !/HMSECFAIL/.test(all.slice(Math.max(0, idx - 4), idx + 1).join('\n'));
+    });
+    assert(silent.length === 0,
+      'ни одного молчаливого отказа примитива (без причины): ' + silent.length);
+  }
+  // Удаление при отказе идёт через Remove-HmSecureStagingDir (единый помощник с
+  // fail-closed гейтом по имени HmDeElev-<hex>) — голый Remove-Item по $dir из
+  // файла убран (он же был источником утечки внешнего каталога в finally).
+  assert(/ReparsePoint/.test(d) && /Remove-HmSecureStagingDir -Path \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
   // (b) main.js: winMakeSecureDir ДЕЛЕГИРУЕТ примитиву; НЕТ Node create-then-icacls.
   const m = EG_MAIN();
   const mi = m.indexOf('function winMakeSecureDir(');
@@ -1163,6 +1277,47 @@ if (powershellAvailable()) {
       assert(/BAD=0/.test(out), 'ни одного постороннего ACE (только SYSTEM/Administrators/владелец): ' + out);
       assert(/REPARSE=False/.test(out), 'реальная директория, не reparse-point: ' + out);
     }
+  });
+
+  // P0 (регресс, боевой сценарий): установщик, запущенный ИЗ ОКРУЖЕНИЯ PowerShell 7
+  // (терминал pwsh, CI-раннер), передавал дочернему powershell.exe 5.1 унаследованный
+  // PSModulePath, указывающий на ...\PowerShell\7\Modules — .NET Core-сборки, которые
+  // 5.1 загрузить не может. Autoload Microsoft.PowerShell.Security падал, примитив уходил
+  // в $null, и lite-издание не качало НИ ОДНОГО компонента («Нужны права администратора»
+  // при полностью корректных правах). Запуск из Explorer работал — поэтому ручные прогоны
+  // сбой не ловили. Защит теперь две, тест проверяет обе разом: ACL читаются/пишутся через
+  // .NET (модуль Security не нужен вовсе) И PSModulePath прибит литералом в main.js.
+  ok('P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)', () => {
+    const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const icacls = path.join(sysRoot, 'System32', 'icacls.exe');
+    const pd = process.env.ProgramData || path.join(path.parse(sysRoot).root, 'ProgramData');
+    const cmd =
+      "$ErrorActionPreference='Stop';" +
+      ". '" + dot + "';" +
+      "$d=New-HmSecureStagingDir -ProgramData '" + pd.replace(/'/g, "''") + "' -Icacls '" + icacls.replace(/'/g, "''") + "' -Elevated $false;" +
+      "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END');Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}";
+    // Ровно тот PSModulePath, который выставляет pwsh 7 — без путей 5.1.
+    const env = Object.assign({}, process.env, {
+      PSModulePath: path.join('C:', 'Program Files', 'PowerShell', '7', 'Modules')
+    });
+    const r = spawnSync(path.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+      { encoding: 'utf8', timeout: 60000, env });
+    const got = /HMSECDIR::([\s\S]+?)::END/.test(String(r.stdout || ''));
+    const err = String(r.stderr || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    assert(got, 'staging-каталог создан при PSModulePath от pwsh 7 (stderr: ' + err.slice(0, 200) + ')');
+    assert(!/Microsoft\.PowerShell\.Security/.test(err), 'нет зависимости от модуля Security: ' + err.slice(0, 200));
+  });
+
+  // Вторая половина той же защиты — на стороне вызывающего: main.js обязан прибивать
+  // PSModulePath литералом, а не полагаться на унаследованный.
+  ok('P0 регресс (main.js): winMakeSecureDir прибивает чистый PSModulePath из валидированного System32', () => {
+    const m = EG_MAIN();
+    const mi = m.indexOf('function winMakeSecureDir(');
+    const mh = m.slice(mi, mi + 3000);
+    assert(/\$env:PSModulePath='/.test(mh), 'инлайн задаёт $env:PSModulePath литералом');
+    assert(/WindowsPowerShell', 'v1\.0', 'Modules'/.test(mh), 'путь модулей строится из System32, а не из env');
   });
 }
 
@@ -1276,12 +1431,15 @@ ok('P1 (vscode.ps1): успех только при обоих расширен�
   assert(/\$missing/.test(s) && /anthropic\.claude-code/.test(s) && /openai\.chatgpt/.test(s), 'в ошибке называем отсутствующее расширение');
 });
 
-// P1 (vscode.sh): exit 0 ТОЛЬКО когда оба EXT_OK; отсутствующее названо.
-ok('P1 (vscode.sh): успех только при обоих EXT_OK (Claude И Codex); называет отсутствующее', () => {
+// vscode.sh: exit 0 по ОБЯЗАТЕЛЬНОМУ Claude; Codex опционален (сборка его не гейтит,
+// verify.sh не проверяет) → его отсутствие = предупреждение, а не красный компонент.
+ok('vscode.sh: успех по обязательному Claude; отсутствие опционального Codex — предупреждение, не exit 1', () => {
   const s = EG_SH();
-  assert(/if \[ "\$EXT_OK_CLAUDE" -eq 1 \] && \[ "\$EXT_OK_CODEX" -eq 1 \]; then exit 0; fi/.test(s), 'exit 0 требует оба EXT_OK==1');
-  assert(!/\[ "\$EXT_OK_CLAUDE" -eq 1 \] && exit 0/.test(s), 'старое поведение (успех по одному Claude) убрано');
-  assert(/missing=/.test(s), 'формируем список отсутствующих расширений для сообщения');
+  assert(/if \[ "\$EXT_OK_CLAUDE" -eq 1 \]; then exit 0; fi/.test(s), 'exit 0 требует установленный anthropic.claude-code');
+  assert(!/\[ "\$EXT_OK_CLAUDE" -eq 1 \] && \[ "\$EXT_OK_CODEX" -eq 1 \]; then exit 0; fi/.test(s), 'Codex больше НЕ гейтит успех');
+  const warn = s.slice(s.indexOf('if [ "$EXT_OK_CODEX" -ne 1 ]'));
+  assert(/ПРЕДУПРЕЖДЕНИЕ[^\n]*openai\.chatgpt/.test(warn), 'отсутствие Codex — именованное предупреждение');
+  assert(/Не установилось расширение Claude Code \(anthropic\.claude-code\)/.test(s), 'exit 1 называет именно обязательное расширение');
 });
 
 // P1 (main.js): «vscode» установлен ТОЛЬКО при приложении И ОБОИХ расширениях (иначе Codex доставляется).
@@ -1772,6 +1930,13 @@ ok('config.ps1: add-missing = robocopy /XC /XN /XO; repair = robocopy без /XC
     'repair: robocopy БЕЗ /XC — наши базовые перезаписываются, /XF/XD исключают пользовательское; /XJ не сквозь junction');
   assert(/\$mergeXD = @\(\$excludeDirs\) \+ @\('skills'\)/.test(s),
     'skills — reparse point → исключается из merge (/XD skills), robocopy не пишет сквозь junction');
+  // Правило «не писать сквозь reparse» — для ВСЕХ детей ~/.claude (agents/rules/tools/…),
+  // не только skills: junction на git-репо юзера иначе затирался бы в repair.
+  assert(/\$mergeXD = @\(\$excludeDirs\) \+ \$reparseKids/.test(s), 'ВСЕ reparse-дети ~/.claude исключаются из merge');
+  const kidScan = s.slice(s.indexOf('$reparseKids = @()'), s.indexOf('$skillsSkipped = $false'));
+  assert(/Get-ChildItem -Force -LiteralPath \$claudeHome -ErrorAction Stop/.test(kidScan), 'reparse-дети перечисляются fail-closed (-ErrorAction Stop)');
+  assert(/if \(-not \$kidScanOk\) \{/.test(kidScan) && /\$installFailed = \$true/.test(kidScan),
+    'сбой проверки reparse → fail-closed: подкаталоги пропущены + компонент честно провален');
   assert(/if \(\$ADDITIVE\) \{/.test(s), 'ветвление по $ADDITIVE (add-missing / repair)');
   assert(!/& \$installer/.test(s), 'НЕ запускает install.ps1 через & $installer (он делал Move-Item = wipe)');
   assert(!/-BackupExisting/.test(s), 'нет -BackupExisting (это и был wipe: Move-Item всего ~/.claude)');
@@ -1805,12 +1970,16 @@ ok('config.ps1: settings.json — наш базовый; CLAUDE.md/credentials �
 ok('config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $preExisting щадит скиллы юзера в add-missing; reparse skip', () => {
   const s = CFG_PS1();
   assert(/if \(\$pruneDisabled -or \$installFailed\)/.test(s), 'прунинг пропускается при pruneDisabled ИЛИ installFailed');
-  assert(/\$weAdded = -not \$preExisting\.ContainsKey\(\$_\.Name\)/.test(s),
-    'guard $weAdded: в ОБОИХ режимах скилл, бывший ДО раскладки, не удаляем (синхр. с config.ps1 после concurrent-коммита 094b15c)');
+  assert(/\$weAdded = \(-not \$preExisting\.ContainsKey\(\$_\.Name\)\) -or \$ourPrev\.ContainsKey\(\$_\.Name\)/.test(s),
+    'guard $weAdded: скилл юзера, бывший ДО раскладки, не удаляем; НАШ из прошлого прогона (.hamidun-skills.txt) — прунится, иначе снятие пака работает лишь раз');
+  assert(/\$ourListPath = Join-Path \$claudeHome '\.hamidun-skills\.txt'/.test(s), 'маркер «наших» скиллов пишется/читается в ~/.claude/.hamidun-skills.txt');
+  assertOrder(s, "$ourPrev = @{}", 'robocopy $srcClaude $claudeHome', 'прошлый список «наших» читается ДО merge-copy');
   assert(/\$preExisting\[\$_\.Name\] = \$true/.test(s), 'инвентарь пред-существующих скиллов собирается ДО merge-copy');
   assert(/-ErrorAction Stop \| ForEach-Object \{/.test(s), 'перечисление с -ErrorAction Stop (fail-closed)');
-  assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$skillsReparse = \$true \}/.test(s),
-    'дочерний skill-reparse → $skillsReparse (merge не пишет сквозь него)');
+  assert(/if \(\$_\.Attributes -band \[System\.IO\.FileAttributes\]::ReparsePoint\) \{ \$reparseSkills \+= \$_\.Name \}/.test(s),
+    'дочерний skill-reparse → исключается ПОИМЁННО ($reparseSkills), а не пропуском всего каталога skills');
+  assert(/foreach \(\$n in \$reparseSkills\) \{ \$mergeXD \+= \(Join-Path \(Join-Path \$srcClaude 'skills'\) \$n\) \}/.test(s),
+    'слинкованный дочерний скилл исключается адресно, остальные скиллы раскладываются');
   const loop = s.slice(s.indexOf('Get-ChildItem -Directory $skillsDir | ForEach-Object'));
   assert(/ReparsePoint\) \{ return \}/.test(loop.slice(0, 700)), 'reparse-скилл (symlink/junction) в прунинге скипается');
 });
@@ -1822,6 +1991,8 @@ ok('config.ps1: бэкап — КОПИЯ robocopy /R:1 (не move); непол�
   assert(iB !== -1 && iAfter > iB, 'блок бэкапа найден');
   const blk = s.slice(iB, iAfter);
   assert(/robocopy \$claudeHome \$backupDir \/E \/R:1 \/W:1/.test(blk), 'бэкап — robocopy (копия, /R:1 не зависает на локах)');
+  assert(/robocopy \$claudeHome \$backupDir \/E \/R:1 \/W:1 \/XJ/.test(blk),
+    'бэкап с /XJ — не рекурсирует по junction внутри ~/.claude (иначе уходит в профиль/сетевую цель и растёт бесконечно)');
   assert(/Это НЕ критично/.test(blk) && /Продолжаю/.test(blk), 'неполный бэкап → предупреждение + продолжаем');
   assert(!/exit 1/.test(blk), 'бэкап НЕ фатален: нет exit 1 (оригинал не переносится/не стирается)');
 });
@@ -2212,6 +2383,71 @@ if (powershellAvailable()) {
         'внешний файл за junction НЕ тронут (robocopy /XD skills + /XJ — не прошёл сквозь ссылку)');
       assert(!fs.existsSync(base + '/external-skills/our-skill/SKILL.md'),
         'наш skills/our-skill/SKILL.md НЕ дописан во внешнюю цель через junction');
+      assert(/скиллы НЕ разложены/.test(r.stdout || ''),
+        'честный статус: рапорт не выдаёт «всё ок», когда skills пропущены целиком: ' + (r.stdout || ''));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('config.ps1 REPAIR: слинкован ОДИН дочерний скилл → внешняя цель цела, остальные скиллы РАЗЛОЖЕНЫ (#42)', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);
+      // clone везёт skills/our-skill; добавим второй скилл, чтобы проверить, что он доехал.
+      fs.mkdirSync(clone + '/.claude/skills/second-skill', { recursive: true });
+      fs.writeFileSync(clone + '/.claude/skills/second-skill/SKILL.md', 'second');
+      fs.mkdirSync(base + '/ext-one', { recursive: true });
+      fs.writeFileSync(base + '/ext-one/DATA.md', 'EXTERNAL-ONE');
+      let linked = false;
+      try { fs.symlinkSync(base + '/ext-one', home + '/.claude/skills/our-skill', 'junction'); linked = true; }
+      catch (e) { linked = false; }
+      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      const r = runCfgPs1(home, clone, {});   // repair
+      assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(!fs.existsSync(base + '/ext-one/SKILL.md'), 'во внешнюю цель слинкованного скилла НЕ писали');
+      assert.strictEqual(fs.readFileSync(base + '/ext-one/DATA.md', 'utf8'), 'EXTERNAL-ONE', 'внешний файл цел');
+      assert(fs.existsSync(home + '/.claude/skills/second-skill/SKILL.md'),
+        'остальные скиллы разложены (одна ссылка не отменяет раскладку всего каталога): ' + (r.stdout || ''));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('config.ps1 ADD-MISSING ×3: .hamidun-skills.txt НЕ присваивает пред-существующий скилл юзера (data-loss на 2-м прогоне), снятие пака живо на 3-м', () => {
+    const { base, home, clone } = mkCfgSandbox();
+    try {
+      seedHome(home);   // ~/.claude/skills/user-skill — СВОЙ скилл юзера ('user skill')
+      // Пак НАРОЧНО везёт скилл с ИМЕНЕМ юзерского (коллизия класса git-workflow/security-audit):
+      // до фикса запись в .hamidun-skills.txt шла СПИСКОМ ИСТОЧНИКА, и на 2-м прогоне
+      // $weAdded = … -or $ourPrev.ContainsKey(…) метил каталог юзера «нашим» → Remove-Item -Recurse.
+      fs.mkdirSync(clone + '/.claude/skills/user-skill', { recursive: true });
+      fs.writeFileSync(clone + '/.claude/skills/user-skill/SKILL.md', 'pack version');
+      fs.writeFileSync(home + '/.claude/skills/user-skill/PRECIOUS.md', 'PRECIOUS USER DATA');
+      const env = { HM_ADDITIVE: '1', HM_ALL_PACK_SKILLS: 'user-skill,our-skill', HM_KEEP_SKILLS: 'our-skill' };
+
+      // Прогон 1: $preExisting сберегает скилл юзера, инвентарь пишется БЕЗ него.
+      let r = runCfgPs1(home, clone, env);
+      assert.strictEqual(r.status, 0, 'прогон 1 exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(fs.existsSync(home + '/.claude/skills/user-skill/PRECIOUS.md'), 'прогон 1: файл юзера цел');
+      const list = fs.readFileSync(home + '/.claude/.hamidun-skills.txt', 'utf8')
+        .replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);   // Set-Content -Encoding UTF8 (PS 5.1) пишет BOM
+      assert(!list.includes('user-skill'), 'пред-существующий user-skill НЕ записан в инвентарь как «наш»: [' + list.join(',') + ']');
+      assert(list.includes('our-skill'), 'реально доложенный нами our-skill записан в инвентарь: [' + list.join(',') + ']');
+
+      // Прогон 2 (те же env) — сценарий воспроизведения потери данных: до фикса каталог
+      // юзера сносился здесь вместе с PRECIOUS.md. Теперь — цел и не перезаписан.
+      r = runCfgPs1(home, clone, env);
+      assert.strictEqual(r.status, 0, 'прогон 2 exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert.strictEqual(fs.readFileSync(home + '/.claude/skills/user-skill/PRECIOUS.md', 'utf8'), 'PRECIOUS USER DATA',
+        'прогон 2: пред-существующий скилл юзера ЦЕЛ (до фикса удалялся по инвентарю .hamidun-skills.txt)');
+      assert.strictEqual(fs.readFileSync(home + '/.claude/skills/user-skill/SKILL.md', 'utf8'), 'user skill',
+        'прогон 2: содержимое юзера НЕ перезаписано паковой версией');
+      assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'прогон 2: выбранный our-skill на месте');
+
+      // Прогон 3: пак our-skill СНЯТ. Благодаря объединению инвентаря с $ourPrev наш скилл
+      // всё ещё числится нашим и удаляется (без объединения список схлопнулся бы на 2-м
+      // прогоне — «всё пред-существует» — и снятие пака умирало с 3-го прогона).
+      r = runCfgPs1(home, clone, Object.assign({}, env, { HM_KEEP_SKILLS: 'something-else' }));
+      assert.strictEqual(r.status, 0, 'прогон 3 exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(!fs.existsSync(home + '/.claude/skills/our-skill'), 'прогон 3: наш our-skill снятого пака УДАЛЁН (снятие пака живо на 3-м прогоне)');
+      assert(fs.existsSync(home + '/.claude/skills/user-skill/PRECIOUS.md'), 'прогон 3: скилл юзера по-прежнему ЦЕЛ');
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 } else {
@@ -2586,39 +2822,10 @@ ok('computeUserPathWithout: убирается ТОЛЬКО точное сов�
   assert(!r2.changed, 'нет совпадения → без изменений');
 });
 
-// P1-7: classifyRegQuery — чистый tri-state. Ошибка запуска/кода/парсера НЕ
-// превращается в «значения нет» (иначе absent → ложный успех удаления).
-ok('P1-7 classifyRegQuery: значение прочитано / штатно отсутствует / ошибка — три РАЗНЫХ исхода', () => {
-  // found:true — тип и данные разобраны, %VAR% НЕ раскрыт (raw)
-  const okRes = uxMod.classifyRegQuery('Path', {
-    status: 0,
-    stdout: '\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\uv\r\n'
-  });
-  assert(okRes.ok === true && okRes.found === true, 'значение прочитано');
-  assert.strictEqual(okRes.type, 'REG_EXPAND_SZ', 'тип сохранён');
-  assert.strictEqual(okRes.data, '%USERPROFILE%\\bin;C:\\uv', 'данные raw (%VAR% не раскрыт)');
-  // P1: код 1 → absent ТОЛЬКО при РАСПОЗНАННОЙ not-found диагностике (reg.exe пишет
-  // её по-английски даже на локализованной Windows — проверено на ru-RU).
-  const absent = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' });
-  assert(absent.ok === true && absent.found === false, 'код 1 + not-found → штатно отсутствует (found:false)');
-  // P1: код 1 «Access is denied» → ОШИБКА, НЕ absent (иначе ложный успех удаления)
-  const denied = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: Access is denied.' });
-  assert(denied.ok === false && !('found' in denied), 'код 1 + access denied → ok:false (НЕ absent)');
-  // P1: код 1 без распознанной not-found диагностики → fail-closed (ok:false)
-  const amb = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: странная неведомая ошибка' });
-  assert(amb.ok === false && !('found' in amb), 'код 1 без not-found диагностики → ok:false (fail-closed)');
-  // spawn error → ok:false (НЕ absent)
-  const spawnErr = uxMod.classifyRegQuery('Path', { error: new Error('ENOENT reg.exe') });
-  assert(spawnErr.ok === false && spawnErr.error, 'ошибка запуска → ok:false');
-  // ненулевой код (кроме 1) → ok:false
-  const badCode = uxMod.classifyRegQuery('Path', { status: 5, stdout: '' });
-  assert(badCode.ok === false, 'код 5 (доступ) → ok:false, НЕ absent');
-  // status 0, но вывод не разобрался как REG_(EXPAND_)SZ → ОШИБКА, не absent
-  const garbled = uxMod.classifyRegQuery('Path', { status: 0, stdout: 'мусор без строки значения' });
-  assert(garbled.ok === false && !('found' in garbled), 'непарсибельный stdout → ошибка (fail-closed), не absent');
-  // отсутствие объекта результата → ошибка
-  assert(uxMod.classifyRegQuery('Path', null).ok === false, 'нет результата → ошибка');
-});
+// Тесты classifyRegQuery удалены ВМЕСТЕ с функцией: main.js читает реестр сам
+// (.NET Registry через winPsPayload), вызовов не осталось — ~30 зелёных строк
+// стерегли мёртвый код и создавали ложное ощущение покрытия. Регрессия-страж
+// «мёртвое не воскресает» — в блоке staging-уборки в конце файла.
 
 console.log('== PRESERVE (функционально): состояние пользователя переживает деинсталляцию ==');
 
@@ -2804,7 +3011,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/использую как есть/.test(nsh), 'nomad.sh: старой ветки «использую как есть» нет');
   // Установка гейтится доверием ДО секции uv.
   assert(/if \[ "\$SRC_TRUSTED" != "1" \]; then/.test(nsh), 'nomad.sh: гейт SRC_TRUSTED');
-  assert(nsh.indexOf('SRC_TRUSTED" != "1" ]; then') !== -1 && nsh.indexOf('SRC_TRUSTED" != "1" ]; then') < nsh.indexOf('uv tool install'),
+  assertOrder(nsh, 'SRC_TRUSTED" != "1" ]; then', 'uv tool install',
     'nomad.sh: skip-гейт (exit 120) ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
@@ -2817,7 +3024,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/--force/.test(nps), 'nomad.ps1: НЕТ --force');
   assert(!/использую как есть/.test(nps), 'nomad.ps1: старой ветки «использую как есть» нет');
   assert(/if \(-not \$DRY -and -not \$srcTrusted\) \{/.test(nps), 'nomad.ps1: гейт $srcTrusted');
-  assert(nps.indexOf('-not $srcTrusted) {') !== -1 && nps.indexOf('-not $srcTrusted) {') < nps.indexOf('tool install --python 3.12 "$src"'),
+  assertOrder(nps, '-not $srcTrusted) {', 'tool install --python 3.12 "$srcForInstall"',
     'nomad.ps1: skip-гейт (exit 120) ПЕРЕД uv tool install');
 });
 
@@ -2826,25 +3033,40 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
 ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существующего nomad-agent/шимов → skip 120', () => {
   const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
   assert(!/--force/.test(nsh), 'nomad.sh: НИ ОДНОГО --force');
-  assert(/uv tool install --python 3\.12 "\$SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
+  // Ставим из КОПИИ проверенного дерева (read-only dmg: setuptools собирает IN-TREE),
+  // но по-прежнему без --force и строго ПОСЛЕ tree-SHA гейта.
+  assert(/uv tool install --python 3\.12 "\$BUILD_SRC"/.test(nsh), 'nomad.sh: uv tool install без --force');
+  assert(/BUILD_SRC="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/hm-nomad-build\.XXXXXX"\)"/.test(nsh), 'nomad.sh: сборка из приватного mktemp-каталога (0700), не из read-only vendor');
+  assert(/cp -R "\$SRC\/\." "\$BUILD_SRC\/"/.test(nsh), 'nomad.sh: копия проверенного дерева в temp');
+  // ПУСТАЯ ПРОВЕРКА БЫЛА ЗДЕСЬ: сравнение indexOf без проверки на -1. Когда гейт
+  // целостности исчезал, indexOf возвращал -1, а -1 < 6748 — истина, и тест оставался
+  // зелёным на ОТКЛЮЧЁННОЙ защите. Проверено мутацией: гейт заменяли на `if false` —
+  // все 283 теста проходили. Теперь сначала требуем НАЛИЧИЕ, потом порядок.
+  const iGate = nsh.indexOf('TREE_GOT" != "$TREE_WANT"');
+  const iBuild = nsh.indexOf('BUILD_SRC="$(mktemp');
+  assert(iGate !== -1, 'nomad.sh: гейт сверки SHA-256 дерева НА МЕСТЕ (без него vendor можно подменить)');
+  assert(iBuild !== -1, 'nomad.sh: сборка из приватного temp-каталога на месте');
+  assert(iGate < iBuild, 'nomad.sh: порядок verify → copy → install (fail-closed сохранён)');
   assert(nsh.indexOf('UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"') !== -1, 'nomad.sh: проверяется uv-tool nomad-agent');
   assert(nsh.indexOf('[ -e "$HOME/.local/bin/nmd" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-agent" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-acp" ]') !== -1,
     'nomad.sh: проверяются шимы nmd/nomad-agent/nomad-acp');
   const guardSh = nsh.slice(nsh.indexOf('UV_TOOL_NA='), nsh.indexOf('UV_TOOL_NA=') + 800);
   assert(/exit 120/.test(guardSh), 'nomad.sh: существующий тул/шим → exit 120');
-  assert(nsh.indexOf('UV_TOOL_NA=') !== -1 && nsh.indexOf('UV_TOOL_NA=') < nsh.indexOf('uv tool install'),
+  assertOrder(nsh, 'UV_TOOL_NA=', 'uv tool install',
     'nomad.sh: guard ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
   assert(!/--force/.test(nps), 'nomad.ps1: НИ ОДНОГО --force');
-  assert(/& \$uv tool install --python 3\.12 "\$src"/.test(nps), 'nomad.ps1: uv tool install без --force');
+  // Ставим из КОПИИ проверенного дерева (uv/setuptools собирают IN-TREE и портят vendor,
+  // из-за чего повторный запуск падал на гейте целостности), но по-прежнему без --force.
+  assert(/& \$uv tool install --python 3\.12 "\$srcForInstall"/.test(nps), 'nomad.ps1: uv tool install без --force');
   assert(/uv\\tools\\nomad-agent/.test(nps) && /\.local\\share\\uv\\tools\\nomad-agent/.test(nps),
     'nomad.ps1: guard проверяет nomad-agent tool (APPDATA + .local\\share)');
   assert(/\.local\\bin\\nmd\.exe/.test(nps) && /\.local\\bin\\nomad-agent/.test(nps) && /\.local\\bin\\nomad-acp/.test(nps),
     'nomad.ps1: проверяются шимы nmd/nomad-agent/nomad-acp(.exe)');
   const guardPs = nps.slice(nps.indexOf('$existingNomad = @('), nps.indexOf('$existingNomad = @(') + 900);
   assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
-  assert(nps.indexOf('$existingNomad = @(') !== -1 && nps.indexOf('$existingNomad = @(') < nps.indexOf('tool install --python 3.12 "$src"'),
+  assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$srcForInstall"',
     'nomad.ps1: guard ПЕРЕД uv tool install');
 });
 
@@ -3247,18 +3469,215 @@ ok('main.js (source): деактивация маркера ДО удалени�
 
 ok('main.js (source): reg — только HKCU из аллоулиста ключей; pathentry сохраняет тип REG_(EXPAND_)SZ и не раскрывает %VAR%', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  assert(/WIN_REG_ALLOWED_KEYS/.test(s), 'аллоулист ключей реестра');
-  assert(/t\.hive !== 'HKCU'/.test(s), 'не-HKCU → отказ');
-  // Разбор вывода reg query (REG_SZ/REG_EXPAND_SZ, raw без раскрытия %VAR%)
-  // делегирован uninstall-exec.classifyRegQuery (tri-state). main читает значение
-  // типизированно через regQueryValueTyped и СОХРАНЯЕТ тип при перезаписи PATH.
-  assert(/regQueryValueTyped\(/.test(s), 'типизированное чтение значения реестра (regQueryValueTyped)');
-  assert(/uninstallExec\.classifyRegQuery\(/.test(s), 'разбор reg query делегирован classifyRegQuery (tri-state)');
-  assert(/'\/t', cur\.type,/.test(s), 'тип значения PATH сохраняется при перезаписи (/t cur.type)');
-  assert(/computeUserPathWithout/.test(s), 'PATH правится чистой точной функцией');
-  assert(/вернул исходный/.test(s), 'верификация записи PATH с восстановлением при расхождении');
-  assert(/remoteFetch\.sysBin\('reg\.exe'\)/.test(s), 'reg.exe — только из валидированного System32');
+  // ВСЕ проверки — по коду БЕЗ комментариев: токен, переехавший в комментарий
+  // (закомментированный вызов, упоминание в пояснении), стеречь ничего не может.
+  // Так уже случилось с DoNotExpandEnvironmentNames: он есть и в комментарии,
+  // и убранный из ФАКТИЧЕСКОГО вызова GetValue оставлял тест зелёным — а чужие
+  // %VAR% при перезаписи PATH запекались бы в литералы.
+  const code = s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert(/WIN_REG_ALLOWED_KEYS/.test(code), 'аллоулист ключей реестра');
+  assert(/t\.hive !== 'HKCU'/.test(code), 'не-HKCU → отказ');
+  // Разбор значения типизирован (regQueryValueTyped) и тип СОХРАНЯЕТСЯ при
+  // перезаписи PATH. Слой чтения: быстрый путь reg.exe допустим ТОЛЬКО с
+  // декодированием реальной кодовой страницы консоли и с fallback на
+  // авторитетный .NET-путь; корректность обоих путей доказывается
+  // ПОВЕДЕНЧЕСКИМИ тестами ниже («реестр (поведение): …» — round-trip кириллицы,
+  // сырой REG_EXPAND_SZ, found:false, запрет HKLM).
+  assert(/regQueryValueTyped\(/.test(code), 'типизированное чтение значения реестра (regQueryValueTyped)');
+  assert(/computeUserPathWithout/.test(code), 'PATH правится чистой точной функцией');
+  assert(/вернул исходный/.test(code), 'верификация записи PATH с восстановлением при расхождении');
+  assert(/Microsoft\.Win32\.Registry/.test(code), 'авторитетный путь чтения/записи — .NET');
+  assert(/DoNotExpandEnvironmentNames/.test(code), 'REG_EXPAND_SZ читается сырым — чужие %VAR% не раскрываются (В КОДЕ, не в комментарии)');
+  assert(/ToBase64String/.test(code) && /HMREG1:/.test(code), 'значение едет base64 — кодировка консоли не участвует');
+  assert(/regWriteValueTyped\(/.test(code), 'запись значения — тоже через .NET');
+  assert(/не переписываю/.test(code), 'PATH с потерянными символами НЕ переписывается (сохранность чужих записей)');
 });
+
+// Гейт на порчу PATH: если прочитанное значение содержит символ замены, переписывать
+// его нельзя ни при каких условиях — чужая кириллическая запись важнее нашей.
+// ПОВЕДЕНЧЕСКИ, а не по тексту сообщения: первая версия этого теста искала в теле
+// строку «не переписываю» и потому не замечала мутацию САМОГО УСЛОВИЯ — гейт можно
+// было отключить, оставив сообщение на месте, и тест оставался зелёным.
+// Ловлю функцию и прогоняю её с подставным чтением реестра.
+ok('main.js: PATH с потерянными символами не переписывается (гейт на порчу)', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const i = s.indexOf('function winRemoveUserPathEntry');
+  assert(i > 0, 'функция найдена');
+  const body = s.slice(i, s.indexOf('\nfunction ', i + 10));
+
+  const mk = (pathValue) => {
+    const calls = { writes: [] };
+    const fn = new Function(
+      'uninstallExec', 'fs', 'regQueryValueTyped', 'regWriteValueTyped', 'calls',
+      // Перевод строки обязателен: тело заканчивается строчным комментарием, и
+      // без него return уезжает ВНУТРЬ комментария — функция возвращает undefined.
+      body + '\n; return winRemoveUserPathEntry;'
+    )(
+      {
+        checkTarget: (d) => ({ ok: true, norm: d }),
+        computeUserPathWithout: (cur, dir) => ({
+          changed: String(cur).indexOf(dir) >= 0,
+          value: String(cur).split(';').filter((x) => x !== dir).join(';'),
+        }),
+      },
+      // Каталог отсутствует — значит запись PATH можно убирать (штатный путь).
+      { lstatSync: () => { const e = new Error('нет'); e.code = 'ENOENT'; throw e; } },
+      () => ({ ok: true, found: true, type: 'REG_EXPAND_SZ', data: pathValue }),
+      (k, v, data) => { calls.writes.push(data); return { ok: true }; },
+      calls
+    );
+    return { fn, calls };
+  };
+
+  const OUR = 'C:\\Users\\x\\AppData\\Local\\Programs\\uv';
+
+  // 1) PATH прочитан с потерей символов → НЕ переписываем ничего.
+  {
+    const t = mk('C:\\\uFFFD\uFFFD\uFFFD\\Python;' + OUR);
+    const r = t.fn({ dir: OUR }, {});
+    assert(r.status === 'failed', 'испорченный PATH → отказ, а не запись: ' + r.status);
+    assert(t.calls.writes.length === 0, 'при испорченном PATH записи НЕ было');
+  }
+
+  // 2) Обычный PATH — наша запись убирается, чужие целы.
+  {
+    const t = mk('C:\\Программы\\Python;' + OUR + ';C:\\Tools');
+    const r = t.fn({ dir: OUR }, {});
+    assert(t.calls.writes.length >= 1, 'обычный PATH переписывается: ' + t.calls.writes.length);
+    assert(t.calls.writes[0] === 'C:\\Программы\\Python;C:\\Tools',
+      'чужая кириллическая запись сохранена: ' + t.calls.writes[0]);
+    // Подставное чтение всегда возвращает исходное значение, поэтому пост-проверка
+    // не сходится и функция ЧЕСТНО возвращает исходный PATH вторым вызовом —
+    // это и есть страховка «не теряем PATH при расхождении».
+    assert(t.calls.writes.length === 2 && t.calls.writes[1].indexOf(OUR) >= 0,
+      'при несошедшейся проверке возвращается исходное значение');
+    assert(r.status === 'failed', 'и статус честный, а не ложный успех: ' + r.status);
+  }
+});
+
+// ===========================================================================
+// РЕЕСТР — ПОВЕДЕНЧЕСКИ. Слой чтения переделан (быстрый путь через reg.exe с
+// декодированием реальной кодовой страницы консоли + авторитетный .NET-фолбэк),
+// поэтому НИКАКИХ грепов по исходнику: функции слоя ВЫРЕЗАЮТСЯ из main.js,
+// исполняются с настоящими spawnSync/remote-fetch и проверяются НА РЕАЛЬНОМ
+// HKCU\Environment пробными значениями HmProbe* (уникальный хвост на прогон;
+// Path и чужие значения НЕ трогаем; за собой убираем в finally и ПРОВЕРЯЕМ это).
+// ===========================================================================
+(function registryBehaviorTests() {
+  console.log('== Реестр (поведение): HKCU\\Environment, пробные значения HmProbe* ==');
+  const REG_KEY = 'HKCU\\Environment';
+
+  function cutRegLayer(deps) {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const a = s.indexOf('const REG_KIND_TO_TYPE');
+    const b = s.indexOf('const WIN_REG_ALLOWED_KEYS');
+    assert(a > 0 && b > a, 'слой реестра найден в main.js (REG_KIND_TO_TYPE … WIN_REG_ALLOWED_KEYS)');
+    return new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'IS_WIN',
+      '"use strict";\n' + s.slice(a, b) +
+      '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };')(
+      deps.spawnSync, deps.remoteFetch, deps.detectSpawnEnv, deps.IS_WIN);
+  }
+
+  let LIVE = null;
+  const live = () => {
+    if (process.platform !== 'win32') SKIP('реестр Windows недоступен на ' + process.platform);
+    if (!LIVE) {
+      LIVE = cutRegLayer({
+        spawnSync,
+        remoteFetch: require(path.join(ROOT, 'src', 'remote-fetch.js')),
+        detectSpawnEnv: () => process.env,
+        IS_WIN: true,
+      });
+    }
+    return LIVE;
+  };
+  const rnd = crypto.randomBytes(5).toString('hex');
+  // Пробное значение живёт ТОЛЬКО внутри колбэка; уборка — в finally, и она
+  // ПРОВЕРЯЕТСЯ (иначе тест, намусоривший в HKCU, сам был бы дефектом).
+  const withProbe = (suffix, fn) => {
+    const L = live();
+    const name = 'HmProbe' + suffix + '_' + rnd;
+    try { fn(L, name); }
+    finally {
+      const del = L.regDeleteValueTyped(REG_KEY, name);
+      const gone = L.regQueryValueTyped(REG_KEY, name);
+      assert(gone && gone.ok === true && gone.found === false,
+        'уборка за собой: ' + name + ' удалён (del=' + JSON.stringify(del) + ', после=' + JSON.stringify(gone) + ')');
+    }
+  };
+
+  ok('реестр (поведение): кириллица переживает round-trip; fast-путь обязан совпадать с .NET', () => {
+    withProbe('Cyr', (L, name) => {
+      const data = 'C:\\Программы\\Проба (тест);D:\\Ещё Кириллица';
+      const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_SZ');
+      assert(w.ok === true, 'запись пробного REG_SZ: ' + JSON.stringify(w));
+      const dn = L.regQueryValueDotNet(REG_KEY, name);
+      assert(dn.ok && dn.found && dn.type === 'REG_SZ' && dn.data === data,
+        '.NET-путь вернул значение байт в байт: ' + JSON.stringify(dn));
+      const t = L.regQueryValueTyped(REG_KEY, name);
+      assert(t.ok && t.found && t.type === 'REG_SZ' && t.data === data,
+        'боевое чтение (fast→.NET) вернуло значение байт в байт — мохибейк «C:\\?????\\…» = ' +
+        'ровно тот дефект, что затирал чужие записи PATH: ' + JSON.stringify(t));
+      const f = L.regQueryFast(REG_KEY, name);
+      if (f) {
+        assert.deepStrictEqual(f, dn,
+          'fast-путь, когда берётся отвечать, обязан совпасть с авторитетным .NET');
+      }
+    });
+  });
+
+  ok('реестр (поведение): REG_EXPAND_SZ приходит СЫРЫМ — чужие %VAR% не раскрываются, тип сохранён', () => {
+    withProbe('Exp', (L, name) => {
+      const data = '%SystemRoot%\\HmProbe;%HMPROBE_NOT_SET%\\x';
+      const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_EXPAND_SZ');
+      assert(w.ok === true, 'запись пробного REG_EXPAND_SZ: ' + JSON.stringify(w));
+      for (const [label, r] of [
+        ['.NET', L.regQueryValueDotNet(REG_KEY, name)],
+        ['боевой', L.regQueryValueTyped(REG_KEY, name)],
+      ]) {
+        assert(r.ok && r.found, label + ': значение найдено: ' + JSON.stringify(r));
+        assert.strictEqual(r.type, 'REG_EXPAND_SZ', label + ': тип НЕ подменён (' + r.type + ')');
+        assert.strictEqual(r.data, data,
+          label + ': %VAR% остались литералами — раскрытие запекло бы чужие переменные при перезаписи PATH: ' + r.data);
+      }
+    });
+  });
+
+  ok('реестр (поведение): отсутствующее значение → found:false, а НЕ ошибка', () => {
+    const L = live();
+    const name = 'HmProbeMissing_' + rnd; // никогда не записывался
+    for (const [label, r] of [
+      ['боевой', L.regQueryValueTyped(REG_KEY, name)],
+      ['.NET', L.regQueryValueDotNet(REG_KEY, name)],
+    ]) {
+      assert.strictEqual(r.ok, true, label + ': отсутствие значения ≠ сбой (у вызывающих ошибка → failed, отсутствие → absent): ' + JSON.stringify(r));
+      assert.strictEqual(r.found, false, label + ': found:false: ' + JSON.stringify(r));
+    }
+  });
+
+  ok('реестр (поведение): запись/удаление в HKLM невозможны — отказ НАШ и ДО запуска PowerShell', () => {
+    // Подставные зависимости: считаем запуски. Отказ обязан случиться в НАШЕМ
+    // разборе ключа (только HKCU), а не прилететь ошибкой доступа от ОС — под
+    // админом «ошибки доступа» не будет, и мутация разбора открыла бы HKLM.
+    const calls = { spawn: 0 };
+    const L = cutRegLayer({
+      spawnSync: () => { calls.spawn++; return { status: 0, stdout: '' }; },
+      remoteFetch: { winPowershellPath: () => 'powershell.exe', sysBin: () => null },
+      detectSpawnEnv: () => ({}),
+      IS_WIN: true,
+    });
+    for (const [label, r] of [
+      ['запись HKLM', L.regWriteValueTyped('HKLM\\SOFTWARE\\HmProbe', 'HmProbeV', 'x', 'REG_SZ')],
+      ['удаление HKLM', L.regDeleteValueTyped('HKLM\\SOFTWARE\\HmProbe', 'HmProbeV')],
+      ['запись HKEY_LOCAL_MACHINE', L.regWriteValueTyped('HKEY_LOCAL_MACHINE\\SOFTWARE\\HmProbe', 'HmProbeV', 'x', 'REG_SZ')],
+    ]) {
+      assert.strictEqual(r.ok, false, label + ' обязана быть отвергнута: ' + JSON.stringify(r));
+      assert(/HKCU/.test(r.error || ''), label + ': отказ наш («только HKCU»), а не ошибка ОС: ' + (r.error || ''));
+    }
+    assert.strictEqual(calls.spawn, 0,
+      'отказ происходит ДО единственного возможного побочного эффекта (запуска PowerShell) — fail-closed');
+  });
+})();
 
 // P0-2: из деинсталлятора НЕ запускается user-writable uv.exe (под elevated =
 // admin-RCE). Тип цели 'uvtool' и вызовы `uv tool uninstall`/findUvBinary УДАЛЕНЫ;
@@ -3267,7 +3686,7 @@ ok('P0-2 (source): деинсталлятор НЕ запускает user-writa
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   // Строки «uv tool uninstall»/«findUvBinary» остаются лишь в поясняющих КОММЕНТАРИЯХ —
   // проверяем отсутствие в реальном коде (комментарии // и /* */ вырезаны).
-  const code = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const code = s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
   assert(!/uv tool uninstall/.test(code), 'в КОДЕ нет запуска `uv tool uninstall`');
   assert(!/findUvBinary\s*\(/.test(s), 'findUvBinary не вызывается (только упоминание в комментарии)');
   assert(!/case 'uvtool'/.test(s), "тип цели 'uvtool' удалён из executeUninstallTarget");
@@ -3688,12 +4107,11 @@ ok('P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи insta
 ok('P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки', () => {
   const cps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
   const iDryPs = cps.indexOf('if ($DRY) {');
-  assert(iDryPs !== -1 && iDryPs < cps.indexOf('git clone'), 'config.ps1: dry-run раньше git clone');
-  assert(iDryPs < cps.indexOf('git -C $clone fetch'), 'config.ps1: dry-run раньше git fetch/reset');
+  assert(iDryPs !== -1 && iDryPs < cps.indexOf('clone --depth 1'), 'config.ps1: dry-run раньше git clone');
   assert(iDryPs < cps.indexOf('robocopy $claudeHome $backupDir'), 'config.ps1: dry-run раньше копии-бэкапа');
   const csh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
   const iDrySh = csh.indexOf('if [ -n "${HM_DRY_RUN:-}" ]; then');
-  assert(iDrySh !== -1 && iDrySh < csh.indexOf('git clone'), 'config.sh: dry-run раньше git clone');
+  assert(iDrySh !== -1 && iDrySh < csh.indexOf('clone --depth 1'), 'config.sh: dry-run раньше git clone');
   assert(iDrySh < csh.indexOf('cp -R "$CLAUDE_HOME" "$BACKUP_DIR"'), 'config.sh: dry-run раньше копии-бэкапа');
   const ups = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'uv.ps1'), 'utf8');
   const iUpsDry = ups.indexOf('if ($DRY) {');
@@ -3968,6 +4386,10 @@ function makeTransport(port) {
 }
 
 async function asyncTests() {
+  // Асинхронные тесты ОБЯЗАНЫ идти через okAsync и await — иначе галочка печатается
+  // до результата, и провал теряется.
+  await okAsync('НИ ОДИН вопрос дочернего процесса не может подвесить установку (stdin закрыт)',
+    testNoChildPromptCanHang);
   const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-rf-test-'));
 
@@ -4231,7 +4653,2022 @@ ok('finish-link: botUrl пустой без базы/пейлоада, инач�
   assert.strictEqual(HMFinish.botUrl('https://t.me/bot', 'installed_win'), 'https://t.me/bot?start=installed_win');
 });
 
+// ---- телеметрия с привязкой к человеку (uid) --------------------------------
+// Установщик стал слать uid и диагностику ошибок, чтобы бот мог помочь адресно
+// («вижу, упало на шаге X по причине Y»). Всё, что уходит наружу, — граница доверия:
+// uid определяет ТОЛЬКО главный процесс, тип события берётся из закрытого списка,
+// а тексты ошибок чистятся от персональных данных.
+
+const UIDT = require(path.join(ROOT, 'src', 'uid-telemetry.js'));
+
+ok('uid: принимаем только [A-Za-z0-9_-]{1,32}, мусор отбрасываем целиком', () => {
+  assert.strictEqual(UIDT.sanitizeUid('272540053'), '272540053');
+  assert.strictEqual(UIDT.sanitizeUid(' a-b_C9 '), 'a-b_C9', 'пробелы по краям срезаются');
+  for (const bad of ['', ' ', 'a b', 'x'.repeat(33), 'a;drop', '../etc', '<script>', null, undefined, {}]) {
+    assert.strictEqual(UIDT.sanitizeUid(bad), '', 'мусор отбрасывается: ' + JSON.stringify(bad));
+  }
+});
+
+ok('uid: источники — env, файл рядом, имя файла; « (1)» от Windows не ломает привязку', () => {
+  const exe = path.join(os.tmpdir(), 'hm-uid-' + Date.now(), 'Hamidun-Setup-Windows--u272540053 (1).exe');
+  fs.mkdirSync(path.dirname(exe), { recursive: true });
+  try {
+    // Имя файла: суффикс --u<uid>, повторное скачивание Windows (« (1)») привязку НЕ теряет.
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: exe }), '272540053');
+    // Файл рядом сильнее имени файла.
+    fs.writeFileSync(path.join(path.dirname(exe), 'hamidun-uid.txt'), 'from_file\n');
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: exe }), 'from_file');
+    // Окружение сильнее всего (отладка и автотесты).
+    assert.strictEqual(UIDT.resolveUid({ env: { HM_UID: 'from_env' }, execPath: exe }), 'from_env');
+    // Мусор в источнике не проходит дальше — уезжает пустая привязка, а не грязь.
+    assert.strictEqual(UIDT.resolveUid({ env: { HM_UID: 'плохой uid' }, execPath: path.join(os.tmpdir(), 'x.exe') }), '');
+    // Обычное имя без суффикса — просто анонимно.
+    assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: path.join(os.tmpdir(), 'Hamidun-Setup-Windows.exe') }), '');
+  } finally {
+    fs.rmSync(path.dirname(exe), { recursive: true, force: true });
+  }
+});
+
+ok('телеметрия: uid ставит ГЛАВНЫЙ процесс, renderer его подменить не может', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf("ipcMain.handle('send-telemetry'");
+  const h = m.slice(i, i + 2600);
+  assert(/uid: INSTALL_UID \|\| null/.test(h), 'в тело идёт INSTALL_UID, вычисленный в main');
+  assert(!/p\.uid/.test(h), 'uid из payload renderer НЕ читается (иначе он приписал бы установку чужому человеку)');
+});
+
+ok('телеметрия: тип события — из закрытого списка, произвольный не пролезает', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf("ipcMain.handle('send-telemetry'");
+  const h = m.slice(i, i + 2600);
+  assert(/const EVENTS = \['installed', 'install_started', 'open_editor'\]/.test(h), 'список событий закрыт');
+  assert(/EVENTS\.indexOf\(String\(p\.event.*!== -1 \? String\(p\.event\) : 'installed'/.test(h),
+    'неизвестное событие схлопывается в installed, а не улетает как есть');
+});
+
+ok('телеметрия: тексты ошибок чистятся от ПД (домашний каталог, имя пользователя, e-mail, IP)', () => {
+  // Фиксированные home/user, чтобы проверка не зависела от машины, на которой её гоняют.
+  const o = { home: 'C:\\Users\\ivan', user: 'ivan' };
+  const out = UIDT.scrubText(
+    'ENOENT C:\\Users\\ivan\\AppData\\x.zip; чужой путь C:\\Users\\petr\\y.zip; ' +
+    'пользователь ivan; почта a.b@mail.ru; узел 10.1.2.3', o);
+  assert(!/ivan/i.test(out), 'ни имени пользователя, ни его каталога: ' + out);
+  assert(!/petr/i.test(out), 'чужие домашние каталоги тоже вычищены: ' + out);
+  // Имя профиля С ПРОБЕЛОМ — норма на Windows («C:\Users\John Smith»). Проверка с
+  // ником без пробела этого не ловила: регулярка обрывалась на пробеле и оставляла
+  // фамилию в тексте («~ Smith\AppData\…»).
+  const spaced = UIDT.scrubText('ENOENT C:\\Users\\John Smith\\AppData\\Local\\hm.zip', o);
+  assert(!/Smith/i.test(spaced), 'профиль с пробелом в имени вычищен целиком: ' + spaced);
+  assert.strictEqual(spaced, 'ENOENT ~\\AppData\\Local\\hm.zip', 'путь после профиля уцелел: ' + spaced);
+  const spacedPosix = UIDT.scrubText('нет доступа к /Users/John Smith/.claude', o);
+  assert.strictEqual(spacedPosix, 'нет доступа к ~/.claude', 'то же на POSIX: ' + spacedPosix);
+  assert(!/a\.b@mail\.ru/.test(out), 'e-mail вычищен: ' + out);
+  assert(!/10\.1\.2\.3/.test(out), 'IP вычищен: ' + out);
+  // Ник «ivan» встречается внутри слова «Ivanovo-Setup.exe» — это НЕ ПД, и калечить
+  // название нельзя: иначе вместо диагностики бот получает кашу.
+  assert.strictEqual(UIDT.scrubText('файл Ivanovo-Setup.exe не подписан', o),
+    'файл Ivanovo-Setup.exe не подписан');
+  // POSIX-домашние каталоги.
+  assert.strictEqual(UIDT.scrubText('нет доступа к /home/ivan/.claude', o), 'нет доступа к ~/.claude');
+  assert.strictEqual(UIDT.scrubText('нет доступа к /Users/ivan/.claude', o), 'нет доступа к ~/.claude');
+});
+
+ok('git НИКОГДА не спрашивает креды — иначе окно помощника вешает установку', () => {
+  // Найдено вживую: Git Credential Manager (на Windows стоит по умолчанию) поднял
+  // ГРАФИЧЕСКОЕ окно «введите логин», и вызвавший процесс встал намертво. У установщика
+  // та же схема — он клонирует конфиг, а окно может всплыть ЗА окном установщика.
+  // Все наши источники ПУБЛИЧНЫЕ: запрос кредов = сломанная ситуация, и правильный
+  // исход — быстро упасть с понятной ошибкой.
+  const m = EG_MAIN();
+  const i = m.indexOf('const NONINTERACTIVE_ENV');
+  assert(i !== -1, 'набор «никакого интерактива» объявлен');
+  const h = m.slice(i, i + 900);
+  for (const k of ['GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GCM_INTERACTIVE', 'SSH_ASKPASS']) {
+    assert(new RegExp(k).test(h), 'заглушено: ' + k);
+  }
+  // Должно попадать в окружение НА ОБЕИХ платформах, а не только на Windows.
+  assert((m.match(/Object\.assign\(out, NONINTERACTIVE_ENV\)/g) || []).length >= 2,
+    'применяется и в Windows-, и в POSIX-ветке buildInstallEnv');
+
+  const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
+  assert(/credential\.helper=/.test(ps) && /credential\.interactive=false/.test(ps),
+    'сам git-вызов на Windows тоже обезврежен (env могут не унаследовать)');
+  // ПОВЕДЕНЧЕСКАЯ проверка, а не текстовая. Текстовая уже пропустила боевую поломку:
+  // в строку попал ЛИТЕРАЛЬНЫЙ backslash-n вместо переноса, git получал лишний аргумент
+  // «n» и падал с «'n' is not a git command», а регекс по исходнику всё равно матчился —
+  // тест был зелёным на мёртвом коде. Поэтому собираем argv настоящим bash.
+  assert(/credential\.helper=/.test(sh) && /credential\.interactive=false/.test(sh),
+    'флаги защиты есть в строке (macOS)');
+  const gitLine = (sh.split(/\r?\n/).find((l) => /clone --depth 1 -b "\$BRANCH"/.test(l)) || '');
+  assert(gitLine, 'нашли строку вызова git clone');
+  assert(gitLine.indexOf('\\n') === -1,
+    'в строке нет литерального backslash-n: он ломает argv и убивает единственный путь получения конфига');
+
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-argv-'));
+  try {
+    const fake = path.join(sb, 'git');
+    fs.writeFileSync(fake, '#!/usr/bin/env bash\nfor a in "$@"; do printf "<%s>\\n" "$a"; done\n');
+    fs.chmodSync(fake, 0o755);
+    const script = 'GIT_BIN=' + JSON.stringify(fake) + '; BRANCH=main; URL=https://example.invalid/r.git; CLONE=' +
+      JSON.stringify(path.join(sb, 'c')) + '\n' + gitLine;
+    const r = require('child_process').spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 20000 });
+    const argv = String(r.stdout || '').trim().split(/\r?\n/)
+      .filter(Boolean).map((s) => s.replace(/^</, '').replace(/>$/, ''));
+    assert(argv.length > 5, 'подставной git отработал: ' + JSON.stringify(argv).slice(0, 200));
+    assert(argv.indexOf('n') === -1, 'в argv нет мусорного «n»: ' + argv.join(' '));
+    let firstPositional = '';
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === '-c') { i++; continue; }
+      if (argv[i].charAt(0) === '-') continue;
+      firstPositional = argv[i]; break;
+    }
+    assert.strictEqual(firstPositional, 'clone',
+      'git получает подкоманду clone, а не мусор: ' + argv.join(' '));
+    assert(argv.indexOf('credential.helper=') !== -1, 'защита от запроса кредов реально доехала до git');
+  } finally {
+    fs.rmSync(sb, { recursive: true, force: true });
+  }
+});
+
+ok('Nomad собирается из КОПИИ — иначе повторная установка падает на гейте целостности', () => {
+  // uv/setuptools кладут артефакты сборки (build\, *.egg-info\) РЯДОМ С ИСХОДНИКОМ.
+  // После первой установки дерево vendor меняется, и при ПОВТОРНОМ запуске установщика
+  // гейт честно говорит «vendor подменён» — компонент не ставится больше никогда.
+  // Проверено запуском на реальном uv: 2 файла в исходнике превращались в 7.
+  // На macOS это уже было сделано (BUILD_SRC), на Windows — не было.
+  const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  assertOrder(ps, 'Get-HmTreeSha256', 'uv tool install', 'Windows: сверка целостности ДО установки');
+  assert(/hm-nomad-build-/.test(ps), 'Windows: сборка идёт из временной копии');
+  assert(/tool install --python 3\.12 "\$srcForInstall"/.test(ps),
+    'Windows: uv получает КОПИЮ, а не путь в vendor');
+  assert(/Remove-Item -LiteralPath \$buildSrc/.test(ps), 'Windows: копия убирается');
+  assert(/BUILD_SRC=/.test(sh) && /uv tool install --python 3\.12 "\$BUILD_SRC"/.test(sh),
+    'macOS: тот же приём на месте');
+});
+
+ok('Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)', () => {
+  // Расширения ставит CLI редактора при MEDIUM integrity, а в лёгком издании vsix лежит
+  // в скачанном паке, распакованном в admins-only каталог (%ProgramData%\HmDeElev-*,
+  // DACL {SYSTEM, Administrators}). Medium-процесс его ПРОЧИТАТЬ НЕ МОЖЕТ — офлайн-путь
+  // срывался бы в Marketplace, а без интернета панель не ставилась бы вовсе.
+  for (const f of ['vscode.ps1', 'extension.ps1']) {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8');
+    assert(/GetTempPath\(\)/.test(s) && /\.vsix'\)/.test(s),
+      f + ': проверенный vsix копируется в пользовательский temp');
+    assert(/OpenRead\(/.test(s),
+      f + ': копия проверяется на ЧИТАЕМОСТЬ — иначе честно уходим в Marketplace');
+    assert(/Confirm-HmArtifact/.test(s), f + ': целостность подтверждается ДО копирования');
+    // Уборка: копии по 80 МБ не должны копиться в %TEMP%.
+    const rm = /function (Remove-HmVsixTemps?)/.exec(s);
+    assert(rm, f + ': есть уборка временных копий');
+    const decl = s.indexOf('function ' + rm[1]);
+    const firstUse = s.split(/\r?\n/).findIndex((l) => l.includes(rm[1]) && !l.trim().startsWith('function'));
+    const declLine = s.slice(0, decl).split(/\r?\n/).length - 1;
+    assert(declLine < firstUse,
+      f + ': функция объявлена ДО первого вызова — в PowerShell иначе ранний выход падает «команда не найдена»');
+  }
+});
+
+ok('Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)', () => {
+  // У Invoke-RestMethod/Invoke-WebRequest таймаут по умолчанию 0 — бесконечный. На
+  // плохом канале или при перехвате трафика вызов висит молча, а watchdog установщика
+  // НАМЕРЕННО не убивает процессы: шаг стоял бы вечно, человек видел бы спиннер.
+  // Один такой вызов уже нашёлся (nomad.ps1), у всех соседей таймаут был.
+  const dir = path.join(ROOT, 'scripts', 'windows');
+  const offenders = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.ps1'))) {
+    const s = fs.readFileSync(path.join(dir, f), 'utf8');
+    s.split(/\r?\n/).forEach((l, n) => {
+      if (/^\s*#/.test(l)) return;                                  // комментарий
+      if (!/Invoke-RestMethod|Invoke-WebRequest/.test(l)) return;
+      if (/-TimeoutSec/.test(l)) return;
+      offenders.push(f + ':' + (n + 1) + ' ' + l.trim().slice(0, 90));
+    });
+  }
+  assert.strictEqual(offenders.length, 0,
+    'сетевые вызовы без таймаута:\n    ' + offenders.join('\n    '));
+});
+
+ok('Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait', () => {
+  // -Wait ждёт не процесс, а ВСЁ ДЕРЕВО потомков. Claude Desktop (Squirrel) сам
+  // запускает приложение, а оно уходит в трей и живёт — шаг висел бы до тех пор, пока
+  // человек не выгрузит программу. Для Cursor это уже было поймано и починено, на
+  // Claude Desktop правило не перенесли.
+  const cd = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude-desktop.ps1'), 'utf8');
+  const i = cd.indexOf('Start-Process -FilePath $installer');
+  assert(i !== -1, 'нашли запуск установщика Claude Desktop');
+  const line = cd.slice(i, cd.indexOf('\n', i));
+  assert(!/-Wait\b/.test(line), 'без -Wait: иначе шаг ждёт трей-приложение вечно — ' + line.trim());
+  assert(/-PassThru/.test(line), '-PassThru нужен, чтобы прибрать Admins-only кэш после выхода установщика');
+  assert(/Wait-Process -Timeout/.test(cd), 'ожидание выхода установщика ОГРАНИЧЕНО по времени');
+
+  // Остальные -Wait допустимы ТОЛЬКО с тихим флагом и без автозапуска приложения.
+  const SILENT = /\/VERYSILENT|\/quiet|\/qn|\/S\b/;
+  for (const f of ['git.ps1', 'node.ps1', 'pydeps.ps1', 'vscode.ps1']) {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8');
+    for (const l of s.split(/\r?\n/)) {
+      if (!/Start-Process/.test(l) || !/-Wait\b/.test(l)) continue;
+      assert(SILENT.test(l), f + ': -Wait допустим только с тихим флагом — ' + l.trim().slice(0, 120));
+    }
+  }
+  // У VS Code автозапуск отключён явно — иначе он бы тоже держал шаг.
+  const vs = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), 'utf8');
+  assert(/!runcode/.test(vs), 'VS Code не запускается сам после установки (MERGETASKS=!runcode)');
+});
+
+// ВНИМАНИЕ: тест АСИНХРОННЫЙ → только okAsync, вызывается из asyncTests().
+// Переданный в синхронный ok() async-колбэк печатает ✅ НЕ ДОЖИДАЯСЬ результата:
+// процесс успевает выйти раньше, чем тело разрешится, и провал не всплывает НИКОГДА.
+// Проверено запуском: с нарочно сломанным ожиданием тест всё равно был зелёным.
+// Это стерегло главный фикс дня (закрытый stdin) — то есть страж был мнимым.
+async function testNoChildPromptCanHang() {
+  // Живой случай: установка встала на 15 минут — unzip спросил «write error (disk full?).
+  // Continue? (y/n/^C)», а ответить некуда. По умолчанию Node даёт ребёнку живой пайп на
+  // stdin, который никогда не закрывается, поэтому ЛЮБОЙ вопрос вешает шаг навсегда.
+  const m = EG_MAIN();
+  const i = m.indexOf('const spawnOpts = { env: childEnv');
+  assert(i !== -1, 'нашли спавн компонентных скриптов');
+  assert(/stdio: \['ignore', 'pipe', 'pipe'\]/.test(m.slice(i, i + 200)),
+    'stdin ребёнка = /dev/null: вопрос получает EOF и инструмент честно падает');
+
+  // Проверяем не текст, а ПОВЕДЕНИЕ: спавним процесс, который ждёт ответа.
+  const script = path.join(os.tmpdir(), 'hm-ask-' + Date.now() + '.js');
+  fs.writeFileSync(script,
+    'process.stdin.once("data", () => process.exit(0));' +
+    'process.stdin.on("end", () => process.exit(3));' +
+    'process.stdin.resume();');
+  const { spawn: spawnChild } = require('child_process');
+  const run = (stdio) => new Promise((resolve) => {
+    const child = spawnChild(process.execPath, [script], { stdio });
+    const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } resolve('hang'); }, 4000);
+    child.on('close', (code) => { clearTimeout(kill); resolve('exit:' + code); });
+  });
+  try {
+    assert.strictEqual(await run(['pipe', 'pipe', 'pipe']), 'hang', 'старое поведение действительно вешало');
+    assert.strictEqual(await run(['ignore', 'pipe', 'pipe']), 'exit:3', 'с закрытым stdin процесс завершается сразу');
+  } finally {
+    fs.rmSync(script, { force: true });
+  }
+}
+
+ok('macOS: курс распаковывается ditto — unzip не понимает кириллицу в именах', () => {
+  const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'course.sh'), 'utf8');
+  assert(/\/usr\/bin\/ditto -x -k/.test(s), 'основной путь — ditto (родной для macOS, UTF-8-имена)');
+  const di = s.indexOf('/usr/bin/ditto -x -k');
+  const ui = s.indexOf('/usr/bin/unzip');
+  assert(di !== -1 && ui !== -1 && di < ui, 'ditto пробуется ПЕРВЫМ, unzip — запасной');
+  assert(/\/usr\/bin\/unzip[^\n]*<\/dev\/null/.test(s),
+    'у запасного unzip stdin закрыт: иначе он снова подвесит установку своим вопросом');
+  // В архиве курса реально есть кириллическое имя — из-за него всё и встало.
+  const zip = path.join(ROOT, 'vendor', 'course', 'vibecoding-course.zip');
+  if (fs.existsSync(zip)) {
+    const buf = fs.readFileSync(zip);
+    assert(buf.includes(Buffer.from('начать', 'utf8')),
+      'архив содержит имя с кириллицей — значит распаковщик обязан её понимать');
+  }
+});
+
+// Текст sh-помощника самолечения — СОБРАННЫЙ ровно как в проде: eval массива
+// строк `const helper = [ … ].join(' ')` из main.js. JS-комментарии между
+// элементами исчезают при eval, поэтому «hdiutil detach» в комментарии текст
+// не засоряет, а результат байт в байт равен тому, что запускает spawn.
+function cutMacSelfhealHelper(m, from) {
+  const hi = m.indexOf('const helper = [', from || 0);
+  assert(hi !== -1, 'текст помощника (const helper = [) найден');
+  const hj = m.indexOf("].join(' ')", hi);
+  assert(hj > hi, 'конец текста помощника найден');
+  return new Function('return ' + m.slice(m.indexOf('[', hi), hj + "].join(' ')".length))();
+}
+
+ok('macOS: установщик чинит карантин САМ — кнопка, а не команда в Терминал', () => {
+  const m = EG_MAIN();
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const p = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+
+  const i = m.indexOf("ipcMain.handle('mac-selfheal'");
+  assert(i !== -1, 'обработчик самолечения есть');
+  // Границей берём следующий обработчик, а не «плюс N символов»: обработчик рос,
+  // и фиксированное окно однажды перестало доставать до spawn помощника — тест
+  // покраснел на ровном месте, хотя код был верен.
+  const hEnd = m.indexOf("ipcMain.handle('mac-selfheal-status'", i);
+  const h = m.slice(i, hEnd > i ? hEnd : i + 6000);
+  // Токены ищем в КОДЕ обработчика (комментарии вырезаны): вокруг self-heal много
+  // пояснений, и токен, уехавший в комментарий, иначе продолжал бы «стеречь».
+  const hc = h.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert(/process\.platform !== 'darwin'/.test(hc), 'на не-macOS не срабатывает');
+  // Всё через execFile с МАССИВОМ аргументов: путь к образу приходит из hdiutil/файловой
+  // системы, и склейка в строку shell открыла бы инъекцию через имя файла.
+  assert(/'\/usr\/bin\/xattr'[\s\S]{0,80}'-dr', 'com\.apple\.quarantine'/.test(hc), 'снимает карантин с образа');
+  // Факт, а не отсутствие исключения: раньше «Готово» писали, не проверив ничего,
+  // и человек получал ровно тот же заблокированный установщик.
+  assert(/'-p', 'com\.apple\.quarantine'/.test(hc), 'проверяет, что карантин ДЕЙСТВИТЕЛЬНО снят');
+  assert(/quarantine-not-cleared/.test(hc), 'при неснятом карантине честно отвечает отказом');
+  // Отцеплять том, с которого сам же и запущен, из собственного процесса нельзя —
+  // detach -force выдёргивает backing store и убивает установщик посреди починки.
+  assert(/detached:\s*true/.test(hc) && /\.unref\(\)/.test(hc),
+    'хвост операции выполняет ОТЦЕПЛЁННЫЙ помощник, переживающий наш выход');
+  assert(!/execFileSync\([^)]*hdiutil[^)]*detach/.test(hc),
+    'сам процесс НЕ отцепляет том, с которого работает');
+
+  // Поведение помощника — на тексте, СОБРАННОМ ровно как в проде (eval массива:
+  // JS-комментарии исчезают сами, «токен в комментарии» стеречь нечего не может).
+  // Порядок — ТОЛЬКО через assertOrder: голый indexOf(a) < indexOf(b) при
+  // исчезнувшем «a» даёт -1 < x и молча зеленеет — ровно так этот тест пережил
+  // удаление ожидания выхода установщика (kill -0), то есть ядра правки.
+  const helper = cutMacSelfhealHelper(m, i);
+  assertOrder(helper, 'kill -0 "$PID"', 'hdiutil detach',
+    'помощник ЖДЁТ выхода установщика ДО отцепления тома (иначе наш замок единственного экземпляра закрывает свежий установщик)');
+  assertOrder(helper, 'hdiutil detach', 'hdiutil attach',
+    'старые тома отцепляются ДО монтирования образа');
+  assertOrder(helper, 'hdiutil attach', 'open -n -a',
+    'запуск идёт после монтирования — с заведомо свежего тома');
+  assert(/open -n -a "\$MP\//.test(helper),
+    'open -n и точка монтирования ИЗ ВЫВОДА attach: без -n macOS активировала бы старый экземпляр, а перебор /Volumes брал бы старый том');
+
+  const fi = m.indexOf('function macFindOurDmg');
+  const fh = m.slice(fi, fi + 1800);
+  assert(/hdiutil['"\],\s]+.*info/.test(fh), 'путь к образу берётся у самого смонтированного образа');
+  const nameRe = fh.match(/\^Hamidun-Setup-Mac\[([^\]]*)\]\*\\\.dmg\$/);
+  assert(nameRe, 'имя образа проверяется по шаблону');
+  {
+    const re = new RegExp(nameRe[0], 'i');
+    assert(re.test('Hamidun-Setup-Mac.dmg'), 'обычное имя принимается');
+    // Браузер дописывает « (1)» при повторном скачивании — именно тот, кто перекачал
+    // образ после блокировки, и жмёт «Исправить автоматически».
+    assert(re.test('Hamidun-Setup-Mac-Lite (1).dmg'), 'повторно скачанный образ « (1)» находится');
+    assert(!re.test('evil.dmg'), 'посторонний файл не принимается');
+  }
+  assert(/Downloads['",\s]+.*Desktop/.test(fh),
+    'ищем не только в «Загрузках» — живой случай: образ лежал на Рабочем столе');
+
+  assert(/macSelfHeal: \(\) => ipcRenderer\.invoke\('mac-selfheal'\)/.test(p), 'проброшено в renderer');
+  assert(/id="mac-selfheal"/.test(a) && /id="mac-selfheal-banner"/.test(a),
+    'кнопка есть и в модалке, и в несмываемом баннере');
+  assert(/window\.installer\.macSelfHeal\(\)/.test(a), 'кнопка вызывает самолечение');
+  assert(/dmg-not-found/.test(a), 'если образа нет — человеку говорят скачать заново, а не молчат');
+});
+
+// Помощник самолечения — ПОВЕДЕНЧЕСКИ, настоящим sh. Текст помощника меняется
+// ТОЛЬКО механически (срезается префикс /usr/bin/, /Volumes/ уводится в
+// песочницу), hdiutil/open подменяются стабами на PATH, которые пишут вызовы в
+// лог; «установщик» — фоновый процесс, который перед смертью пишет маркер в тот
+// же лог. Если помощник НЕ ждёт выхода установщика (мутация: убрать kill -0),
+// detach попадает в лог РАНЬШЕ маркера — тест краснеет ПОВЕДЕНИЕМ, а не грепом.
+ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхода установщика → detach томов → attach → open -n изнутри свежего тома', () => {
+  const bash = (() => {
+    if (process.platform !== 'win32') return 'bash';
+    for (const c of ['C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe']) {
+      try { if (fs.existsSync(c)) return c; } catch (e) { /* */ }
+    }
+    return '';
+  })();
+  if (!bash) SKIP('bash недоступен — поведенческий прогон sh-помощника невозможен');
+
+  const helper = cutMacSelfhealHelper(EG_MAIN(), 0);
+  assert(helper.includes('/usr/bin/hdiutil') && helper.includes('/Volumes/'),
+    'ожидаемые якоря в тексте помощника (иначе механическая подстановка стала бы враньём)');
+
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-selfheal-'));
+  try {
+    const posix = (p) => String(p).replace(/\\/g, '/').replace(/^([A-Za-z]):\//, (q, d) => '/' + d.toLowerCase() + '/');
+    const SB = posix(sb);
+    fs.mkdirSync(path.join(sb, 'bin'), { recursive: true });
+    // Два «уже смонтированных» тома — помощник обязан отцепить ОБА до attach.
+    fs.mkdirSync(path.join(sb, 'Volumes', 'HamidunOld'), { recursive: true });
+    fs.mkdirSync(path.join(sb, 'Volumes', 'Hamidun Setup', 'Hamidun Setup.app'), { recursive: true });
+    fs.writeFileSync(path.join(sb, 'fake.dmg'), 'x');
+
+    // Стабы: пишут вызов в лог; attach отвечает как настоящий hdiutil —
+    // таблицей, где точка монтирования стоит В КОНЦЕ строки (её достаёт sed).
+    fs.writeFileSync(path.join(sb, 'bin', 'hdiutil'),
+      '#!/bin/sh\necho "hdiutil $*" >> "$HM_LOG"\n' +
+      'if [ "$1" = "attach" ]; then\n' +
+      '  echo "/dev/disk9          GUID_partition_scheme"\n' +
+      '  echo "/dev/disk9s1        Apple_HFS        ' + SB + '/Volumes/Hamidun Setup"\n' +
+      'fi\nexit 0\n');
+    fs.writeFileSync(path.join(sb, 'bin', 'open'),
+      '#!/bin/sh\necho "open $*" >> "$HM_LOG"\nexit 0\n');
+    for (const f of ['hdiutil', 'open']) {
+      try { fs.chmodSync(path.join(sb, 'bin', f), 0o755); } catch (e) { /* win */ }
+    }
+
+    // Механические подстановки (логика помощника НЕ меняется).
+    const patched = helper.split('/usr/bin/').join('').split('/Volumes/').join(SB + '/Volumes/');
+    fs.writeFileSync(path.join(sb, 'helper.sh'), patched + '\n');
+    fs.writeFileSync(path.join(sb, 'run.sh'),
+      'export PATH="' + SB + '/bin:$PATH"\n' +
+      'export HM_LOG="' + SB + '/log.txt"\n' +
+      ': > "$HM_LOG"\n' +
+      // «Установщик»: живёт ~0.9 c, перед смертью оставляет маркер в общем логе.
+      '( sleep 0.9; echo "INSTALLER-EXITED" >> "$HM_LOG" ) &\n' +
+      'INST=$!\n' +
+      'sh "' + SB + '/helper.sh" "' + SB + '/fake.dmg" "$INST" "' + SB + '/status.txt"\n' +
+      'echo "HELPER_RC=$?"\n');
+    const r = spawnSync(bash, [path.join(sb, 'run.sh')], { encoding: 'utf8', timeout: 120000 });
+    const out = (r.stdout || '') + (r.stderr || '');
+    assert(/HELPER_RC=0/.test(out), 'помощник завершился успехом: ' + out);
+
+    const lines = fs.readFileSync(path.join(sb, 'log.txt'), 'utf8').split(/\r?\n/).filter(Boolean);
+    const iExit = lines.indexOf('INSTALLER-EXITED');
+    const detaches = lines.map((l, n) => (/^hdiutil detach /.test(l) ? n : -1)).filter((n) => n >= 0);
+    const iAttach = lines.findIndex((l) => /^hdiutil attach /.test(l));
+    const iOpen = lines.findIndex((l) => /^open /.test(l));
+    assert(iExit !== -1, 'маркер выхода установщика есть в логе: ' + JSON.stringify(lines));
+    assert(detaches.length >= 2, 'отцеплены ОБА старых тома: ' + JSON.stringify(lines));
+    assert(detaches[0] > iExit,
+      'ЯДРО ПРАВКИ: detach только ПОСЛЕ выхода установщика (иначе замок единственного экземпляра закрывает свежий): ' + JSON.stringify(lines));
+    assert(iAttach > detaches[detaches.length - 1], 'attach после отцепления всех томов: ' + JSON.stringify(lines));
+    assert(iOpen > iAttach, 'open после attach: ' + JSON.stringify(lines));
+    assert(/-n -a/.test(lines[iOpen]) && lines[iOpen].includes('/Volumes/Hamidun Setup/Hamidun Setup.app'),
+      'open -n -a с приложением на точке монтирования ИЗ ВЫВОДА attach: ' + lines[iOpen]);
+    assert.strictEqual(fs.readFileSync(path.join(sb, 'status.txt'), 'utf8').trim(), 'ok',
+      'хлебная крошка статуса — «ok»');
+  } finally { try { fs.rmSync(sb, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+});
+
+ok('прогресс: полоса в ПРОЦЕНТАХ по прогону, проценты настоящие', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'styles.css'), 'utf8');
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const view = html.slice(html.indexOf('<main id="view-progress"'), html.indexOf('</main>', html.indexOf('<main id="view-progress"')));
+  assert(/id="run-progress-fill"/.test(view) && /id="run-progress-label"/.test(view),
+    'полоса и подпись живут в экране установки');
+  assert(/\.run-progress__fill/.test(css), 'стили полосы описаны');
+
+  // Арифметика вынесена в тестируемый модуль (тот же приём, что у finish-link).
+  assert.strictEqual(HMFinish.runProgressPct(0, 8), 0);
+  assert.strictEqual(HMFinish.runProgressPct(3, 8), 38, 'процент считается от пройденных компонентов');
+  assert.strictEqual(HMFinish.runProgressPct(8, 8), 100);
+  assert.strictEqual(HMFinish.runProgressPct(0, 0), 0, 'пустой набор не даёт NaN');
+  assert.strictEqual(HMFinish.runProgressPct(9, 8), 100, 'больше 100% не показываем');
+  assert.strictEqual(HMFinish.runProgressPct(-1, 8), 0, 'отрицательное не уводит полосу в минус');
+  assert(/window\.HMFinishLink\.runProgressPct\(done, total\)/.test(a), 'интерфейс использует ТУ ЖЕ функцию, что проверена тестом');
+  // Порядок загрузки: глобал должен существовать к моменту вызова, иначе полоса
+  // упадёт с ReferenceError уже у человека, а не в тестах.
+  // Сравниваем именно ТЕГИ скриптов: имена файлов упоминаются ещё и в комментариях
+  // разметки, и поиск по подстроке дал бы ложный порядок.
+  const si = html.indexOf('<script src="finish-link.js">');
+  const ai = html.indexOf('<script src="app.js">');
+  assert(si !== -1 && ai !== -1 && si < ai, 'finish-link.js подключается ДО app.js');
+  assert(/сейчас: \$\{currentName\}/.test(a), 'в подписи видно, какой компонент идёт сейчас');
+
+  // Полоса обязана двигаться и когда компонент ПРОПУЩЕН из-за зависимости, иначе она
+  // застынет и человек снова решит, что всё зависло.
+  const runFn = a.slice(a.indexOf('async function runComponents'));
+  assert((runFn.match(/setRunProgress\(/g) || []).length >= 3,
+    'обновляется на старте шага, после шага и в ветке пропуска по зависимости');
+});
+
+ok('прогресс: на идущем шаге тикают часы (спиннер не отличить от зависания)', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/function startStepClock/.test(a) && /function stopStepClock/.test(a), 'часы есть');
+  assert(/startStepClock\(id,/.test(a), 'запускаются при переходе шага в работу');
+  assert(/stopStepClock\(\);\s*\n\s*if \(offP\)/.test(a), 'останавливаются по завершении шага');
+  // Настоящих процентов у установочных скриптов нет — выдуманную полосу рисовать нельзя.
+  const ci = a.indexOf('function startStepClock');
+  const ch = a.slice(ci, ci + 1200);
+  assert(/if \(\/%\/\.test/.test(ch), 'подпись докачки с НАСТОЯЩИМИ процентами не перетирается');
+  assert(/идёт /.test(ch), 'показывается время, а не выдуманный процент');
+});
+
+ok('macOS: команда разблокировки САМА находит образ (жёсткий ~/Downloads запрещён)', () => {
+  // Живой случай: человек сохранил dmg не в «Загрузки», команда падала на первом шаге
+  // («No such file»), карантин не снимался — и инструкция выглядела неработающей.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const txtPath = path.join(ROOT, 'assets', 'mac', 'ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt');
+  const txt = fs.readFileSync(txtPath, 'utf8');
+
+  const hits = app.match(/DMG=\$\(find[^<]*/g) || [];
+  assert.strictEqual(hits.length, 2, 'команда есть и в модалке, и в несмываемом баннере');
+  const decode = (s) => s.replace(/&quot;/g, '"').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+  const fromHtml = decode(hits[0]).trim();
+  const fromTxt = (txt.match(/DMG=\$\(find.*/) || [''])[0].trim();
+
+  assert(!/~\/Downloads\/Hamidun-Setup-Mac/.test(app),
+    'жёсткого пути к «Загрузкам» в интерфейсе нет');
+  assert(!/~\/Downloads\/Hamidun-Setup-Mac/.test(txt),
+    'жёсткого пути к «Загрузкам» в файле внутри образа нет');
+  assert(/find ~ -maxdepth \d+ -iname/.test(fromHtml), 'команда ищет образ сама');
+  assert(/for v in \/Volumes\/Hamidun\*/.test(fromHtml),
+    'отцепляются ВСЕ окна образа: при повторных попытках их несколько, и старый вариант закрывал только первое');
+  // Человек копирует команду ИЗ ИНТЕРФЕЙСА — в буфере должно оказаться ровно то же,
+  // что написано в файле внутри образа, иначе две инструкции разойдутся.
+  assert.strictEqual(fromHtml, fromTxt, 'интерфейс и файл в образе дают ОДНУ команду');
+});
+
+ok('uid: на Windows берётся PORTABLE_EXECUTABLE_FILE — process.execPath указывает в %TEMP%', () => {
+  // Сборка — самораспаковывающийся portable-exe: он распаковывает приложение в
+  // %TEMP%\ns<rnd>.tmp\app и запускает ОТТУДА. process.execPath = «Hamidun Setup.exe» во
+  // временной папке, а НЕ скачанный Hamidun-Setup-Windows--u<uid>.exe, поэтому привязка
+  // по имени файла молча не работала бы вообще.
+  const real = path.join('C:', 'Users', 'x', 'Downloads', 'Hamidun-Setup-Windows--u272540053.exe');
+  const unpacked = path.join(os.tmpdir(), 'nsABCD.tmp', 'app', 'Hamidun Setup.exe');
+  assert.strictEqual(
+    UIDT.resolveUid({ env: { PORTABLE_EXECUTABLE_FILE: real }, execPath: undefined }), '272540053',
+    'uid берётся из настоящего имени скачанного файла');
+  assert.strictEqual(UIDT.resolveUid({ env: {}, execPath: unpacked }), '',
+    'из распакованного пути uid не выдумывается');
+  const m = EG_MAIN();
+  assert(/PORTABLE_EXECUTABLE_FILE/.test(fs.readFileSync(path.join(ROOT, 'src', 'uid-telemetry.js'), 'utf8')),
+    'источник объявлен в модуле');
+  assert(m.indexOf('uidTelemetry.resolveUid()') !== -1, 'main зовёт резолвинг без ручных аргументов');
+});
+
+ok('телеметрия: SID и доменные учётки не уезжают, а обычные пути не калечатся', () => {
+  const o = { home: 'C:\\Users\\student', user: 'student' };
+  assert(!/S-1-5-21/.test(UIDT.scrubText('владелец = S-1-5-21-333-444-555-1001', o)), 'SID пользователя вычищен');
+  assert(!/petrov/i.test(UIDT.scrubText('посторонний ACE: CORP\\petrov.ivan', o)), 'доменная учётка вычищена');
+  assert(/S-1-5-32-544/.test(UIDT.scrubText('ожидался S-1-5-32-544', o)), 'встроенные SID остаются — они объясняют причину');
+  // Пути — это диагностика, а не ПД: правило «домен\\учётка» не должно их резать.
+  assert.strictEqual(UIDT.scrubText('нет файла vendor\\apps\\git-setup.exe', o),
+    'нет файла vendor\\apps\\git-setup.exe', 'относительный путь цел');
+  assert.strictEqual(UIDT.scrubText('C:\\Windows\\System32\\icacls.exe не найден', o),
+    'C:\\Windows\\System32\\icacls.exe не найден', 'системный путь цел');
+});
+
+ok('телеметрия: согласие и защёлки — повторный прогон снова отчитывается', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/STATE\.telemetryEditorSent/.test(a), 'open_editor защёлкнут (три кнопки ведут в одну отправку)');
+  assert(/STATE\.telemetrySent = false;[\s\S]{0,120}STATE\.telemetryStartSent = false;/.test(a),
+    'новый прогон сбрасывает защёлки — иначе вторая попытка невидима');
+  // Cursor обязан отчитываться ПО ФАКТУ открытия: кнопка рисуется по выбору компонента,
+  // а не по факту установки.
+  const ci = a.indexOf("const cursorBtn");
+  const ch = a.slice(ci, ci + 700);
+  assert(/await window\.installer\.launchCursor\(\)/.test(ch), 'результат запуска Cursor ожидается');
+  assert(/if \(ok\) sendOpenEditorTelemetry\(\)/.test(ch), 'событие только при реально открытом редакторе');
+});
+
+ok('главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)', () => {
+  const m = EG_MAIN();
+  const i = m.indexOf('async function winMakeSecureDir()');
+  const h = m.slice(i, i + 5000);
+  assert(/env: detectSpawnEnv\(\)/.test(h),
+    'spawn получает доверенный env: инлайн $env:PSModulePath не закрывает COR_ENABLE_PROFILING/COR_PROFILER — их CLR читает ДО разбора -Command');
+  assert(/lastSecureDirError = '';/.test(h), 'причина отказа сбрасывается на входе (не липнет к другому компоненту)');
+});
+
+ok('E2E: «докачка стартовала» доказывается ПРОЦЕНТАМИ, а не подписью до обращения к сети', () => {
+  const e = fs.readFileSync(path.join(ROOT, 'test', 'e2e-gui.js'), 'utf8');
+  const i = e.indexOf('async function armDownloadWatcher');
+  const h = e.slice(i, i + 1400);
+  assert(/Скачиваю\\s\+\\d\+%/.test(h), 'наблюдатель ищет проценты');
+  assert(!/\/Скачиваю\|скачив\|Докачка/.test(h),
+    'слова «Скачиваю»/«Докачка» renderer печатает ДО сети — по ним проверка была бы всегда-истиной');
+  // Заморозка окна обязана ронять прогон, а не оставаться предупреждением.
+  const ci = e.indexOf('async function clickInstall');
+  const ch = e.slice(ci, ci + 1500);
+  assert(/check\('интерфейс ответил на клик «Установить»', false/.test(ch),
+    'таймаут клика = проваленная проверка (CI читает код возврата, а не текст лога)');
+});
+
+ok('телеметрия: renderer шлёт старт, финиш с диагностикой и открытие редактора', () => {
+  const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert(/event: 'install_started'/.test(a), 'событие старта установки');
+  assert(/event: 'open_editor'/.test(a), 'событие «открыл редактор»');
+  assert(/errors: Array\.from\(STATE\.errorDigest\.values\(\)\)/.test(a), 'финиш везёт диагностику ошибок');
+  assert(/STATE\.errorDigest\.set\(id, \{/.test(a), 'диагностика собирается на каждом провале');
+  assert(/STATE\.errorDigest\.delete\(id\)/.test(a), 'успех/пропуск закрывают запись — не шлём вылеченные ошибки');
+  // Согласие уважается всеми тремя отправками, а не только финишной.
+  const starts = a.indexOf('function sendStartTelemetry');
+  const opens = a.indexOf('function sendOpenEditorTelemetry');
+  assert(/STATE\.telemetryConsent === false/.test(a.slice(starts, starts + 400)), 'старт уважает opt-out');
+  assert(/STATE\.telemetryConsent === false/.test(a.slice(opens, opens + 400)), 'open_editor уважает opt-out');
+});
+
+// ===== ЕДИНЫЙ БЛОК: vsix-темпы убираются на КАЖДОМ выходе (vscode/extension) +
+// ===== claude.ps1 проверяется ЗАПУСКОМ (урок macOS) + вердикт Claude Desktop по ФАКТУ =====
+console.log('== vsix-temps: уборка на каждом выходе; claude: проверка запуском; desktop: вердикт по факту ==');
+
+// PowerShell-текст БЕЗ чисто-комментарных строк: «exit 0/1» в комментариях не должен
+// обманывать проверку достижимости уборки.
+const psCodeOnly = (s) => s.split(/\r?\n/).map((l) => (l.trim().startsWith('#') ? '' : l)).join('\n');
+const CLD_PS1 = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude.ps1'), 'utf8');
+
+// НЕ «есть ли вызов уборки» (такая текстовая регулярка и пропустила главный успешный
+// exit 0 — 82 МБ мусора за каждый успешный прогон), а инвариант структуры: КАЖДЫЙ exit
+// после начала создания копий лежит ВНУТРИ top-level try, чей finally зовёт уборку, и
+// после finally выходов нет. PowerShell исполняет finally при exit (проверено прогоном),
+// значит уборка ДОСТИЖИМА на любом выходе, включая необработанное исключение.
+function assertVsixCleanupReachable(name, cleanupFn, creationMarker) {
+  const s = psCodeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', name), 'utf8'));
+  const created = s.indexOf(creationMarker);
+  assert(created !== -1, name + ': место создания vsix-копий («' + creationMarker + '») найдено');
+  const tryIdx = s.search(/^try \{/m);      // top-level try (внутренние try — с отступом)
+  const finIdx = s.search(/^\} finally \{/m);
+  assert(tryIdx !== -1, name + ': есть top-level try вокруг блока с vsix-копиями');
+  assert(finIdx > tryIdx, name + ': у top-level try есть finally');
+  assert(new RegExp('^\\} finally \\{[\\s\\S]{0,220}?' + cleanupFn + '\\b', 'm').test(s.slice(finIdx)),
+    name + ': в finally — уборка ' + cleanupFn);
+  const rx = /\bexit\s+\d+/g; let m;
+  while ((m = rx.exec(s)) !== null) {
+    if (m.index <= created && m.index < tryIdx) continue;   // ранние выходы: копий ещё нет
+    assert(m.index > tryIdx && m.index < finIdx,
+      name + ': exit вне try/finally с уборкой (смещение ' + m.index + '): «' + s.slice(m.index, m.index + 12) + '»');
+  }
+}
+
+ok('vscode.ps1: уборка vsix-темпов достижима перед КАЖДЫМ exit (включая успешный exit 0 «оба встали»)', () => {
+  assertVsixCleanupReachable('vscode.ps1', 'Remove-HmVsixTemps', "Get-Vsix 'claude-code.vsix'");
+  const s = psCodeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), 'utf8'));
+  // Пойманный дефект — самый частый выход: оба расширения встали -> exit 0 БЕЗ уборки.
+  const okBoth = s.indexOf('if ($okClaude -and $okCodex) { exit 0 }');
+  assert(okBoth !== -1, 'успешный путь «оба расширения» на месте');
+  assert(okBoth > s.search(/^try \{/m) && okBoth < s.search(/^\} finally \{/m),
+    'главный успешный exit 0 — ВНУТРИ try, уборка в finally его накрывает');
+});
+
+ok('extension.ps1: уборка vsix-темпа достижима перед КАЖДЫМ exit (та же схема, что и vscode.ps1)', () => {
+  assertVsixCleanupReachable('extension.ps1', 'Remove-HmVsixTemp', 'hm-claude-code-');
+});
+
+// Наблюдатель за каталогом из ОТДЕЛЬНОГО node-процесса: spawnSync блокирует
+// event loop родителя, и короткоживущую копию vsix (создание → finally-уборка)
+// можно увидеть только сбоку (fs.watch + страховочный поллинг; совпавшие имена
+// дописываются в out-файл). Без доказательства «копия СОЗДАВАЛАСЬ» проверка
+// «в %TEMP% пусто» — пустая: мутация, отключившая создание копии вовсе
+// (а с ней и офлайн-путь установки), оставляла бы тест зелёным.
+function watchDirForPrefix(dir, prefix, outFile) {
+  const { spawn } = require('child_process');
+  fs.writeFileSync(outFile, '');
+  const child = spawn(process.execPath, ['-e',
+    'const fs=require("fs");const [dir,prefix,out]=process.argv.slice(1);' +
+    'const seen=new Set();' +
+    'const rec=(n)=>{if(n&&n.startsWith(prefix)&&!seen.has(n)){seen.add(n);try{fs.appendFileSync(out,n+"\\n")}catch(e){}}};' +
+    'const scan=()=>{try{fs.readdirSync(dir).forEach(rec)}catch(e){}};' +
+    'scan();try{fs.watch(dir,(ev,f)=>rec(f))}catch(e){}' +
+    'setInterval(scan,10);setTimeout(()=>process.exit(0),300000);',
+    dir, prefix, outFile], { stdio: 'ignore', windowsHide: true });
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  sleep(200); // node-наблюдатель успевает поднять fs.watch до старта PowerShell
+  return {
+    stop() {
+      sleep(60);
+      try { child.kill(); } catch (e) { /* */ }
+      try { return fs.readFileSync(outFile, 'utf8').split(/\r?\n/).filter(Boolean); }
+      catch (e) { return []; }
+    },
+  };
+}
+
+if (powershellAvailable()) {
+  // Функциональный прогон ХВОСТА vscode.ps1 в БОЕВОМ PowerShell 5.1: успешный путь
+  // «оба расширения уже на месте» (Get-Vsix копии УЖЕ созданы — они рождаются ДО проверки
+  // «уже установлено», ровно как в проде при повторной установке) -> exit 0 И НОЛЬ hm-vsix-*.
+  ok('vscode.ps1 (прогон PS 5.1, sandbox): копии vsix СОЗДАВАЛИСЬ и успешный exit 0 не оставляет hm-vsix-* в %TEMP%', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-vsxclean-'));
+    try {
+      const sb = (p) => path.join(base, p);
+      ['scripts', 'vendor\\apps', 'temp', 'home', 'la\\Programs\\Microsoft VS Code\\bin']
+        .forEach((d) => fs.mkdirSync(sb(d), { recursive: true }));
+      fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), sb('scripts\\vscode.ps1'));
+      // Стабы примитивов: целостность ОК; де-элевация «отработала»; расширения «уже на месте».
+      fs.writeFileSync(sb('scripts\\_verify.ps1'),
+        '﻿function Confirm-HmArtifact { param($p) }\r\nfunction Test-HmArtifact { param($p) $true }\r\n');
+      fs.writeFileSync(sb('scripts\\_deelev.ps1'),
+        '﻿function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @()) [pscustomobject]@{ Gate = "medium"; Code = 0 } }\r\n' +
+        'function Test-HmExtInstalled { param($ExtId, [string[]]$Dirs) $true }\r\n');
+      fs.writeFileSync(sb('vendor\\apps\\claude-code.vsix'), Buffer.alloc(262144, 7));
+      fs.writeFileSync(sb('vendor\\apps\\chatgpt.vsix'), Buffer.alloc(262144, 8));
+      fs.writeFileSync(sb('la\\Programs\\Microsoft VS Code\\bin\\code.cmd'), '@echo off\r\n');
+      const env = Object.assign({}, process.env, {
+        TEMP: sb('temp'), TMP: sb('temp'), LOCALAPPDATA: sb('la'),
+        USERPROFILE: sb('home'), HM_VENDOR: sb('vendor')
+      });
+      delete env.HM_DRY_RUN;
+      const w = watchDirForPrefix(sb('temp'), 'hm-vsix-', sb('watch.log'));
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\vscode.ps1') + "'"],
+        { encoding: 'utf8', timeout: 120000, env });
+      const seen = w.stop();
+      assert.strictEqual(r.status, 0, 'exit 0 (оба расширения «на месте»): ' + (r.stdout || '') + (r.stderr || ''));
+      assert(/уже на месте/.test(r.stdout || ''), 'прогон прошёл путь «уже установлено»');
+      // Факт создания, а не догадка по маршруту: обе копии видел наблюдатель.
+      assert(seen.length >= 2,
+        'копии vsix (claude-code + chatgpt) реально СОЗДАВАЛИСЬ во время прогона, видели: ' + JSON.stringify(seen));
+      const left = fs.readdirSync(sb('temp')).filter((n) => n.startsWith('hm-vsix-'));
+      assert.strictEqual(left.length, 0, 'hm-vsix-* убраны на успешном пути: ' + left.join(', '));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('extension.ps1 (прогон PS 5.1, sandbox): копия vsix СОЗДАВАЛАСЬ; выход «Cursor не установлен» не оставляет hm-claude-code-* в %TEMP%', () => {
+    // Guard осмысленный и ОСТАЁТСЯ: при живом пользовательском Cursor скрипт ждёт 20 с
+    // и в конце может его закрыть — на машине разработчика такой прогон непозволителен.
+    // Но пропуск теперь ЧЕСТНЫЙ (⏭, не ✅): раньше тест печатал зелёную галочку и на
+    // машине разработчика с запущенным Cursor не стерёг ВООБЩЕ ничего.
+    const t = spawnSync('tasklist', ['/FI', 'IMAGENAME eq Cursor.exe', '/NH'], { encoding: 'utf8', timeout: 15000 });
+    if (/Cursor\.exe/i.test(t.stdout || '')) SKIP('Cursor запущен — прогон extension.ps1 небезопасен (ждёт 20 с и может закрыть Cursor)');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-extclean-'));
+    try {
+      const sb = (p) => path.join(base, p);
+      ['scripts', 'vendor\\apps', 'temp', 'home', 'la', 'appdata'].forEach((d) => fs.mkdirSync(sb(d), { recursive: true }));
+      fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', 'extension.ps1'), sb('scripts\\extension.ps1'));
+      fs.writeFileSync(sb('scripts\\_verify.ps1'),
+        '﻿function Confirm-HmArtifact { param($p) }\r\nfunction Test-HmArtifact { param($p) $true }\r\n');
+      fs.writeFileSync(sb('scripts\\_deelev.ps1'),
+        '﻿function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @()) [pscustomobject]@{ Gate = "medium"; Code = 0 } }\r\n' +
+        'function Test-HmExtInstalled { param($ExtId, [string[]]$Dirs) $false }\r\n');
+      fs.writeFileSync(sb('vendor\\apps\\claude-code.vsix'), Buffer.alloc(262144, 9));
+      const env = Object.assign({}, process.env, {
+        TEMP: sb('temp'), TMP: sb('temp'), LOCALAPPDATA: sb('la'), APPDATA: sb('appdata'),
+        USERPROFILE: sb('home'), HM_VENDOR: sb('vendor')
+      });
+      delete env.HM_DRY_RUN; delete env.HM_CURSOR_AUTOSTARTED; delete env.HM_CLAUDE_EXT_ID;
+      const w = watchDirForPrefix(sb('temp'), 'hm-claude-code-', sb('watch.log'));
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\extension.ps1') + "'"],
+        { encoding: 'utf8', timeout: 120000, env });
+      const seen = w.stop();
+      assert.strictEqual(r.status, 0, 'exit 0 («Cursor не установлен — пропускаю»): ' + (r.stdout || '') + (r.stderr || ''));
+      // Раньше тест проверял только «в конце пусто» — это выполнялось и когда копия
+      // НЕ создавалась вовсе. Теперь факт создания доказан наблюдателем.
+      assert(seen.length >= 1,
+        'копия vsix реально СОЗДАВАЛАСЬ во время прогона (наблюдатель видел hm-claude-code-*): ' + JSON.stringify(seen));
+      const left = fs.readdirSync(sb('temp')).filter((n) => n.startsWith('hm-claude-code-'));
+      assert.strictEqual(left.length, 0, 'hm-claude-code-* убраны: ' + left.join(', '));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+}
+
+// --- claude.ps1: офлайн-установка проверяется ЗАПУСКОМ (перенос семантики scripts/macos/claude.sh) ---
+ok('claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken', () => {
+  const s = CLD_PS1();
+  assert(/_deelev\.ps1/.test(s), 'дот-сорсит единый примитив де-элевации');
+  assert(/function Test-HmClaudeRuns/.test(s), 'проверка запуском объявлена');
+  assert(/Invoke-HmDeElevated \$bin @\('--version'\)/.test(s),
+    '--version исполняется ДЕ-ЭЛЕВИРОВАННО (user-writable claude НЕ запускается под админом)');
+  assert(!/&\s*\$claudeBin\b/.test(s) && !/&\s*\$bin\s+--version/.test(s),
+    'нет прямого elevated-запуска claude-бинаря');
+  assert(/function Remove-HmBrokenClaude/.test(s), 'уборка нерабочей обёртки объявлена');
+  assert(/node_modules\\@anthropic-ai\\claude-code/.test(s), 'убирается и пакет в node_modules (зеркало rm -rf в claude.sh)');
+  // Порядок: офлайн npm -> проверка запуском -> уборка обёртки -> онлайн-путь.
+  assertOrder(s, '--offline --cache', 'Test-HmClaudeRuns $bin', 'проверка запуском идёт ПОСЛЕ офлайн-установки');
+  assertOrder(s, 'Test-HmClaudeRuns $bin', 'Remove-HmBrokenClaude $bin', 'при провале проверки обёртка убирается');
+  assertOrder(s, 'Remove-HmBrokenClaude $bin', 'https://claude.ai/install.ps1', 'после уборки — онлайн-путь');
+  // Финальный вердикт: broken -> честный exit 1 ДО любой «OK»-строки (никакой зелёной галочки).
+  assert(/if \(\$probe -eq 'broken'\) \{[^{}]{0,320}?exit 1/.test(s), 'broken на финале = exit 1');
+  const brokenIdx = s.lastIndexOf("($probe -eq 'broken')");
+  const okIdx = s.lastIndexOf('Write-Host "OK: Claude Code CLI');
+  assert(brokenIdx !== -1 && okIdx > brokenIdx, 'красный вердикт выносится РАНЬШЕ OK-квитанции');
+  // Первоисточник семантики — scripts/macos/claude.sh (проверка запуском --version + уборка
+  // обёртки); его стерегут СВОИ тесты выше. Здесь на него нарочно НЕ смотрим: файл правится
+  // параллельно, и чужой рефакторинг не должен ронять проверку Windows-порта.
+});
+
+if (powershellAvailable()) {
+  ok('claude.ps1 (прогон PS 5.1): Test-HmClaudeRuns отличает рабочий бинарь от обёртки; Remove-HmBrokenClaude сносит шимы и пакет', () => {
+    const src = CLD_PS1();
+    const fn = (name) => {
+      const m = src.match(new RegExp('function ' + name + '[\\s\\S]*?\\r?\\n\\}'));
+      assert(m, name + ' извлекается из claude.ps1');
+      return m[0];
+    };
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldrun-'));
+    try {
+      // Фейковый npm-prefix: рабочий и сломанный claude.cmd + пакет в node_modules.
+      // Сломанный лежит в САНДБОКСНОМ %APPDATA%\npm: после ревью-фикса Remove-HmBrokenClaude
+      // удаляет СТРОГО по аллоулисту наших мест установки (см. блок тестов в конце файла).
+      const good = path.join(base, 'good'); const bad = path.join(base, 'appdata', 'npm');
+      fs.mkdirSync(path.join(good), { recursive: true });
+      fs.mkdirSync(path.join(bad, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
+      fs.writeFileSync(path.join(good, 'claude.cmd'), '@echo 2.1.0\r\n@exit /b 0\r\n');
+      fs.writeFileSync(path.join(bad, 'claude.cmd'), '@echo claude native binary not installed 1>&2\r\n@exit /b 1\r\n');
+      fs.writeFileSync(path.join(bad, 'node_modules', '@anthropic-ai', 'claude-code', 'package.json'), '{}');
+      // Гарнесс: РЕАЛЬНЫЕ функции из claude.ps1 + фейковая де-элевация, которая честно
+      // ЗАПУСКАЕТ бинарь (симуляция medium) и возвращает его код — как боевой примитив.
+      const harness = '﻿' +
+        'param([string]$Bin, [string]$Mode)\r\n' +
+        'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+        '  & $Exe @Arguments *> $null\r\n' +
+        '  $c = $LASTEXITCODE; if ($null -eq $c) { $c = 0 }\r\n' +
+        "  [pscustomobject]@{ Gate = 'medium'; Code = $c }\r\n" +
+        '}\r\n' +
+        fn('Test-HmClaudeRuns') + '\r\n' + fn('Test-HmOurClaudeDir') + '\r\n' + fn('Remove-HmBrokenClaude') + '\r\n' +
+        "if ($Mode -eq 'probe') { Write-Output (Test-HmClaudeRuns $Bin) }\r\n" +
+        "if ($Mode -eq 'clean') { Remove-HmBrokenClaude $Bin }\r\n";
+      const hFile = path.join(base, 'harness.ps1');
+      fs.writeFileSync(hFile, harness);
+      // APPDATA указывает в песочницу: уборка разрешена только в НАШИХ каталогах.
+      const run = (bin, mode) => spawnSync('powershell.exe',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', hFile, bin, mode],
+        { encoding: 'utf8', timeout: 60000,
+          env: Object.assign({}, process.env, { APPDATA: path.join(base, 'appdata') }) });
+      const probeGood = (run(path.join(good, 'claude.cmd'), 'probe').stdout || '').trim();
+      assert.strictEqual(probeGood, 'works', 'рабочий claude.cmd -> works: ' + probeGood);
+      const probeBad = (run(path.join(bad, 'claude.cmd'), 'probe').stdout || '').trim();
+      assert.strictEqual(probeBad, 'broken', 'обёртка с exit 1 -> broken (нулевому коду npm не верим): ' + probeBad);
+      run(path.join(bad, 'claude.cmd'), 'clean');
+      assert(!fs.existsSync(path.join(bad, 'claude.cmd')), 'сломанный шим удалён');
+      assert(!fs.existsSync(path.join(bad, 'node_modules', '@anthropic-ai', 'claude-code')),
+        'пакет @anthropic-ai/claude-code удалён (иначе перехватит PATH после онлайн-установки)');
+      assert(fs.existsSync(path.join(good, 'claude.cmd')), 'рабочий бинарь clean не трогал');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+}
+
+// --- claude-desktop.ps1: вердикт по ФАКТУ завершения установщика, без вечного ожидания ---
+ok('claude-desktop.ps1: вердикт через Wait-HmClaudeDesktopVerdict (факт завершения процесса), гоночный опрос 90 c убран, вечного ожидания нет', () => {
+  const s = DT_CLAUDE_PS1();
+  assert(/function Wait-HmClaudeDesktopVerdict/.test(s), 'функция вердикта объявлена');
+  assert(/\$installed = Wait-HmClaudeDesktopVerdict -Proc \$cdProc/.test(s),
+    'вердикт зовёт функцию с ПРОЦЕССОМ установщика (не слепой таймер)');
+  assert(/\$Proc\.HasExited/.test(s), 'функция смотрит на фактическое завершение процесса');
+  assert(!/for \(\$i = 0; \$i -lt 90; \$i\+\+\)/.test(s), 'старый опрос 90 с, оторванный от процесса, убран');
+  // Вечное ожидание НЕ вернулось: запуск без -Wait, у ожиданий — потолки.
+  const i = s.indexOf('Start-Process -FilePath $installer');
+  assert(i !== -1, 'запуск установщика на месте');
+  const line = s.slice(i, s.indexOf('\n', i));
+  assert(!/-Wait\b/.test(line), 'Start-Process БЕЗ -Wait (иначе шаг ждёт трей-приложение вечно)');
+  assert(/CapSec/.test(s) && /\$deadline/.test(s), 'у ожидания вердикта есть жёсткий потолок');
+  assert(/Wait-Process -Timeout/.test(s), 'finally ждёт процесс ОГРАНИЧЕННО (чистка кэша)');
+  assertOrder(s, '$installed = Wait-HmClaudeDesktopVerdict', 'OK: Claude Desktop установлен',
+    '«установлено» печатается только ПОСЛЕ фактического ожидания');
+});
+
+if (powershellAvailable()) {
+  ok('claude-desktop.ps1 (прогон PS 5.1): вердикт ждёт живой процесс, НЕ ждёт вечно, успех — сразу по маркеру', () => {
+    const src = DT_CLAUDE_PS1();
+    const m = src.match(/function Wait-HmClaudeDesktopVerdict[\s\S]*?\r?\n\}/);
+    assert(m, 'Wait-HmClaudeDesktopVerdict извлекается из claude-desktop.ps1');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cdwait-'));
+    try {
+      const harness = '﻿' +
+        '$script:calls = 0\r\n' +
+        'function Test-ClaudeDesktopInstalled {\r\n' +
+        '  $script:calls++\r\n' +
+        '  if ($env:HM_T_MARKER_AT -and $script:calls -ge [int]$env:HM_T_MARKER_AT) { return $true }\r\n' +
+        '  return $false\r\n' +
+        '}\r\n' +
+        m[0] + '\r\n' +
+        "$ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'\r\n" +
+        "$proc = Start-Process -FilePath $ps -ArgumentList '-NoProfile','-Command',('Start-Sleep ' + $env:HM_T_CHILD_SLEEP) -PassThru -WindowStyle Hidden\r\n" +
+        '$t0 = Get-Date\r\n' +
+        '$r = Wait-HmClaudeDesktopVerdict -Proc $proc -CapSec ([int]$env:HM_T_CAP) -GraceSec ([int]$env:HM_T_GRACE)\r\n' +
+        '$el = [int](((Get-Date) - $t0).TotalSeconds)\r\n' +
+        '$alive = -not $proc.HasExited\r\n' +
+        'Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue\r\n' +
+        'Write-Output ("R=$r EL=$el ALIVE=$alive")\r\n';
+      const hFile = path.join(base, 'wait-harness.ps1');
+      fs.writeFileSync(hFile, harness);
+      const run = (envAdd) => {
+        const env = Object.assign({}, process.env, envAdd);
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', hFile],
+          { encoding: 'utf8', timeout: 90000, env });
+        const mm = /R=(\S+) EL=(\d+) ALIVE=(\S+)/.exec(r.stdout || '');
+        assert(mm, 'гарнесс отчитался: ' + (r.stdout || '') + (r.stderr || ''));
+        return { r: mm[1], el: Number(mm[2]), alive: mm[3] };
+      };
+      // 1) Маркер появился, установщик ещё работает -> успех СРАЗУ, не ждём выхода процесса.
+      const s1 = run({ HM_T_MARKER_AT: '3', HM_T_CHILD_SLEEP: '25', HM_T_CAP: '20', HM_T_GRACE: '5' });
+      assert(s1.r === 'True' && s1.el <= 12, 'успех по маркеру без ожидания процесса: ' + JSON.stringify(s1));
+      assert(s1.alive === 'True', 'процесс ещё жил — трей не держит успех');
+      // 2) Маркера нет -> вердикт «нет» выносится НЕ РАНЬШЕ фактического завершения процесса
+      //    (старый опрос был оторван от процесса — в этом и была гонка).
+      const s2 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: '5', HM_T_CAP: '40', HM_T_GRACE: '2' });
+      assert(s2.r === 'False', 'без маркера — честное False: ' + JSON.stringify(s2));
+      assert(s2.el >= 5, 'вердикт вынесен ПОСЛЕ завершения процесса (' + s2.el + ' c >= 5 c)');
+      assert(s2.el <= 25, 'и без лишнего зависания: ' + s2.el + ' c');
+      // 3) Установщик висит дольше потолка -> False около CapSec, БЕЗ вечного ожидания.
+      const s3 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: '40', HM_T_CAP: '4', HM_T_GRACE: '60' });
+      assert(s3.r === 'False' && s3.el <= 25, 'потолок работает (нет вечного ожидания): ' + JSON.stringify(s3));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+}
+
 asyncTests().then(() => {
-  console.log(`\nИТОГ: ${pass} прошло, ${fail} упало`);
+  console.log(`\nИТОГ: ${pass} прошло, ${fail} упало` + (skipped ? `, ${skipped} пропущено (⏭ НЕ выполнялись)` : ''));
   process.exit(fail ? 1 : 0);
 }).catch((e) => { console.error('FATAL async tests:', e); process.exit(1); });
+
+// ===========================================================================
+// Renderer UX (агент fix-renderer): подпись/часы шага после конца докачки +
+// защёлка «Исправить автоматически». Куски app.js вырезаются по балансу фигурных
+// скобок и исполняются в vm с ПОДДЕЛЬНЫМИ window/document — тот же приём вынесенной
+// pure-логики, что у finish-link/runProgressPct, но для DOM-обвязки.
+// ===========================================================================
+(function rendererUxTests() {
+  const vm = require('vm');
+  console.log('== Renderer UX: фаза установки после докачки + защёлка самолечения ==');
+
+  const APP_SRC = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+
+  // Вырезает из исходника функцию по её заголовку; конец — по балансу «{ }».
+  // Если функцию переименуют/удалят — тест честно упадёт «пропало», а не позеленеет.
+  function cutBlock(src, header) {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в app.js пропало: ' + header);
+    const open = src.indexOf('{', i);
+    assert(open !== -1, 'нет тела у: ' + header);
+    let depth = 0;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+    }
+    throw new Error('не нашёл конец блока: ' + header);
+  }
+  function cutLine(src, snippet) {
+    const line = src.split('\n').find((l) => l.includes(snippet));
+    assert(line, 'в app.js пропала строка: ' + snippet);
+    return line;
+  }
+
+  // --- Дефект 1: у lite-компонента после «Скачиваю 100%» начинается сама установка
+  // (самая долгая фаза), событий докачки больше нет — подпись обязана смениться на
+  // фазу установки, а часы «идёт М:СС» — тикать до реального конца шага.
+  ok('докачка дошла до конца → подпись БЕЗ «Скачиваю», часы продолжают тикать', () => {
+    const script = [
+      cutLine(APP_SRC, 'let STEP_TIMER'),
+      cutLine(APP_SRC, 'let STEP_CLOCK_PHASE'),
+      cutBlock(APP_SRC, 'function setStepClockPhase'),
+      cutBlock(APP_SRC, 'function startStepClock'),
+      cutBlock(APP_SRC, 'function stopStepClock'),
+      cutBlock(APP_SRC, 'function setStepLabel'),
+      cutBlock(APP_SRC, 'function remoteProgressLabel'),
+      cutBlock(APP_SRC, 'function handleRemoteProgress'),
+      'this.API = { startStepClock, stopStepClock, handleRemoteProgress };',
+    ].join('\n');
+
+    const label = { textContent: '' };
+    const step = {
+      classList: { contains: (c) => c === 'running' },
+      querySelectorAll: () => [{ textContent: '' }, label], // [точка-индикатор, подпись]
+    };
+    let tickFn = null;
+    let now = 1_000_000;
+    const sandbox = {
+      document: { querySelector: (sel) => (sel.includes('claude') ? step : null) },
+      Date: { now: () => now },
+      setInterval: (fn) => { tickFn = fn; return 7; },
+      clearInterval: () => { tickFn = null; },
+    };
+    vm.runInNewContext(script, sandbox);
+    const api = sandbox.API;
+
+    api.startStepClock('claude', 'Claude Code');
+    now += 5000; tickFn();
+    assert(/Claude Code — идёт 0:05/.test(label.textContent),
+      'до докачки часы тикают: ' + label.textContent);
+
+    // Пошли НАСТОЯЩИЕ проценты — часы им уступают (это старое поведение, оно верное).
+    api.handleRemoteProgress('claude', 'Claude Code',
+      { id: 'claude', pct: 42, received: 44 * 1048576, total: 104 * 1048576 });
+    assert(/Скачиваю 42%/.test(label.textContent), 'подпись докачки: ' + label.textContent);
+    now += 1000; tickFn();
+    assert(/Скачиваю 42%/.test(label.textContent), 'часы не перетирают настоящие проценты');
+
+    // Событие «докачка завершена» (100%): дальше идёт сама установка.
+    api.handleRemoteProgress('claude', 'Claude Code',
+      { id: 'claude', pct: 100, received: 104 * 1048576, total: 104 * 1048576 });
+    assert(!/Скачиваю/.test(label.textContent),
+      'после конца докачки подпись БОЛЬШЕ НЕ содержит «Скачиваю»: ' + label.textContent);
+    assert(/Устанавлива/.test(label.textContent),
+      'подпись сменилась на фазу установки: ' + label.textContent);
+
+    now += 61_000; tickFn(); // 5+1+61 секунд от старта шага
+    assert(/идёт 1:07/.test(label.textContent),
+      'часы продолжают тикать после конца докачки: ' + label.textContent);
+    assert(/Устанавлива/.test(label.textContent) && !/Скачиваю/.test(label.textContent),
+      'в подписи фаза установки + часы, «Скачиваю» не вернулось: ' + label.textContent);
+
+    // Чужое событие (другой компонент) подпись этого шага не трогает.
+    api.handleRemoteProgress('claude', 'Claude Code', { id: 'other', pct: 1, received: 1, total: 9 });
+    assert(!/Скачиваю/.test(label.textContent), 'событие чужого шага игнорируется');
+    api.stopStepClock();
+
+    // Интеграция: runComponents кормит события докачки именно в этот обработчик.
+    assert(/onRemoteProgress\(\(p\) => handleRemoteProgress\(id, comp\.name, p\)\)/.test(APP_SRC),
+      'runComponents подписывает докачку на handleRemoteProgress');
+  });
+
+  // --- Дефект 2: кнопок самолечения ДВЕ (модалка + баннер); пока идёт первая попытка,
+  // запуск второй force-отцепил бы том, с которого уже стартует новый установщик.
+  // Защёлка общая: повторный вызов невозможен до завершения первого.
+  // async: продолжения — только микрозадачи (уже разрешённые Promise), поэтому тест
+  // детерминированно завершается в первом же microtask-дренаже, до ИТОГа asyncTests.
+  okAsync('самолечение: второй вызов не проходит, пока первый не завершился', async () => {
+    const script = [
+      cutLine(APP_SRC, 'let SELF_HEAL_BUSY'),
+      cutBlock(APP_SRC, 'function setSelfHealButtonsBusy'),
+      cutBlock(APP_SRC, 'function bindMacSelfHeal'),
+      'this.API = { bindMacSelfHeal };',
+    ].join('\n');
+
+    const mkBtn = () => ({
+      dataset: {}, disabled: false, textContent: 'Исправить автоматически', onClick: null,
+      addEventListener(ev, fn) { if (ev === 'click') this.onClick = fn; },
+    });
+    const els = {
+      'mac-selfheal': mkBtn(),
+      'mac-selfheal-banner': mkBtn(),
+      'mac-selfheal-status': { textContent: '' },
+      'mac-selfheal-banner-status': { textContent: '' },
+    };
+    const calls = []; // resolve-функции ещё не завершённых вызовов mac-selfheal
+    let quits = 0;
+    const sandbox = {
+      document: { getElementById: (id) => els[id] || null },
+      window: { installer: {
+        macSelfHeal: () => new Promise((resolve) => calls.push(resolve)),
+        quit: () => { quits++; },
+      } },
+      setTimeout: (fn) => { fn(); return 1; }, // задержку перед quit в тесте схлопываем
+    };
+    vm.runInNewContext(script, sandbox);
+    sandbox.API.bindMacSelfHeal('mac-selfheal', 'mac-selfheal-status');
+    sandbox.API.bindMacSelfHeal('mac-selfheal-banner', 'mac-selfheal-banner-status');
+    const b1 = els['mac-selfheal'];
+    const b2 = els['mac-selfheal-banner'];
+    const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
+
+    b1.onClick(); // первая попытка пошла (вызов «висит» — calls[0] ещё не разрешён)
+    assert.strictEqual(calls.length, 1, 'первый клик запускает починку');
+    assert(b1.disabled && b2.disabled, 'ОБЕ кнопки заблокированы на время починки');
+    assert(/Чиню/.test(b1.textContent) && /Чиню/.test(b2.textContent),
+      'на кнопках видно, что починка идёт');
+
+    b2.onClick(); // вторая кнопка — пока первый вызов не завершился
+    b1.onClick(); // и та же кнопка ещё раз
+    assert.strictEqual(calls.length, 1,
+      'повторный вызов НЕ проходит, пока первый не завершился');
+
+    calls[0]({ ok: false, error: 'open-failed' }); // первая попытка завершилась неудачей
+    await flush();
+    assert(!b1.disabled && !b2.disabled, 'после завершения кнопки снова доступны');
+    assert(/Исправить автоматически/.test(b1.textContent), 'подпись кнопки вернулась');
+
+    b2.onClick(); // теперь запуск снова возможен
+    assert.strictEqual(calls.length, 2, 'после завершения первой попытки починка запускается снова');
+
+    calls[1]({ ok: true }); // успех → перезапуск из свежего тома
+    await flush();
+    assert.strictEqual(quits, 1, 'успех → установщик перезапускается');
+    b1.onClick();
+    assert.strictEqual(calls.length, 2,
+      'после успеха защёлка НЕ отпускается — том нового установщика не отцепить');
+  });
+})();
+
+/* ============================================================================
+ * claude.sh: «установлен» = ЗАПУСКАЕТСЯ (все пути) · config.sh: бэкап БЕЗ секретов ·
+ * _deelev.ps1: уборка осиротевших задач планировщика.
+ * Тесты ПОВЕДЕНЧЕСКИЕ: bash-фрагменты гоняются настоящим bash, PS-функции — настоящим
+ * Windows PowerShell 5.1 (боевой интерпретатор), интеграция — на РЕАЛЬНОМ планировщике
+ * (тестовые задачи создаются со своим hex-тегом и убираются за собой).
+ * ==========================================================================*/
+(function hmClaudeGateBackupSecretsOrphanTasks() {
+  const { spawnSync } = require('child_process');
+  const toPosix = (p) => String(p).replace(/\\/g, '/');
+
+  function findBash() {
+    if (process.platform !== 'win32') return 'bash';
+    const cands = [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe'
+    ];
+    for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) { /* */ } }
+    return 'bash'; // последний шанс — PATH; если и там нет, тесты честно упадут
+  }
+  const BASH = findBash();
+  const PS51 = path.join(process.env.SystemRoot || 'C:\\Windows',
+    'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const runBashFile = (file) => {
+    const r = spawnSync(BASH, [file], { encoding: 'utf8', timeout: 60000 });
+    return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  };
+  const runPsFile = (file) => {
+    const r = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file],
+      { encoding: 'utf8', timeout: 120000 });
+    return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  };
+
+  const CLAUDE_SH = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'claude.sh'), 'utf8');
+  const CONFIG_SH = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8');
+  const CONFIG_PS = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+  const DEELEV_PS = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), 'utf8');
+  const DEELEV_PATH = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+
+  // Вырезает bash-функцию по имени: от "name() {" до закрывающей } в нулевой колонке.
+  function bashFn(src, name) {
+    const i = src.indexOf(name + '() {');
+    assert(i !== -1, 'в скрипте нет функции ' + name);
+    const j = src.indexOf('\n}', i);
+    assert(j !== -1, 'функция ' + name + ' не закрыта');
+    return src.slice(i, j + 2);
+  }
+
+  console.log('== claude.sh: гейт «claude РАБОТАЕТ» на всех путях ==');
+
+  ok('bash -n: claude.sh и config.sh синтаксически валидны', () => {
+    for (const f of ['claude.sh', 'config.sh']) {
+      const r = spawnSync(BASH, ['-n', toPosix(path.join(ROOT, 'scripts', 'macos', f))],
+        { encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r.status, 0, f + ': ' + (r.stderr || r.stdout || ''));
+    }
+  });
+
+  // Хелпер: собрать временный HOME с claude нужного поведения и прогнать claude_install_ok.
+  function runClaudeGate(prep) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-claude-'));
+    try {
+      prep(home);
+      const scriptFile = path.join(home, 'gate.sh');
+      // PATH урезан до sandbox-HOME + системных утилит: на дев-машине НАСТОЯЩИЙ claude
+      // в PATH иначе просачивается в кейс «claude нет вовсе» и даёт ложный rc=0.
+      fs.writeFileSync(scriptFile,
+        'set -u\nHOME="' + toPosix(home) + '"\nexport PATH="$HOME/.local/bin:/usr/bin:/bin"\n' +
+        'have() { command -v "$1" >/dev/null 2>&1; }\n' +
+        bashFn(CLAUDE_SH, 'claude_install_ok') + '\n' +
+        'claude_install_ok; echo "rc=$?"\n');
+      const r = runBashFile(scriptFile);
+      return {
+        out: r.out,
+        wrapper: fs.existsSync(path.join(home, '.local', 'bin', 'claude')),
+        pkg: fs.existsSync(path.join(home, '.local', 'lib', 'node_modules', '@anthropic-ai', 'claude-code'))
+      };
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  }
+
+  ok('claude.sh (поведение): нерабочая обёртка проваливает гейт и УДАЛЯЕТСЯ вместе с пакетом', () => {
+    // Живой случай: npm отчитался успехом, а bin печатает «claude native binary not
+    // installed» и падает. Гейт обязан увидеть это ЗАПУСКОМ и убрать артефакт из ~/.local.
+    const r = runClaudeGate((home) => {
+      const bin = path.join(home, '.local', 'bin');
+      fs.mkdirSync(bin, { recursive: true });
+      fs.mkdirSync(path.join(home, '.local', 'lib', 'node_modules', '@anthropic-ai', 'claude-code'),
+        { recursive: true });
+      fs.writeFileSync(path.join(bin, 'claude'),
+        '#!/bin/sh\necho "claude native binary not installed" >&2\nexit 1\n');
+      try { fs.chmodSync(path.join(bin, 'claude'), 0o755); } catch (e) { /* win */ }
+    });
+    assert(/rc=1/.test(r.out), 'нерабочий claude обязан провалить гейт: ' + r.out);
+    assert(!r.wrapper, 'нерабочая обёртка удалена (иначе перехватит PATH у следующего пути установки)');
+    assert(!r.pkg, 'пакет-пустышка в ~/.local/lib удалён');
+  });
+
+  ok('claude.sh (поведение): работающий claude проходит гейт и НЕ трогается', () => {
+    const r = runClaudeGate((home) => {
+      const bin = path.join(home, '.local', 'bin');
+      fs.mkdirSync(bin, { recursive: true });
+      fs.writeFileSync(path.join(bin, 'claude'),
+        '#!/bin/sh\n[ "$1" = "--version" ] && { echo "1.2.3 (Claude Code)"; exit 0; }\nexit 1\n');
+      try { fs.chmodSync(path.join(bin, 'claude'), 0o755); } catch (e) { /* win */ }
+    });
+    assert(/rc=0/.test(r.out), 'работающий claude обязан пройти гейт: ' + r.out);
+    assert(r.wrapper, 'работающий бинарь не удаляется');
+  });
+
+  ok('claude.sh (поведение): claude нет вовсе → гейт красный (без ложного OK)', () => {
+    const r = runClaudeGate(() => { /* пустой HOME */ });
+    assert(/rc=1/.test(r.out), 'отсутствующий claude не должен проходить гейт: ' + r.out);
+  });
+
+  ok('claude.sh: ЕДИНЫЙ гейт стоит на ВСЕХ путях — офлайн, curl, npm-фолбэк, финал', () => {
+    // объявление — раньше первого вызова (в проекте уже был баг «вызов до объявления»)
+    const decl = CLAUDE_SH.indexOf('claude_install_ok() {');
+    assert(decl !== -1, 'функция claude_install_ok объявлена');
+    const calls = [];
+    const re = /claude_install_ok\b/g; let m;
+    while ((m = re.exec(CLAUDE_SH)) !== null) calls.push(m.index);
+    assert(calls.filter((i) => i > decl + 10).length >= 4,
+      'гейт вызывается минимум 4 раза (офлайн, curl, npm-фолбэк, финальный гейт), нашли: ' + (calls.length - 1));
+    // офлайн: между успехом npm --offline и INSTALLED=1 стоит гейт
+    const off = CLAUDE_SH.slice(CLAUDE_SH.indexOf('--offline --cache'), CLAUDE_SH.indexOf('онлайн-фолбэк."'));
+    assertOrder(off, 'claude_install_ok', 'INSTALLED=1', 'офлайн: INSTALLED=1 только после гейта');
+    // curl-путь: тот же гейт в ОДНОЙ команде с bash (&&), успех curl сам по себе ничего не решает
+    assert(/install\.sh \| bash \\\n\s+&& claude_install_ok; then/.test(CLAUDE_SH),
+      'curl-путь гейтится claude_install_ok');
+    // npm-фолбэк: тоже
+    assert(/--no-audit --no-fund \\\n\s+&& claude_install_ok; then/.test(CLAUDE_SH),
+      'npm-фолбэк гейтится claude_install_ok');
+    // финальный гейт — РАБОТОЙ, а не наличием файла (старый вариант давал ложный OK)
+    assert(/if claude_install_ok; then\n\s*persist_local_bin_path/.test(CLAUDE_SH),
+      'финальный гейт использует claude_install_ok');
+    assert(!/if have claude \|\| \[ -x "\$HOME\/\.local\/bin\/claude" \]; then/.test(CLAUDE_SH),
+      'финальная проверка «файл на диске» удалена — она пропускала нерабочую обёртку');
+  });
+
+  console.log('== config.sh: бэкап ~/.claude БЕЗ секретов (зеркало config.ps1) ==');
+
+  // Вырезаем блок бэкапа целиком: от BACKUP_EXCLUDES= до комментария следующей секции.
+  function backupBlock() {
+    const i = CONFIG_SH.indexOf('BACKUP_EXCLUDES=');
+    const j = CONFIG_SH.indexOf('# hm_copy');
+    assert(i !== -1 && j !== -1 && i < j, 'блок бэкапа найден в config.sh');
+    return CONFIG_SH.slice(i, j);
+  }
+
+  ok('config.sh (поведение): в бэкапе НЕТ ключей и tg-сессии, файлы юзера есть, оригинал цел', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cfgbk-'));
+    try {
+      const ch = path.join(home, '.claude');
+      fs.mkdirSync(path.join(ch, 'memory'), { recursive: true });
+      fs.mkdirSync(path.join(ch, 'tools'), { recursive: true });
+      fs.writeFileSync(path.join(ch, 'settings.json'), '{}');
+      fs.writeFileSync(path.join(ch, 'memory', 'MEMORY.md'), 'mem');
+      // секреты: в корне, вложенный и глоб-хвосты сессии (как -wal/-journal у SQLite)
+      fs.writeFileSync(path.join(ch, '.credentials.master.env'), 'KEY=sk-secret');
+      fs.writeFileSync(path.join(ch, '.credentials.json'), '{"tok":"x"}');
+      fs.writeFileSync(path.join(ch, 'tg_session.session'), 'tg');
+      fs.writeFileSync(path.join(ch, 'tg_session.session-journal'), 'tgj');
+      fs.writeFileSync(path.join(ch, 'tools', '.credentials.json'), 'nested');
+      const scriptFile = path.join(home, 'bk.sh');
+      fs.writeFileSync(scriptFile, 'set -u\nCLAUDE_HOME="' + toPosix(ch) + '"\n' + backupBlock());
+      const r = runBashFile(scriptFile);
+      const bk = fs.readdirSync(home).find((n) => n.startsWith('.claude.backup.'));
+      assert(bk, 'бэкап создан: ' + r.out);
+      const bkDir = path.join(home, bk);
+      assert(fs.existsSync(path.join(bkDir, 'settings.json')), 'обычный файл в бэкапе');
+      assert(fs.existsSync(path.join(bkDir, 'memory', 'MEMORY.md')), 'память в бэкапе');
+      for (const s of ['.credentials.master.env', '.credentials.json', 'tg_session.session',
+        'tg_session.session-journal', path.join('tools', '.credentials.json')]) {
+        assert(!fs.existsSync(path.join(bkDir, s)), 'секрет НЕ должен попасть в бэкап: ' + s);
+      }
+      // оригинал не тронут — бэкап-исключения не смеют чистить сам ~/.claude
+      for (const s of ['.credentials.master.env', '.credentials.json', 'tg_session.session',
+        'tg_session.session-journal', path.join('tools', '.credentials.json')]) {
+        assert(fs.existsSync(path.join(ch, s)), 'оригинал секрета обязан остаться в ~/.claude: ' + s);
+      }
+      // сверка полноты обязана считать источник БЕЗ секретов — иначе вечный ложный warning
+      assert(!/неполный бэкап/.test(r.out),
+        'исключённые секреты не должны давать ложный «неполный бэкап»: ' + r.out);
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  ok('config.sh: список исключений бэкапа = ТОЧНО /XF из config.ps1 (не разъезжаются)', () => {
+    // Windows: robocopy-бэкап с /XF — авторитетный список (переносим РОВНО его).
+    const m = CONFIG_PS.match(/robocopy \$claudeHome \$backupDir[^|\n]*\/XF([^|\n]*)/);
+    assert(m, 'в config.ps1 есть robocopy-бэкап с /XF');
+    const winList = (m[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1)).sort();
+    assert(winList.length >= 3, 'в /XF есть исключения: ' + winList.join(', '));
+    const bm = CONFIG_SH.match(/BACKUP_EXCLUDES="([^"]+)"/);
+    assert(bm, 'в config.sh есть BACKUP_EXCLUDES');
+    const macList = bm[1].trim().split(/\s+/).map((s) => s.replace(/^--exclude=/, '')).sort();
+    assert.deepStrictEqual(macList, winList,
+      'mac-список исключений бэкапа обязан РОВНО совпадать с Windows-списком');
+    // fallback-ветка (cp -R + find-вычистка) знает те же имена — rsync есть не везде
+    for (const n of winList) {
+      assert(backupBlock().indexOf("-name '" + n + "'") !== -1,
+        'fallback-вычистка не знает про ' + n);
+    }
+    // rsync-ветка использует ровно ту переменную, что сверена выше
+    assert(/rsync -a \$BACKUP_EXCLUDES "\$CLAUDE_HOME\/"/.test(CONFIG_SH),
+      'rsync-бэкап исключает через $BACKUP_EXCLUDES');
+  });
+
+  console.log('== _deelev.ps1: осиротевшие задачи планировщика убираются ==');
+
+  const IS_WIN_HERE = process.platform === 'win32';
+  const HAVE_PS51 = IS_WIN_HERE && fs.existsSync(PS51);
+
+  ok('_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)', () => {
+    if (!IS_WIN_HERE) SKIP('не Windows — парс PS 5.1 недоступен');
+    assert(HAVE_PS51, 'нет ' + PS51);
+    const f = path.join(os.tmpdir(), 'hm-parse-' + Date.now() + '.ps1');
+    fs.writeFileSync(f,
+      "$errs = $null\n" +
+      "[void][System.Management.Automation.Language.Parser]::ParseFile('" + DEELEV_PATH.replace(/'/g, "''") + "', [ref]$null, [ref]$errs)\n" +
+      "if ($errs -and $errs.Count) { $errs | ForEach-Object { Write-Host ('PARSE-ERR: ' + $_.Message) }; exit 1 }\n" +
+      "Write-Host 'PARSE=OK'\n");
+    try {
+      const r = runPsFile(f);
+      assert(/PARSE=OK/.test(r.out), 'ошибки парсера: ' + r.out);
+    } finally { fs.rmSync(f, { force: true }); }
+  });
+
+  ok('_deelev.ps1: объявления ДО первого использования; авто-уборка стоит ПОСЛЕДНЕЙ', () => {
+    // В этом файле уже был баг «функция вызвана до объявления» — порядок закреплён тестом.
+    const declPredicate = DEELEV_PS.indexOf('function Test-HmTaskIsOrphan');
+    const declSweep = DEELEV_PS.indexOf('function Remove-HmOrphanTasks');
+    const declInvoke = DEELEV_PS.indexOf('function Invoke-HmDeElevated');
+    const callSweep = DEELEV_PS.lastIndexOf('@(Remove-HmOrphanTasks)');
+    assert(declPredicate !== -1 && declSweep !== -1 && callSweep !== -1, 'функции уборки есть');
+    assert(declPredicate < declSweep, 'предикат объявлен раньше уборщика');
+    assert(declSweep < callSweep && declInvoke < callSweep,
+      'top-level вызов уборки стоит ПОСЛЕ всех объявлений');
+    assert(/try \{\s*\n\s*\$hmOrphanTags = @\(Remove-HmOrphanTasks\)/.test(DEELEV_PS),
+      'авто-уборка обёрнута в try — сбой уборки НЕ роняет установку');
+    // Задача теперь несёт дату регистрации (по ней отличаем свежую от сироты); Date — первой в схеме.
+    assert(/<RegistrationInfo><Date>\$regDateXml<\/Date><Description>/.test(DEELEV_PS),
+      'в XML задачи есть <Date> перед <Description> (схема RegistrationInfo)');
+    // Штатное удаление собственной задачи в finally никуда не делось.
+    assert(/finally \{\s*\n\s*& \$schtasks '\/Delete' '\/TN' \$tag '\/F'/.test(DEELEV_PS),
+      'finally по-прежнему удаляет свою задачу');
+  });
+
+  ok('_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe', () => {
+    if (!HAVE_PS51) SKIP('не Windows / нет PowerShell 5.1');
+    const f = path.join(os.tmpdir(), 'hm-orphan-pred-' + Date.now() + '.ps1');
+    fs.writeFileSync(f,
+      ". '" + DEELEV_PATH.replace(/'/g, "''") + "' | Out-Null\n" +
+      "$now = Get-Date\n" +
+      "$oldD = $now.AddHours(-3).ToString('s')\n" +
+      "$newD = $now.AddMinutes(-5).ToString('s')\n" +
+      "$nD = 'HmDeElev_0123456789abcdef0123456789abcdef'\n" +
+      "$nL = 'HmLaunch_abcdef012345'\n" +
+      "Write-Host ('old-ready=' + (Test-HmTaskIsOrphan -Name $nD -State 3 -RegDate $oldD -Now $now))\n" +
+      "Write-Host ('old-running=' + (Test-HmTaskIsOrphan -Name $nD -State 4 -RegDate $oldD -Now $now))\n" +
+      "Write-Host ('old-queued=' + (Test-HmTaskIsOrphan -Name $nD -State 2 -RegDate $oldD -Now $now))\n" +
+      "Write-Host ('fresh=' + (Test-HmTaskIsOrphan -Name $nD -State 3 -RegDate $newD -Now $now))\n" +
+      "Write-Host ('excluded=' + (Test-HmTaskIsOrphan -Name $nD -State 3 -RegDate $oldD -ExcludeTag $nD -Now $now))\n" +
+      "Write-Host ('foreign=' + (Test-HmTaskIsOrphan -Name 'GoogleUpdateTaskMachineUA' -State 3 -RegDate $oldD -Now $now))\n" +
+      "Write-Host ('no-age=' + (Test-HmTaskIsOrphan -Name $nD -State 3 -Now $now))\n" +
+      "Write-Host ('lastrun-old=' + (Test-HmTaskIsOrphan -Name $nL -State 3 -LastRun $now.AddHours(-2) -Now $now))\n" +
+      "Write-Host ('lastrun-sentinel=' + (Test-HmTaskIsOrphan -Name $nL -State 3 -LastRun ([datetime]'1999-11-30') -Now $now))\n" +
+      "Write-Host ('fileborn-old=' + (Test-HmTaskIsOrphan -Name $nL -State 3 -FileBorn $now.AddHours(-2) -Now $now))\n" +
+      "Write-Host ('bad-regdate-file-fallback=' + (Test-HmTaskIsOrphan -Name $nD -State 3 -RegDate 'not-a-date' -FileBorn $now.AddHours(-2) -Now $now))\n");
+    try {
+      const r = runPsFile(f);
+      const expect = {
+        'old-ready': 'True',            // старая, не бежит → сирота
+        'old-running': 'False',         // бежит ПРЯМО СЕЙЧАС → не трогаем
+        'old-queued': 'False',          // в очереди на запуск → не трогаем
+        'fresh': 'False',               // свежая: возможно, живая у параллельного экземпляра
+        'excluded': 'False',            // собственный тег текущего запуска
+        'foreign': 'False',             // чужое имя — никогда
+        'no-age': 'False',              // возраст неизвестен → fail-safe
+        'lastrun-old': 'True',          // без Date, но давно отработала → сирота
+        'lastrun-sentinel': 'False',    // сентинел «не запускалась» (1899/1999) ≠ возраст
+        'fileborn-old': 'True',         // дата из файла задачи (System32\Tasks) — для HmLaunch_*
+        'bad-regdate-file-fallback': 'True' // битая Date не ломает каскад источников возраста
+      };
+      for (const k of Object.keys(expect)) {
+        const mm = r.out.match(new RegExp('^' + k + '=(\\S+)', 'm'));
+        assert(mm, 'нет строки ' + k + ' в выводе: ' + r.out);
+        assert.strictEqual(mm[1], expect[k], k + ': ожидали ' + expect[k] + ', вывод: ' + r.out);
+      }
+    } finally { fs.rmSync(f, { force: true }); }
+  });
+
+  ok('_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы', () => {
+    if (!HAVE_PS51) SKIP('не Windows / нет PowerShell 5.1 — реальный планировщик недоступен');
+    // ГЕРМЕТИЧНОСТЬ. Префикс Hm(DeElev|Launch)_ зашит в предикат Test-HmTaskIsOrphan —
+    // «свой уникальный префикс на прогон» невозможен без правки исходников. Поэтому:
+    // если в планировщике УЖЕ есть задачи с этим префиксом (параллельный прогон тестов,
+    // живой установщик или сироты прежних падений) — тест ЧЕСТНО пропускается: чужая
+    // уборка снесла бы нашу «исключённую» задачу (after1 ждёт её живой), а наша — чужие
+    // свежесозданные «старые». Перечисляем ТЕМ ЖЕ способом, что и уборка (COM,
+    // GetTasks(1) — скрытые видны), а не schtasks, который прячет Hidden-задачи.
+    {
+      const probe = path.join(os.tmpdir(), 'hm-orphan-probe-' + Date.now() + '.ps1');
+      fs.writeFileSync(probe,
+        "$svc = New-Object -ComObject 'Schedule.Service'; $svc.Connect()\n" +
+        "$names = @($svc.GetFolder('\\').GetTasks(1) | ForEach-Object { $_.Name }) -match '^Hm(DeElev|Launch)_'\n" +
+        "Write-Host ('FOREIGN=' + ($names -join ','))\n");
+      let foreign = '';
+      try {
+        const pr = runPsFile(probe);
+        const mm = pr.out.match(/^FOREIGN=(.*)$/m);
+        assert(mm, 'перечисление задач планировщика отработало: ' + pr.out);
+        foreign = mm[1].trim();
+      } finally { fs.rmSync(probe, { force: true }); }
+      if (foreign) SKIP('в планировщике уже есть Hm*-задачи (параллельный прогон/установщик/сироты): ' + foreign);
+    }
+    const f = path.join(os.tmpdir(), 'hm-orphan-integ-' + Date.now() + '.ps1');
+    fs.writeFileSync(f, [
+      "$ErrorActionPreference = 'Continue'",
+      ". '" + DEELEV_PATH.replace(/'/g, "''") + "' | Out-Null",
+      "$schtasks = Join-Path (Join-Path $env:SystemRoot 'System32') 'schtasks.exe'",
+      "$userXml = [System.Security.SecurityElement]::Escape([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)",
+      "function New-TestTask([string]$tag, [string]$date, [string]$cmd, [string]$cargs) {",
+      "  $xml = '<?xml version=\"1.0\" encoding=\"UTF-16\"?><Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">' +",
+      "    ('<RegistrationInfo><Date>' + $date + '</Date><Description>hm test orphan</Description></RegistrationInfo>') +",
+      "    ('<Principals><Principal id=\"Author\"><UserId>' + $userXml + '</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>') +",
+      "    '<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate><Enabled>true</Enabled><Hidden>true</Hidden><AllowStartOnDemand>true</AllowStartOnDemand><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings>' +",
+      "    ('<Actions Context=\"Author\"><Exec><Command>' + $cmd + '</Command><Arguments>' + $cargs + '</Arguments></Exec></Actions></Task>')",
+      "  $fx = Join-Path $env:TEMP ('hmtt-' + $tag + '.xml')",
+      "  Set-Content -LiteralPath $fx -Value $xml -Encoding Unicode",
+      "  & $schtasks /Create /TN $tag /XML $fx /F 2>&1 | Out-Null",
+      "  $rc = $LASTEXITCODE; Remove-Item $fx -Force -ErrorAction SilentlyContinue; return $rc",
+      "}",
+      "function Task-Exists([string]$tag) { & $schtasks /Query /TN $tag 2>&1 | Out-Null; return ($LASTEXITCODE -eq 0) }",
+      "$now = Get-Date",
+      "$oldTag = 'HmDeElev_' + [guid]::NewGuid().ToString('N')",
+      "$newTag = 'HmLaunch_' + [guid]::NewGuid().ToString('N').Substring(0,12)",
+      "$exTag  = 'HmDeElev_' + [guid]::NewGuid().ToString('N')",
+      "$runTag = 'HmDeElev_' + [guid]::NewGuid().ToString('N')",
+      "$cmdExe = Join-Path (Join-Path $env:SystemRoot 'System32') 'cmd.exe'",
+      "$psExe  = Join-Path (Join-Path $env:SystemRoot 'System32') 'WindowsPowerShell\\v1.0\\powershell.exe'",
+      "Write-Host ('create=' + (New-TestTask $oldTag ($now.AddHours(-3).ToString('s')) $cmdExe '/c exit 0') +",
+      "  ',' + (New-TestTask $newTag ($now.AddMinutes(-2).ToString('s')) $cmdExe '/c exit 0') +",
+      "  ',' + (New-TestTask $exTag ($now.AddHours(-3).ToString('s')) $cmdExe '/c exit 0') +",
+      "  ',' + (New-TestTask $runTag ($now.AddHours(-3).ToString('s')) $psExe '-NoProfile -Command Start-Sleep 20'))",
+      "& $schtasks /Run /TN $runTag 2>&1 | Out-Null",
+      "$svc = New-Object -ComObject 'Schedule.Service'; $svc.Connect(); $root = $svc.GetFolder('\\')",
+      "$state = 0",
+      "for ($i = 0; $i -lt 25; $i++) { Start-Sleep -Milliseconds 300; $state = [int]$root.GetTask($runTag).State; if ($state -eq 4) { break } }",
+      "Write-Host ('run-state=' + $state)",
+      "$sw1 = @(Remove-HmOrphanTasks -ExcludeTag $exTag)",
+      "Write-Host ('after1=' + (Task-Exists $oldTag) + ',' + (Task-Exists $newTag) + ',' + (Task-Exists $exTag) + ',' + (Task-Exists $runTag))",
+      "$sw2 = @(Remove-HmOrphanTasks)",
+      "Write-Host ('after2=' + (Task-Exists $exTag) + ',' + (Task-Exists $runTag))",
+      "& $schtasks /End /TN $runTag 2>&1 | Out-Null",
+      "foreach ($t in @($oldTag, $newTag, $exTag, $runTag)) { & $schtasks /Delete /TN $t /F 2>&1 | Out-Null }",
+      "Write-Host 'CLEANED'"
+    ].join('\n'));
+    try {
+      const r = runPsFile(f);
+      assert(/create=0,0,0,0/.test(r.out), 'тестовые задачи создались: ' + r.out);
+      assert(/run-state=4/.test(r.out), 'бегущая задача реально в состоянии Running: ' + r.out);
+      // sweep1 (-ExcludeTag exTag): старая сирота удалена; свежая, исключённая и бегущая целы
+      assert(/after1=False,True,True,True/.test(r.out),
+        'после уборки: сирота снесена, свежая/исключённая/бегущая целы: ' + r.out);
+      // sweep2 (без исключения): exTag — тоже сирота → снесена; бегущая всё ещё цела
+      assert(/after2=False,True/.test(r.out),
+        'вторая уборка сносит бывшую исключённую, но НЕ бегущую: ' + r.out);
+      assert(/CLEANED/.test(r.out), 'тест убрал за собой: ' + r.out);
+    } finally { fs.rmSync(f, { force: true }); }
+  });
+})();
+
+// ===========================================================================
+// Второй круг рой-ревью: реестр без консольной кодировки, блокировка второго
+// экземпляра, восстановление прерванного удаления, uid на macOS, копия
+// исходников Nomad. Каждый закрывает подтверждённый и воспроизведённый дефект.
+// ===========================================================================
+(function secondSwarmFixes() {
+  const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  // ПОРЯДОК ВАЖЕН: сначала строчные //, потом блочные /* */. Иначе «/*» из ТЕКСТА
+  // строчного комментария (в main.js есть `// … scripts/*/nomad.*`) спаривается с
+  // далёким «*/» и съедает килобайты НАСТОЯЩЕГО кода — проверки по code дают ложь
+  // в обе стороны (проверено: пропадал регион с encoding:'ascii' и слоем реестра).
+  const codeOf = (s) => s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // reg.exe печатает данные И диагностику в кодовой странице консоли (CP866 на
+  // русской Windows). Node читал трубу как UTF-8: «C:\Программы\Python» после
+  // нашей перезаписи PATH навсегда становилось «C:\?????\Python», а удаление
+  // скрепки/моста ВСЕГДА рапортовало провал (русское «не удалось найти» не
+  // совпадало ни с одной веткой распознавания).
+  // Правило изменилось и это осознанно: reg.exe вернулся, потому что беда была НЕ
+  // в нём, а в чтении его вывода как UTF-8. Полный отказ от reg.exe стоил ×27
+  // скорости (31 мс → 830 мс) на СИНХРОННОМ вызове в главном процессе — окно
+  // уходило в «не отвечает» на секунды при каждом запуске и удалении.
+  // Теперь инвариант такой: читать reg.exe можно, декодировать его вывод как
+  // UTF-8 — нельзя; писать в реестр консольным reg.exe — нельзя.
+  ok('реестр: вывод reg.exe декодируется кодовой страницей, а не как UTF-8', () => {
+    const s = MAIN();
+    const code = codeOf(s);
+    assert(!/'add', 'HKCU/.test(code), 'запись реестра НЕ через reg add');
+    assert(/consoleCodePage\(/.test(code) && /TextDecoder\(/.test(code),
+      'кодовая страница консоли определяется и используется для декодирования');
+    // Ни один вызов reg.exe не смеет читаться как текст в UTF-8.
+    const fast = s.slice(s.indexOf('function regQueryFast'), s.indexOf('function regQueryValueTyped'));
+    assert(fast.length > 100, 'быстрый путь найден');
+    assert(!/encoding:\s*'utf8'/.test(fast), 'вывод reg.exe НЕ читается как UTF-8');
+    assert(/dec\.decode\(/.test(fast), 'вывод декодируется реальной кодовой страницей');
+    assert(/return null/.test(fast), 'в сомнительных случаях быстрый путь уступает авторитетному');
+  });
+
+  // Быстрый и авторитетный пути обязаны давать ОДИНАКОВЫЙ результат на трудном
+  // значении, иначе однажды разойдутся именно на кириллице.
+  if (process.platform === 'win32') {
+    ok('реестр (прогон): быстрый и .NET-путь согласованы на кириллице и %VAR%', () => {
+      const s = MAIN();
+      const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
+      const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+      const env = () => {
+        const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+        return Object.assign({}, process.env, { PATH: s32, Path: s32 });
+      };
+      const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
+        body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
+      )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+
+      const KEY = 'HKCU\\Environment';
+      const NAME = 'HmProbeSuite' + Date.now();
+      const VAL = 'C:\\Программы\\Python;C:\\Users\\Жемал\\bin;%SystemRoot%\\System32';
+      try {
+        assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_EXPAND_SZ').ok, 'пробное значение записано');
+        const fast = M.regQueryFast(KEY, NAME);
+        const slow = M.regQueryValueDotNet(KEY, NAME);
+        assert(fast && fast.data === VAL, 'быстрый путь: байт в байт (' + (fast && fast.data) + ')');
+        assert(slow.ok && slow.data === VAL, 'авторитетный путь: байт в байт');
+        assert(fast.type === 'REG_EXPAND_SZ' && slow.type === 'REG_EXPAND_SZ', 'тип сохранён обоими');
+        assert(VAL.indexOf('%SystemRoot%') >= 0 && fast.data.indexOf('%SystemRoot%') >= 0,
+          '%VAR% не раскрыт — чужие переменные не запекаются в литералы');
+        // Отсутствующее значение — не ошибка, а честный found:false.
+        const miss = M.regQueryValueTyped(KEY, NAME + '_nope');
+        assert(miss.ok === true && miss.found === false, 'отсутствующее значение: found=false');
+        assert(M.regQueryFast(KEY, NAME + '_nope') === null, 'быстрый путь не судит об отсутствии');
+        assert(M.regWriteValueTyped('HKLM\\SYSTEM\\X', 'Y', 'z', 'REG_SZ').ok === false, 'запись в HKLM невозможна');
+      } finally {
+        try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой в любом случае */ }
+      }
+    });
+  }
+
+  ok('реестр: значение едет base64 — кодировка консоли не участвует', () => {
+    // По коду БЕЗ комментариев: токен, уехавший в комментарий, не страж.
+    const s = codeOf(MAIN());
+    assert(/HMREG1:/.test(s), 'маркер ответа');
+    assert(/ToBase64String/.test(s) && /FromBase64String/.test(s), 'base64 в обе стороны');
+    assert(/encoding: 'ascii'/.test(s), 'ответ читается как ASCII — мохибейку неоткуда взяться');
+  });
+
+  ok('реестр: запись разрешена ТОЛЬКО в HKCU, чтение — HKCU и HKLM', () => {
+    const s = codeOf(MAIN());
+    const w = s.slice(s.indexOf('function regWriteValueTyped'), s.indexOf('function regDeleteValueTyped'));
+    assert(w.length > 50, 'тело regWriteValueTyped найдено');
+    assert(/hkcuSubkeyOf/.test(w), 'запись идёт через HKCU-только разбор');
+    assert(!/regPathParts/.test(w), 'запись НЕ использует общий разбор (иначе открылся бы HKLM)');
+    const q = s.slice(s.indexOf('function regQueryValueTyped'), s.indexOf('function regWriteValueTyped'));
+    assert(/regPathParts/.test(q), 'чтение умеет оба куста');
+  });
+
+  // Первый клик даёт запрос прав и минуту тишины на распаковке — новичок кликает
+  // ещё раз. Portable-стаб при этом рекурсивно чистит ОБЩИЙ каталог распаковки,
+  // выдёргивая ресурсы у уже работающего экземпляра.
+  ok('второй запуск установщика невозможен (блокировка + уникальный каталог распаковки)', () => {
+    const s = MAIN();
+    // Проверяем СТРУКТУРУ, а не наличие вызова: мутация «if (false && !app.…)»
+    // оставляла вызов на месте, и проверка по строке этого не замечала.
+    const cond = s.match(/if\s*\(([^)]*requestSingleInstanceLock\(\)[^)]*)\)\s*\{/);
+    assert(cond, 'условие с блокировкой найдено');
+    assert(cond[1].trim() === '!app.requestSingleInstanceLock()',
+      'условие ровно «!app.requestSingleInstanceLock()», без обходов: ' + cond[1].trim());
+
+    // Ветка «не получили блокировку» обязана завершать процесс, а ветка else —
+    // содержать whenReady (иначе второй экземпляр продолжил бы установку).
+    const at = s.indexOf(cond[0]);
+    let depth = 0, i = at + cond[0].length - 1, thenEnd = -1;
+    for (; i < s.length; i++) {
+      if (s[i] === '{') depth++;
+      else if (s[i] === '}') { depth--; if (depth === 0) { thenEnd = i; break; } }
+    }
+    assert(thenEnd > 0, 'тело ветки отказа найдено');
+    const thenBody = s.slice(at, thenEnd);
+    assert(/app\.quit\(\)/.test(thenBody), 'без блокировки процесс завершается');
+    const tail = s.slice(thenEnd, thenEnd + 40);
+    assert(/^\}\s*else\s*\{/.test(tail), 'есть ветка else, а не просто продолжение: ' + JSON.stringify(tail.slice(0, 20)));
+    const ready = s.indexOf('app.whenReady()');
+    assert(ready > thenEnd, 'whenReady находится в ветке else, а не до блокировки');
+    assert(/'second-instance'/.test(s), 'повторный запуск поднимает уже открытое окно');
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    // В app-builder-lib define ставится при string И при любом falsy — пропускается
+    // ТОЛЬКО при boolean true. Тогда стаб распаковывается в $PLUGINSDIR (уникальный
+    // на запуск) вместо общего $TEMP\<ksuid>.
+    assert(pkg.build.portable.unpackDirName === true,
+      'unpackDirName: true — каталог распаковки уникален для каждого запуска');
+  });
+
+  // Цикл удаления длится десятками секунд; если процесс убили жёстко, маркер
+  // оставался переименованным, кнопка «Удалить» исчезала навсегда, и компонент
+  // нельзя было доудалить — только переустановить и удалять заново.
+  ok('прерванное удаление: маркер возвращается на старте, живой не затирается', () => {
+    const r = require(path.join(ROOT, 'src', 'install-receipts.js'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-tomb-'));
+    try {
+      r.writeReceipt(home, 'nomad', r.buildReceipt('nomad', 'win32', '1.0'));
+      assert(r.deactivateReceipt(home, 'nomad').ok, 'удаление деактивировало маркер');
+      assert(r.readReceipt(home, 'nomad') === null, 'до починки маркера нет');
+      const rec = r.recoverOrphanTombstones(home);
+      assert(rec.restored.indexOf('nomad') >= 0, 'старт вернул маркер: ' + JSON.stringify(rec.restored));
+      assert(!!r.readReceipt(home, 'nomad'), 'удаление можно повторить');
+
+      // Живой маркер новее tombstone (компонент переустановили) — не трогаем.
+      r.writeReceipt(home, 'vscode', r.buildReceipt('vscode', 'win32', '2.0'));
+      fs.writeFileSync(r.tombstonePath(home, 'vscode'), '{"id":"vscode","schemaVersion":2}');
+      r.recoverOrphanTombstones(home);
+      const v = r.readReceipt(home, 'vscode');
+      assert(v && v.version === '2.0', 'живой маркер не перезаписан устаревшим tombstone');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  ok('main.js вызывает восстановление осиротевших маркеров при старте', () => {
+    // По коду БЕЗ комментариев: раньше тест читал исходник целиком, и
+    // ЗАКОММЕНТИРОВАННЫЙ вызов (// receipts.recoverOrphanTombstones(...))
+    // проходил проверку — «восстановление есть», хотя на старте не звалось ничего.
+    const s = codeOf(MAIN());
+    const call = s.indexOf('receipts.recoverOrphanTombstones(');
+    assert(call !== -1, 'вызов есть В КОДЕ (не в комментарии)');
+    const ready = s.indexOf('app.whenReady()');
+    assert(ready !== -1 && call > ready, 'вызывается после готовности приложения');
+  });
+
+  // На macOS приложение стартует ИЗ ОБРАЗА, и имя скачанного файла до него не
+  // доезжает: привязка событий к человеку не работала вовсе.
+  ok('uid на macOS берётся у смонтированного образа, чужой образ игнорируется', () => {
+    const u = require(path.join(ROOT, 'src', 'uid-telemetry.js'));
+    const call = (out) => u.resolveUid({
+      platform: 'darwin', execPath: '/Volumes/Hamidun Setup/Hamidun Setup.app',
+      env: {}, execFileSync: () => out,
+    });
+    assert(call('image-path : /d/Hamidun-Setup-Mac-Lite--u272540053.dmg\n') === '272540053', 'наш образ даёт uid');
+    assert(call('image-path : /d/Hamidun-Setup-Mac--u999 (1).dmg\n') === '999', 'повторно скачанный « (1)» тоже');
+    assert(call('image-path : /d/Evil--u666.dmg\n') === '', 'чужой смонтированный образ uid НЕ даёт');
+    assert(call('image-path : /d/Hamidun-Setup-Mac.dmg\n') === '', 'образ без uid → анонимно');
+    let threw = false;
+    try {
+      u.resolveUid({
+        platform: 'darwin', execPath: '/V/a', env: {},
+        execFileSync: () => { throw new Error('нет образа'); },
+      });
+    } catch (e) { threw = true; }
+    assert(!threw, 'падение hdiutil не роняет установку');
+  });
+
+  // Copy-Item -LiteralPath с подстановкой в боевом Windows PowerShell 5.1 НЕ
+  // раскрывает звёздочку и молча копирует НОЛЬ файлов без исключения (в pwsh 7 —
+  // честно падает, поэтому дефект и не ловился). uv получал пустой каталог,
+  // и Nomad не ставился на Windows НИКОГДА.
+  ok('Nomad: копия исходников без подстановок + проверка факта копирования', () => {
+    const n = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+    const i = n.indexOf('$buildSrc = Join-Path');
+    assert(i > 0, 'блок подготовки копии найден');
+    const blk = n.slice(i, i + 1200);
+    assert(!/Copy-Item[^\n]*\*/.test(blk),
+      'в копировании нет подстановок — в PS 5.1 они молча копируют ноль файлов');
+    assert(/Copy-Item -LiteralPath \$src -Destination \$buildSrc/.test(blk),
+      'копируется каталог целиком в ещё не существующий путь');
+    assert(/pyproject\.toml/.test(blk), 'факт копирования проверяется по контрольному файлу');
+    const chk = blk.indexOf('pyproject.toml');
+    const use = blk.indexOf('$srcForInstall = $buildSrc');
+    assert(chk > 0 && use > chk, 'проверка стоит ДО того, как копия объявлена пригодной');
+  });
+
+  // Причина отказа staging-каталога показывается человеку, пишется в лог и
+  // уезжает в телеметрию — она обязана быть читаемой, а не CP866-мусором.
+  ok('причина отказа staging-каталога приходит в UTF-8', () => {
+    const s = MAIN();
+    // В main.js два инлайна: для компонентных скриптов и для примитива. Нужен
+    // именно примитив — он один прибивает PSModulePath литералом.
+    const anchor = s.indexOf("$env:PSModulePath='");
+    assert(anchor > 0, 'инлайн примитива найден');
+    const i = s.lastIndexOf('const inline =', anchor);
+    assert(i > 0, 'начало инлайна примитива найдено');
+    const blk = s.slice(i, anchor + 900);
+    assert(/OutputEncoding=\[System\.Text\.Encoding\]::UTF8/.test(blk),
+      'кодировка консоли задаётся ПЕРВОЙ командой');
+    const enc = blk.indexOf('OutputEncoding');
+    const dot = blk.indexOf(". '");
+    assert(enc < dot, 'кодировка выставляется ДО дот-сорса примитива');
+  });
+})();
+
+// ===========================================================================
+// Агент fix-staging-cleanup: уборка двухуровневого staging обязана сносить
+// ВНЕШНИЙ запертый HmDeElev-<hex>, а не только рабочий подкаталог `w` (иначе
+// %ProgramData% зарастает Admins-only пустышками, которые пользователь стереть
+// не может — на боевой машине их скопились сотни). Плюс регрессия-страж задачи 2:
+// мёртвый classifyRegQuery не воскресает.
+// ===========================================================================
+(function stagingCleanupTests() {
+  console.log('== Staging-уборка: сносится ВНЕШНИЙ HmDeElev-<hex> (не подкаталог w), fail-closed по имени ==');
+
+  const DEELEV_STAGE = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), 'utf8');
+
+  // Статика: единый помощник существует (по образцу stagingRootOf из main.js),
+  // поднимается от `w` к родителю, стережёт имя шаблоном HmDeElev-<32 hex>
+  // (fail-closed: код работает под админом — ошибка вычисления пути не должна
+  // удалить чужой каталог), и ВСЕ сносы staging в _deelev.ps1 идут через него.
+  ok('_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)', () => {
+    const s = DEELEV_STAGE();
+    const i = s.indexOf('function Remove-HmSecureStagingDir');
+    assert(i !== -1, 'помощник Remove-HmSecureStagingDir определён');
+    const body = s.slice(i, i + 1400);
+    assert(/-eq 'w'/.test(body) && /GetDirectoryName/.test(body),
+      'помощник поднимается от рабочего подкаталога w к родителю (образец stagingRootOf)');
+    assert(/HmDeElev-\[0-9a-f\]\{32\}/.test(body),
+      'удаляется ТОЛЬКО каталог с именем HmDeElev-<32 hex> (шаблон pruneStaleSecureDirs)');
+    assert(/-notmatch '\^HmDeElev-\[0-9a-f\]\{32\}\$'/.test(body), 'fail-closed гейт по имени присутствует');
+    assertOrder(body, "-notmatch '^HmDeElev-", 'Remove-Item -LiteralPath $root',
+      'проверка имени стоит ДО удаления (fail-closed, не после)');
+    // Дефект был именно здесь: finally Invoke-HmDeElevated удалял $dir (= подкаталог w),
+    // внешний запертый каталог оставался в %ProgramData% навсегда.
+    assert(/if \(\$dir\)\s+\{ Remove-HmSecureStagingDir -Path \$dir \}/.test(s),
+      'finally Invoke-HmDeElevated чистит через помощник');
+    assert(!/Remove-Item -LiteralPath \$dir\b/.test(s),
+      'голых Remove-Item по $dir не осталось — все сносы staging только через помощник');
+  });
+
+  // Функционал в БОЕВОМ Windows PowerShell 5.1 (полный путь, не pwsh): помощнику
+  // отдают путь РАБОЧЕГО подкаталога — исчезнуть обязан ВНЕШНИЙ каталог целиком;
+  // каталог с посторонним именем (та же структура …\w) остаётся цел (fail-closed).
+  if (powershellAvailable()) {
+    ok('PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)', () => {
+      const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-stage-'));
+      try {
+        const hex = crypto.randomBytes(16).toString('hex'); // 32 hex — как guid N
+        const outer = path.join(base, 'HmDeElev-' + hex);
+        const work = path.join(outer, 'w');
+        fs.mkdirSync(work, { recursive: true });
+        fs.writeFileSync(path.join(work, 'task.xml'), 'x'); // непустой — как в бою
+        const alien = path.join(base, 'NotMine-' + hex);    // структура та же, имя чужое
+        fs.mkdirSync(path.join(alien, 'w'), { recursive: true });
+        const psExe = path.join(process.env.SystemRoot || 'C:\\Windows',
+          'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        const cmd = ". '" + dot + "';" +
+          "Remove-HmSecureStagingDir -Path '" + work + "';" +
+          "Remove-HmSecureStagingDir -Path '" + path.join(alien, 'w') + "';" +
+          "Write-Output ('OUTER=' + (Test-Path -LiteralPath '" + outer + "'));" +
+          "Write-Output ('ALIEN=' + (Test-Path -LiteralPath '" + alien + "'))";
+        const r = spawnSync(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+          { encoding: 'utf8', timeout: 120000 });
+        const out = (r.stdout || '');
+        assert(/OUTER=False/.test(out),
+          'ВНЕШНИЙ каталог исчез целиком (не только w): ' + out.trim() + ' ' + (r.stderr || '').trim().slice(0, 200));
+        assert(/ALIEN=True/.test(out), 'постороннее имя НЕ тронуто (fail-closed): ' + out.trim());
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+  }
+
+  // Задача 2: classifyRegQuery / REG_NOTFOUND_RE / REG_DENIED_RE удалены — main.js
+  // читает реестр сам (.NET Registry через winPsPayload), вызовов в репозитории нет.
+  // Живые экспорты (launchctl-классификаторы, verifyPostconditions) — на месте.
+  ok('uninstall-exec.js: мёртвый classifyRegQuery не воскрес; живые экспорты целы', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'uninstall-exec.js'), 'utf8');
+    assert(!/function classifyRegQuery/.test(s), 'функция classifyRegQuery не вернулась');
+    assert(!/REG_NOTFOUND_RE\s*=|REG_DENIED_RE\s*=/.test(s), 'мёртвые регэкспы не вернулись');
+    assert(typeof uxMod.classifyRegQuery === 'undefined', 'экспорт classifyRegQuery снят');
+    assert(typeof uxMod.classifyLaunchctlPrint === 'function' &&
+      typeof uxMod.launchctlRemoveError === 'function', 'живые launchctl-классификаторы на месте');
+    assert(typeof uxMod.verifyPostconditions === 'function', 'verifyPostconditions жив');
+  });
+})();
+
+// ===========================================================================
+// claude.ps1 — ревью-фиксы «проверки запуском» (агент fix-claude-probe):
+//   ДЕФЕКТ 1: служебные статусы «Last Result» планировщика (SCHED_S_*, 0x41300..0x41308,
+//             0x41325) читались как код возврата claude -> рабочий CLI сносился
+//             Remove-HmBrokenClaude и шаг краснел на ровном месте;
+//   ДЕФЕКТ 2: Remove-HmBrokenClaude (elevated!) удалял по произвольному найденному пути
+//             -> мог снести чужой claude (свой npm prefix / volta).
+// Функции режутся из БОЕВОГО claude.ps1 и гоняются в Windows PowerShell 5.1; мутационные
+// прогоны доказывают, что тесты КРАСНЕЮТ при возврате каждого дефекта.
+// ===========================================================================
+(function claudeProbeReviewTests() {
+  console.log('== claude.ps1: сентинелы планировщика != код claude; уборка строго по аллоулисту ==');
+
+  const SENTINELS = [267008, 267009, 267010, 267011, 267012, 267013, 267014, 267015, 267016, 267045];
+
+  ok('структура: сентинел-гейт ДО вердикта broken; уборка зовётся только при broken; чужой сломанный claude на финале -> unverified', () => {
+    const s = CLD_PS1();
+    // Дефект 1: полный список SCHED_S_* в Test-HmClaudeRuns, исход — 'unverified'.
+    const fnM = s.match(/function Test-HmClaudeRuns[\s\S]*?\r?\n\}/);
+    assert(fnM, 'Test-HmClaudeRuns на месте');
+    SENTINELS.forEach((c) => assert(fnM[0].includes(String(c)), 'сентинел ' + c + ' учтён'));
+    // Второй якорь — ФИНАЛЬНЫЙ `return 'broken'` (с новой строки), а не ранний
+    // `if (-not $bin) { return 'broken' }` в первой строке функции.
+    assertOrder(fnM[0], "-contains $r.Code) { return 'unverified' }", "\n    return 'broken'",
+      'сентинелы дают unverified РАНЬШЕ вердикта broken');
+    // Дефект 2: аллоулист объявлен (зеркало macos/claude.sh) и удаление им гейтится.
+    assert(/function Test-HmOurClaudeDir/.test(s), 'аллоулист наших каталогов объявлен');
+    assert(/Join-Path \$env:USERPROFILE '\.local\\bin'/.test(s) && /Join-Path \$env:APPDATA 'npm'/.test(s),
+      'в аллоулисте ровно наши места: ~/.local\\bin и %APPDATA%\\npm');
+    const rmM = s.match(/function Remove-HmBrokenClaude[\s\S]*?\r?\n\}/);
+    assert(rmM, 'Remove-HmBrokenClaude на месте');
+    assertOrder(rmM[0], 'Test-HmOurClaudeDir', 'Remove-Item', 'проверка аллоулиста стоит ДО первого Remove-Item');
+    // КАЖДЫЙ вызов уборки — только под вердиктом broken ('unverified' ничего не сносит).
+    const rx = /Remove-HmBrokenClaude \$/g; let m; let calls = 0;
+    while ((m = rx.exec(s)) !== null) {
+      calls++;
+      assert(s.lastIndexOf("($probe -eq 'broken')", m.index) > m.index - 700,
+        'вызов уборки (смещение ' + m.index + ') не под вердиктом broken');
+    }
+    assert(calls >= 1, 'вызов уборки в офлайн-ветке на месте');
+    // Финал: сломанный ЧУЖОЙ claude не краснит шаг и не трогается — путь «не подтвердили».
+    assert(/-eq 'broken' -and -not \(Test-HmOurClaudeDir \(Split-Path \$claudeBin\)\)/.test(s),
+      'финальный вердикт различает наш/чужой каталог');
+    assertOrder(s, '-not (Test-HmOurClaudeDir (Split-Path $claudeBin))', "$probe = 'unverified'",
+      'чужой сломанный claude понижается до unverified, а не exit 1');
+  });
+
+  if (!powershellAvailable()) return;
+
+  // Гарнесс: РЕАЛЬНЫЕ функции из claude.ps1; де-элевация подставная — Gate/Code из env
+  // (HM_T_GATE/HM_T_CODE), чтобы прогнать в т.ч. значения, которых живой бинарь не даст.
+  const cutFn = (src, name) => {
+    const m = src.match(new RegExp('function ' + name + '[\\s\\S]*?\\r?\\n\\}'));
+    assert(m, name + ' извлекается из claude.ps1');
+    return m[0];
+  };
+  const mkHarness = (dir, fns) => {
+    const harness = '\uFEFF' +
+      'param([string]$Bin, [string]$Mode)\r\n' +
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+      'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+      "  if ($env:HM_T_GATE -eq 'null') { return $null }\r\n" +
+      '  [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE }\r\n' +
+      '}\r\n' +
+      fns.join('\r\n') + '\r\n' +
+      "if ($Mode -eq 'probe') { Write-Output (Test-HmClaudeRuns $Bin) }\r\n" +
+      "if ($Mode -eq 'clean') { Write-Output (Remove-HmBrokenClaude $Bin) }\r\n";
+    const hFile = path.join(dir, 'review-harness.ps1');
+    fs.writeFileSync(hFile, harness);
+    return hFile;
+  };
+  const runPs = (hFile, bin, mode, envAdd) => spawnSync('powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', hFile, bin, mode],
+    { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, envAdd) });
+
+  ok('ДЕФЕКТ 1 (прогон PS 5.1): каждый сентинел планировщика -> unverified (НЕ broken); 0 -> works; 1 -> broken; мутант без гейта пойман', () => {
+    const src = CLD_PS1();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldsent-'));
+    try {
+      const hFile = mkHarness(base, [cutFn(src, 'Test-HmClaudeRuns')]);
+      const probe = (file, code) => (runPs(file, 'C:\\fake\\claude.cmd', 'probe',
+        { HM_T_GATE: 'medium', HM_T_CODE: String(code) }).stdout || '').trim();
+      SENTINELS.forEach((c) => {
+        assert.strictEqual(probe(hFile, c), 'unverified',
+          'Last Result ' + c + ' — статус ЗАДАЧИ, не код claude: удалять нечего');
+      });
+      assert.strictEqual(probe(hFile, 0), 'works', 'настоящий exit 0 -> works');
+      assert.strictEqual(probe(hFile, 1), 'broken', 'настоящий exit 1 -> broken (доказанный отказ запуска)');
+      const rNull = (runPs(hFile, 'C:\\fake\\claude.cmd', 'probe', { HM_T_GATE: 'null', HM_T_CODE: '0' }).stdout || '').trim();
+      assert.strictEqual(rNull, 'unverified', 'де-элевация не отчиталась -> unverified (регрессии нет)');
+      // МУТАЦИЯ (возврат дефекта 1): убираем сентинел-гейт — 267014 обязан стать broken,
+      // иначе ассерты выше ничего не сторожат.
+      const fnSrc = cutFn(src, 'Test-HmClaudeRuns');
+      const mutant = fnSrc.split(/\r?\n/).filter((l) => !/-contains \$r\.Code\)/.test(l)).join('\r\n');
+      assert(mutant !== fnSrc, 'мутация применилась (гейт найден и вырезан)');
+      const hMut = path.join(base, 'mutant-probe.ps1');
+      fs.writeFileSync(hMut, fs.readFileSync(hFile, 'utf8').replace(fnSrc, () => mutant));
+      assert.strictEqual(probe(hMut, 267014), 'broken',
+        'дефектная версия даёт broken на 267014 — тест различает фикс и дефект');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ДЕФЕКТ 2 (прогон PS 5.1): чужой claude вне наших каталогов НЕ удаляется; наш (%APPDATA%\\npm, ~/.local\\bin) — удаляется как раньше; мутант без аллоулиста пойман', () => {
+    const src = CLD_PS1();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldrm-'));
+    try {
+      const home = path.join(base, 'home'); const appdata = path.join(base, 'appdata');
+      const ourNpm = path.join(appdata, 'npm'); const ourLocal = path.join(home, '.local', 'bin');
+      const foreign = path.join(base, 'volta', 'bin');   // «свой npm prefix / volta» пользователя
+      fs.mkdirSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
+      fs.mkdirSync(ourLocal, { recursive: true });
+      fs.mkdirSync(foreign, { recursive: true });
+      fs.writeFileSync(path.join(ourNpm, 'claude.cmd'), '@exit /b 1\r\n');
+      fs.writeFileSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code', 'package.json'), '{}');
+      fs.writeFileSync(path.join(ourLocal, 'claude.exe'), 'x');
+      fs.writeFileSync(path.join(foreign, 'claude.cmd'), '@echo user claude\r\n');
+      const hFile = mkHarness(base, [cutFn(src, 'Test-HmOurClaudeDir'), cutFn(src, 'Remove-HmBrokenClaude')]);
+      const envSb = { USERPROFILE: home, APPDATA: appdata, HM_T_GATE: 'medium', HM_T_CODE: '1' };
+      // 1) ЧУЖОЙ каталог: честный отказ, файл ЖИВ (elevated-скрипт не сносит чужой claude).
+      const r1 = runPs(hFile, path.join(foreign, 'claude.cmd'), 'clean', envSb);
+      assert(/False/.test(r1.stdout || ''), 'уборка вернула $false (отказ): ' + (r1.stdout || '') + (r1.stderr || ''));
+      assert(/не трогаю/.test(r1.stdout || ''), 'человеку сказано, ПОЧЕМУ не тронули');
+      assert(fs.existsSync(path.join(foreign, 'claude.cmd')), 'чужой claude ЖИВ');
+      // 2) НАШ npm-prefix: шим и пакет снесены (регрессии нет).
+      const r2 = runPs(hFile, path.join(ourNpm, 'claude.cmd'), 'clean', envSb);
+      assert(/True/.test(r2.stdout || ''), 'наш артефакт убран: ' + (r2.stdout || '') + (r2.stderr || ''));
+      assert(!fs.existsSync(path.join(ourNpm, 'claude.cmd')), 'сломанный шим удалён');
+      assert(!fs.existsSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code')),
+        'пакет @anthropic-ai/claude-code удалён (иначе перехватит PATH после онлайн-установки)');
+      // 3) НАШ ~/.local\bin (нативный установщик): снесён.
+      runPs(hFile, path.join(ourLocal, 'claude.exe'), 'clean', envSb);
+      assert(!fs.existsSync(path.join(ourLocal, 'claude.exe')), 'наш claude.exe из ~/.local/bin удалён');
+      // МУТАЦИЯ (возврат дефекта 2): вырезаем аллоулист-гейт — чужой файл обязан быть
+      // снесён дефектной версией, иначе ассерт «чужой ЖИВ» ничего не сторожит.
+      const rmSrc = cutFn(src, 'Remove-HmBrokenClaude');
+      const mutant = rmSrc.replace(/if \(-not \(Test-HmOurClaudeDir \$dir\)\) \{[\s\S]*?\r?\n    \}\r?\n/, '');
+      assert(mutant !== rmSrc, 'мутация применилась (гейт найден и вырезан)');
+      const hMut = path.join(base, 'mutant-rm.ps1');
+      fs.writeFileSync(hMut, fs.readFileSync(hFile, 'utf8').replace(rmSrc, () => mutant));
+      runPs(hMut, path.join(foreign, 'claude.cmd'), 'clean', envSb);
+      assert(!fs.existsSync(path.join(foreign, 'claude.cmd')),
+        'дефектная версия сносит чужой файл — тест различает фикс и дефект');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+})();
+
+// reg.exe САМ подменяет символом «?» всё, что непредставимо в кодовой странице
+// консоли, — ещё ДО нашего декодирования. Строка приходит «чистой», без единого
+// признака порчи, и гейт на U+FFFD её не видит. Проверено запуском: греческий
+// путь на русской консоли превращался в «C:\?????\bin» и был бы записан обратно
+// в PATH, уничтожив чужую запись.
+if (process.platform === 'win32') {
+  ok('реестр: значение с непредставимыми символами уходит на .NET, а не портится', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
+    const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+    const env = () => {
+      const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+      return Object.assign({}, process.env, { PATH: s32, Path: s32 });
+    };
+    const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
+      body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
+    )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+
+    const KEY = 'HKCU\\Environment';
+    const NAME = 'HmLossy' + Date.now();
+    // Греческий и акцентированная латиница непредставимы в CP866.
+    const VAL = 'C:\\Ωμέγα\\bin;C:\\Программы\\x';
+    try {
+      assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_SZ').ok, 'пробное значение записано');
+      const fast = M.regQueryFast(KEY, NAME);
+      assert(fast === null,
+        'быстрый путь ОБЯЗАН отказаться от значения с потерянными символами, а вернул: '
+        + (fast && fast.data));
+      const got = M.regQueryValueTyped(KEY, NAME);
+      assert(got.ok && got.found, 'итоговое чтение состоялось');
+      assert(got.data === VAL, 'значение пришло целым через .NET: ' + got.data);
+      assert(got.data.indexOf('?') === -1, 'в итоговом значении нет подменных «?»');
+    } finally {
+      try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой всегда */ }
+    }
+  });
+}
+
+// ===========================================================================
+// Журнал установки разгонял процессор до нескольких ядер и грел ноутбук.
+// Живой случай на Mac M4: процесс «Hamidun» — 523% ЦП, 11 часов процессорного
+// времени, ноутбук выключили вручную.
+// Две причины, обе на КАЖДОЙ строке вывода (а их десятки тысяч — pip, uv, npm):
+//   1) в интерфейсе `log.textContent += line` пересоздавал текстовый узел целиком,
+//      а чтение scrollHeight принудительно пересчитывало вёрстку мегабайтного блока;
+//   2) в главном процессе fs.appendFileSync открывал и закрывал файл на каждую
+//      строку — замер: 20 000 строк = 11,8 с синхронной блокировки против 0,185 с
+//      с открытым дескриптором.
+// ===========================================================================
+(function installLogPerformance() {
+  const vm = require('vm');
+
+  ok('журнал в интерфейсе: кольцо строк, одна перерисовка на кадр', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const start = src.indexOf('const LOG_MAX_LINES');
+    const end = src.indexOf('\n// Часы на ИДУЩЕМ шаге', start);
+    assert(start > 0 && end > start, 'блок журнала найден');
+    const block = src.slice(start, end);
+
+    let layoutReads = 0;
+    let textWrites = 0;
+    const logEl = {
+      _t: '',
+      get textContent() { return this._t; },
+      set textContent(v) { this._t = v; textWrites++; },
+      get scrollHeight() { layoutReads++; return this._t.length; },
+      get scrollTop() { return 0; },
+      set scrollTop(v) { /* прокрутка */ },
+      get clientHeight() { return 100; },
+    };
+    const frames = [];
+    const ctx = {
+      $: () => logEl,
+      requestAnimationFrame: (fn) => { frames.push(fn); },
+      setTimeout: (fn) => { frames.push(fn); },
+      String: String, Math: Math, console: console,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(block + '\n; this.__append = appendLog; this.__lines = LOG_LINES;', ctx);
+
+    const N = 40000;
+    for (let i = 0; i < N; i++) ctx.__append('Collecting package==1.0.' + i);
+    while (frames.length) frames.shift()();
+
+    assert(ctx.__lines.length <= 800, 'журнал ограничен: ' + ctx.__lines.length + ' строк из ' + N);
+    assert(textWrites < 100, 'перерисовок ' + textWrites + ', а не по одной на строку');
+    assert(layoutReads < 200, 'чтений вёрстки ' + layoutReads + ', а не ' + N);
+    assert(logEl.textContent.length < 200000,
+      'в DOM держится ' + Math.round(logEl.textContent.length / 1024) + ' КБ, а не мегабайты');
+    // Хвост важнее всего: человек смотрит на последние строки.
+    assert(logEl.textContent.indexOf('1.0.' + (N - 1)) >= 0, 'последняя строка на месте');
+
+    // Полоски прогресса перерисовывают строку возвратом каретки — они не должны
+    // плодить строки (иначе журнал раздувается в разы на ровном месте).
+    const before = ctx.__lines.length;
+    for (let i = 0; i < 500; i++) ctx.__append('\rЗагрузка ' + i + '%');
+    while (frames.length) frames.shift()();
+    assert(ctx.__lines.length <= before + 1,
+      'возврат каретки не плодит строки (+' + (ctx.__lines.length - before) + ')');
+  });
+
+  ok('журнал на диске: дескриптор открыт один раз, а не на каждую строку', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const i = s.indexOf('function logToFile');
+    assert(i > 0, 'функция найдена');
+    const body = s.slice(i, s.indexOf('\n}', i));
+    assert(!/appendFileSync/.test(body),
+      'appendFileSync убран — он открывал и закрывал файл на КАЖДОЙ строке');
+    assert(/openSync/.test(body) && /writeSync/.test(body), 'пишем в открытый дескриптор');
+    // Дескриптор мог протухнуть — обязан быть сброс, иначе журнал умрёт молча.
+    assert(/logFd = null/.test(s), 'при ошибке дескриптор сбрасывается для переоткрытия');
+
+    // Поведенчески: та же нагрузка обязана укладываться на порядок быстрее.
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-log-'));
+    try {
+      const N = 4000;
+      const LINE = '[2026-07-27T12:00:00.000Z] [pydeps] Collecting package==1.0.0\n';
+      const p1 = path.join(d, 'a.log');
+      const p2 = path.join(d, 'b.log');
+      let t = Date.now();
+      for (let k = 0; k < N; k++) fs.appendFileSync(p1, LINE);
+      const msOld = Date.now() - t;
+      const fd = fs.openSync(p2, 'a');
+      t = Date.now();
+      for (let k = 0; k < N; k++) fs.writeSync(fd, LINE);
+      const msNew = Date.now() - t;
+      fs.closeSync(fd);
+      assert(fs.readFileSync(p1, 'utf8') === fs.readFileSync(p2, 'utf8'), 'содержимое идентично');
+      assert(msNew * 3 < msOld,
+        'открытый дескриптор быстрее втрое и более: было ' + msOld + ' мс, стало ' + msNew + ' мс');
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+})();

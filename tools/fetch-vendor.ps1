@@ -380,6 +380,32 @@ function Invoke-NomadSrcSanitize {
 }
 # --- /Экспорт-фильтр nomad-src ---
 
+# Детерминированный SHA-256 ДЕРЕВА каталога (nomad-src: pyproject.toml/любой .py мог быть
+# подменён medium-малварью того же юзера до `uv tool install` под АДМИНОМ). Рецепт:
+# относительные пути (сорт ORDINAL, locale-независимо) + per-file SHA-256 → хеш конкатенации.
+# ОБЯЗАН совпадать между tools/fetch-vendor.ps1 (пишет манифест) и scripts/windows/_verify.ps1
+# (верифицирует). Self-contained (не зависит от Get-HmFileSha256).
+function Get-HmTreeSha256 {
+    param([string]$Root)
+    $root = (Resolve-Path -LiteralPath $Root).Path
+    $lines = New-Object System.Collections.Generic.List[string]
+    $sha1 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {
+            $rel = $_.FullName.Substring($root.Length).TrimStart('\', '/').Replace('\', '/')
+            $fs = [IO.File]::OpenRead($_.FullName)
+            try { $fh = $sha1.ComputeHash($fs) } finally { $fs.Dispose() }
+            $lines.Add($rel + ':' + (([BitConverter]::ToString($fh) -replace '-', '').ToLower()))
+        }
+    } finally { $sha1.Dispose() }
+    $arr = $lines.ToArray()
+    [System.Array]::Sort($arr, [System.StringComparer]::Ordinal)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($arr -join "`n") + "`n")
+    $sha2 = [System.Security.Cryptography.SHA256]::Create()
+    try { $hb = $sha2.ComputeHash($bytes) } finally { $sha2.Dispose() }
+    return ([BitConverter]::ToString($hb) -replace '-', '').ToLower()
+}
+
 Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive merged-кода, БЕЗ .git; vendor-only установка)..."
 # Компонент Nomad объявлен? Друзьям не нужен доступ к репозиторию: код едет офлайн внутри
 # установщика. nomad-src приватный, в git НЕ коммитится (.gitignore vendor/). Нет
@@ -416,6 +442,9 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
       if (Test-Path (Join-Path $srcOut 'pyproject.toml')) {
         # Экспорт-фильтр + гейт: несводимые деанон/секрет-паттерны в раздаваемом exe → FATAL.
         if (-not (Invoke-NomadSrcSanitize $srcOut)) { exit 1 }
+        # #2: детерминированный SHA-256 дерева nomad-src → манифест vendor\nomad-src.sha256
+        # (nomad.ps1 сверяет его fail-closed перед `uv tool install`, зеркало mac-гейта).
+        [IO.File]::WriteAllText((Join-Path $root 'vendor\nomad-src.sha256'), (Get-HmTreeSha256 $srcOut))
         $mbn = [math]::Round(((Get-ChildItem $srcOut -Recurse -File | Measure-Object Length -Sum).Sum)/1MB, 0)
         Write-Host "  ok vendor\nomad-src ($mbn МБ, pyproject.toml на месте; фильтр пройден)"
       } else {
@@ -443,6 +472,12 @@ try {
   # уникально — коллизий по базовому имени (ключ манифеста) нет.
   $courseZipChk = Get-Item (Join-Path $root 'vendor\course\vibecoding-course.zip') -ErrorAction SilentlyContinue
   if ($courseZipChk -and $courseZipChk.Length -gt 0) { $toHash += $courseZipChk }
+  # #2: nomad-src integrity — закрепляем в checksums.json манифест дерева + главный файл
+  # пакета (nomad.ps1 верифицирует их перед установкой из непроверенного дерева).
+  $nomadShaChk = Get-Item (Join-Path $root 'vendor\nomad-src.sha256') -ErrorAction SilentlyContinue
+  if ($nomadShaChk) { $toHash += $nomadShaChk }
+  $nomadPyproj = Get-Item (Join-Path $root 'vendor\nomad-src\pyproject.toml') -ErrorAction SilentlyContinue
+  if ($nomadPyproj) { $toHash += $nomadPyproj }
   $toHash | Sort-Object Name | ForEach-Object {
     $fs = [IO.File]::OpenRead($_.FullName)
     try { $hb = $sha.ComputeHash($fs) } finally { $fs.Dispose() }

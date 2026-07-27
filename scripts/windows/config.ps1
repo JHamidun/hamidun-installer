@@ -18,7 +18,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
@@ -77,15 +76,22 @@ if ($haveBundled) {
     $url    = if ($env:HM_CONFIG_REPO_URL) { $env:HM_CONFIG_REPO_URL } else { 'https://github.com/JHamidun/claude-code-config-pack' }
     $branch = if ($env:HM_CONFIG_REPO_BRANCH) { $env:HM_CONFIG_REPO_BRANCH } else { 'main' }
     $clone  = Join-Path $env:USERPROFILE '.hamidun-setup\config-repo'
-    if (Test-Path (Join-Path $clone '.git')) {
-        Write-Host "Обновляю конфиг с GitHub..."
-        git -C $clone fetch --depth 1 origin $branch 2>&1 | Out-Null
-        git -C $clone reset --hard "origin/$branch" 2>&1 | Out-Null
-    } else {
-        Write-Host "Скачиваю конфиг с GitHub ($url)..."
-        New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null
-        git clone --depth 1 -b $branch $url $clone
-    }
+    # #7: НЕ доверяем ранее существующему репо — атакующий (medium, тот же юзер) мог пред-
+    # создать $clone\.git с core.fsmonitor/hooksPath = payload → code-exec под нашим git.
+    # Всегда СВЕЖИЙ clone + hardening-флаги (командные -c перебивают repo-local config).
+    # credential.helper ПУСТОЙ + запрет интерактива — иначе Git Credential Manager
+    # (он на Windows стоит по умолчанию) поднимает ГРАФИЧЕСКОЕ окно «введите логин»
+    # при любом отказе доступа: прокси, перехват трафика, лимит GitHub. Установщик
+    # ждал бы ответа ВЕЧНО — то же зависание, что было с вопросом unzip, только
+    # окно может всплыть за окном установщика и остаться незамеченным.
+    # Репозиторий конфига ПУБЛИЧНЫЙ: любой запрос кредов = сломанная ситуация,
+    # и правильный исход — быстро упасть с понятной ошибкой, а не висеть.
+    $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false',
+                 '-c','credential.helper=','-c','credential.interactive=false')
+    if (Test-Path $clone) { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }
+    Write-Host "Скачиваю конфиг с GitHub ($url)..."
+    New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null
+    git @gitHard clone --depth 1 -b $branch $url $clone
 }
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.ps1
@@ -109,7 +115,10 @@ if (Test-Path $claudeHome) {
     try {
         # M7: robocopy (не Copy-Item -Recurse) — PS 5.1 не longPathAware; /R:1 /W:1 — не
         # зависать на залоченном файле (дефолт robocopy — 1M ретраев по 30с).
-        robocopy $claudeHome $backupDir /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+        # /XJ — НЕ рекурсировать по junction/symlink-каталогам внутри ~/.claude: иначе бэкап
+        # уходит по reparse-точке (напр. junction на сам профиль или на сетевую папку) и растёт
+        # бесконечно — шаг «Резервная копия» зависает/забивает диск. Симметрично merge (167/170).
+        robocopy $claudeHome $backupDir /E /R:1 /W:1 /XJ /NFL /NDL /NJH /NJS /NP /XF '.credentials.master.env' '.credentials.json' 'tg_session.session*' | Out-Null
         if ($LASTEXITCODE -ge 8) { $backupOk = $false }
         $global:LASTEXITCODE = 0
         if (-not (Test-Path $backupDir)) { $backupOk = $false }
@@ -118,6 +127,15 @@ if (Test-Path $claudeHome) {
         Write-Host "ВНИМАНИЕ: полный бэкап ~/.claude снять не удалось (возможно, часть файлов занята — открыт Cursor/Claude)."
         Write-Host "  Это НЕ критично: оригинал ~/.claude НЕ переносится и НЕ стирается — твои данные на месте. Продолжаю."
     }
+    # РЕТЕНЦИЯ: держим 3 ПОСЛЕДНИЕ копии. Без неё каждый прогон (repair/повтор/ручной
+    # перезапуск) оставлял ПОЛНУЮ копию ~/.claude навсегда — гигабайты, о которых юзер не
+    # знает и которые никто не чистит. Имена $claudeHome.backup.<YYYYMMDD-HHmmss> →
+    # лексикографическая сортировка = хронологическая. Зеркало config.sh (mac).
+    try {
+        Get-ChildItem -Path (Split-Path $claudeHome -Parent) -Directory -Filter ((Split-Path $claudeHome -Leaf) + '.backup.*') -ErrorAction Stop |
+            Sort-Object Name -Descending | Select-Object -Skip 3 |
+            ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+    } catch { Write-Host "  (старые копии ~/.claude.backup.* не удалось перечислить — оставляю как есть)" }
 }
 
 # Существовал ли рабочий конфиг ДО обновления — для честного финального рапорта.
@@ -127,9 +145,12 @@ New-Item -ItemType Directory -Force $claudeHome | Out-Null
 # Какие скиллы БЫЛИ до раскладки — ПОЛНОЕ УСПЕШНОЕ перечисление обязательно.
 # Любой сбой перечисления → прунинг ПОЛНОСТЬЮ выключен (никогда не удаляем чужое).
 $skillsDirNow = Join-Path $claudeHome 'skills'
-# корень skills ИЛИ дочерний skill — reparse point? Тогда merge НЕЛЬЗЯ пускать в skills:
+# КОРЕНЬ skills — reparse point? Тогда merge НЕЛЬЗЯ пускать в skills целиком:
 # robocopy пойдёт ПО junction и в repair перезапишет ВНЕШНЮЮ цель (data-loss). Исключаем skills.
-$skillsReparse = $false
+# ДОЧЕРНИЙ skill-reparse (симлинк одной папки скилла на репо/облако) — НЕ повод пропускать ВЕСЬ
+# каталог: одна ссылка обнуляла раскладку всех ~330 скиллов. Исключаем ТОЧЕЧНО по имени.
+$skillsReparse = $false   # reparse-point именно КОРЕНЬ ~/.claude/skills
+$reparseSkills = @()      # дочерние скиллы-ссылки — исключаются поимённо
 try {
     if (Test-Path -LiteralPath $skillsDirNow) {
         $item = Get-Item -LiteralPath $skillsDirNow -Force -ErrorAction Stop
@@ -139,15 +160,24 @@ try {
         }
         # ВСЕ immediate-дети (включая файлы и symlink/junction — не только -Directory):
         # пред-существующий symlink-скилл иначе считался бы «нашим» и удалялся при снятом паке.
-        # Дочерний reparse → тоже помечаем skillsReparse (merge не должен писать сквозь него).
         Get-ChildItem -Force -LiteralPath $skillsDirNow -ErrorAction Stop | ForEach-Object {
             $preExisting[$_.Name] = $true
-            if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $skillsReparse = $true }
+            if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $reparseSkills += $_.Name }
         }
     }
 } catch {
     $pruneDisabled = $true
     Write-Host "  Перечисление существующих скиллов не удалось ($($_.Exception.Message)) — прунинг паков отключён (ничего не удаляем)."
+}
+
+# Список скиллов, разложенных НАМИ в предыдущий прогон. Без него снятие пака работает ровно
+# один раз (на чистой машине): на повторном прогоне наши вчерашние скиллы уже «пред-существуют»
+# и прунинг молча ничего не удаляет. Файла нет / нечитаем → консервативное поведение как раньше.
+$ourListPath = Join-Path $claudeHome '.hamidun-skills.txt'
+$ourPrev = @{}
+if (Test-Path -LiteralPath $ourListPath) {
+    try { Get-Content -LiteralPath $ourListPath -ErrorAction Stop | ForEach-Object { if ($_) { $ourPrev[$_.Trim()] = $true } } }
+    catch { $ourPrev = @{} }
 }
 
 # === Merge-copy НАШЕЙ базы ПОВЕРХ ~/.claude (БЕЗ переноса/стирания) ===
@@ -159,10 +189,37 @@ try {
 # Если ~/.claude/skills (корень или дочерний skill) — reparse point, ИСКЛЮЧАЕМ skills из merge:
 # иначе robocopy пойдёт ПО junction и в repair перезапишет внешнюю цель. /XJ — не рекурсировать
 # в junction-точки нигде в дереве (defense-in-depth; наш source junction-ов не содержит).
-$mergeXD = $excludeDirs
+# Правило «не писать СКВОЗЬ reparse-point» действует НЕ только для skills: пакет везёт agents,
+# commands, rules, hooks, tools, config, templates… Любой из них юзер мог слинковать на свой
+# git-репо (mklink /J) — robocopy в repair ушёл бы по ссылке и затёр его файлы во ВНЕШНЕЙ цели.
+# Поэтому исключаем ВСЕ immediate-дети ~/.claude, помеченные ReparsePoint. Сбой проверки →
+# fail-closed: не пускаем merge ни в один наш подкаталог и честно проваливаем компонент.
+$reparseKids = @(); $reparseFiles = @(); $kidScanOk = $true
+try {
+    Get-ChildItem -Force -LiteralPath $claudeHome -ErrorAction Stop | ForEach-Object {
+        if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            if ($_.PSIsContainer) { $reparseKids += $_.Name } else { $reparseFiles += $_.Name }
+        }
+    }
+} catch { $kidScanOk = $false }
+if (-not $kidScanOk) {
+    $reparseKids = @(Get-ChildItem -Force -Directory -LiteralPath $srcClaude -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    Write-Host "  Проверка reparse-точек в ~/.claude не удалась — подкаталоги пропущены (внешние цели не тронуты)."
+    $installFailed = $true; $pruneDisabled = $true
+}
+foreach ($n in $reparseKids) { Write-Host "  ~/.claude/$n — reparse point (symlink/junction): пропускаю в раскладке (внешняя цель не тронута)." }
+# Файл-ссылка (напр. settings.json → репо юзера) — тем же правилом, через /XF.
+if ($reparseFiles.Count) { $excludeNames = @($excludeNames) + $reparseFiles }
+$mergeXD = @($excludeDirs) + $reparseKids
+$skillsSkipped = $false
 if ($skillsReparse) {
-    $mergeXD = @($excludeDirs) + @('skills')
+    $mergeXD = @($excludeDirs) + @('skills') + $reparseKids
+    $skillsSkipped = $true
     Write-Host "  ~/.claude/skills — reparse point (symlink/junction): пропускаю skills в раскладке (внешняя цель не тронута; наши скиллы туда не докладываю)."
+} elseif ($reparseSkills.Count) {
+    # Слинкованы отдельные ДОЧЕРНИЕ скиллы — исключаем только их, остальные раскладываем.
+    foreach ($n in $reparseSkills) { $mergeXD += (Join-Path (Join-Path $srcClaude 'skills') $n) }
+    Write-Host "  Скиллы-ссылки пропущены поимённо (внешние цели не тронуты): $($reparseSkills -join ', ')"
 }
 if ($ADDITIVE) {
     Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
@@ -200,6 +257,33 @@ if (-not $installFailed) {
     else { Write-Host "Готово: наши базовые файлы обновлены, пользовательские данные (ключи/память/история) на месте." }
 }
 
+# Фиксируем, какие скиллы разложили МЫ — чтобы на СЛЕДУЮЩЕМ прогоне снятие пака реально удаляло
+# их, а не считало «пред-существующими» (иначе прунинг — молчаливый no-op после первой установки).
+# КРИТИЧНО (data-loss): в список идёт ТОЛЬКО реально доложенное нами =
+# (скиллы источника МИНУС $preExisting) ∪ прошлый список $ourPrev.
+# Писать ВЕСЬ список источника нельзя: пред-существующий каталог ЮЗЕРА, чьё имя совпало
+# с нашим паком (git-workflow, security-audit, database-design…), на следующем прогоне
+# считался бы «нашим» ($ourPrev.ContainsKey) и сносился Remove-Item -Recurse при снятом
+# паке — вместе с файлами пользователя, которые первый прогон корректно сберёг.
+# Объединение с $ourPrev обязательно: без него на 2-м прогоне разность пуста (наши
+# вчерашние скиллы уже «пред-существуют») и снятие пака переставало бы работать с 3-го.
+# $pruneDisabled (перечисление $preExisting не удалось) → список НЕ обновляем: разность
+# от неполного $preExisting пометила бы скиллы юзера как наши. Старый файл остаётся.
+# Не записалось → прунинг просто останется консервативным (fail-safe, ничего чужого не удалим).
+if (-not $installFailed -and -not $skillsReparse -and -not $pruneDisabled) {
+    try {
+        $srcSkills = Join-Path $srcClaude 'skills'
+        if (Test-Path -LiteralPath $srcSkills) {
+            $ourNow = @{}
+            Get-ChildItem -Directory -LiteralPath $srcSkills -ErrorAction Stop | ForEach-Object {
+                if (-not $preExisting.ContainsKey($_.Name)) { $ourNow[$_.Name] = $true }
+            }
+            foreach ($n in @($ourPrev.Keys)) { $ourNow[$n] = $true }
+            Set-Content -LiteralPath $ourListPath -Value @($ourNow.Keys | Sort-Object) -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch { }
+}
+
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
 # Прунятся ТОЛЬКО скиллы, входящие в какой-то пак, но чей пак не выбран.
 # core и скиллы вне всех паков остаются всегда.
@@ -233,15 +317,17 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
                 # В ОБОИХ режимах НЕ удаляем скиллы, которые были у юзера ДО нашей раскладки
                 # (не наши — не трогаем, даже в repair). $preExisting захвачен до merge в любом
                 # режиме; сбой захвата → $pruneDisabled → сюда не доходим. Пустой хеш (skills не
-                # было до нас) → всё тут доложено нами → прунится по снятому паку. Удаляем только
-                # доложенное этим прогоном и чей пак снят.
-                $weAdded = -not $preExisting.ContainsKey($_.Name)
+                # было до нас) → всё тут доложено нами → прунится по снятому паку. Наше —
+                # доложенное ЭТИМ прогоном ЛИБО записанное в .hamidun-skills.txt прошлым
+                # (иначе снятие пака работало бы ровно один раз, на чистой машине).
+                $weAdded = (-not $preExisting.ContainsKey($_.Name)) -or $ourPrev.ContainsKey($_.Name)
                 if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name) -and $weAdded) {
                     Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
                     $removed++
                 }
             }
-            Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)."
+            if ($removed -gt 0) { Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)." }
+            else { Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: 0) — под снятые наборы нашего ничего не нашлось, пред-существующее не трогаю." }
         }
     }
 }
@@ -282,6 +368,12 @@ if ($dstPresent) {
     # ~/.claude/skills) выглядела завершённой, авто-снимала галку, и повторный запуск
     # НЕ доразворачивал конфиг. Пишем в самом конце, после успешной раскладки.
     try { Set-Content -Path (Join-Path $dst '.hamidun-config-complete') -Value 'ok' -NoNewline -ErrorAction Stop } catch {}
+    if ($skillsSkipped) {
+        # Честный статус: exit 0 (повтор ничего не изменит — исключение детерминировано),
+        # но НЕ делаем вид, что скиллы разложены.
+        Write-Host "ВНИМАНИЕ: конфиг развёрнут, НО скиллы НЕ разложены — ~/.claude/skills это ссылка (внешняя цель не тронута)."
+        Write-Host "  Скопируй их вручную: $srcClaude\skills  ->  <цель ссылки>"
+    }
     Write-Host "OK: конфиг развёрнут. Не забудь заполнить ~/.claude/.credentials.master.env"
     exit 0
 }

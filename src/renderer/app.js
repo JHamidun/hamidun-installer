@@ -19,6 +19,15 @@ let STATE = {
   repair: {},        // id -> bool: переустановить начисто (форс — отключает аддитивность)
   repairConfirmed: {}, // id -> bool: перезапись ~/.claude ОТДЕЛЬНО подтверждена диалогом (P0-1)
   detectDone: false,   // P0-1: кнопка установки выключена, пока детекция не завершилась
+  edition: 'offline',  // 'lite' = стриминг-издание (докачка с S3); из bootstrap (main решает)
+  remoteSizes: {},     // componentId -> ТОЧНЫЙ sizeBytes докачки (реестр; НЕ рукописный sizeHint)
+  netProbeDone: true,  // lite: false, пока main пробует сервер докачки (гейт «Установить»)
+  netOnline: true,     // lite: false = сервер докачки недоступен (жёлтый баннер + «Проверить снова»)
+  runActive: false,    // идёт прогон установки (гейт inline-кнопок «Повторить» на шагах)
+  // id → {id, stage, error}: почему компонент не встал. Едет в телеметрию, чтобы бот
+  // мог сказать «упало на шаге X, причина Y», а не «что-то не получилось». Кумулятивная
+  // (как badEver): inline-«Повторить» одного шага не должен стирать картину остальных.
+  errorDigest: new Map(),
 };
 
 // Компоненты, которые деинсталлятор умеет безопасно удалить целиком (самодостаточные
@@ -56,6 +65,11 @@ async function init() {
   STATE.vendorAvailable = boot.vendorAvailable !== false;
   STATE.vendorBlock = boot.vendorBlock || { blocked: false };
   STATE.vendorBlocked = !!STATE.vendorBlock.blocked;
+  // Лёгкое (стриминг) издание + превью размеров докачки — авторитетно из main.
+  STATE.edition = boot.edition === 'lite' ? 'lite' : 'offline';
+  STATE.remoteSizes = boot.remoteSizes || {};
+  // PREFLIGHT LITE: до завершения probe-remote «Установить» не активируем.
+  STATE.netProbeDone = STATE.edition !== 'lite';
   STATE.groups = (boot.components && boot.components.groups) || [];
   STATE.packsData = boot.packs || { core: [], packs: [] };
   STATE.selectedPacks = {};
@@ -101,13 +115,19 @@ async function init() {
   if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
   const whatBtn = $('#btn-what-installs');
   if (whatBtn) whatBtn.addEventListener('click', showWhatInstalls);
+  // «Что будет дальше?» — встроенный просмотр памятки в окне установщика;
+  // внешний браузер — только по явной соседней кнопке (у части людей дефолтный
+  // браузер «холодный» и его онбординг пугает сильнее самой памятки).
   const nextBtn = $('#btn-what-next');
-  if (nextBtn) nextBtn.addEventListener('click', () => openStartHereMemo());
+  if (nextBtn) nextBtn.addEventListener('click', () => showStartHereInline());
+  const nextExtBtn = $('#btn-what-next-ext');
+  if (nextExtBtn) nextExtBtn.addEventListener('click', () => openStartHereMemo());
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
     if (auto && auto.checked) {
       let ok = false;
       try { ok = await window.installer.launchVsCode(); } catch (_) {}
+      if (ok) sendOpenEditorTelemetry();
       // #7: не закрываемся МОЛЧА, если VS Code не открылся (нет в сборке / не встал) —
       // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе. Показываем
       // ту же подсказку, что и главная CTA, и НЕ квитим.
@@ -120,6 +140,56 @@ async function init() {
   setupMascots();
   // Детекция состояния — best-effort, после первичного рендера (не блокирует UI).
   detectAndApply();
+  // PREFLIGHT LITE: пробуем сервер докачки (через main-IPC — CSP запрещает сеть
+  // renderer'у). Нет сети → жёлтый баннер + «Проверить снова» (мягче vendorBlock).
+  runNetProbe();
+}
+
+// PREFLIGHT LITE: доступность сервера докачки ДО активации «Установить». Сеть
+// пробует ТОЛЬКО main (probe-remote); сбой самого IPC — fail-open (не запираем
+// установку по ошибке пробы), честный offline от main → баннер runNetProbe→
+// renderLiteNetBanner. В офлайн-издании — no-op (качать нечего).
+async function runNetProbe() {
+  if (STATE.edition !== 'lite' || !window.installer.probeRemote) {
+    STATE.netProbeDone = true;
+    refreshDerived();
+    return;
+  }
+  STATE.netProbeDone = false;
+  refreshDerived();
+  let online = true;
+  try {
+    const r = await window.installer.probeRemote();
+    online = !(r && r.online === false);
+  } catch (e) { online = true; } // fail-open: ошибка пробы ≠ «сети нет»
+  STATE.netOnline = online;
+  STATE.netProbeDone = true;
+  renderLiteNetBanner();
+  refreshDerived();
+}
+
+// Жёлтый баннер лёгкой версии: сервер докачки недоступен. НЕ жёсткий стоп (в
+// отличие от mac-vendorBlock): установку не запираем, но честно предупреждаем и
+// даём «Проверить снова». Перерисовывается на каждый вызов (сброс кнопки).
+function renderLiteNetBanner() {
+  const existing = document.getElementById('lite-net-warn');
+  if (existing) existing.remove();
+  if (STATE.netOnline) return;
+  const el = document.createElement('div');
+  el.id = 'lite-net-warn';
+  el.className = 'preflight-warn';
+  el.innerHTML = '⚠️ Лёгкой версии нужен интернет для скачивания компонентов, а сервер загрузки ' +
+    'сейчас недоступен. Проверь подключение (Wi-Fi/кабель, VPN может мешать) и нажми ' +
+    '«Проверить снова» — иначе установка оборвётся на докачке. ' +
+    '<button type="button" id="lite-net-retry" class="btn-sm">Проверить снова</button>';
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+  const rb = document.getElementById('lite-net-retry');
+  if (rb) rb.addEventListener('click', () => {
+    rb.disabled = true;
+    rb.textContent = 'Проверяю…';
+    runNetProbe();
+  });
 }
 
 // Определяем, что УЖЕ установлено (грунд-труть из main), помечаем «уже установлено» и
@@ -265,6 +335,7 @@ function renderCard(c) {
   const updateAvail = !!(det && det.updateAvailable);
   const el = document.createElement('div');
   el.className = 'card' + (checked ? ' checked' : '') + (installed ? ' installed' : '');
+  el.dataset.id = c.id;   // якорь для GUI-автотестов (test/e2e-gui.js); в UI не виден
   const reqNames = (c.requires || []).map((r) => STATE.byId[r] && STATE.byId[r].name).filter(Boolean);
   const okBadge = installed
     ? `<span class="badge ok">✓ уже установлено${det.detectedVersion ? ' · ' + escapeHtml(det.detectedVersion) : ''}</span>`
@@ -517,12 +588,15 @@ function renderVendorBlock() {
       '<p><b>Почему «просто открыть из окна DMG» часто НЕ помогает:</b> если образ уже смонтирован, снятие карантина на него не подействует — образ надо ЗАКРЫТЬ (отмонтировать) и открыть заново. Команда ниже делает всё это сама.</p>' +
       '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
       '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
-      '<li>Открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter). Вставь <b>ОДНОЙ строкой</b> и Enter:<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code>' +
-      '<br><span style="font-size:12px;opacity:.82">Она снимет карантин, ЗАКРОЕТ старый образ и откроет свежий — это ключевой шаг.</span></li>' +
+      '<li><b>Проще всего — нажми кнопку ниже</b>, установщик всё сделает сам: найдёт образ, снимет карантин, закроет старые окна образа и откроет свежее, а затем перезапустится из него.<br>' +
+      '<button type="button" id="mac-selfheal" class="btn" style="margin-top:8px">Исправить автоматически</button>' +
+      '<div id="mac-selfheal-status" style="font-size:12px;opacity:.85;margin-top:6px"></div></li>' +
+      '<li><b>Если кнопка не помогла</b> — открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter) и вставь <b>ОДНОЙ строкой</b>:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code>' +
+      '<br><span style="font-size:12px;opacity:.82">Она сама найдёт образ (даже если он не в «Загрузках»), ЗАКРОЕТ все ранее открытые окна образа и откроет свежий — это ключевой шаг. Если после «Нашёл:» пусто — файла на маке нет, скачай заново.</span></li>' +
       '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
       '</ol>' +
-      '<p style="font-size:12px;opacity:.82">Если dmg не в «Загрузках» — напиши боту-помощнику, пришли скрин. Застрял — @vibecodeguidebot.</p>',
+      '<p style="font-size:12px;opacity:.82">Не получилось — пришли боту-помощнику скрин Терминала целиком: @vibecodeguidebot.</p>',
     closeLabel: 'Понятно',
     blocking: true,
   });
@@ -536,14 +610,103 @@ function renderVendorBlock() {
     b.className = 'preflight-warn';
     b.style.cssText = 'border-color:#e5484d;background:rgba(229,72,77,.08)';
     b.innerHTML = '🛑 Установка заблокирована: macOS запускает приложение из карантинной копии. ' +
-      'Выполни ОДНОЙ строкой (снимет карантин + перемонтирует образ) и запусти из СВЕЖЕГО окна DMG:<br>' +
-      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">xattr -dr com.apple.quarantine ~/Downloads/Hamidun-Setup-Mac.dmg; hdiutil detach "/Volumes/Hamidun Setup" 2>/dev/null; open ~/Downloads/Hamidun-Setup-Mac.dmg</code><br>' +
+      '<button type="button" id="mac-selfheal-banner" class="btn-sm" style="margin:6px 8px 6px 0">Исправить автоматически</button>' +
+      '<span id="mac-selfheal-banner-status" style="font-size:12px;opacity:.85"></span><br>' +
+      'Если кнопка не помогла — выполни ОДНОЙ строкой и запусти из СВЕЖЕГО окна DMG:<br>' +
+      '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code><br>' +
       '<button type="button" id="vendorblock-reopen" class="btn-sm" style="margin-top:6px">Показать инструкцию</button>';
     const hero = document.querySelector('#view-select .hero');
     if (hero) hero.insertAdjacentElement('afterend', b);
     const rb = document.getElementById('vendorblock-reopen');
     if (rb) rb.addEventListener('click', () => renderVendorBlock());
   }
+  bindMacSelfHeal('mac-selfheal', 'mac-selfheal-status');
+  bindMacSelfHeal('mac-selfheal-banner', 'mac-selfheal-banner-status');
+  showPrevSelfHealFailure('mac-selfheal-status', 'mac-selfheal-banner-status');
+}
+
+// Если прошлая починка провалилась УЖЕ ПОСЛЕ нашего выхода, человек до сих пор
+// не узнавал об этом ничего: окно исчезало, а новое не появлялось. Помощник
+// оставляет крошку — показываем её причину при следующем запуске.
+async function showPrevSelfHealFailure(...statusIds) {
+  if (!window.installer || !window.installer.macSelfHealStatus) return;
+  let st = '';
+  try { st = ((await window.installer.macSelfHealStatus()) || {}).status || ''; } catch (e) { return; }
+  if (!st || st === 'ok' || st === 'started') return;
+  const text = st === 'mount-failed'
+    ? 'Прошлая попытка починки не смогла открыть образ — возможно, файл повреждён. Скачай установщик заново или выполни команду ниже в Терминале.'
+    : 'Прошлая попытка починки не смогла перезапустить установщик. Выполни команду ниже в Терминале.';
+  for (const id of statusIds) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+}
+
+// Кнопка «Исправить автоматически»: установщик сам снимает карантин с образа,
+// перемонтирует его и перезапускается из свежего тома. Просить человека копировать
+// команду в Терминал — плохой путь: живой случай показал, что там ошибаются (образ
+// лежал не в «Загрузках», команда падала, и человек упирался в тупик).
+// Защёлка самолечения. Кнопок ДВЕ (в модалке и в несмываемом баннере), и раньше,
+// пока шла первая попытка, со второй кнопки можно было запустить починку ещё раз —
+// а вторая попытка force-отцепляет том, с которого уже стартует новый установщик.
+// Флаг общий на модуль: пока вызов идёт, повторный клик с ЛЮБОЙ кнопки невозможен.
+// disabled на кнопках — только видимая часть; сама защита — этот флаг.
+let SELF_HEAL_BUSY = false;
+// Обе кнопки разом: блокируем и показываем, что починка уже идёт.
+function setSelfHealButtonsBusy(busy) {
+  ['mac-selfheal', 'mac-selfheal-banner'].forEach((bid) => {
+    const b = document.getElementById(bid);
+    if (!b) return;
+    b.disabled = busy;
+    if (busy) {
+      if (!b.dataset.idleLabel) b.dataset.idleLabel = b.textContent;
+      b.textContent = 'Чиню…';
+    } else if (b.dataset.idleLabel) {
+      b.textContent = b.dataset.idleLabel;
+    }
+  });
+}
+function bindMacSelfHeal(btnId, statusId) {
+  const btn = document.getElementById(btnId);
+  if (!btn || btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', async () => {
+    if (SELF_HEAL_BUSY) return; // починка уже идёт — второй запуск невозможен
+    SELF_HEAL_BUSY = true;
+    const st = document.getElementById(statusId);
+    const say = (s) => { if (st) st.textContent = s; };
+    setSelfHealButtonsBusy(true);
+    say('Ищу образ и снимаю карантин…');
+    let res = null;
+    try { res = await window.installer.macSelfHeal(); } catch (e) { res = { ok: false, error: String(e) }; }
+    if (res && res.ok) {
+      // Защёлку НЕ отпускаем: приложение сейчас перезапустится из свежего тома,
+      // и повторная починка в этот момент отцепила бы том у него из-под ног.
+      // Говорим ровно то, что уже произошло. Раньше здесь было «открыл свежее
+      // окно образа и запускаю установщик оттуда» — заведомо неверно: остальное
+      // делается уже после нашего выхода, и если у помощника не выйдет, человек
+      // увидит только исчезнувшее окно. Поэтому и команда для Терминала остаётся
+      // на экране: она — запасной путь, а не признак ошибки.
+      say('Карантин снят. Сейчас закрою это окно — через несколько секунд установщик '
+        + 'откроется заново из свежего образа. Если этого не произошло за полминуты, '
+        + 'выполни команду ниже в Терминале.');
+      // Закрываемся с задержкой: человек должен успеть прочитать, а помощник ждёт
+      // именно нашего выхода (пока мы живы, замок единственного экземпляра занят,
+      // и свежий установщик закрылся бы сам).
+      setTimeout(() => { try { window.installer.quit(); } catch (e) { /* */ } }, 6000);
+      return;
+    }
+    SELF_HEAL_BUSY = false;
+    setSelfHealButtonsBusy(false);
+    const why = (res && res.error) || 'неизвестно';
+    if (why === 'dmg-not-found') {
+      say('Не нашёл файл образа (Hamidun-Setup-Mac.dmg) — похоже, он удалён. Скачай установщик заново.');
+    } else if (why === 'volume-not-ready' || why === 'open-failed') {
+      say('Образ не открылся сам. Выполни команду ниже в Терминале — она делает то же самое.');
+    } else {
+      say('Автоматически не вышло (' + why + '). Выполни команду ниже в Терминале.');
+    }
+  });
 }
 
 // На macOS офлайн-ресурсы (vendor) лежат в dmg РЯДОМ с приложением. Если .app
@@ -598,21 +761,34 @@ function openModal(opts) {
 // components.json (имя + описание + примерный размер sizeHint). Служебные (hidden,
 // напр. verify) не показываем. Ничего не выдумываем — только данные конфига.
 function showWhatInstalls() {
+  const lite = STATE.edition === 'lite';
+  const sizes = STATE.remoteSizes || {};
   const rows = [];
   (STATE.groups || []).forEach((g) => {
     (g.components || []).forEach((c) => {
       if (!c || c.hidden) return;
-      const size = c.sizeHint ? ' <span class="wi-size">' + escapeHtml(c.sizeHint) + '</span>' : '';
+      // Лёгкое издание: для remote-компонентов показываем ТОЧНЫЙ размер докачки из
+      // реестра (рукописный sizeHint тут про офлайн-сборку и врал бы).
+      const sizeText = (lite && sizes[c.id] != null)
+        ? '~' + fmtBytesRu(sizes[c.id]) + ' · скачается'
+        : (c.sizeHint || '');
+      const size = sizeText ? ' <span class="wi-size">' + escapeHtml(sizeText) + '</span>' : '';
       rows.push(
         '<li><div class="wi-name">' + escapeHtml(c.name) + size + '</div>' +
         '<div class="wi-desc">' + escapeHtml(c.desc || '') + '</div></li>'
       );
     });
   });
+  // Лёгкое издание: суммарное превью докачки по ВЫБРАННЫМ компонентам (точные байты).
+  const dlBytes = downloadTotalBytes();
+  const dlLead = dlBytes > 0
+    ? '<p class="wi-lead"><b>Скачается: ~' + escapeHtml(fmtBytesRu(dlBytes)) + '</b> — лёгкая ' +
+      'версия докачивает выбранные компоненты с сервера во время установки (с проверкой целостности).</p>'
+    : '';
   const body =
     '<p class="wi-lead">Ставится только то, что ты выбрал. Основное — офлайн из самого ' +
     'установщика; компоненты с пометкой «онлайн» докачиваются с официальных источников ' +
-    'с проверкой целостности.</p>' +
+    'с проверкой целостности.</p>' + dlLead +
     '<ul class="wi-list">' + rows.join('') + '</ul>';
   openModal({
     id: 'what-installs',
@@ -662,6 +838,119 @@ async function openStartHereMemo() {
   }
 }
 
+// Тихая копия памятки на рабочий стол (без открытия чего-либо). На финише зовётся
+// вместо прежнего авто-открытия браузера: артефакт «Что дальше — Hamidun.html» на
+// столе остаётся, а браузер больше не выскакивает сам. Результат кэшируем как в
+// openStartHereMemo; неудача не критична — вшитая копия всегда на месте.
+async function saveStartHereQuiet() {
+  if (STATE.startHerePath) return;
+  try {
+    const r = await window.installer.saveStartHere();
+    if (r && r.ok && r.dest) STATE.startHerePath = r.dest;
+  } catch (e) { /* копия на стол не удалась — не мешаем финишу */ }
+}
+
+// ---- встроенный просмотр памятки «Что дальше» (в окне установщика) ----------
+// Раньше на финише памятка АВТОМАТИЧЕСКИ открывалась во внешнем браузере — у части
+// людей дефолтный браузер стартует «с нуля» (холодный запуск с онбордингом), это
+// раздражает и выглядит, будто установщик запускает что-то постороннее. Теперь
+// памятка читается прямо здесь, в оверлее; браузер — только по явной кнопке.
+// Памятка — статичный документ: <script> вырезаем целиком (его checklist-интерактив
+// в оверлее не нужен, а CSP окна всё равно не дала бы ему исполниться).
+function stripMemoScripts(html) {
+  return String(html)
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<script\b[^>]*>/gi, ''); // незакрытый хвостовой <script …> тоже гасим
+}
+
+// CSS памятки писан для отдельного документа (:root / body / html). Внутри Shadow DOM
+// эти селекторы не матчатся НИЧЕМУ — пропали бы все CSS-переменные (весь цвет памятки
+// на var(--…)) и базовая типографика. Переписываем на :host / .memo-doc (обёртка).
+function adaptMemoCss(css) {
+  return String(css)
+    .replace(/:root\b/g, ':host')
+    .replace(/(^|[\s,{}])body\b/g, '$1.memo-doc')
+    .replace(/(^|[\s,{}])html\b/g, '$1.memo-doc');
+}
+
+// Оверлей с памяткой поверх текущего экрана: заголовок, «Открыть в браузере»,
+// крестик/Esc, прокрутка. Контент — в Shadow DOM, чтобы стили памятки и установщика
+// не подрались. Содержимое отдаёт main (read-start-here, путь считает сам).
+async function showStartHereInline() {
+  if (document.getElementById('memo-overlay')) return; // уже открыта
+  const fin = (STATE.config && STATE.config.finish) || {};
+  if (!fin.startHtmlRelPath) return; // памятки в этой сборке нет — кнопки и не рисуем
+
+  const ov = document.createElement('div');
+  ov.id = 'memo-overlay';
+  ov.className = 'modal-overlay memo-overlay';
+  ov.innerHTML =
+    '<div class="memo-card" role="dialog" aria-modal="true" aria-label="Памятка «Что дальше»">' +
+      '<div class="memo-head">' +
+        '<div class="memo-title">📌 Что дальше — памятка</div>' +
+        '<button type="button" id="memo-ext" class="btn-sm">Открыть в браузере</button>' +
+        '<button type="button" id="memo-close" class="memo-close" aria-label="Закрыть" title="Закрыть (Esc)">✕</button>' +
+      '</div>' +
+      '<div class="memo-body"><div id="memo-host"></div></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { document.removeEventListener('keydown', onKey); ov.remove(); };
+  document.addEventListener('keydown', onKey);
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('#memo-close').addEventListener('click', close);
+  // «Открыть в браузере» — прежний путь целиком: копия на стол + системное открытие.
+  ov.querySelector('#memo-ext').addEventListener('click', () => openStartHereMemo());
+
+  const sh = ov.querySelector('#memo-host').attachShadow({ mode: 'open' });
+  const fallback = (msg) => {
+    // Честный отказ БЕЗ innerHTML с текстом ошибки (textContent) + путь наружу.
+    sh.textContent = '';
+    const box = document.createElement('div');
+    box.className = 'memo-fallback';
+    box.style.cssText = 'padding:28px 22px;font-size:14.5px;line-height:1.6';
+    const p1 = document.createElement('p');
+    p1.textContent = 'Не получилось показать памятку в этом окне' + (msg ? ' (' + msg + ')' : '') + '.';
+    const p2 = document.createElement('p');
+    p2.style.marginTop = '8px';
+    p2.textContent = 'Нажми «Открыть в браузере» вверху — это та же памятка.';
+    box.appendChild(p1); box.appendChild(p2);
+    sh.appendChild(box);
+  };
+
+  let res = null;
+  try { res = await window.installer.readStartHere(); } catch (e) { res = { ok: false, error: e.message }; }
+  if (!res || !res.ok || !res.html) { fallback((res && res.error) || 'нет данных'); return; }
+
+  const doc = new DOMParser().parseFromString(stripMemoScripts(res.html), 'text/html');
+  const wrap = document.createElement('div');
+  wrap.className = 'memo-doc';
+  // Стили памятки: и из <head>, и из <body> (сейчас они в body) — адаптируем под shadow.
+  Array.from(doc.querySelectorAll('style')).forEach((st) => { st.textContent = adaptMemoCss(st.textContent); });
+  Array.from(doc.head.querySelectorAll('style')).forEach((st) => wrap.appendChild(st));
+  while (doc.body.firstChild) wrap.appendChild(doc.body.firstChild);
+  const base = document.createElement('style');
+  base.textContent = ':host{display:block;min-height:100%} .memo-doc{min-height:100%}';
+  sh.appendChild(base);
+  sh.appendChild(wrap);
+
+  // Ссылки: дефолтную навигацию давим ВСЕГДА (иначе клик увёл бы само окно установщика
+  // с app.js). Якоря скроллим внутри shadow; внешние — через main-IPC openExternal,
+  // где уже стоит allowlist схем (web/почта/telegram).
+  wrap.addEventListener('click', (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+    e.preventDefault();
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#')) {
+      const t = href.length > 1 ? sh.getElementById(href.slice(1)) : null;
+      if (t && t.scrollIntoView) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (href) {
+      window.installer.openExternal(href);
+    }
+  });
+}
+
 // Task 4b: заметная плашка «Не едет? Напиши боту…» на экране прогресса (и финиша —
 // это тот же view). Ссылка ведёт на бота-спутника из config.links.bot.
 function renderProgressBotBanner() {
@@ -679,6 +968,24 @@ function renderProgressBotBanner() {
   if (btn) btn.addEventListener('click', () => window.installer.openExternal(btn.dataset.ext));
 }
 
+// Байты → человекочитаемо: до ~1 ГБ — «N МБ», дальше — «N,N ГБ». Суммируются ТОЛЬКО
+// точные sizeBytes из реестра докачки (рукописный sizeHint для математики не годится).
+function fmtBytesRu(bytes) {
+  const mb = Number(bytes || 0) / (1024 * 1024);
+  if (mb >= 1000) {
+    return String(Math.round((mb / 1024) * 10) / 10).replace('.', ',') + ' ГБ';
+  }
+  return String(Math.max(1, Math.round(mb))) + ' МБ';
+}
+
+// Сумма ТОЧНЫХ размеров докачки по ВЫБРАННЫМ remote-компонентам (превью «Скачается:
+// ~X»). Только lite-издание: в офлайн всё вшито — качать нечего, превью не показываем.
+function downloadTotalBytes() {
+  if (STATE.edition !== 'lite') return 0;
+  const sizes = STATE.remoteSizes || {};
+  return selectedIds().reduce((sum, id) => sum + (Number(sizes[id]) || 0), 0);
+}
+
 function refreshDerived() {
   // Скрытые компоненты не считаем в сводке — пользователь их не выбирал.
   const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
@@ -692,12 +999,20 @@ function refreshDerived() {
     if (STATE.selectedPacks[p.id]) nSkills += packSelectedCount(p);
   });
   const skillsPart = STATE.selected['config'] ? ` · тематических скиллов: ${nSkills}` : '';
-  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}`;
+  // Лёгкое издание: честное превью докачки по ТОЧНЫМ sizeBytes выбранных remote-
+  // компонентов (реестр). В офлайн-издании dlBytes=0 — ничего не показываем.
+  const dlBytes = downloadTotalBytes();
+  const dlPart = dlBytes > 0 ? ` · Скачается: ~${fmtBytesRu(dlBytes)}` : '';
+  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}${dlPart}`;
   // P0-1: кнопка выключена, пока детекция установленного не завершилась — чтобы
   // установка не стартовала с недодетектированным состоянием (режим/галки).
   // App-Translocation / оторванный vendor (STATE.vendorBlocked) — жёсткий стоп:
   // «Установить» не даём, пока офлайн-vendor неполон (main решает авторитетно).
-  $('#btn-install').disabled = n === 0 || !STATE.detectDone || !!STATE.vendorBlocked;
+  // Лёгкое издание: ждём и preflight probe-remote (netProbeDone; сам результат
+  // НЕ запирает кнопку — offline даёт мягкий баннер, не жёсткий стоп).
+  const btnInstall = $('#btn-install');
+  btnInstall.disabled = n === 0 || !STATE.detectDone || !STATE.netProbeDone || !!STATE.vendorBlocked;
+  btnInstall.textContent = dlBytes > 0 ? `Установить · скачается ~${fmtBytesRu(dlBytes)}` : 'Установить';
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
@@ -749,10 +1064,105 @@ function envForRun() {
   };
 }
 
-function appendLog(line) {
+// Журнал установки. Раньше здесь было `log.textContent += line + '\n'` плюс чтение
+// scrollHeight на КАЖДОЙ строке — и это разгоняло приложение до нескольких ядер.
+// Живой случай: на Mac процесс съел 523% процессора и перегрел ноутбук.
+// Почему так дорого:
+//   • `textContent +=` читает ВЕСЬ накопленный текст и записывает заново — то есть
+//     пересоздаёт текстовый узел целиком. При 40 000 строках (обычный объём для pip,
+//     uv и npm) это мегабайты, скопированные десятки тысяч раз;
+//   • чтение scrollHeight — принудительный синхронный пересчёт вёрстки этого же
+//     мегабайтного блока, тоже на каждой строке.
+// Теперь: кольцо из последних строк + одна перерисовка на кадр. ПОЛНЫЙ журнал
+// никуда не девается — главный процесс пишет его в install.log целиком.
+const LOG_MAX_LINES = 800;
+const LOG_LINES = [];
+let LOG_DIRTY = false;
+
+function flushLog() {
+  LOG_DIRTY = false;
   const log = $('#log');
-  log.textContent += line + '\n';
-  log.scrollTop = log.scrollHeight;
+  if (!log) return;
+  // Прилипание к низу — только если человек и так внизу. Иначе автопрокрутка
+  // вырывала бы у него из рук журнал, который он читает.
+  const atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 40;
+  log.textContent = LOG_LINES.join('\n') + '\n';
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function appendLog(line) {
+  const s = String(line == null ? '' : line);
+  // Полоски прогресса (pip, uv, curl) перерисовывают строку возвратом каретки.
+  // Без этого каждая перерисовка становилась ОТДЕЛЬНОЙ строкой — журнал раздувался
+  // в разы на ровном месте.
+  const parts = s.split('\r');
+  const last = parts[parts.length - 1];
+  if (parts.length > 1 && LOG_LINES.length) {
+    LOG_LINES[LOG_LINES.length - 1] = last;
+  } else {
+    LOG_LINES.push(last);
+  }
+  while (LOG_LINES.length > LOG_MAX_LINES) LOG_LINES.shift();
+
+  if (LOG_DIRTY) return;                 // перерисовка уже запланирована на этот кадр
+  LOG_DIRTY = true;
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flushLog);
+  else setTimeout(flushLog, 16);
+}
+
+// Часы на ИДУЩЕМ шаге. Просьба живых пользователей: «он крутит эту штуку и непонятно,
+// что-то поломалось или процесс идёт». Настоящих процентов у установочных скриптов нет
+// (они не сообщают прогресс), и рисовать выдуманную полосу — врать. Честный минимум:
+// показать, СКОЛЬКО этот шаг уже идёт. Стоящие часы = завис, растущие = живой.
+// Подпись докачки (там проценты настоящие) не трогаем: она перерисовывается своим
+// обработчиком прогресса.
+let STEP_TIMER = null;
+// Фаза внутри шага ПОСЛЕ конца докачки («Устанавливаю»). Пока фаза пуста, часы
+// уступают подписи докачки (там настоящие проценты). Раньше уступали ВСЕГДА по
+// признаку «%» в тексте — и после «Скачиваю 100%» замирали навсегда: вся установка
+// шла под замершей подписью, ровно то, на что жаловались живые пользователи.
+let STEP_CLOCK_PHASE = '';
+function setStepClockPhase(phase) { STEP_CLOCK_PHASE = phase || ''; }
+function startStepClock(id, baseLabel) {
+  stopStepClock();
+  const t0 = Date.now();
+  const tick = () => {
+    const step = document.querySelector(`.step[data-id="${id}"]`);
+    if (!step || !step.classList.contains('running')) { stopStepClock(); return; }
+    const spans = step.querySelectorAll('span');
+    const el = spans.length ? spans[spans.length - 1] : null;
+    if (!el) return;
+    // Пока докачка рисует НАСТОЯЩИЕ проценты — не мешаем ей. Но когда докачка
+    // дошла до конца (фаза установки, см. handleRemoteProgress) — часы снова
+    // главные и обязаны тикать до реального завершения шага.
+    if (!STEP_CLOCK_PHASE) {
+      if (/%/.test(el.textContent || '')) return;
+    }
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const phase = STEP_CLOCK_PHASE ? STEP_CLOCK_PHASE + ', ' : '';
+    el.textContent = baseLabel + ' — ' + phase + 'идёт ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+  STEP_TIMER = setInterval(tick, 1000);
+}
+function stopStepClock() {
+  if (STEP_TIMER) { clearInterval(STEP_TIMER); STEP_TIMER = null; }
+  STEP_CLOCK_PHASE = '';
+}
+
+// Общий прогресс прогона в ПРОЦЕНТАХ. Проценты настоящие — доля пройденных
+// компонентов от выбранных; внутри шага скрипты прогресс не сообщают, поэтому там
+// идут секунды (startStepClock), а выдуманную полосу мы не рисуем.
+function setRunProgress(done, total, currentName) {
+  const box = document.getElementById('run-progress');
+  const fill = document.getElementById('run-progress-fill');
+  const label = document.getElementById('run-progress-label');
+  if (!box || !fill || !label) return;
+  box.classList.remove('hidden');
+  const pct = window.HMFinishLink.runProgressPct(done, total);
+  fill.style.width = pct + '%';
+  label.textContent = currentName
+    ? `${pct}% · ${done} из ${total} · сейчас: ${currentName}`
+    : `${pct}% · ${done} из ${total}`;
 }
 
 function setStep(id, status) {
@@ -795,7 +1205,37 @@ function firstBrokenDep(id, badSet) {
   return null;
 }
 
+// Провал ДОКАЧКИ бывает двух РАЗНЫХ природ, а main отдаёт для обеих stage:'fetch':
+//   СЕТЬ         — обрыв/таймаут/зеркало не ответило: лечится ретраем;
+//   ЦЕЛОСТНОСТЬ  — SHA-256 не совпал, распаковка fail-closed, нет валидного SHA в
+//                  реестре, нет сборки для платформы, не создан защищённый кэш
+//                  (нужны права администратора). Это ДЕТЕРМИНИРОВАННО: авто-ретрай
+//                  бесполезен (и стоит ещё ~1.5 ГБ трафика), а «проверь интернет»
+//                  уводит пользователя не туда — чинить Wi-Fi при подменённом или
+//                  устаревшем артефакте бессмысленно, это надо эскалировать.
+// Признак: явный stage:'integrity' (если main его отдаёт) ИЛИ маркер в тексте ошибки.
+// ТОЛЬКО подмена/расхождение содержимого. Раньше сюда попадали «нет прав администратора»
+// и «не удалось создать защищённый кэш» — среда, а не атака: пользователю показывалось
+// «Проверка целостности не пройдена» БЕЗ кнопки «Повторить», хотя повтор всё чинит.
+// Стадию теперь авторитетно ставит main (stage:'integrity'); регекс — узкий фолбэк.
+const INTEGRITY_ERR_RE = /SHA-?256|checksums\.json|не совпал|подмен/i;
+function isIntegrityFail(res) {
+  if (!res || res.ok) return false;
+  if (res.stage === 'integrity') return true;
+  if (res.stage !== 'fetch') return false;
+  return INTEGRITY_ERR_RE.test(String(res.error || ''));
+}
+// Сетевой обрыв докачки = stage 'fetch' И НЕ провал целостности/среды.
+// Отказ СРЕДЫ (не сеть и не подмена): не удалось подготовить защищённый каталог
+// загрузки. Раньше это показывалось как «Сеть оборвалась», и пользователь бесконечно
+// жал «Повторить», хотя чинится это запуском от администратора.
+function isEnvFail(res) { return !!(res && !res.ok && res.stage === 'env'); }
+function isNetFail(res) {
+  return !!(res && !res.ok && res.stage === 'fetch' && !isIntegrityFail(res));
+}
+
 async function runComponents(ids, env) {
+  STATE.runActive = true; // inline-«Повторить» на шагах заблокированы до конца прогона
   const off = window.installer.onLog(({ line }) => {
     // Строки "CHECK ok <ярлык>" / "CHECK fail <ярлык>" от verify-скрипта не
     // сыпем в общий лог — собираем для чеклиста на финальном экране.
@@ -821,6 +1261,14 @@ async function runComponents(ids, env) {
   STATE.installedEver = STATE.installedEver || new Set();
   STATE.skippedEver = STATE.skippedEver || new Set();
   const runtimeSkipped = STATE.skippedEver;
+  // НЕРЕШЁННЫЕ проблемы — тоже КУМУЛЯТИВНО (id → 'net' | 'integrity' | 'fail' | 'dep').
+  // Inline-«Повторить» на одном шаге запускает прогон ТОЛЬКО из этого id (+verify), и
+  // per-прогонные failed/depSkipped после него пусты → финиш рапортовал бы «Готово!
+  // Всё установлено», хотя остальные компоненты так и не встали, а кнопки повтора уже
+  // нет. Карта переживает прогоны (сбрасывается только новым startInstall) и чистится
+  // ровно тогда, когда компонент реально встал или осознанно пропущен.
+  STATE.badEver = STATE.badEver || new Map();
+  const badEver = STATE.badEver;
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -830,14 +1278,19 @@ async function runComponents(ids, env) {
       setStep(id, 'skipped');
       depSkipped.push(id);
       bad.add(id);
+      badEver.set(id, 'dep');
       runtimeSkipped.add(id);
       appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
+      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
+    startStepClock(id, (STATE.byId[id] && STATE.byId[id].name) || id);
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length,
+      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id);
     // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
     // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
     // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
@@ -849,17 +1302,15 @@ async function runComponents(ids, env) {
     // шагами — см. main.js). Здесь только показываем прогресс докачки в step-list;
     // логи докачки и «целостность подтверждена (SHA-256)» приходят из main по
     // тому же каналу component-log. Провал докачки → res.stage==='fetch'.
+    // Remote = явный флаг components.json ИЛИ lite-авто-remote (bootstrap.remoteSizes —
+    // карта из main по loadRemoteMaps; в lite components.json remote-флагов не несёт).
     const comp = STATE.byId[id];
+    const isRemote = !!(comp && comp.remote) || (STATE.remoteSizes && STATE.remoteSizes[id] != null);
     let offP = null;
-    if (comp && comp.remote) {
+    if (comp && isRemote) {
       setStepLabel(id, `${comp.name} — Скачиваю…`);
       appendLog(`[↓] Докачка ${comp.name} из облака…`);
-      offP = window.installer.onRemoteProgress((p) => {
-        if (!p || p.id !== id) return;
-        setStepLabel(id, (p.pct != null)
-          ? `${comp.name} — Скачиваю ${p.pct}%`
-          : `${comp.name} — Скачиваю…`);
-      });
+      offP = window.installer.onRemoteProgress((p) => handleRemoteProgress(id, comp.name, p));
     }
 
     // verify читает HM_SELECTED, чтобы печатать "skip" для НЕ выбранных. Компоненты,
@@ -877,39 +1328,147 @@ async function runComponents(ids, env) {
     try { res = await window.installer.runComponent(id, runEnv); }
     catch (e) { res = { id, ok: false, code: -1, error: String(e) }; }
 
+    // ERROR-NET: обрыв ДОКАЧКИ (stage 'fetch') — это сеть, не провал установки.
+    // ОДИН авто-ретрай внутри прогона: повторный runComponent того же id (main
+    // заново пробует зеркала). Сетевой сбой НИКОГДА не маппится в graceful-skip.
+    // Авто-ретрай — ТОЛЬКО на сетевом обрыве. Провал целостности/среды детерминирован:
+    // повтор дал бы тот же результат ценой ещё одной полной докачки.
+    if (isNetFail(res)) {
+      appendLog(`[↻] ${STATE.byId[id].name}: сеть оборвалась при докачке (${res.error || 'нет соединения'}) — пробую ещё раз…`);
+      setStepLabel(id, `${comp.name} — сеть оборвалась, повторяю…`);
+      try { res = await window.installer.runComponent(id, runEnv); }
+      catch (e) { res = { id, ok: false, code: -1, stage: 'fetch', error: String(e) }; }
+    }
+
+    stopStepClock();
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
+    else setStepLabel(id, (STATE.byId[id] && STATE.byId[id].name) || id);   // снять «идёт М:СС»
 
     if (res && res.skipped) {
-      // P1: осознанный пропуск компонента (exit 120 — нечего ставить, напр. VS Code не
-      // вшит в сборку И не установлен). НЕ успех и НЕ ошибка: помечаем skipped И заносим
-      // в bad, чтобы зависимые (extension requires vscode) не запускались красным впустую,
-      // а тоже грациозно пропускались. Из HM_SELECTED для verify компонент уже убираем.
+      // P1: осознанный пропуск (exit 120 — нечего ставить, напр. VS Code не вшит в
+      // сборку И не установлен). НЕ успех и НЕ ошибка: skipped + в bad, чтобы зависимые
+      // не запускались красным впустую. Из HM_SELECTED для verify компонент уже убираем.
       setStep(id, 'skipped');
       gracefulSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
+      badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
+      STATE.errorDigest.delete(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
+      badEver.delete(id); // встало — проблема закрыта
+      STATE.errorDigest.delete(id);   // поставилось с ретрая — в отчёт ошибка не едет
       // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
       // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
       STATE.installedEver.add(id);
     }
     else {
-      setStep(id, 'error');
+      // Сетевой обрыв докачки (после авто-ретрая) — ОРАНЖЕВЫЙ error-net, не красный
+      // провал: «Сеть оборвалась» + inline-«Повторить». В failed компонент ВХОДИТ
+      // (общий retry/финиш его видят); в graceful-skip НЕ уходит никогда.
+      const isNet = isNetFail(res);
+      const isIntegrity = isIntegrityFail(res);
+      const isEnv = isEnvFail(res);
+      setStep(id, (isNet || isEnv) ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
+      // Диагностика для бота: id + стадия + текст. Без стадии «упал git» не отличить от
+      // «нет интернета», «нет прав» и «подменён файл», а совет человеку в этих случаях
+      // РАЗНЫЙ. Текст чистится от ПД в главном процессе (scrubText) перед отправкой.
+      STATE.errorDigest.set(id, {
+        id,
+        stage: isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')),
+        error: String((res && res.error) || ('код ' + (res ? res.code : '?'))),
+      });
+      badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')));
       const name = STATE.byId[id].name;
-      if (res && res.stage === 'fetch') {
-        appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}`);
+      if (isEnv) {
+        // Не сеть и не подмена: система не дала подготовить защищённый каталог загрузки.
+        // Говорим ПРАВДУ и подсказываем действие — «Повторить» оставляем (после запуска
+        // от администратора оно сработает), но не врём про интернет.
+        setStepLabel(id, `${name} — Нужны права администратора`);
+        addStepRetry(id);
+        appendLog(`[!] ${name}: ${res.error || 'не удалось подготовить защищённый каталог для загрузки'}`);
+      } else if (isNet) {
+        setStepLabel(id, `${name} — Сеть оборвалась`);
+        addStepRetry(id);
+        appendLog(`[!] ${name}: докачка не удалась — ${res.error || 'нет соединения'}. Проверь интернет и нажми «Повторить».`);
+      } else if (isIntegrity) {
+        // Скачанный файл не совпал с эталоном / среда не даёт защитить кэш: КРАСНЫЙ шаг,
+        // БЕЗ кнопки «Повторить» (повтор детерминированно даст то же) и без «проверь интернет».
+        setStepLabel(id, `${name} — Проверка целостности не пройдена`);
+        appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: пришли лог в бота.`);
       } else {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
   }
   off && off();
-  return { failed, depSkipped, gracefulSkipped };
+  STATE.runActive = false;
+  // Финиш строится по КУМУЛЯТИВНОЙ карте нерешённых проблем (badEver), а НЕ по
+  // per-прогонным спискам: inline-«Повторить» одного шага запускает прогон только
+  // из него (+verify), per-прогонные failed/depSkipped после него пусты — финиш
+  // рапортовал бы «Готово! Всё установлено», хотя остальные провалы никуда не
+  // делись, и кнопки повтора на них уже не было бы. Карта чистится ровно тогда,
+  // когда компонент реально встал (res.ok) или осознанно пропущен (res.skipped).
+  const unresolved = Array.from(badEver);
+  return {
+    failed: unresolved.filter(([, k]) => k !== 'dep').map(([i]) => i),
+    depSkipped: unresolved.filter(([, k]) => k === 'dep').map(([i]) => i),
+    fetchFailed: unresolved.filter(([, k]) => k === 'net').map(([i]) => i),
+    integrityFailed: unresolved.filter(([, k]) => k === 'integrity').map(([i]) => i),
+    gracefulSkipped,
+  };
+}
+
+// Событие прогресса докачки для идущего шага (вынесено из runComponents, чтобы
+// тестироваться без Electron). Пока идут байты — рисуем настоящие проценты и часы
+// молчат. Когда докачка ДОШЛА ДО КОНЦА (100% или received==total) — у КАЖДОГО
+// докачиваемого компонента дальше начинается собственно установка, и событий
+// прогресса больше не будет: если подпись не сменить, на всю самую долгую фазу
+// экран замирает на «Скачиваю 100%» (жалоба живых пользователей). Поэтому здесь
+// подпись переключается на «Устанавливаю…», а часам возвращается право тикать
+// (setStepClockPhase) до реального завершения шага.
+function handleRemoteProgress(id, name, p) {
+  if (!p || p.id !== id) return;
+  const doneDl = (p.pct != null && p.pct >= 100) || (p.total > 0 && p.received >= p.total);
+  if (doneDl) {
+    setStepClockPhase('Устанавливаю');
+    setStepLabel(id, `${name} — Устанавливаю…`);
+    return;
+  }
+  // Сеть могла оборваться и докачка началась заново (ретрай) — проценты снова главные.
+  setStepClockPhase('');
+  setStepLabel(id, remoteProgressLabel(name, p));
+}
+
+// «Скачиваю 45% · 12 из 27 МБ» — подпись шага докачки (received/total шлёт main).
+function remoteProgressLabel(name, p) {
+  const mb = (n) => Math.max(0, Math.round(Number(n || 0) / (1024 * 1024)));
+  if (p.pct != null && p.total) {
+    return `${name} — Скачиваю ${p.pct}% · ${mb(p.received)} из ${mb(p.total)} МБ`;
+  }
+  if (p.received) return `${name} — Скачиваю… ${mb(p.received)} МБ`;
+  return `${name} — Скачиваю…`;
+}
+
+// Inline-кнопка «Повторить» на шаге с оборванной докачкой (error-net). Повтор — через
+// СУЩЕСТВУЮЩИЙ механизм retryFailed([id]) (runComponent того же id + verify в конце).
+// До конца текущего прогона кнопка выключена (finishInstall включает) — второй
+// параллельный прогон не запускаем.
+function addStepRetry(id) {
+  const step = document.querySelector(`.step[data-id="${id}"]`);
+  if (!step || step.querySelector('.step-retry')) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn-sm step-retry';
+  b.textContent = 'Повторить';
+  b.disabled = true;
+  b.addEventListener('click', () => { if (!STATE.runActive) retryFailed([id]); });
+  step.appendChild(b);
 }
 
 // Карусель советов на время установки: то, что спасает новичка в первый день
@@ -968,6 +1527,16 @@ async function startInstall() {
   // ложные красные кресты, а финиш врёт «Агент Nomad уже установлен».
   STATE.installedEver = new Set();
   STATE.skippedEver = new Set();
+  // Карта НЕРЕШЁННЫХ проблем (id → 'net'|'integrity'|'fail'|'dep') — тоже кумулятивная
+  // (retryFailed её НЕ сбрасывает): по ней финиш видит ВЕСЬ остаточный набор провалов,
+  // а не только результат последнего (возможно, одношагового inline-)прогона.
+  STATE.badEver = new Map();
+  STATE.errorDigest = new Map();
+  // Защёлки телеметрии сбрасываем вместе с остальным состоянием прогона: иначе вторая
+  // попытка (человек починил интернет и запустил установку заново) не отчитается ВООБЩЕ —
+  // ни стартом, ни финишем, — а это как раз тот, кому нужна помощь.
+  STATE.telemetrySent = false;
+  STATE.telemetryStartSent = false;
   // Телеметрия: момент старта (для duration_sec) и согласие — снимаем ДО ухода
   // с экрана выбора (чекбокс #telemetry-opt; нет элемента = считаем согласием,
   // как и было бы по умолчанию).
@@ -979,6 +1548,7 @@ async function startInstall() {
   buildSteps(order);
   startTips();
   LAST_ENV = envForRun();
+  sendStartTelemetry(order);
   const res = await runComponents(order, LAST_ENV);
   finishInstall(res);
 }
@@ -1006,10 +1576,17 @@ async function retryFailed(ids) {
 function finishInstall(res) {
   stopTips();
   const failed = res.failed || [];
+  // Обрывы докачки (stage 'fetch') — подмножество failed с сетевой формулировкой.
+  const fetchFailed = res.fetchFailed || [];
+  // Провалы ЦЕЛОСТНОСТИ (SHA-256 mismatch / fail-closed) — подмножество failed:
+  // детерминированны, «проверь интернет» и ретрай не помогут — эскалация в бота.
+  const integrityFailed = res.integrityFailed || [];
   // depSkipped (упала зависимость) = проблема; gracefulSkipped (exit 120, «не входит
   // в сборку») = НЕ проблема и на исход установки не влияет.
   const depSkipped = res.depSkipped || [];
   const gracefulSkipped = res.gracefulSkipped || [];
+  // Прогон завершён — inline-«Повторить» на error-net-шагах теперь можно нажимать.
+  document.querySelectorAll('.step-retry').forEach((b) => { b.disabled = false; });
   // Независимая проверка (verify) может найти проблему, даже когда все шаги
   // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
   const checkFailed = (STATE.checks || []).some(
@@ -1025,6 +1602,15 @@ function finishInstall(res) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
     sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
+  } else if (integrityFailed.length && failed.every((id) => integrityFailed.indexOf(id) !== -1)) {
+    // ВСЕ провалы — целостность: НЕ сеть. «Проверь интернет» увёл бы не туда —
+    // подменённый/устаревший артефакт надо эскалировать, а не ретраить.
+    title = 'Файл не прошёл проверку подлинности';
+    sub = 'Скачанный компонент не совпал с эталоном — установка остановлена. Нажми «Показать лог для поддержки» ниже и пришли файл в бота.';
+  } else if (fetchFailed.length && failed.every((id) => fetchFailed.indexOf(id) !== -1)) {
+    // ВСЕ провалы — обрывы докачки: это сеть, а не установка. Говорим прямо.
+    title = 'Сеть оборвалась при скачивании';
+    sub = 'Часть компонентов не докачалась. Проверь интернет и нажми «Повторить» — установка продолжится.';
   } else {
     title = 'Установка завершена с предупреждениями';
     sub = 'Часть компонентов не установилась — можно повторить ниже.';
@@ -1037,14 +1623,15 @@ function finishInstall(res) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
     mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed);
+  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed);
   sendInstallTelemetry(failed, okAll, gracefulSkipped);
   $('#btn-finish').classList.remove('hidden');
 }
 
-// Анонимная телеметрия установки: ОДИН POST по завершении (повторные финиши после
+// Телеметрия установки: ОДИН POST по завершении (повторные финиши после
 // «Повторить неустановленное» не шлют — guard telemetrySent). Opt-out — чекбоксом
-// на экране выбора. БЕЗ uid и ПД: только исход, id упавших компонентов и длительность.
+// на экране выбора. Везёт исход, id упавших компонентов с ПРИЧИНОЙ и длительность; uid
+// добавляет main, если установка пришла по персональной ссылке (renderer его не знает).
 // Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
 // renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
 // телеметрии не зависит ни в каком исходе.
@@ -1058,20 +1645,52 @@ function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
     // gracefulSkipped едет отдельным полем (симметрично тому, как main санитизирует
     // failed) — и НЕ влияет на ok: осознанный «не входит в сборку» это не провал.
     const p = window.installer.sendTelemetry({
+      event: 'installed',
       ok: !!okAll,
       failed: (failed || []).slice(),
       skipped: (gracefulSkipped || []).slice(),
+      // Почему именно упало — без этого помощь человеку сводится к «пришли лог».
+      errors: Array.from(STATE.errorDigest.values()),
       durationSec,
     });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
 }
 
-function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
+// Событие ОТДЕЛЬНО от завершения: кто начал ставить и что выбрал. Без него не видно
+// людей, у которых установка не дошла до финиша (закрыл окно, упало намертво,
+// перезагрузился) — а это как раз те, кому нужна помощь. Шлётся один раз за прогон.
+function sendStartTelemetry(order) {
+  if (STATE.telemetryStartSent || STATE.telemetryConsent === false) return;
+  STATE.telemetryStartSent = true;
+  try {
+    const p = window.installer.sendTelemetry({ event: 'install_started', selected: (order || []).slice() });
+    if (p && p.catch) p.catch(() => { /* молча */ });
+  } catch (e) { /* телеметрия никогда не ломает установку */ }
+}
+
+// «Открыл редактор» — единственный сигнал, что человек реально пошёл работать, а не
+// просто получил зелёные галочки и закрыл окно.
+function sendOpenEditorTelemetry() {
+  // Защёлка на прогон: кнопок, ведущих сюда, три (финиш с автозапуском, «Открыть VS
+  // Code», «Открыть Cursor»), а обратной связи у них нет — человек жмёт повторно, пока
+  // окно не появится. Без защёлки один прогон давал бы несколько одинаковых событий и
+  // воронка считала бы их разными людьми.
+  if (STATE.telemetryConsent === false || STATE.telemetryEditorSent) return;
+  STATE.telemetryEditorSent = true;
+  try {
+    const p = window.installer.sendTelemetry({ event: 'open_editor', ok: true });
+    if (p && p.catch) p.catch(() => { /* молча */ });
+  } catch (e) { /* никогда не мешаем запуску редактора */ }
+}
+
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed) {
   failed = failed || [];
   depSkipped = depSkipped || [];
   gracefulSkipped = gracefulSkipped || [];
   checkFailed = !!checkFailed;
+  fetchFailed = fetchFailed || [];
+  integrityFailed = integrityFailed || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const botH = botHandle();
@@ -1089,9 +1708,19 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
   const depSkipHtml = depSkipped.length
     ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${depSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
+  // Обрывы докачки — сетевая формулировка (не generic-ошибка): «проверь интернет
+  // и нажми Повторить». Имена компонентов — из components.json (доверенный конфиг).
+  const netHint = fetchFailed.length
+    ? `<div class="ns-fail-hint">Сеть оборвалась при докачке: <b>${fetchFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Проверь интернет и нажми «Повторить неустановленное».</div>`
+    : '';
+  // Провал целостности — НЕ сетевая формулировка: «проверь интернет» тут вреден,
+  // повтор детерминированно даст то же — направляем в лог и бота (эскалация).
+  const integrityHint = integrityFailed.length
+    ? `<div class="ns-fail-hint">Не прошли проверку подлинности: <b>${integrityFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Повтор не поможет — нажми «Показать лог для поддержки» и пришли файл в ${botH}.</div>`
+    : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${netHint}${integrityHint}
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
@@ -1119,11 +1748,14 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
     : '';
   const videoBtn = links.video ? `<button type="button" class="btn-sm" data-ext="${links.video}">▶ Видео: что дальше</button>` : '';
   // Памятка «Что дальше»: START-HERE.html вшит (finish.startHtmlRelPath). На финише
-  // копируем её на рабочий стол (постоянная, всегда доступна) и открываем один раз.
-  // Кнопка ниже переоткрывает памятку в любой момент.
+  // копируем её на рабочий стол (постоянная, всегда доступна) и один раз показываем
+  // ВСТРОЕННЫЙ просмотр — внешний браузер сам не открываем (холодный дефолтный
+  // браузер со своим онбордингом пугает и выглядит как посторонний запуск).
+  // Кнопки ниже: переоткрыть встроенный просмотр / явно открыть в браузере.
   const startHtmlRel = fin.startHtmlRelPath || '';
   const startBtn = startHtmlRel
-    ? `<button type="button" id="ns-start" class="btn-sm">📌 Открыть памятку «Что дальше»</button>`
+    ? `<button type="button" id="ns-start" class="btn-sm">📌 Памятка «Что дальше»</button>
+       <button type="button" id="ns-start-ext" class="btn-sm">Открыть памятку в браузере</button>`
     : '';
   const logBtn = STATE.logPath ? `<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>` : '';
 
@@ -1289,6 +1921,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
   vscodeBtnEl.addEventListener('click', async () => {
     let ok = false;
     try { ok = await window.installer.launchVsCode(); } catch (_) {}
+    if (ok) sendOpenEditorTelemetry();
     if (!ok) {
       let hint = vscodeBtnEl.parentElement.querySelector('.ns-vscode-err');
       if (!hint) {
@@ -1319,20 +1952,34 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed) {
     }
   });
   const cursorBtn = $('#ns-cursor');
-  if (cursorBtn) cursorBtn.addEventListener('click', () => window.installer.launchCursor());
+  if (cursorBtn) {
+    // Результат ЖДЁМ: кнопка рисуется по ВЫБОРУ компонента, а не по факту установки —
+    // если Cursor не встал, окно не откроется, и слать «открыл редактор» было бы враньём
+    // (бот на этом сигнале решает, что человек пошёл работать). Симметрично VS Code.
+    cursorBtn.addEventListener('click', async () => {
+      let ok = false;
+      try { ok = await window.installer.launchCursor(); } catch (_) { ok = false; }
+      if (ok) sendOpenEditorTelemetry();
+    });
+  }
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
   $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
   const logBtnEl = $('#ns-log');
   if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
   const startBtnEl = $('#ns-start');
   if (startBtnEl && startHtmlRel) {
-    // Открытие памятки — через общий openStartHereMemo (тот же вход, что у кнопки
-    // «Что будет дальше?» на экране выбора): save-на-стол + фолбэк на вшитую копию.
+    // Авто-показ ОДИН раз — встроенный просмотр (Shadow DOM-оверлей), НЕ браузер.
+    // Копию на рабочий стол кладём по-прежнему сразу, но тихо (без открытия).
     if (!STATE.startHereOpened) {
       STATE.startHereOpened = true;
-      openStartHereMemo(); // авто-открытие после установки + копия на рабочий стол
+      saveStartHereQuiet();   // «Что дальше — Hamidun.html» на столе — как раньше
+      showStartHereInline();  // памятка читается прямо в окне установщика
     }
-    startBtnEl.addEventListener('click', () => openStartHereMemo());
+    startBtnEl.addEventListener('click', () => showStartHereInline());
+    // Браузер — осознанная ВОЗМОЖНОСТЬ: прежний путь openStartHereMemo целиком
+    // (копия на стол + системное открытие с фолбэком на вшитую).
+    const startExtEl = $('#ns-start-ext');
+    if (startExtEl) startExtEl.addEventListener('click', () => openStartHereMemo());
   }
   const saveKeysBtn = $('#ns-save-keys');
   if (saveKeysBtn) saveKeysBtn.addEventListener('click', saveCredentialKeys);

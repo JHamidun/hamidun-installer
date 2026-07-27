@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Continue'
 # по HTTPS (доверие = TLS). Форсим TLS 1.2. Основной путь — офлайн: уже установленный uv
 # или вшитый vendor-uv через uv.ps1 (SHA-256 fail-closed).
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+# #2: интегрити-гейт nomad-src (Confirm-HmArtifact + Get-HmTreeSha256 из _verify.ps1).
+. (Join-Path $PSScriptRoot '_verify.ps1')
+
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -24,7 +27,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 
@@ -129,16 +131,32 @@ if (-not $DRY) {
 $uv = Resolve-UvExe
 $uvPlannedOffline = $false   # dry-run: uv будет поставлен из vendor — онлайн-фолбэк не превьюим
 if (-not $uv) {
-    $uvScript    = Join-Path $PSScriptRoot 'uv.ps1'
-    $vendorUvExe = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\uv\uv.exe' } else { '' }
-    if ($vendorUvExe -and (Test-Path -LiteralPath $vendorUvExe -PathType Leaf) -and (Test-Path -LiteralPath $uvScript -PathType Leaf)) {
+    $uvScript = Join-Path $PSScriptRoot 'uv.ps1'
+    # В lite-издании nomad — remote-компонент, и HM_VENDOR указывает на его staging, где apps\uv
+    # НЕТ (uv остаётся bundled-only и лежит во ВШИТОМ vendor рядом с checksums.json). Раньше из-за
+    # этого ветка (b) молча пропускалась и основным путём становился онлайн-скрипт astral.sh под
+    # админом. Ищем вшитый uv ещё и в bundled-корне: HM_VENDOR_BUNDLED (если main его пробросил)
+    # либо <resources>\vendor рядом со скриптами (<resources>\scripts\windows -> ..\..\vendor).
+    $uvRoots = New-Object System.Collections.Generic.List[string]
+    if ($env:HM_VENDOR)         { $uvRoots.Add($env:HM_VENDOR) }
+    if ($env:HM_VENDOR_BUNDLED) { $uvRoots.Add($env:HM_VENDOR_BUNDLED) }
+    try { $uvRoots.Add((Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor')) } catch { }
+    $uvRoot = ''
+    foreach ($root in $uvRoots) {
+        if ($root -and (Test-Path -LiteralPath (Join-Path $root 'apps\uv\uv.exe') -PathType Leaf)) { $uvRoot = $root; break }
+    }
+    if ($uvRoot -and (Test-Path -LiteralPath $uvScript -PathType Leaf)) {
         Write-Host "uv не найден — ставлю вшитый офлайн-uv (vendor\apps\uv, SHA-256 fail-closed, через uv.ps1)..."
         if ($DRY) {
             Write-Host "  [dry-run] WOULD: установить uv из vendor через uv.ps1 (офлайн, без сети)"
             $uvPlannedOffline = $true
         } else {
+            # uv.ps1 (и Confirm-HmArtifact внутри) резолвит и бинарь, и checksums.json через
+            # HM_VENDOR — на время вызова указываем на корень, где вшитый uv реально лежит, и
+            # ОБЯЗАТЕЛЬНО восстанавливаем: секция 3 верифицирует nomad-src по staging-HM_VENDOR.
             # exit N внутри дочернего .ps1 возвращает управление сюда с $LASTEXITCODE=N.
-            & $uvScript
+            $savedVendor = $env:HM_VENDOR
+            try { $env:HM_VENDOR = $uvRoot; & $uvScript } finally { $env:HM_VENDOR = $savedVendor }
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [warn] вшитый uv не установился (код $LASTEXITCODE) — попробую онлайн-фолбэк."
             }
@@ -151,7 +169,12 @@ if (-not $uv -and -not $uvPlannedOffline) {
     Write-Host "uv не найден, офлайн-источник (vendor\apps\uv) недоступен — ставлю uv ОНЛАЙН с astral.sh (нужен интернет; это последний фолбэк)..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://astral.sh/uv/install.ps1 | iex (онлайн-фолбэк)" }
     else {
-        try { Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression }
+        # -TimeoutSec ОБЯЗАТЕЛЕН: по умолчанию у Invoke-RestMethod он 0, то есть
+        # бесконечность. На плохом канале или при DPI-перехвате вызов висит молча, а
+        # watchdog установщика намеренно НЕ убивает процессы — шаг стоял бы вечно.
+        # Это был единственный сетевой вызов в scripts/windows/ без таймаута; у всех
+        # соседей он есть.
+        try { Invoke-RestMethod https://astral.sh/uv/install.ps1 -TimeoutSec 120 | Invoke-Expression }
         catch { Write-Host "uv не установился: $($_.Exception.Message)"; exit 1 }
     }
     Update-Path
@@ -171,7 +194,51 @@ if ($DRY) {
     & $uv python install 3.12
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv python install 3.12 завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Write-Host "Устанавливаю Nomad (команды nmd/nomad-agent/nomad-acp)..."
-    & $uv tool install --python 3.12 "$src"
+    # #2: fail-closed integrity-гейт nomad-src ПЕРЕД установкой (medium-малварь того же
+    # юзера могла подменить pyproject.toml/любой .py в user-writable vendor до `uv tool
+    # install` → build-hook под АДМИНОМ). Зеркало mac nomad.sh. Нет манифеста/несовпал → exit 1.
+    $treeShaFile = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'nomad-src.sha256' } else { '' }
+    if (-not $treeShaFile -or -not (Test-Path $treeShaFile)) {
+        Write-Host "БЕЗОПАСНОСТЬ: нет манифеста целостности nomad-src (vendor\nomad-src.sha256) — отказываюсь ставить Nomad из непроверенного дерева. Установка остановлена."
+        exit 1
+    }
+    Confirm-HmArtifact $treeShaFile
+    Confirm-HmArtifact (Join-Path $src 'pyproject.toml')
+    $treeWant = ((Get-Content -Raw $treeShaFile) -replace '\s', '').ToLower()
+    $treeGot = Get-HmTreeSha256 $src
+    if (-not $treeWant -or $treeGot -ne $treeWant) {
+        Write-Host "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 дерева nomad-src — vendor подменён/повреждён. Установка Nomad остановлена."
+        Write-Host "  ожидалось: $treeWant"
+        Write-Host "  получено:  $treeGot"
+        exit 1
+    }
+    Write-Host "  Целостность подтверждена (SHA-256 дерева): vendor\nomad-src"
+    # Собираем из КОПИИ, а не из vendor напрямую. uv/setuptools кладут артефакты сборки
+    # (build\, *.egg-info\) РЯДОМ С ИСХОДНИКОМ: после первой же установки дерево
+    # vendor\nomad-src меняется, и при ПОВТОРНОМ запуске установщика гейт целостности
+    # честно говорит «vendor подменён» — компонент больше не ставится никогда.
+    # Проверено запуском: 4929 файлов в дереве превращались в 7374, SHA переставал
+    # совпадать. На macOS это уже было сделано (nomad.sh, BUILD_SRC) — переносим сюда.
+    # ВАЖНО: копируем каталог целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок.
+    # Copy-Item -LiteralPath "...\*" в Windows PowerShell 5.1 (а это боевой интерпретатор)
+    # НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов: исключения нет, catch не
+    # срабатывает, и uv получает пустой каталог. Проверено запуском: 2 файла -> 0.
+    $buildSrc = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
+    $srcForInstall = $src
+    try {
+        Copy-Item -LiteralPath $src -Destination $buildSrc -Recurse -Force -ErrorAction Stop
+        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
+        if (-not (Test-Path -LiteralPath (Join-Path $buildSrc 'pyproject.toml'))) {
+            throw 'копия исходников пуста (нет pyproject.toml)'
+        }
+        $srcForInstall = $buildSrc
+    } catch {
+        Write-Host "  Не удалось подготовить временную копию исходников ($($_.Exception.Message)) — ставлю из vendor напрямую."
+        if (Test-Path -LiteralPath $buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
+        $buildSrc = ''
+    }
+    & $uv tool install --python 3.12 "$srcForInstall"
+    if ($buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
     # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с

@@ -23,7 +23,6 @@ function Update-Path {
         $parts += (Join-Path $env:ProgramFiles 'nodejs')
     }
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
-    if ($env:HM_VENDOR) { $parts += (Join-Path $env:HM_VENDOR 'apps') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 Update-Path
@@ -37,6 +36,47 @@ $installed = $false
 $vsix = ''
 if ($env:HM_VENDOR) { $cand = Join-Path $env:HM_VENDOR 'apps\claude-code.vsix'; if (Test-Path $cand) { $vsix = $cand } }
 if ($vsix -and -not $DRY) { Confirm-HmArtifact $vsix }
+
+# Расширение ставится ДЕ-ЭЛЕВИРОВАННО (редакторный CLI запускается от пользователя), а в
+# лёгком издании vsix лежит в СКАЧАННОМ паке, распакованном в admins-only каталог
+# (%ProgramData%\HmDeElev-*\w\unpacked-*, DACL {SYSTEM, Administrators} без ACE
+# пользователя). Medium-процесс такой файл ПРОЧИТАТЬ НЕ МОЖЕТ — установка расширения
+# срывалась бы в офлайн-пути и молча уходила в Marketplace (а без интернета — никуда).
+# Поэтому кладём ПРОВЕРЕННЫЙ vsix в читаемое пользователем место и ставим оттуда.
+# Эскалации это не даёт: vsix и так исполняется редактором при MEDIUM integrity, а
+# целостность подтверждена ВЫШЕ, под админом, до копирования.
+# Копия vsix (до 80 МБ) не должна оставаться в %TEMP%. Объявлена ДО создания копии, а
+# убирается — ОДНИМ механизмом, в finally вокруг всего остатка скрипта (см. try ниже):
+# так уборку получает и каждый exit, и необработанное исключение, без перечисления путей.
+function Remove-HmVsixTemp {
+    if ($script:vsixTemp) {
+        Remove-Item -LiteralPath $script:vsixTemp -Force -ErrorAction SilentlyContinue
+        $script:vsixTemp = ''
+    }
+}
+
+$vsixTemp = ''
+if ($vsix -and -not $DRY) {
+    try {
+        $userTmp = [System.IO.Path]::GetTempPath()
+        $vsixTemp = Join-Path $userTmp ('hm-claude-code-' + [guid]::NewGuid().ToString('N') + '.vsix')
+        Copy-Item -LiteralPath $vsix -Destination $vsixTemp -Force -ErrorAction Stop
+        # Убеждаемся, что копия действительно читается: если нет — лучше честно уйти в
+        # Marketplace, чем ставить из файла, к которому у пользователя нет доступа.
+        $null = [System.IO.File]::OpenRead($vsixTemp).Close()
+        $vsix = $vsixTemp
+    } catch {
+        Write-Host "  Не удалось подготовить читаемую копию vsix ($($_.Exception.Message)) — попробую Marketplace."
+        if ($vsixTemp) { Remove-Item -LiteralPath $vsixTemp -Force -ErrorAction SilentlyContinue; $vsixTemp = '' }
+        $vsix = ''
+    }
+}
+
+# С этого места в %TEMP% может лежать копия vsix — ЛЮБОЙ выход (exit 0/1, исключение)
+# обязан пройти через finally с уборкой. Тело блока намеренно НЕ переиндентировано:
+# PowerShell к отступам безразличен, а here-string settings.json обязан держать '@ в
+# нулевой колонке.
+try {
 
 # Cursor должен быть ЗАКРЫТ, иначе --install-extension падает с 'aborted' (баг с теста).
 # НО не убиваем силой Cursor, открытый ПОЛЬЗОВАТЕЛЕМ — это потеря несохранённой работы.
@@ -192,3 +232,7 @@ if ($script:DeElevFailed) {
     Write-Host "Расширение в Cursor не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
 }
 exit 1
+} finally {
+    # Уборка копии vsix на ЛЮБОМ выходе из блока выше (exit 0/1, необработанное исключение).
+    Remove-HmVsixTemp
+}

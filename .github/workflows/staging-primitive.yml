@@ -1,0 +1,60 @@
+name: Гейт — защищённый staging-каталог (Windows, elevated)
+
+# Отдельный БЫСТРЫЙ прогон одного примитива New-HmSecureStagingDir.
+#
+# Зачем отдельно от e2e-win.yml: когда примитив не отдаёт каталог, lite-издание не качает
+# НИЧЕГО, а полный GUI-E2E тратит на одну попытку десятки минут. Здесь цикл «правка →
+# ответ с настоящей elevated-Windows» занимает ~1 минуту.
+on:
+  workflow_dispatch:
+  push:
+    branches: ['probe/**', 'e2e/**']
+    paths:
+      - 'scripts/windows/_deelev.ps1'
+      - 'test/staging-primitive.ps1'
+      - '.github/workflows/staging-primitive.yml'
+
+jobs:
+  primitive:
+    name: New-HmSecureStagingDir на чистой Windows
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Кто мы и с какими привилегиями
+        shell: pwsh
+        run: |
+          $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $p  = New-Object Security.Principal.WindowsPrincipal($id)
+          Write-Host "Пользователь: $($id.Name)"
+          Write-Host "IsAdmin: $($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+          Write-Host "PSVersion: $($PSVersionTable.PSVersion)"
+          # SeRestorePrivilege определяет, сработает ли АТОМАРНЫЙ путь (владелец в SD при
+          # создании) или включится фолбэк через icacls — по логу это должно быть видно.
+          & "$env:SystemRoot\System32\whoami.exe" /priv | Select-String 'SeRestore|SeTakeOwnership|SeBackup'
+
+      # В БОЮ примитив исполняет Windows PowerShell 5.1 (winPowershellPath() ->
+      # System32\WindowsPowerShell\v1.0\powershell.exe), а не pwsh 7. Разница
+      # принципиальная: в 5.1 (.NET Framework) перегрузка CreateDirectory(path, SD)
+      # СУЩЕСТВУЕТ, в pwsh 7 (.NET Core) — нет. То есть ветки кода разные, и зелёный
+      # pwsh ничего не говорит о боевом пути. Гоняем обе.
+      - name: Тест примитива — Windows PowerShell 5.1 (боевая оболочка)
+        shell: cmd
+        run: '%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File test\staging-primitive.ps1'
+
+      - name: Тест примитива — pwsh 7
+        shell: cmd
+        run: pwsh -NoProfile -File test\staging-primitive.ps1
+
+      # Диагностика запускается ТОЛЬКО при падении: показывает фактические ACL на
+      # ProgramData, из-за которых наследование/владелец могли не примениться.
+      - name: Диагностика при падении
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "=== ACL на ProgramData ==="
+          & "$env:SystemRoot\System32\icacls.exe" $env:ProgramData
+          Write-Host "=== остатки HmDeElev-* ==="
+          Get-ChildItem -LiteralPath $env:ProgramData -Filter 'HmDeElev-*' -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_.FullName; & "$env:SystemRoot\System32\icacls.exe" $_.FullName }

@@ -221,6 +221,15 @@ function trustedEnv() {
     const p = [s32, root, path.join(s32, 'WindowsPowerShell', 'v1.0')].join(';');
     return {
       SystemRoot: root, windir: root, PATH: p, Path: p,
+      // PSModulePath задаём ЯВНО. Унаследованный ломает всё дважды:
+      //  * запуск из окружения PowerShell 7 (терминал pwsh) подсовывает 5.1 модули из
+      //    ...\PowerShell\7\Modules — .NET Core-сборки, которые 5.1 загрузить не может,
+      //    и любой cmdlet из Microsoft.PowerShell.Security (Get-Acl) падает. Проверка
+      //    защищённости каталога возвращала бы false на ИСПРАВНОМ каталоге, и докачка
+      //    умирала бы «по соображениям безопасности»;
+      //  * PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) —
+      //    штатный вектор module-hijack в elevated-процессе.
+      PSModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'),
       TEMP: process.env.TEMP || process.env.TMP || '',
       TMP: process.env.TMP || process.env.TEMP || ''
     };
@@ -256,7 +265,14 @@ function verifyDirSecureWin(dir, log) {
     "$ErrorActionPreference='Stop';" +
     "$d=$env:HM_VERIFY_DIR;" +
     "$allow=@('S-1-5-18','S-1-5-32-544');" +
-    "$acl=Get-Acl -LiteralPath $d;" +
+    // ACL читаем через .NET, а НЕ Get-Acl: cmdlet тянет модуль Microsoft.PowerShell.Security,
+    // который в 5.1 не грузится при PSModulePath от PowerShell 7. Тогда проверка падала бы
+    // на ИСПРАВНОМ каталоге и докачка умирала «по соображениям безопасности». Cmdlet
+    // остаётся последним шансом (окружение мы и так чиним в trustedEnv).
+    "$acl=$null;" +
+    "try{$acl=(New-Object System.IO.DirectoryInfo($d)).GetAccessControl()}catch{}" +
+    "if($null -eq $acl){try{$acl=[System.IO.FileSystemAclExtensions]::GetAccessControl((New-Object System.IO.DirectoryInfo($d)))}catch{}};" +
+    "if($null -eq $acl){$acl=Get-Acl -LiteralPath $d};" +
     "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
     "if($allow -notcontains $o){Write-Output ('INSECURE:owner='+$o);exit 0};" +
     "foreach($a in $acl.Access){" +
@@ -337,7 +353,8 @@ function ipv4IsPrivate(ip) {
   if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true; // CGNAT
   if (o[0] === 192 && o[1] === 0 && o[2] === 0) return true;  // IETF protocol
   if (o[0] === 192 && o[1] === 0 && o[2] === 2) return true;  // TEST-NET-1
-  if (o[0] === 198 && o[1] === 18) return true;               // benchmark
+  if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return true; // 198.18.0.0/15 benchmark (RFC 2544)
+  if (o[0] === 192 && o[1] === 88 && o[2] === 99) return true; // 192.88.99.0/24 6to4 relay anycast (RFC 7526)
   if (o[0] === 198 && o[1] === 51 && o[2] === 100) return true; // TEST-NET-2
   if (o[0] === 203 && o[1] === 0 && o[2] === 113) return true; // TEST-NET-3
   if (o[0] >= 224) return true;                               // multicast/reserved
@@ -395,6 +412,9 @@ function ipv6IsPrivate(addr) {
   // /48 (первые 6 байт = 00 64 ff 9b 00 01) отвергаем безусловно (fail-closed).
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
       b[4] === 0x00 && b[5] === 0x01) return true;                            // 64:ff9b:1::/48 NAT64 local-use
+  // #30: 2002::/16 — 6to4: встроенный IPv4 лежит в байтах 2..5 (2002:7f00:1:: = 127.0.0.1).
+  // Классифицируем ПО вложенному адресу, как для ::ffff:/96 и 64:ff9b::/96.
+  if (b[0] === 0x20 && b[1] === 0x02) return ipv4IsPrivate([b[2], b[3], b[4], b[5]].join('.')); // 2002::/16 6to4
   if (b.slice(0, 12).every((x) => x === 0)) return ipv4IsPrivate(v4tail());   // ::a.b.c.d (deprecated)
   return false;
 }
@@ -550,6 +570,7 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
     let written = 0;
     let done = false;
     let subAttempts = 0;
+    let lastProgressMark = 0; // #31: отметка прогресса, по которой сбрасывается бюджет попыток
     let activeReq = null;
     let activeRes = null;
     let lastTick = Date.now();
@@ -579,10 +600,19 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
       try { fs.ftruncateSync(fd, 0); } catch (e) { /* ignore */ }
       hash = crypto.createHash('sha256');
       written = 0;
+      // #8: прогресс откатился к нулю — окно min-rate watchdog'а ОБЯЗАНО откатиться
+      // вместе с ним, иначе written(0) - lastTickBytes(уже скачанное) < минимума и
+      // ЖИВОЕ соединение убивается «скорость ниже минимума» сразу после рестарта.
+      lastTick = Date.now(); lastTickBytes = 0; lastPct = -1;
     };
 
     const attempt = () => {
       if (done) return;
+      // #31: бюджет попыток считаем ПОДРЯД идущими безрезультатными. Если докачка
+      // реально продвинулась с прошлой попытки — бюджет обновляем; общая длительность
+      // всё равно ограничена deadlineAt и stall-watchdog'ом. restartFresh() обнуляет
+      // written, поэтому 416/Range-ignore-петля бюджет не восстанавливает.
+      if (written > lastProgressMark) { lastProgressMark = written; subAttempts = 0; }
       if (++subAttempts > MAX_SUB_ATTEMPTS) { finish({ ok: false, error: 'исчерпаны попытки докачки' }); return; }
       let cbUsed = false;    // openStream может позвать cb дважды (res, потом поздний error) — учитываем 1 раз
       let advanced = false;  // этот attempt уже уступил место resume — не дублируем из error/close/end
@@ -612,6 +642,13 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
         } else if (code >= 400) { finish({ ok: false, error: 'HTTP ' + code }); return; }
         else if (code >= 300) { finish({ ok: false, error: 'HTTP ' + code }); return; }
         // иначе 2xx при written===0 — пишем с нуля
+
+        // #12: завершённость этого ответа определяем по ТРАНСПОРТУ (Content-Length),
+        // а НЕ по registry sizeBytes (cap — лишь верхняя граница/DoS-предел). Неточный
+        // cap оператора не должен зацикливать resume при совпадающем sha.
+        const clen = Number(res.headers['content-length'] || 0);
+        const respBase = written;                                  // байт до этого ответа
+        const respExpected = clen > 0 ? respBase + clen : 0;       // 0 = длина неизвестна
 
         res.on('data', (chunk) => {
           if (done || localErr) return;
@@ -644,15 +681,17 @@ function downloadToFd(url, fd, expectedSize, onProgress, timeoutMs, deadlineAt, 
         res.on('end', () => {
           if (done || localErr) return;
           activeRes = null;
-          if (cap && written < cap) { nextAttempt(); return; } // короткий ответ → докачиваем
-          // #9: перед публикацией — РЕАЛЬНЫЙ размер файла на диске == хешированному
-          // (written) == ожидаемому (cap, если известен). Закрывает случай, когда
-          // held-fd короче, чем то, что мы «посчитали» записанным/захешированным.
+          // Тело недобрано ОТНОСИТЕЛЬНО Content-Length этого ответа (сервер закрыл раньше)
+          // → докачиваем. registry-cap для этого решения НЕ используем (#12).
+          if (respExpected > 0 && written < respExpected) { nextAttempt(); return; }
+          // #9: перед публикацией — РЕАЛЬНЫЙ размер файла на диске == хешированному (written).
           let fsize = -1;
           try { fsize = fs.fstatSync(fd).size; }
           catch (e) { finish({ ok: false, error: 'fstat перед публикацией не удался: ' + String(e.message || e) }); return; }
           if (fsize !== written) { finish({ ok: false, error: 'размер на диске (' + fsize + ') не совпал с записанным (' + written + ')' }); return; }
-          if (cap && (written !== cap || fsize !== cap)) { finish({ ok: false, error: 'итоговый размер ' + written + ' не равен ожидаемому ' + cap }); return; }
+          // Целостность гарантирует sha (сверяется в fetchRemote); cap — лишь верхняя
+          // граница (превышение отбито в data-хендлере). written<cap при совпавшем sha —
+          // НОРМА (оператор завысил sizeBytes), НЕ провал (#12).
           finish({ ok: true, bytes: written, sha: hash.digest('hex').toLowerCase() });
         });
       });
@@ -679,16 +718,23 @@ function unpackZip(zipPath, destDir) {
         "[System.IO.Compression.ZipFile]::ExtractToDirectory('" + zp + "','" + dp + "')";
       const r = spawnSync(ps,
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-        { windowsHide: true, encoding: 'utf8', env });
+        { windowsHide: true, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
       if (r.error) return { ok: false, error: String(r.error.message || r.error) };
       if (r.status !== 0) {
         return { ok: false, error: String((r.stderr || r.stdout || ('powershell exit ' + r.status)) || '').trim() };
       }
     } else {
-      let r = spawnSync('/usr/bin/unzip', ['-o', '-q', zipPath, '-d', destDir], { encoding: 'utf8', env });
+      // ditto ПЕРВЫМ, unzip — запасным. Причина из живой установки: в архивах есть
+      // файлы с кириллическими именами и флагом UTF-8, а штатный unzip в macOS
+      // (Info-ZIP 6.0) флаг не понимает — имя превращается в мусор, запись падает, и
+      // unzip ЗАДАЁТ ВОПРОС «Continue? (y/n)», подвешивая шаг навсегда. ditto — родной
+      // распаковщик, имена читает верно и вопросов не задаёт.
+      // stdin закрыт у ОБОИХ: любой вопрос получает EOF и процесс честно падает.
+      let r = spawnSync('/usr/bin/ditto', ['-x', '-k', zipPath, destDir],
+        { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
       if (r.error || r.status !== 0) {
-        // Фолбэк для macOS без unzip в PATH — ditto по абсолютному пути.
-        r = spawnSync('/usr/bin/ditto', ['-x', '-k', zipPath, destDir], { encoding: 'utf8', env });
+        r = spawnSync('/usr/bin/unzip', ['-o', '-q', zipPath, '-d', destDir],
+          { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
         if (r.error || r.status !== 0) {
           return { ok: false, error: String((r.stderr || (r.error && r.error.message) || 'распаковка не удалась')).trim() };
         }
@@ -700,6 +746,16 @@ function unpackZip(zipPath, destDir) {
 
 // Удалить ВСЕ прежние unpacked-*/unpacking-* каталоги. Fail-closed: если хоть
 // один НЕ удалился — { ok:false } (не продолжаем в старом каталоге).
+//
+// ВАЖНО про параллельные запуски. На POSIX кэш общий и предсказуемый
+// (~/Library/Caches/HamidunSetup/<remoteId>), поэтому второй экземпляр
+// установщика вычистил бы отсюда unpacked-<sha>, который прямо сейчас отдан
+// установочному скрипту как HM_VENDOR и читается им минутами (uv tool install,
+// ditto, раскладка конфига) — скрипты падали бы на «нет файла» посреди установки.
+// Второго экземпляра теперь не бывает: app.requestSingleInstanceLock() в main.js
+// стоит ДО создания окна, и повторный запуск лишь поднимает уже открытое окно.
+// Если эта блокировка когда-нибудь будет снята — сюда обязан вернуться lock-файл
+// на cacheDir (иначе дефект воскреснет молча).
 function removeOldUnpacked(cacheDir) {
   let names;
   try { names = fs.readdirSync(cacheDir); }

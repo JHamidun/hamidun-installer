@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- img-src data: — ТОЛЬКО ради инлайн-картинок памятки START-HERE.html во
+       встроенном просмотре (Shadow DOM); сеть/скрипты этим не ослабляются. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
   <title>Hamidun Setup</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -102,6 +104,8 @@
       <div class="help-row">
         <button type="button" id="btn-what-installs" class="linkbtn">📦 Что скачается на мой ПК?</button>
         <button type="button" id="btn-what-next" class="linkbtn">🧭 Что будет дальше?</button>
+        <!-- Памятка по умолчанию открывается ВНУТРИ окна (кнопка выше); браузер — только по явному клику. -->
+        <button type="button" id="btn-what-next-ext" class="linkbtn">↗ Памятка — в браузере</button>
       </div>
 
       <section id="groups" class="groups"></section>
@@ -120,12 +124,16 @@
     <footer class="actions">
       <div class="actions-left">
         <div class="summary" id="summary">Выбрано: 0</div>
-        <!-- Анонимная телеметрия установки (opt-out). Согласие снимается в момент
-             нажатия «Установить» (app.js/startInstall); POST один, без uid и ПД. -->
+        <!-- Телеметрия установки (opt-out). Согласие снимается в момент нажатия
+             «Установить» (app.js/startInstall).
+             ВАЖНО: если человек пришёл по персональной ссылке бота, отчёт везёт его
+             идентификатор в Telegram (uid из имени скачанного файла) — иначе бот не
+             сможет помочь адресно. Значит называть отчёт «анонимным» НЕЛЬЗЯ: текст
+             ниже обязан оставаться правдой при включённой привязке. -->
         <label class="ns-auto telemetry-opt"
-               title="Один анонимный отчёт после установки: платформа, успех/упавшие компоненты, длительность. Без имени, почты и каких-либо личных данных.">
+               title="Отчёт после установки: платформа, успех или упавшие компоненты с причиной, длительность. Тексты ошибок очищаются от путей, имени пользователя, почты и адресов. Журнал установки НЕ отправляется. Если ты пришёл по персональной ссылке помощника — отчёт привязывается к твоему Telegram, чтобы он мог подсказать по конкретной ошибке.">
           <input type="checkbox" id="telemetry-opt" checked />
-          Отправлять анонимную статистику установки (помогает чинить ошибки)
+          Отправлять отчёт об установке (помогает чинить ошибки и подсказывать в боте)
         </label>
       </div>
       <button type="button" id="btn-install" class="btn btn-primary">Установить</button>
@@ -144,6 +152,15 @@
       </div>
       <img class="mascot" src="mascot/loading.webp" alt="Омлетон готовит окружение">
     </header>
+
+    <!-- Общий прогресс прогона. Просьба живых пользователей: по одному крутящемуся
+         спиннеру не понять, идёт процесс или всё встало. Проценты тут НАСТОЯЩИЕ —
+         доля завершённых компонентов; внутри шага скрипты прогресс не сообщают,
+         поэтому там показываются секунды, а не выдуманная полоса. -->
+    <div id="run-progress" class="run-progress hidden">
+      <div class="run-progress__bar"><div class="run-progress__fill" id="run-progress-fill"></div></div>
+      <div class="run-progress__label" id="run-progress-label"></div>
+    </div>
 
     <!-- Заметная плашка помощи: заполняется renderProgressBotBanner, видна во время
          установки и на финише (это тот же view). -->

@@ -241,6 +241,12 @@ h1 {
 @keyframes spin { to { transform: rotate(360deg); } }
 .step.running { border-color: var(--h-cyan); }
 .step.error { border-color: var(--h-red); }
+/* Сетевой обрыв докачки (lite): ОРАНЖЕВЫЙ «проверь интернет», не красный провал. */
+.step.error-net .dot { background: #e8963a; border-color: #e8963a; }
+.step.error-net { border-color: #e8963a; }
+/* Inline-«Повторить» на шаге с оборванной докачкой. */
+.step .step-retry { margin-left: auto; flex: 0 0 auto; padding: 3px 10px; font-size: 11.5px; }
+.step .step-retry:disabled { opacity: .5; cursor: default; }
 
 .log-wrap {
   display: flex; flex-direction: column; min-height: 0;
@@ -650,6 +656,38 @@ h1 {
 .wi-size { font-family: var(--h-font-body); font-weight: 500; font-size: 12px; color: var(--text-subtle); margin-left: 6px; }
 .wi-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.45; margin-top: 1px; }
 
+/* ---- встроенный просмотр памятки «Что дальше» (Shadow DOM-оверлей) ---- */
+/* Каркас: шапка с заголовком/«Открыть в браузере»/крестиком + прокручиваемое тело.
+   Сам контент памятки живёт в shadow root (#memo-host) со СВОИМИ стилями. */
+.memo-overlay { padding: 18px; }
+.memo-card {
+  width: 100%; max-width: 880px; height: calc(100vh - 36px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--h-r-lg);
+  box-shadow: 0 24px 64px rgba(0,0,0,.55);
+}
+.memo-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--border-strong);
+}
+.memo-title {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--h-font-head); font-weight: 700; font-size: 15px;
+}
+.memo-close {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--border-strong); background: transparent; color: var(--text);
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.memo-close:hover { background: rgba(255,255,255,.08); }
+.memo-body { flex: 1 1 auto; overflow: auto; }
+/* Узкое окно: оверлей почти во весь экран, шапка переносится (flex-wrap выше). */
+@media (max-width: 560px) {
+  .memo-overlay { padding: 8px; }
+  .memo-card { height: calc(100vh - 16px); }
+}
+
 /* ---- плашка помощи-бота на экране прогресса/финиша ---- */
 .progress-bot {
   flex: 0 0 auto;
@@ -661,3 +699,17 @@ h1 {
 .progress-bot-ico { font-size: 18px; line-height: 1; }
 .progress-bot-text { flex: 1 1 220px; font-size: 13px; color: var(--text); font-weight: 600; }
 .progress-bot-btn { flex: 0 0 auto; }
+
+/* Общий прогресс прогона (просьба пользователей: видеть, что процесс идёт).
+   Проценты настоящие — доля завершённых компонентов. */
+.run-progress { margin: 10px 0 4px; }
+.run-progress__bar {
+  height: 8px; border-radius: 999px; overflow: hidden;
+  background: rgba(255, 255, 255, .10);
+}
+.run-progress__fill {
+  height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, #5CB3FF, #29A9FF);
+  transition: width .35s ease;
+}
+.run-progress__label { margin-top: 6px; font-size: 13px; color: var(--text-muted); }

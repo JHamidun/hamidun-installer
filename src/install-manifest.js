@@ -15,6 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 const SCHEMA_VERSION = 1;
 const DIR_NAME = '.hamidun-setup';
@@ -76,6 +77,30 @@ function readManifest(homedir) {
 // unlink-перед-rename (окно, где старый уже удалён, а новый не встал → манифест
 // ПОТЕРЯН при сбое второго rename). Вместо этого: old→backup, temp→dest; при сбое —
 // откат backup→dest и удаление temp. Плюс fsync temp-файла где можно.
+// Открыть temp-файл в dir БЕЗОПАСНО (тот же приём, что uninstall-exec.js:removeProfileLine):
+// НЕПРЕДСКАЗУЕМОЕ имя (crypto.randomBytes) + 'wx' (O_CREAT|O_EXCL — по заранее
+// подложенному hardlink/symlink НЕ пишем, получаем EEXIST) + fstat открытого fd
+// (обычный файл, nlink==1). Предсказуемое pid+Date.now()-имя с флагом 'w' позволяло
+// medium-integrity процессу того же юзера заранее подставить ссылку и заставить
+// ЭЛЕВЕЙТЕД установщик усечь и перезаписать чужой файл. Префикс имени сохранён
+// (base + '.') — recoverBak/уборка хвостов продолжают его находить.
+function openExclTmp(dir, base) {
+  for (let i = 0; i < 3; i++) {
+    const cand = path.join(dir, base + '.' + crypto.randomBytes(8).toString('hex') + '.tmp');
+    let fd;
+    try { fd = fs.openSync(cand, 'wx', 0o600); }
+    catch (e) { if (e && e.code === 'EEXIST') continue; throw e; }
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || (typeof st.nlink === 'number' && st.nlink !== 1)) {
+      fs.closeSync(fd);
+      try { fs.rmSync(cand, { force: true }); } catch (e2) { /* ignore */ }
+      throw new Error('ЗАЩИТА: temp не обычный файл / nlink!=1 — отказ');
+    }
+    return { fd, tmp: cand };
+  }
+  throw new Error('ЗАЩИТА: temp уже существует (EEXIST) — возможная подмена, отказ');
+}
+
 function writeManifest(homedir, data, opts) {
   opts = opts || {};
   const obj = (data && typeof data === 'object') ? data : emptyManifest();
@@ -86,8 +111,9 @@ function writeManifest(homedir, data, opts) {
   const dir = setupDir(homedir);
   const json = JSON.stringify(obj, null, 2);
   fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, FILE_NAME + '.' + process.pid + '.' + Date.now() + '.tmp');
-  const fd = fs.openSync(tmp, 'w', 0o600);
+  const ex = openExclTmp(dir, FILE_NAME);
+  const tmp = ex.tmp;
+  const fd = ex.fd;
   try {
     fs.writeFileSync(fd, json, 'utf8');
     try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
@@ -97,7 +123,7 @@ function writeManifest(homedir, data, opts) {
   try {
     fs.renameSync(tmp, dst);
   } catch (e) {
-    const bak = dst + '.' + process.pid + '.' + Date.now() + '.bak';
+    const bak = dst + '.' + crypto.randomBytes(8).toString('hex') + '.bak';
     let movedOld = false;
     try {
       // старый → backup (ENOENT допустим: файла ещё не было)
