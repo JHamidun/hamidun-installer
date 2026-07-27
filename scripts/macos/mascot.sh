@@ -247,8 +247,14 @@ try:
     fd = os.open(tmp, WRFLAGS, 0o600)
     try:
         off = 0
+        # os.write может вернуть 0; без этой проверки цикл крутится вечно и
+        # съедает ядро процессора целиком. Живой случай на маке: процесс
+        # разогнал CPU до 99%, и ноутбук пришлось выключить.
         while off < len(newraw_b):
-            off += os.write(fd, newraw_b[off:])
+            n = os.write(fd, newraw_b[off:])
+            if n <= 0:
+                raise IOError("запись не продвигается")
+            off += n
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -272,7 +278,10 @@ try:
     try:
         off = 0
         while off < len(raw_b):
-            off += os.write(fd, raw_b[off:])
+            n = os.write(fd, raw_b[off:])
+            if n <= 0:
+                raise IOError("запись не продвигается")
+            off += n
         os.fsync(fd)
     finally:
         os.close(fd)

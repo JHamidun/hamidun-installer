@@ -91,7 +91,7 @@ if ($local -and (Test-Path $local)) {
             $exe = Join-Path $cache $asset.name
             Invoke-WebRequest $asset.browser_download_url -OutFile $exe -UseBasicParsing -TimeoutSec 600
         } catch {
-            try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+            Remove-HmSecureStagingDir -Path $cache
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
@@ -107,7 +107,7 @@ if ($local -and (Test-Path $local)) {
             Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Git не подтвердилась ($why) — НЕ запускаю (fail-closed)."
         }
         # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
-        try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        Remove-HmSecureStagingDir -Path $cache
     }
 }
 

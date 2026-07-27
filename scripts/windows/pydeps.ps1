@@ -100,7 +100,7 @@ if (-not $py) {
                     }
                 }
                 # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
-                try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                Remove-HmSecureStagingDir -Path $cache
             } else {
                 Write-Host "  Не удалось создать защищённый кэш для скачивания — пропускаю онлайн-фолбэк Python."
             }

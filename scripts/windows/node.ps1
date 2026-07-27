@@ -63,7 +63,7 @@ if ($local -and (Test-Path $local)) {
             $msi = Join-Path $cache "node-lts.msi"
             Invoke-WebRequest $url -OutFile $msi -UseBasicParsing -TimeoutSec 600
         } catch {
-            try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+            Remove-HmSecureStagingDir -Path $cache
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
@@ -79,7 +79,7 @@ if ($local -and (Test-Path $local)) {
             Write-Host "  БЕЗОПАСНОСТЬ: подпись MSI Node.js не подтвердилась ($why) — НЕ запускаю (fail-closed)."
         }
         # Чистим Admins-only кэш (установщик уже отработал; больше не нужен). Best-effort.
-        try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        Remove-HmSecureStagingDir -Path $cache
     }
 }
 

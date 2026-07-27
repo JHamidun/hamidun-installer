@@ -66,7 +66,7 @@ if ($local -and (Test-Path $local)) {
             $inst = Join-Path $onlineCache 'cursor-setup.exe'
             Invoke-WebRequest $api.downloadUrl -OutFile $inst -MaximumRedirection 6 -UseBasicParsing -TimeoutSec 600
         } catch {
-            try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+            Remove-HmSecureStagingDir -Path $onlineCache
             Write-Host "Сеть недоступна или медленная — повтори установку компонента. ($($_.Exception.Message))"
             exit 1
         }
@@ -90,7 +90,7 @@ if ($inst) {
         $why = Test-HmTrustedSigner -Path $inst
         if ($why) {
             Write-Host "  БЕЗОПАСНОСТЬ: подпись установщика Cursor не подтвердилась ($why) — НЕ запускаю (fail-closed)."
-            if ($onlineCache) { try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+            if ($onlineCache) { Remove-HmSecureStagingDir -Path $onlineCache }
             Write-Host "ОШИБКА: Cursor не установился (подпись не подтверждена)."
             exit 1
         }
@@ -112,7 +112,7 @@ Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAct
 if ($onlineCache) {
     for ($k = 0; $k -lt 30; $k++) {
         if ($instProc -and -not $instProc.HasExited) { Start-Sleep -Seconds 2; continue }
-        try { Remove-Item -LiteralPath $onlineCache -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        Remove-HmSecureStagingDir -Path $onlineCache
         if (-not (Test-Path -LiteralPath $onlineCache)) { break }
         Start-Sleep -Seconds 2
     }

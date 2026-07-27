@@ -40,7 +40,13 @@ function assertOrder(hay, first, second, msg) {
 // результата, процесс успевает выйти, и провал не всплывает НИКОГДА. Такой тест уже
 // сторожил главный фикс дня (закрытый stdin) и был зелёным при нарочно сломанном
 // ожидании. Ловим это на входе: async идёт только в okAsync.
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
+// ЧЕСТНЫЙ пропуск: тест, который не может выполниться в этой среде (не та ОС,
+// занят живой Cursor, чужие задачи в планировщике), НЕ печатает ✅ — иначе он
+// «зелёный», хотя не стерёг НИЧЕГО. SKIP() бросает помеченную ошибку, ok/okAsync
+// показывают её как ⏭ и считают отдельно от pass/fail.
+const HM_SKIP = Symbol('hm-skip');
+function SKIP(reason) { const e = new Error(reason || 'пропуск'); e[HM_SKIP] = true; throw e; }
 function ok(name, fn) {
   if (fn && fn.constructor && fn.constructor.name === 'AsyncFunction') {
     console.log('  ❌ ' + name + '  -> async-тест передан в синхронный ok(): используй okAsync + await');
@@ -48,11 +54,17 @@ function ok(name, fn) {
     return;
   }
   try { fn(); console.log('  ✅ ' + name); pass++; }
-  catch (e) { console.log('  ❌ ' + name + '  -> ' + e.message); fail++; }
+  catch (e) {
+    if (e && e[HM_SKIP]) { console.log('  ⏭  ' + name + '  -> ПРОПУЩЕН: ' + e.message); skipped++; return; }
+    console.log('  ❌ ' + name + '  -> ' + e.message); fail++;
+  }
 }
 async function okAsync(name, fn) {
   try { await fn(); console.log('  ✅ ' + name); pass++; }
-  catch (e) { console.log('  ❌ ' + name + '  -> ' + e.message); fail++; }
+  catch (e) {
+    if (e && e[HM_SKIP]) { console.log('  ⏭  ' + name + '  -> ПРОПУЩЕН: ' + e.message); skipped++; return; }
+    console.log('  ❌ ' + name + '  -> ' + e.message); fail++;
+  }
 }
 
 // Build byId from components.
@@ -865,7 +877,12 @@ ok('claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпи�
   assert(/Start-Process -FilePath \$installer -WorkingDirectory \$cache/.test(s), 'запуск ИЗ защищённого кэша (CWD=кэш, run-from-protected)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
   assert(/Test-ClaudeDesktopInstalled/.test(s), 'идемпотентность: детект уже установленного');
-  assert(/Remove-Item -LiteralPath \$cache -Recurse -Force/.test(s), 'secure-cache чистится (finally)');
+  // Уборка идёт через общий помощник: голый Remove-Item сносил РАБОЧИЙ подкаталог
+  // «w», а внешний запертый HmDeElev-* оставался в ProgramData навсегда —
+  // пользователь стереть его не может. Помощник поднимается к внешнему каталогу
+  // и удаляет только имя строго вида HmDeElev-<32 hex> (иначе fail-closed no-op).
+  assert(/Remove-HmSecureStagingDir -Path \$cache/.test(s), 'secure-cache чистится общим помощником');
+  assert(!/Remove-Item -LiteralPath \$cache -Recurse/.test(s), 'голого сноса подкаталога не осталось');
   assert(/https:\/\/claude\.ai\/api\/desktop/.test(s), 'официальный Anthropic-endpoint');
 });
 
@@ -1216,7 +1233,10 @@ ok('P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::Cre
     assert(silent.length === 0,
       'ни одного молчаливого отказа примитива (без причины): ' + silent.length);
   }
-  assert(/ReparsePoint/.test(d) && /Remove-Item -LiteralPath \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
+  // Удаление при отказе идёт через Remove-HmSecureStagingDir (единый помощник с
+  // fail-closed гейтом по имени HmDeElev-<hex>) — голый Remove-Item по $dir из
+  // файла убран (он же был источником утечки внешнего каталога в finally).
+  assert(/ReparsePoint/.test(d) && /Remove-HmSecureStagingDir -Path \$dir/.test(d), 'fail на reparse-point (junction-подмена) -> удаление + $null');
   // (b) main.js: winMakeSecureDir ДЕЛЕГИРУЕТ примитиву; НЕТ Node create-then-icacls.
   const m = EG_MAIN();
   const mi = m.indexOf('function winMakeSecureDir(');
@@ -2802,39 +2822,10 @@ ok('computeUserPathWithout: убирается ТОЛЬКО точное сов�
   assert(!r2.changed, 'нет совпадения → без изменений');
 });
 
-// P1-7: classifyRegQuery — чистый tri-state. Ошибка запуска/кода/парсера НЕ
-// превращается в «значения нет» (иначе absent → ложный успех удаления).
-ok('P1-7 classifyRegQuery: значение прочитано / штатно отсутствует / ошибка — три РАЗНЫХ исхода', () => {
-  // found:true — тип и данные разобраны, %VAR% НЕ раскрыт (raw)
-  const okRes = uxMod.classifyRegQuery('Path', {
-    status: 0,
-    stdout: '\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\uv\r\n'
-  });
-  assert(okRes.ok === true && okRes.found === true, 'значение прочитано');
-  assert.strictEqual(okRes.type, 'REG_EXPAND_SZ', 'тип сохранён');
-  assert.strictEqual(okRes.data, '%USERPROFILE%\\bin;C:\\uv', 'данные raw (%VAR% не раскрыт)');
-  // P1: код 1 → absent ТОЛЬКО при РАСПОЗНАННОЙ not-found диагностике (reg.exe пишет
-  // её по-английски даже на локализованной Windows — проверено на ru-RU).
-  const absent = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: The system was unable to find the specified registry key or value.' });
-  assert(absent.ok === true && absent.found === false, 'код 1 + not-found → штатно отсутствует (found:false)');
-  // P1: код 1 «Access is denied» → ОШИБКА, НЕ absent (иначе ложный успех удаления)
-  const denied = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: Access is denied.' });
-  assert(denied.ok === false && !('found' in denied), 'код 1 + access denied → ok:false (НЕ absent)');
-  // P1: код 1 без распознанной not-found диагностики → fail-closed (ok:false)
-  const amb = uxMod.classifyRegQuery('Path', { status: 1, stdout: '', stderr: 'ERROR: странная неведомая ошибка' });
-  assert(amb.ok === false && !('found' in amb), 'код 1 без not-found диагностики → ok:false (fail-closed)');
-  // spawn error → ok:false (НЕ absent)
-  const spawnErr = uxMod.classifyRegQuery('Path', { error: new Error('ENOENT reg.exe') });
-  assert(spawnErr.ok === false && spawnErr.error, 'ошибка запуска → ok:false');
-  // ненулевой код (кроме 1) → ok:false
-  const badCode = uxMod.classifyRegQuery('Path', { status: 5, stdout: '' });
-  assert(badCode.ok === false, 'код 5 (доступ) → ok:false, НЕ absent');
-  // status 0, но вывод не разобрался как REG_(EXPAND_)SZ → ОШИБКА, не absent
-  const garbled = uxMod.classifyRegQuery('Path', { status: 0, stdout: 'мусор без строки значения' });
-  assert(garbled.ok === false && !('found' in garbled), 'непарсибельный stdout → ошибка (fail-closed), не absent');
-  // отсутствие объекта результата → ошибка
-  assert(uxMod.classifyRegQuery('Path', null).ok === false, 'нет результата → ошибка');
-});
+// Тесты classifyRegQuery удалены ВМЕСТЕ с функцией: main.js читает реестр сам
+// (.NET Registry через winPsPayload), вызовов не осталось — ~30 зелёных строк
+// стерегли мёртвый код и создавали ложное ощущение покрытия. Регрессия-страж
+// «мёртвое не воскресает» — в блоке staging-уборки в конце файла.
 
 console.log('== PRESERVE (функционально): состояние пользователя переживает деинсталляцию ==');
 
@@ -3478,40 +3469,215 @@ ok('main.js (source): деактивация маркера ДО удалени�
 
 ok('main.js (source): reg — только HKCU из аллоулиста ключей; pathentry сохраняет тип REG_(EXPAND_)SZ и не раскрывает %VAR%', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  assert(/WIN_REG_ALLOWED_KEYS/.test(s), 'аллоулист ключей реестра');
-  assert(/t\.hive !== 'HKCU'/.test(s), 'не-HKCU → отказ');
-  // Разбор вывода reg query (REG_SZ/REG_EXPAND_SZ, raw без раскрытия %VAR%)
-  // делегирован uninstall-exec.classifyRegQuery (tri-state). main читает значение
-  // типизированно через regQueryValueTyped и СОХРАНЯЕТ тип при перезаписи PATH.
-  assert(/regQueryValueTyped\(/.test(s), 'типизированное чтение значения реестра (regQueryValueTyped)');
-  assert(/computeUserPathWithout/.test(s), 'PATH правится чистой точной функцией');
-  assert(/вернул исходный/.test(s), 'верификация записи PATH с восстановлением при расхождении');
-  // Реестр читается и пишется через .NET, а НЕ через консольный вывод reg.exe:
-  // reg.exe печатает данные и диагностику в кодовой странице консоли (CP866 на
-  // русской Windows), Node читал трубу как UTF-8 — и «C:\Программы\Python» после
-  // нашей перезаписи PATH навсегда превращался в «C:\?????\Python». Проверено
-  // запуском: старый путь round-trip не переживал.
-  const code = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-  assert(!/sysBin\('reg\.exe'\)/.test(code), 'reg.exe в КОДЕ больше не используется (кодировка консоли портила кириллицу)');
-  assert(/Microsoft\.Win32\.Registry/.test(s), 'реестр читается через .NET');
-  assert(/DoNotExpandEnvironmentNames/.test(s), 'REG_EXPAND_SZ читается сырым — чужие %VAR% не раскрываются');
-  assert(/ToBase64String/.test(s) && /HMREG1:/.test(s), 'значение едет base64 — кодировка консоли не участвует');
-  assert(/regWriteValueTyped\(/.test(s), 'запись значения — тоже через .NET');
-  assert(/не переписываю/.test(s), 'PATH с потерянными символами НЕ переписывается (сохранность чужих записей)');
+  // ВСЕ проверки — по коду БЕЗ комментариев: токен, переехавший в комментарий
+  // (закомментированный вызов, упоминание в пояснении), стеречь ничего не может.
+  // Так уже случилось с DoNotExpandEnvironmentNames: он есть и в комментарии,
+  // и убранный из ФАКТИЧЕСКОГО вызова GetValue оставлял тест зелёным — а чужие
+  // %VAR% при перезаписи PATH запекались бы в литералы.
+  const code = s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert(/WIN_REG_ALLOWED_KEYS/.test(code), 'аллоулист ключей реестра');
+  assert(/t\.hive !== 'HKCU'/.test(code), 'не-HKCU → отказ');
+  // Разбор значения типизирован (regQueryValueTyped) и тип СОХРАНЯЕТСЯ при
+  // перезаписи PATH. Слой чтения: быстрый путь reg.exe допустим ТОЛЬКО с
+  // декодированием реальной кодовой страницы консоли и с fallback на
+  // авторитетный .NET-путь; корректность обоих путей доказывается
+  // ПОВЕДЕНЧЕСКИМИ тестами ниже («реестр (поведение): …» — round-trip кириллицы,
+  // сырой REG_EXPAND_SZ, found:false, запрет HKLM).
+  assert(/regQueryValueTyped\(/.test(code), 'типизированное чтение значения реестра (regQueryValueTyped)');
+  assert(/computeUserPathWithout/.test(code), 'PATH правится чистой точной функцией');
+  assert(/вернул исходный/.test(code), 'верификация записи PATH с восстановлением при расхождении');
+  assert(/Microsoft\.Win32\.Registry/.test(code), 'авторитетный путь чтения/записи — .NET');
+  assert(/DoNotExpandEnvironmentNames/.test(code), 'REG_EXPAND_SZ читается сырым — чужие %VAR% не раскрываются (В КОДЕ, не в комментарии)');
+  assert(/ToBase64String/.test(code) && /HMREG1:/.test(code), 'значение едет base64 — кодировка консоли не участвует');
+  assert(/regWriteValueTyped\(/.test(code), 'запись значения — тоже через .NET');
+  assert(/не переписываю/.test(code), 'PATH с потерянными символами НЕ переписывается (сохранность чужих записей)');
 });
 
 // Гейт на порчу PATH: если прочитанное значение содержит символ замены, переписывать
 // его нельзя ни при каких условиях — чужая кириллическая запись важнее нашей.
+// ПОВЕДЕНЧЕСКИ, а не по тексту сообщения: первая версия этого теста искала в теле
+// строку «не переписываю» и потому не замечала мутацию САМОГО УСЛОВИЯ — гейт можно
+// было отключить, оставив сообщение на месте, и тест оставался зелёным.
+// Ловлю функцию и прогоняю её с подставным чтением реестра.
 ok('main.js: PATH с потерянными символами не переписывается (гейт на порчу)', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const i = s.indexOf('function winRemoveUserPathEntry');
   assert(i > 0, 'функция найдена');
   const body = s.slice(i, s.indexOf('\nfunction ', i + 10));
-  const guard = body.indexOf('не переписываю');
-  const write = body.indexOf('regWriteValueTyped(');
-  assert(guard > 0, 'гейт на порчу присутствует');
-  assert(guard < write, 'гейт стоит ДО записи, а не после');
+
+  const mk = (pathValue) => {
+    const calls = { writes: [] };
+    const fn = new Function(
+      'uninstallExec', 'fs', 'regQueryValueTyped', 'regWriteValueTyped', 'calls',
+      // Перевод строки обязателен: тело заканчивается строчным комментарием, и
+      // без него return уезжает ВНУТРЬ комментария — функция возвращает undefined.
+      body + '\n; return winRemoveUserPathEntry;'
+    )(
+      {
+        checkTarget: (d) => ({ ok: true, norm: d }),
+        computeUserPathWithout: (cur, dir) => ({
+          changed: String(cur).indexOf(dir) >= 0,
+          value: String(cur).split(';').filter((x) => x !== dir).join(';'),
+        }),
+      },
+      // Каталог отсутствует — значит запись PATH можно убирать (штатный путь).
+      { lstatSync: () => { const e = new Error('нет'); e.code = 'ENOENT'; throw e; } },
+      () => ({ ok: true, found: true, type: 'REG_EXPAND_SZ', data: pathValue }),
+      (k, v, data) => { calls.writes.push(data); return { ok: true }; },
+      calls
+    );
+    return { fn, calls };
+  };
+
+  const OUR = 'C:\\Users\\x\\AppData\\Local\\Programs\\uv';
+
+  // 1) PATH прочитан с потерей символов → НЕ переписываем ничего.
+  {
+    const t = mk('C:\\\uFFFD\uFFFD\uFFFD\\Python;' + OUR);
+    const r = t.fn({ dir: OUR }, {});
+    assert(r.status === 'failed', 'испорченный PATH → отказ, а не запись: ' + r.status);
+    assert(t.calls.writes.length === 0, 'при испорченном PATH записи НЕ было');
+  }
+
+  // 2) Обычный PATH — наша запись убирается, чужие целы.
+  {
+    const t = mk('C:\\Программы\\Python;' + OUR + ';C:\\Tools');
+    const r = t.fn({ dir: OUR }, {});
+    assert(t.calls.writes.length >= 1, 'обычный PATH переписывается: ' + t.calls.writes.length);
+    assert(t.calls.writes[0] === 'C:\\Программы\\Python;C:\\Tools',
+      'чужая кириллическая запись сохранена: ' + t.calls.writes[0]);
+    // Подставное чтение всегда возвращает исходное значение, поэтому пост-проверка
+    // не сходится и функция ЧЕСТНО возвращает исходный PATH вторым вызовом —
+    // это и есть страховка «не теряем PATH при расхождении».
+    assert(t.calls.writes.length === 2 && t.calls.writes[1].indexOf(OUR) >= 0,
+      'при несошедшейся проверке возвращается исходное значение');
+    assert(r.status === 'failed', 'и статус честный, а не ложный успех: ' + r.status);
+  }
 });
+
+// ===========================================================================
+// РЕЕСТР — ПОВЕДЕНЧЕСКИ. Слой чтения переделан (быстрый путь через reg.exe с
+// декодированием реальной кодовой страницы консоли + авторитетный .NET-фолбэк),
+// поэтому НИКАКИХ грепов по исходнику: функции слоя ВЫРЕЗАЮТСЯ из main.js,
+// исполняются с настоящими spawnSync/remote-fetch и проверяются НА РЕАЛЬНОМ
+// HKCU\Environment пробными значениями HmProbe* (уникальный хвост на прогон;
+// Path и чужие значения НЕ трогаем; за собой убираем в finally и ПРОВЕРЯЕМ это).
+// ===========================================================================
+(function registryBehaviorTests() {
+  console.log('== Реестр (поведение): HKCU\\Environment, пробные значения HmProbe* ==');
+  const REG_KEY = 'HKCU\\Environment';
+
+  function cutRegLayer(deps) {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const a = s.indexOf('const REG_KIND_TO_TYPE');
+    const b = s.indexOf('const WIN_REG_ALLOWED_KEYS');
+    assert(a > 0 && b > a, 'слой реестра найден в main.js (REG_KIND_TO_TYPE … WIN_REG_ALLOWED_KEYS)');
+    return new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'IS_WIN',
+      '"use strict";\n' + s.slice(a, b) +
+      '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };')(
+      deps.spawnSync, deps.remoteFetch, deps.detectSpawnEnv, deps.IS_WIN);
+  }
+
+  let LIVE = null;
+  const live = () => {
+    if (process.platform !== 'win32') SKIP('реестр Windows недоступен на ' + process.platform);
+    if (!LIVE) {
+      LIVE = cutRegLayer({
+        spawnSync,
+        remoteFetch: require(path.join(ROOT, 'src', 'remote-fetch.js')),
+        detectSpawnEnv: () => process.env,
+        IS_WIN: true,
+      });
+    }
+    return LIVE;
+  };
+  const rnd = crypto.randomBytes(5).toString('hex');
+  // Пробное значение живёт ТОЛЬКО внутри колбэка; уборка — в finally, и она
+  // ПРОВЕРЯЕТСЯ (иначе тест, намусоривший в HKCU, сам был бы дефектом).
+  const withProbe = (suffix, fn) => {
+    const L = live();
+    const name = 'HmProbe' + suffix + '_' + rnd;
+    try { fn(L, name); }
+    finally {
+      const del = L.regDeleteValueTyped(REG_KEY, name);
+      const gone = L.regQueryValueTyped(REG_KEY, name);
+      assert(gone && gone.ok === true && gone.found === false,
+        'уборка за собой: ' + name + ' удалён (del=' + JSON.stringify(del) + ', после=' + JSON.stringify(gone) + ')');
+    }
+  };
+
+  ok('реестр (поведение): кириллица переживает round-trip; fast-путь обязан совпадать с .NET', () => {
+    withProbe('Cyr', (L, name) => {
+      const data = 'C:\\Программы\\Проба (тест);D:\\Ещё Кириллица';
+      const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_SZ');
+      assert(w.ok === true, 'запись пробного REG_SZ: ' + JSON.stringify(w));
+      const dn = L.regQueryValueDotNet(REG_KEY, name);
+      assert(dn.ok && dn.found && dn.type === 'REG_SZ' && dn.data === data,
+        '.NET-путь вернул значение байт в байт: ' + JSON.stringify(dn));
+      const t = L.regQueryValueTyped(REG_KEY, name);
+      assert(t.ok && t.found && t.type === 'REG_SZ' && t.data === data,
+        'боевое чтение (fast→.NET) вернуло значение байт в байт — мохибейк «C:\\?????\\…» = ' +
+        'ровно тот дефект, что затирал чужие записи PATH: ' + JSON.stringify(t));
+      const f = L.regQueryFast(REG_KEY, name);
+      if (f) {
+        assert.deepStrictEqual(f, dn,
+          'fast-путь, когда берётся отвечать, обязан совпасть с авторитетным .NET');
+      }
+    });
+  });
+
+  ok('реестр (поведение): REG_EXPAND_SZ приходит СЫРЫМ — чужие %VAR% не раскрываются, тип сохранён', () => {
+    withProbe('Exp', (L, name) => {
+      const data = '%SystemRoot%\\HmProbe;%HMPROBE_NOT_SET%\\x';
+      const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_EXPAND_SZ');
+      assert(w.ok === true, 'запись пробного REG_EXPAND_SZ: ' + JSON.stringify(w));
+      for (const [label, r] of [
+        ['.NET', L.regQueryValueDotNet(REG_KEY, name)],
+        ['боевой', L.regQueryValueTyped(REG_KEY, name)],
+      ]) {
+        assert(r.ok && r.found, label + ': значение найдено: ' + JSON.stringify(r));
+        assert.strictEqual(r.type, 'REG_EXPAND_SZ', label + ': тип НЕ подменён (' + r.type + ')');
+        assert.strictEqual(r.data, data,
+          label + ': %VAR% остались литералами — раскрытие запекло бы чужие переменные при перезаписи PATH: ' + r.data);
+      }
+    });
+  });
+
+  ok('реестр (поведение): отсутствующее значение → found:false, а НЕ ошибка', () => {
+    const L = live();
+    const name = 'HmProbeMissing_' + rnd; // никогда не записывался
+    for (const [label, r] of [
+      ['боевой', L.regQueryValueTyped(REG_KEY, name)],
+      ['.NET', L.regQueryValueDotNet(REG_KEY, name)],
+    ]) {
+      assert.strictEqual(r.ok, true, label + ': отсутствие значения ≠ сбой (у вызывающих ошибка → failed, отсутствие → absent): ' + JSON.stringify(r));
+      assert.strictEqual(r.found, false, label + ': found:false: ' + JSON.stringify(r));
+    }
+  });
+
+  ok('реестр (поведение): запись/удаление в HKLM невозможны — отказ НАШ и ДО запуска PowerShell', () => {
+    // Подставные зависимости: считаем запуски. Отказ обязан случиться в НАШЕМ
+    // разборе ключа (только HKCU), а не прилететь ошибкой доступа от ОС — под
+    // админом «ошибки доступа» не будет, и мутация разбора открыла бы HKLM.
+    const calls = { spawn: 0 };
+    const L = cutRegLayer({
+      spawnSync: () => { calls.spawn++; return { status: 0, stdout: '' }; },
+      remoteFetch: { winPowershellPath: () => 'powershell.exe', sysBin: () => null },
+      detectSpawnEnv: () => ({}),
+      IS_WIN: true,
+    });
+    for (const [label, r] of [
+      ['запись HKLM', L.regWriteValueTyped('HKLM\\SOFTWARE\\HmProbe', 'HmProbeV', 'x', 'REG_SZ')],
+      ['удаление HKLM', L.regDeleteValueTyped('HKLM\\SOFTWARE\\HmProbe', 'HmProbeV')],
+      ['запись HKEY_LOCAL_MACHINE', L.regWriteValueTyped('HKEY_LOCAL_MACHINE\\SOFTWARE\\HmProbe', 'HmProbeV', 'x', 'REG_SZ')],
+    ]) {
+      assert.strictEqual(r.ok, false, label + ' обязана быть отвергнута: ' + JSON.stringify(r));
+      assert(/HKCU/.test(r.error || ''), label + ': отказ наш («только HKCU»), а не ошибка ОС: ' + (r.error || ''));
+    }
+    assert.strictEqual(calls.spawn, 0,
+      'отказ происходит ДО единственного возможного побочного эффекта (запуска PowerShell) — fail-closed');
+  });
+})();
 
 // P0-2: из деинсталлятора НЕ запускается user-writable uv.exe (под elevated =
 // admin-RCE). Тип цели 'uvtool' и вызовы `uv tool uninstall`/findUvBinary УДАЛЕНЫ;
@@ -3520,7 +3686,7 @@ ok('P0-2 (source): деинсталлятор НЕ запускает user-writa
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   // Строки «uv tool uninstall»/«findUvBinary» остаются лишь в поясняющих КОММЕНТАРИЯХ —
   // проверяем отсутствие в реальном коде (комментарии // и /* */ вырезаны).
-  const code = s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const code = s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
   assert(!/uv tool uninstall/.test(code), 'в КОДЕ нет запуска `uv tool uninstall`');
   assert(!/findUvBinary\s*\(/.test(s), 'findUvBinary не вызывается (только упоминание в комментарии)');
   assert(!/case 'uvtool'/.test(s), "тип цели 'uvtool' удалён из executeUninstallTarget");
@@ -4764,6 +4930,18 @@ ok('macOS: курс распаковывается ditto — unzip не пони
   }
 });
 
+// Текст sh-помощника самолечения — СОБРАННЫЙ ровно как в проде: eval массива
+// строк `const helper = [ … ].join(' ')` из main.js. JS-комментарии между
+// элементами исчезают при eval, поэтому «hdiutil detach» в комментарии текст
+// не засоряет, а результат байт в байт равен тому, что запускает spawn.
+function cutMacSelfhealHelper(m, from) {
+  const hi = m.indexOf('const helper = [', from || 0);
+  assert(hi !== -1, 'текст помощника (const helper = [) найден');
+  const hj = m.indexOf("].join(' ')", hi);
+  assert(hj > hi, 'конец текста помощника найден');
+  return new Function('return ' + m.slice(m.indexOf('[', hi), hj + "].join(' ')".length))();
+}
+
 ok('macOS: установщик чинит карантин САМ — кнопка, а не команда в Терминал', () => {
   const m = EG_MAIN();
   const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
@@ -4771,33 +4949,43 @@ ok('macOS: установщик чинит карантин САМ — кноп�
 
   const i = m.indexOf("ipcMain.handle('mac-selfheal'");
   assert(i !== -1, 'обработчик самолечения есть');
-  const h = m.slice(i, i + 3500);
-  assert(/process\.platform !== 'darwin'/.test(h), 'на не-macOS не срабатывает');
+  // Границей берём следующий обработчик, а не «плюс N символов»: обработчик рос,
+  // и фиксированное окно однажды перестало доставать до spawn помощника — тест
+  // покраснел на ровном месте, хотя код был верен.
+  const hEnd = m.indexOf("ipcMain.handle('mac-selfheal-status'", i);
+  const h = m.slice(i, hEnd > i ? hEnd : i + 6000);
+  // Токены ищем в КОДЕ обработчика (комментарии вырезаны): вокруг self-heal много
+  // пояснений, и токен, уехавший в комментарий, иначе продолжал бы «стеречь».
+  const hc = h.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert(/process\.platform !== 'darwin'/.test(hc), 'на не-macOS не срабатывает');
   // Всё через execFile с МАССИВОМ аргументов: путь к образу приходит из hdiutil/файловой
   // системы, и склейка в строку shell открыла бы инъекцию через имя файла.
-  assert(/'\/usr\/bin\/xattr'[\s\S]{0,80}'-dr', 'com\.apple\.quarantine'/.test(h), 'снимает карантин с образа');
+  assert(/'\/usr\/bin\/xattr'[\s\S]{0,80}'-dr', 'com\.apple\.quarantine'/.test(hc), 'снимает карантин с образа');
   // Факт, а не отсутствие исключения: раньше «Готово» писали, не проверив ничего,
   // и человек получал ровно тот же заблокированный установщик.
-  assert(/'-p', 'com\.apple\.quarantine'/.test(h), 'проверяет, что карантин ДЕЙСТВИТЕЛЬНО снят');
-  assert(/quarantine-not-cleared/.test(h), 'при неснятом карантине честно отвечает отказом');
+  assert(/'-p', 'com\.apple\.quarantine'/.test(hc), 'проверяет, что карантин ДЕЙСТВИТЕЛЬНО снят');
+  assert(/quarantine-not-cleared/.test(hc), 'при неснятом карантине честно отвечает отказом');
   // Отцеплять том, с которого сам же и запущен, из собственного процесса нельзя —
   // detach -force выдёргивает backing store и убивает установщик посреди починки.
-  assert(/detached:\s*true/.test(h) && /\.unref\(\)/.test(h),
+  assert(/detached:\s*true/.test(hc) && /\.unref\(\)/.test(hc),
     'хвост операции выполняет ОТЦЕПЛЁННЫЙ помощник, переживающий наш выход');
-  assert(!/execFileSync\([^)]*hdiutil[^)]*detach/.test(h),
+  assert(!/execFileSync\([^)]*hdiutil[^)]*detach/.test(hc),
     'сам процесс НЕ отцепляет том, с которого работает');
 
-  // Поведение помощника проверяем на его собственном тексте.
-  const hi = m.indexOf('const helper = [');
-  assert(hi > 0 && hi > i, 'текст помощника найден внутри обработчика');
-  const helperSrc = m.slice(hi, m.indexOf("].join(' ')", hi));
-  const helper = helperSrc.split('\n').filter((l) => !/^\s*\/\//.test(l)).join(' ');
-  assert(helper.indexOf('kill -0') < helper.indexOf('hdiutil detach'),
-    'помощник ждёт выхода установщика ДО отцепления тома');
-  assert(helper.indexOf('hdiutil detach') < helper.indexOf('open "$DMG"'),
-    'старые тома отцепляются ДО открытия образа — значит появившийся том заведомо свежий');
-  assert(/open -n -a/.test(helper),
-    'запуск через open -n: без него macOS активировала бы старый экземпляр вместо нового тома');
+  // Поведение помощника — на тексте, СОБРАННОМ ровно как в проде (eval массива:
+  // JS-комментарии исчезают сами, «токен в комментарии» стеречь нечего не может).
+  // Порядок — ТОЛЬКО через assertOrder: голый indexOf(a) < indexOf(b) при
+  // исчезнувшем «a» даёт -1 < x и молча зеленеет — ровно так этот тест пережил
+  // удаление ожидания выхода установщика (kill -0), то есть ядра правки.
+  const helper = cutMacSelfhealHelper(m, i);
+  assertOrder(helper, 'kill -0 "$PID"', 'hdiutil detach',
+    'помощник ЖДЁТ выхода установщика ДО отцепления тома (иначе наш замок единственного экземпляра закрывает свежий установщик)');
+  assertOrder(helper, 'hdiutil detach', 'hdiutil attach',
+    'старые тома отцепляются ДО монтирования образа');
+  assertOrder(helper, 'hdiutil attach', 'open -n -a',
+    'запуск идёт после монтирования — с заведомо свежего тома');
+  assert(/open -n -a "\$MP\//.test(helper),
+    'open -n и точка монтирования ИЗ ВЫВОДА attach: без -n macOS активировала бы старый экземпляр, а перебор /Volumes брал бы старый том');
 
   const fi = m.indexOf('function macFindOurDmg');
   const fh = m.slice(fi, fi + 1800);
@@ -4820,6 +5008,86 @@ ok('macOS: установщик чинит карантин САМ — кноп�
     'кнопка есть и в модалке, и в несмываемом баннере');
   assert(/window\.installer\.macSelfHeal\(\)/.test(a), 'кнопка вызывает самолечение');
   assert(/dmg-not-found/.test(a), 'если образа нет — человеку говорят скачать заново, а не молчат');
+});
+
+// Помощник самолечения — ПОВЕДЕНЧЕСКИ, настоящим sh. Текст помощника меняется
+// ТОЛЬКО механически (срезается префикс /usr/bin/, /Volumes/ уводится в
+// песочницу), hdiutil/open подменяются стабами на PATH, которые пишут вызовы в
+// лог; «установщик» — фоновый процесс, который перед смертью пишет маркер в тот
+// же лог. Если помощник НЕ ждёт выхода установщика (мутация: убрать kill -0),
+// detach попадает в лог РАНЬШЕ маркера — тест краснеет ПОВЕДЕНИЕМ, а не грепом.
+ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхода установщика → detach томов → attach → open -n изнутри свежего тома', () => {
+  const bash = (() => {
+    if (process.platform !== 'win32') return 'bash';
+    for (const c of ['C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe']) {
+      try { if (fs.existsSync(c)) return c; } catch (e) { /* */ }
+    }
+    return '';
+  })();
+  if (!bash) SKIP('bash недоступен — поведенческий прогон sh-помощника невозможен');
+
+  const helper = cutMacSelfhealHelper(EG_MAIN(), 0);
+  assert(helper.includes('/usr/bin/hdiutil') && helper.includes('/Volumes/'),
+    'ожидаемые якоря в тексте помощника (иначе механическая подстановка стала бы враньём)');
+
+  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-selfheal-'));
+  try {
+    const posix = (p) => String(p).replace(/\\/g, '/').replace(/^([A-Za-z]):\//, (q, d) => '/' + d.toLowerCase() + '/');
+    const SB = posix(sb);
+    fs.mkdirSync(path.join(sb, 'bin'), { recursive: true });
+    // Два «уже смонтированных» тома — помощник обязан отцепить ОБА до attach.
+    fs.mkdirSync(path.join(sb, 'Volumes', 'HamidunOld'), { recursive: true });
+    fs.mkdirSync(path.join(sb, 'Volumes', 'Hamidun Setup', 'Hamidun Setup.app'), { recursive: true });
+    fs.writeFileSync(path.join(sb, 'fake.dmg'), 'x');
+
+    // Стабы: пишут вызов в лог; attach отвечает как настоящий hdiutil —
+    // таблицей, где точка монтирования стоит В КОНЦЕ строки (её достаёт sed).
+    fs.writeFileSync(path.join(sb, 'bin', 'hdiutil'),
+      '#!/bin/sh\necho "hdiutil $*" >> "$HM_LOG"\n' +
+      'if [ "$1" = "attach" ]; then\n' +
+      '  echo "/dev/disk9          GUID_partition_scheme"\n' +
+      '  echo "/dev/disk9s1        Apple_HFS        ' + SB + '/Volumes/Hamidun Setup"\n' +
+      'fi\nexit 0\n');
+    fs.writeFileSync(path.join(sb, 'bin', 'open'),
+      '#!/bin/sh\necho "open $*" >> "$HM_LOG"\nexit 0\n');
+    for (const f of ['hdiutil', 'open']) {
+      try { fs.chmodSync(path.join(sb, 'bin', f), 0o755); } catch (e) { /* win */ }
+    }
+
+    // Механические подстановки (логика помощника НЕ меняется).
+    const patched = helper.split('/usr/bin/').join('').split('/Volumes/').join(SB + '/Volumes/');
+    fs.writeFileSync(path.join(sb, 'helper.sh'), patched + '\n');
+    fs.writeFileSync(path.join(sb, 'run.sh'),
+      'export PATH="' + SB + '/bin:$PATH"\n' +
+      'export HM_LOG="' + SB + '/log.txt"\n' +
+      ': > "$HM_LOG"\n' +
+      // «Установщик»: живёт ~0.9 c, перед смертью оставляет маркер в общем логе.
+      '( sleep 0.9; echo "INSTALLER-EXITED" >> "$HM_LOG" ) &\n' +
+      'INST=$!\n' +
+      'sh "' + SB + '/helper.sh" "' + SB + '/fake.dmg" "$INST" "' + SB + '/status.txt"\n' +
+      'echo "HELPER_RC=$?"\n');
+    const r = spawnSync(bash, [path.join(sb, 'run.sh')], { encoding: 'utf8', timeout: 120000 });
+    const out = (r.stdout || '') + (r.stderr || '');
+    assert(/HELPER_RC=0/.test(out), 'помощник завершился успехом: ' + out);
+
+    const lines = fs.readFileSync(path.join(sb, 'log.txt'), 'utf8').split(/\r?\n/).filter(Boolean);
+    const iExit = lines.indexOf('INSTALLER-EXITED');
+    const detaches = lines.map((l, n) => (/^hdiutil detach /.test(l) ? n : -1)).filter((n) => n >= 0);
+    const iAttach = lines.findIndex((l) => /^hdiutil attach /.test(l));
+    const iOpen = lines.findIndex((l) => /^open /.test(l));
+    assert(iExit !== -1, 'маркер выхода установщика есть в логе: ' + JSON.stringify(lines));
+    assert(detaches.length >= 2, 'отцеплены ОБА старых тома: ' + JSON.stringify(lines));
+    assert(detaches[0] > iExit,
+      'ЯДРО ПРАВКИ: detach только ПОСЛЕ выхода установщика (иначе замок единственного экземпляра закрывает свежий): ' + JSON.stringify(lines));
+    assert(iAttach > detaches[detaches.length - 1], 'attach после отцепления всех томов: ' + JSON.stringify(lines));
+    assert(iOpen > iAttach, 'open после attach: ' + JSON.stringify(lines));
+    assert(/-n -a/.test(lines[iOpen]) && lines[iOpen].includes('/Volumes/Hamidun Setup/Hamidun Setup.app'),
+      'open -n -a с приложением на точке монтирования ИЗ ВЫВОДА attach: ' + lines[iOpen]);
+    assert.strictEqual(fs.readFileSync(path.join(sb, 'status.txt'), 'utf8').trim(), 'ok',
+      'хлебная крошка статуса — «ok»');
+  } finally { try { fs.rmSync(sb, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
 });
 
 ok('прогресс: полоса в ПРОЦЕНТАХ по прогону, проценты настоящие', () => {
@@ -5018,11 +5286,40 @@ ok('extension.ps1: уборка vsix-темпа достижима перед К
   assertVsixCleanupReachable('extension.ps1', 'Remove-HmVsixTemp', 'hm-claude-code-');
 });
 
+// Наблюдатель за каталогом из ОТДЕЛЬНОГО node-процесса: spawnSync блокирует
+// event loop родителя, и короткоживущую копию vsix (создание → finally-уборка)
+// можно увидеть только сбоку (fs.watch + страховочный поллинг; совпавшие имена
+// дописываются в out-файл). Без доказательства «копия СОЗДАВАЛАСЬ» проверка
+// «в %TEMP% пусто» — пустая: мутация, отключившая создание копии вовсе
+// (а с ней и офлайн-путь установки), оставляла бы тест зелёным.
+function watchDirForPrefix(dir, prefix, outFile) {
+  const { spawn } = require('child_process');
+  fs.writeFileSync(outFile, '');
+  const child = spawn(process.execPath, ['-e',
+    'const fs=require("fs");const [dir,prefix,out]=process.argv.slice(1);' +
+    'const seen=new Set();' +
+    'const rec=(n)=>{if(n&&n.startsWith(prefix)&&!seen.has(n)){seen.add(n);try{fs.appendFileSync(out,n+"\\n")}catch(e){}}};' +
+    'const scan=()=>{try{fs.readdirSync(dir).forEach(rec)}catch(e){}};' +
+    'scan();try{fs.watch(dir,(ev,f)=>rec(f))}catch(e){}' +
+    'setInterval(scan,10);setTimeout(()=>process.exit(0),300000);',
+    dir, prefix, outFile], { stdio: 'ignore', windowsHide: true });
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  sleep(200); // node-наблюдатель успевает поднять fs.watch до старта PowerShell
+  return {
+    stop() {
+      sleep(60);
+      try { child.kill(); } catch (e) { /* */ }
+      try { return fs.readFileSync(outFile, 'utf8').split(/\r?\n/).filter(Boolean); }
+      catch (e) { return []; }
+    },
+  };
+}
+
 if (powershellAvailable()) {
   // Функциональный прогон ХВОСТА vscode.ps1 в БОЕВОМ PowerShell 5.1: успешный путь
   // «оба расширения уже на месте» (Get-Vsix копии УЖЕ созданы — они рождаются ДО проверки
   // «уже установлено», ровно как в проде при повторной установке) -> exit 0 И НОЛЬ hm-vsix-*.
-  ok('vscode.ps1 (прогон PS 5.1, sandbox): успешный exit 0 не оставляет hm-vsix-* в %TEMP%', () => {
+  ok('vscode.ps1 (прогон PS 5.1, sandbox): копии vsix СОЗДАВАЛИСЬ и успешный exit 0 не оставляет hm-vsix-* в %TEMP%', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-vsxclean-'));
     try {
       const sb = (p) => path.join(base, p);
@@ -5043,21 +5340,28 @@ if (powershellAvailable()) {
         USERPROFILE: sb('home'), HM_VENDOR: sb('vendor')
       });
       delete env.HM_DRY_RUN;
+      const w = watchDirForPrefix(sb('temp'), 'hm-vsix-', sb('watch.log'));
       const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\vscode.ps1') + "'"],
         { encoding: 'utf8', timeout: 120000, env });
+      const seen = w.stop();
       assert.strictEqual(r.status, 0, 'exit 0 (оба расширения «на месте»): ' + (r.stdout || '') + (r.stderr || ''));
-      assert(/уже на месте/.test(r.stdout || ''), 'прогон прошёл путь «уже установлено» (копии в %TEMP% создавались)');
+      assert(/уже на месте/.test(r.stdout || ''), 'прогон прошёл путь «уже установлено»');
+      // Факт создания, а не догадка по маршруту: обе копии видел наблюдатель.
+      assert(seen.length >= 2,
+        'копии vsix (claude-code + chatgpt) реально СОЗДАВАЛИСЬ во время прогона, видели: ' + JSON.stringify(seen));
       const left = fs.readdirSync(sb('temp')).filter((n) => n.startsWith('hm-vsix-'));
       assert.strictEqual(left.length, 0, 'hm-vsix-* убраны на успешном пути: ' + left.join(', '));
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 
-  ok('extension.ps1 (прогон PS 5.1, sandbox): выход «Cursor не установлен» не оставляет hm-claude-code-* в %TEMP%', () => {
-    // Guard: при живом пользовательском Cursor скрипт ждёт 20 с и в конце может его закрыть —
-    // на машине разработчика такой прогон непозволителен, честно пропускаем.
+  ok('extension.ps1 (прогон PS 5.1, sandbox): копия vsix СОЗДАВАЛАСЬ; выход «Cursor не установлен» не оставляет hm-claude-code-* в %TEMP%', () => {
+    // Guard осмысленный и ОСТАЁТСЯ: при живом пользовательском Cursor скрипт ждёт 20 с
+    // и в конце может его закрыть — на машине разработчика такой прогон непозволителен.
+    // Но пропуск теперь ЧЕСТНЫЙ (⏭, не ✅): раньше тест печатал зелёную галочку и на
+    // машине разработчика с запущенным Cursor не стерёг ВООБЩЕ ничего.
     const t = spawnSync('tasklist', ['/FI', 'IMAGENAME eq Cursor.exe', '/NH'], { encoding: 'utf8', timeout: 15000 });
-    if (/Cursor\.exe/i.test(t.stdout || '')) { console.log('     (пропуск: Cursor запущен — прогон небезопасен)'); return; }
+    if (/Cursor\.exe/i.test(t.stdout || '')) SKIP('Cursor запущен — прогон extension.ps1 небезопасен (ждёт 20 с и может закрыть Cursor)');
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-extclean-'));
     try {
       const sb = (p) => path.join(base, p);
@@ -5074,10 +5378,16 @@ if (powershellAvailable()) {
         USERPROFILE: sb('home'), HM_VENDOR: sb('vendor')
       });
       delete env.HM_DRY_RUN; delete env.HM_CURSOR_AUTOSTARTED; delete env.HM_CLAUDE_EXT_ID;
+      const w = watchDirForPrefix(sb('temp'), 'hm-claude-code-', sb('watch.log'));
       const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\extension.ps1') + "'"],
         { encoding: 'utf8', timeout: 120000, env });
+      const seen = w.stop();
       assert.strictEqual(r.status, 0, 'exit 0 («Cursor не установлен — пропускаю»): ' + (r.stdout || '') + (r.stderr || ''));
+      // Раньше тест проверял только «в конце пусто» — это выполнялось и когда копия
+      // НЕ создавалась вовсе. Теперь факт создания доказан наблюдателем.
+      assert(seen.length >= 1,
+        'копия vsix реально СОЗДАВАЛАСЬ во время прогона (наблюдатель видел hm-claude-code-*): ' + JSON.stringify(seen));
       const left = fs.readdirSync(sb('temp')).filter((n) => n.startsWith('hm-claude-code-'));
       assert.strictEqual(left.length, 0, 'hm-claude-code-* убраны: ' + left.join(', '));
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
@@ -5120,7 +5430,9 @@ if (powershellAvailable()) {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldrun-'));
     try {
       // Фейковый npm-prefix: рабочий и сломанный claude.cmd + пакет в node_modules.
-      const good = path.join(base, 'good'); const bad = path.join(base, 'bad');
+      // Сломанный лежит в САНДБОКСНОМ %APPDATA%\npm: после ревью-фикса Remove-HmBrokenClaude
+      // удаляет СТРОГО по аллоулисту наших мест установки (см. блок тестов в конце файла).
+      const good = path.join(base, 'good'); const bad = path.join(base, 'appdata', 'npm');
       fs.mkdirSync(path.join(good), { recursive: true });
       fs.mkdirSync(path.join(bad, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
       fs.writeFileSync(path.join(good, 'claude.cmd'), '@echo 2.1.0\r\n@exit /b 0\r\n');
@@ -5135,14 +5447,16 @@ if (powershellAvailable()) {
         '  $c = $LASTEXITCODE; if ($null -eq $c) { $c = 0 }\r\n' +
         "  [pscustomobject]@{ Gate = 'medium'; Code = $c }\r\n" +
         '}\r\n' +
-        fn('Test-HmClaudeRuns') + '\r\n' + fn('Remove-HmBrokenClaude') + '\r\n' +
+        fn('Test-HmClaudeRuns') + '\r\n' + fn('Test-HmOurClaudeDir') + '\r\n' + fn('Remove-HmBrokenClaude') + '\r\n' +
         "if ($Mode -eq 'probe') { Write-Output (Test-HmClaudeRuns $Bin) }\r\n" +
         "if ($Mode -eq 'clean') { Remove-HmBrokenClaude $Bin }\r\n";
       const hFile = path.join(base, 'harness.ps1');
       fs.writeFileSync(hFile, harness);
+      // APPDATA указывает в песочницу: уборка разрешена только в НАШИХ каталогах.
       const run = (bin, mode) => spawnSync('powershell.exe',
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', hFile, bin, mode],
-        { encoding: 'utf8', timeout: 60000 });
+        { encoding: 'utf8', timeout: 60000,
+          env: Object.assign({}, process.env, { APPDATA: path.join(base, 'appdata') }) });
       const probeGood = (run(path.join(good, 'claude.cmd'), 'probe').stdout || '').trim();
       assert.strictEqual(probeGood, 'works', 'рабочий claude.cmd -> works: ' + probeGood);
       const probeBad = (run(path.join(bad, 'claude.cmd'), 'probe').stdout || '').trim();
@@ -5226,7 +5540,7 @@ if (powershellAvailable()) {
 }
 
 asyncTests().then(() => {
-  console.log(`\nИТОГ: ${pass} прошло, ${fail} упало`);
+  console.log(`\nИТОГ: ${pass} прошло, ${fail} упало` + (skipped ? `, ${skipped} пропущено (⏭ НЕ выполнялись)` : ''));
   process.exit(fail ? 1 : 0);
 }).catch((e) => { console.error('FATAL async tests:', e); process.exit(1); });
 
@@ -5612,7 +5926,7 @@ asyncTests().then(() => {
   const HAVE_PS51 = IS_WIN_HERE && fs.existsSync(PS51);
 
   ok('_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)', () => {
-    if (!IS_WIN_HERE) { console.log('     (не Windows — парс PS 5.1 недоступен, пропуск)'); return; }
+    if (!IS_WIN_HERE) SKIP('не Windows — парс PS 5.1 недоступен');
     assert(HAVE_PS51, 'нет ' + PS51);
     const f = path.join(os.tmpdir(), 'hm-parse-' + Date.now() + '.ps1');
     fs.writeFileSync(f,
@@ -5647,7 +5961,7 @@ asyncTests().then(() => {
   });
 
   ok('_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe', () => {
-    if (!HAVE_PS51) { console.log('     (не Windows — пропуск)'); return; }
+    if (!HAVE_PS51) SKIP('не Windows / нет PowerShell 5.1');
     const f = path.join(os.tmpdir(), 'hm-orphan-pred-' + Date.now() + '.ps1');
     fs.writeFileSync(f,
       ". '" + DEELEV_PATH.replace(/'/g, "''") + "' | Out-Null\n" +
@@ -5691,7 +6005,29 @@ asyncTests().then(() => {
   });
 
   ok('_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы', () => {
-    if (!HAVE_PS51) { console.log('     (не Windows — пропуск)'); return; }
+    if (!HAVE_PS51) SKIP('не Windows / нет PowerShell 5.1 — реальный планировщик недоступен');
+    // ГЕРМЕТИЧНОСТЬ. Префикс Hm(DeElev|Launch)_ зашит в предикат Test-HmTaskIsOrphan —
+    // «свой уникальный префикс на прогон» невозможен без правки исходников. Поэтому:
+    // если в планировщике УЖЕ есть задачи с этим префиксом (параллельный прогон тестов,
+    // живой установщик или сироты прежних падений) — тест ЧЕСТНО пропускается: чужая
+    // уборка снесла бы нашу «исключённую» задачу (after1 ждёт её живой), а наша — чужие
+    // свежесозданные «старые». Перечисляем ТЕМ ЖЕ способом, что и уборка (COM,
+    // GetTasks(1) — скрытые видны), а не schtasks, который прячет Hidden-задачи.
+    {
+      const probe = path.join(os.tmpdir(), 'hm-orphan-probe-' + Date.now() + '.ps1');
+      fs.writeFileSync(probe,
+        "$svc = New-Object -ComObject 'Schedule.Service'; $svc.Connect()\n" +
+        "$names = @($svc.GetFolder('\\').GetTasks(1) | ForEach-Object { $_.Name }) -match '^Hm(DeElev|Launch)_'\n" +
+        "Write-Host ('FOREIGN=' + ($names -join ','))\n");
+      let foreign = '';
+      try {
+        const pr = runPsFile(probe);
+        const mm = pr.out.match(/^FOREIGN=(.*)$/m);
+        assert(mm, 'перечисление задач планировщика отработало: ' + pr.out);
+        foreign = mm[1].trim();
+      } finally { fs.rmSync(probe, { force: true }); }
+      if (foreign) SKIP('в планировщике уже есть Hm*-задачи (параллельный прогон/установщик/сироты): ' + foreign);
+    }
     const f = path.join(os.tmpdir(), 'hm-orphan-integ-' + Date.now() + '.ps1');
     fs.writeFileSync(f, [
       "$ErrorActionPreference = 'Continue'",
@@ -5756,29 +6092,87 @@ asyncTests().then(() => {
 // ===========================================================================
 (function secondSwarmFixes() {
   const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  const codeOf = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  // ПОРЯДОК ВАЖЕН: сначала строчные //, потом блочные /* */. Иначе «/*» из ТЕКСТА
+  // строчного комментария (в main.js есть `// … scripts/*/nomad.*`) спаривается с
+  // далёким «*/» и съедает килобайты НАСТОЯЩЕГО кода — проверки по code дают ложь
+  // в обе стороны (проверено: пропадал регион с encoding:'ascii' и слоем реестра).
+  const codeOf = (s) => s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
 
   // reg.exe печатает данные И диагностику в кодовой странице консоли (CP866 на
   // русской Windows). Node читал трубу как UTF-8: «C:\Программы\Python» после
   // нашей перезаписи PATH навсегда становилось «C:\?????\Python», а удаление
   // скрепки/моста ВСЕГДА рапортовало провал (русское «не удалось найти» не
   // совпадало ни с одной веткой распознавания).
-  ok('реестр: ни одного чтения через консольный вывод reg.exe', () => {
-    const code = codeOf(MAIN());
-    assert(!/sysBin\('reg\.exe'\)/.test(code), 'reg.exe в коде не используется');
-    assert(!/'add', 'HKCU/.test(code), 'запись реестра не через reg add');
+  // Правило изменилось и это осознанно: reg.exe вернулся, потому что беда была НЕ
+  // в нём, а в чтении его вывода как UTF-8. Полный отказ от reg.exe стоил ×27
+  // скорости (31 мс → 830 мс) на СИНХРОННОМ вызове в главном процессе — окно
+  // уходило в «не отвечает» на секунды при каждом запуске и удалении.
+  // Теперь инвариант такой: читать reg.exe можно, декодировать его вывод как
+  // UTF-8 — нельзя; писать в реестр консольным reg.exe — нельзя.
+  ok('реестр: вывод reg.exe декодируется кодовой страницей, а не как UTF-8', () => {
+    const s = MAIN();
+    const code = codeOf(s);
+    assert(!/'add', 'HKCU/.test(code), 'запись реестра НЕ через reg add');
+    assert(/consoleCodePage\(/.test(code) && /TextDecoder\(/.test(code),
+      'кодовая страница консоли определяется и используется для декодирования');
+    // Ни один вызов reg.exe не смеет читаться как текст в UTF-8.
+    const fast = s.slice(s.indexOf('function regQueryFast'), s.indexOf('function regQueryValueTyped'));
+    assert(fast.length > 100, 'быстрый путь найден');
+    assert(!/encoding:\s*'utf8'/.test(fast), 'вывод reg.exe НЕ читается как UTF-8');
+    assert(/dec\.decode\(/.test(fast), 'вывод декодируется реальной кодовой страницей');
+    assert(/return null/.test(fast), 'в сомнительных случаях быстрый путь уступает авторитетному');
   });
 
+  // Быстрый и авторитетный пути обязаны давать ОДИНАКОВЫЙ результат на трудном
+  // значении, иначе однажды разойдутся именно на кириллице.
+  if (process.platform === 'win32') {
+    ok('реестр (прогон): быстрый и .NET-путь согласованы на кириллице и %VAR%', () => {
+      const s = MAIN();
+      const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
+      const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+      const env = () => {
+        const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+        return Object.assign({}, process.env, { PATH: s32, Path: s32 });
+      };
+      const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
+        body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
+      )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+
+      const KEY = 'HKCU\\Environment';
+      const NAME = 'HmProbeSuite' + Date.now();
+      const VAL = 'C:\\Программы\\Python;C:\\Users\\Жемал\\bin;%SystemRoot%\\System32';
+      try {
+        assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_EXPAND_SZ').ok, 'пробное значение записано');
+        const fast = M.regQueryFast(KEY, NAME);
+        const slow = M.regQueryValueDotNet(KEY, NAME);
+        assert(fast && fast.data === VAL, 'быстрый путь: байт в байт (' + (fast && fast.data) + ')');
+        assert(slow.ok && slow.data === VAL, 'авторитетный путь: байт в байт');
+        assert(fast.type === 'REG_EXPAND_SZ' && slow.type === 'REG_EXPAND_SZ', 'тип сохранён обоими');
+        assert(VAL.indexOf('%SystemRoot%') >= 0 && fast.data.indexOf('%SystemRoot%') >= 0,
+          '%VAR% не раскрыт — чужие переменные не запекаются в литералы');
+        // Отсутствующее значение — не ошибка, а честный found:false.
+        const miss = M.regQueryValueTyped(KEY, NAME + '_nope');
+        assert(miss.ok === true && miss.found === false, 'отсутствующее значение: found=false');
+        assert(M.regQueryFast(KEY, NAME + '_nope') === null, 'быстрый путь не судит об отсутствии');
+        assert(M.regWriteValueTyped('HKLM\\SYSTEM\\X', 'Y', 'z', 'REG_SZ').ok === false, 'запись в HKLM невозможна');
+      } finally {
+        try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой в любом случае */ }
+      }
+    });
+  }
+
   ok('реестр: значение едет base64 — кодировка консоли не участвует', () => {
-    const s = MAIN();
+    // По коду БЕЗ комментариев: токен, уехавший в комментарий, не страж.
+    const s = codeOf(MAIN());
     assert(/HMREG1:/.test(s), 'маркер ответа');
     assert(/ToBase64String/.test(s) && /FromBase64String/.test(s), 'base64 в обе стороны');
     assert(/encoding: 'ascii'/.test(s), 'ответ читается как ASCII — мохибейку неоткуда взяться');
   });
 
   ok('реестр: запись разрешена ТОЛЬКО в HKCU, чтение — HKCU и HKLM', () => {
-    const s = MAIN();
+    const s = codeOf(MAIN());
     const w = s.slice(s.indexOf('function regWriteValueTyped'), s.indexOf('function regDeleteValueTyped'));
+    assert(w.length > 50, 'тело regWriteValueTyped найдено');
     assert(/hkcuSubkeyOf/.test(w), 'запись идёт через HKCU-только разбор');
     assert(!/regPathParts/.test(w), 'запись НЕ использует общий разбор (иначе открылся бы HKLM)');
     const q = s.slice(s.indexOf('function regQueryValueTyped'), s.indexOf('function regWriteValueTyped'));
@@ -5845,11 +6239,14 @@ asyncTests().then(() => {
   });
 
   ok('main.js вызывает восстановление осиротевших маркеров при старте', () => {
-    const s = MAIN();
-    assert(/recoverOrphanTombstones\(/.test(s), 'вызов есть');
+    // По коду БЕЗ комментариев: раньше тест читал исходник целиком, и
+    // ЗАКОММЕНТИРОВАННЫЙ вызов (// receipts.recoverOrphanTombstones(...))
+    // проходил проверку — «восстановление есть», хотя на старте не звалось ничего.
+    const s = codeOf(MAIN());
     const call = s.indexOf('receipts.recoverOrphanTombstones(');
+    assert(call !== -1, 'вызов есть В КОДЕ (не в комментарии)');
     const ready = s.indexOf('app.whenReady()');
-    assert(call > ready, 'вызывается после готовности приложения');
+    assert(ready !== -1 && call > ready, 'вызывается после готовности приложения');
   });
 
   // На macOS приложение стартует ИЗ ОБРАЗА, и имя скачанного файла до него не
@@ -5911,3 +6308,269 @@ asyncTests().then(() => {
     assert(enc < dot, 'кодировка выставляется ДО дот-сорса примитива');
   });
 })();
+
+// ===========================================================================
+// Агент fix-staging-cleanup: уборка двухуровневого staging обязана сносить
+// ВНЕШНИЙ запертый HmDeElev-<hex>, а не только рабочий подкаталог `w` (иначе
+// %ProgramData% зарастает Admins-only пустышками, которые пользователь стереть
+// не может — на боевой машине их скопились сотни). Плюс регрессия-страж задачи 2:
+// мёртвый classifyRegQuery не воскресает.
+// ===========================================================================
+(function stagingCleanupTests() {
+  console.log('== Staging-уборка: сносится ВНЕШНИЙ HmDeElev-<hex> (не подкаталог w), fail-closed по имени ==');
+
+  const DEELEV_STAGE = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), 'utf8');
+
+  // Статика: единый помощник существует (по образцу stagingRootOf из main.js),
+  // поднимается от `w` к родителю, стережёт имя шаблоном HmDeElev-<32 hex>
+  // (fail-closed: код работает под админом — ошибка вычисления пути не должна
+  // удалить чужой каталог), и ВСЕ сносы staging в _deelev.ps1 идут через него.
+  ok('_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)', () => {
+    const s = DEELEV_STAGE();
+    const i = s.indexOf('function Remove-HmSecureStagingDir');
+    assert(i !== -1, 'помощник Remove-HmSecureStagingDir определён');
+    const body = s.slice(i, i + 1400);
+    assert(/-eq 'w'/.test(body) && /GetDirectoryName/.test(body),
+      'помощник поднимается от рабочего подкаталога w к родителю (образец stagingRootOf)');
+    assert(/HmDeElev-\[0-9a-f\]\{32\}/.test(body),
+      'удаляется ТОЛЬКО каталог с именем HmDeElev-<32 hex> (шаблон pruneStaleSecureDirs)');
+    assert(/-notmatch '\^HmDeElev-\[0-9a-f\]\{32\}\$'/.test(body), 'fail-closed гейт по имени присутствует');
+    assertOrder(body, "-notmatch '^HmDeElev-", 'Remove-Item -LiteralPath $root',
+      'проверка имени стоит ДО удаления (fail-closed, не после)');
+    // Дефект был именно здесь: finally Invoke-HmDeElevated удалял $dir (= подкаталог w),
+    // внешний запертый каталог оставался в %ProgramData% навсегда.
+    assert(/if \(\$dir\)\s+\{ Remove-HmSecureStagingDir -Path \$dir \}/.test(s),
+      'finally Invoke-HmDeElevated чистит через помощник');
+    assert(!/Remove-Item -LiteralPath \$dir\b/.test(s),
+      'голых Remove-Item по $dir не осталось — все сносы staging только через помощник');
+  });
+
+  // Функционал в БОЕВОМ Windows PowerShell 5.1 (полный путь, не pwsh): помощнику
+  // отдают путь РАБОЧЕГО подкаталога — исчезнуть обязан ВНЕШНИЙ каталог целиком;
+  // каталог с посторонним именем (та же структура …\w) остаётся цел (fail-closed).
+  if (powershellAvailable()) {
+    ok('PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)', () => {
+      const dot = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-stage-'));
+      try {
+        const hex = crypto.randomBytes(16).toString('hex'); // 32 hex — как guid N
+        const outer = path.join(base, 'HmDeElev-' + hex);
+        const work = path.join(outer, 'w');
+        fs.mkdirSync(work, { recursive: true });
+        fs.writeFileSync(path.join(work, 'task.xml'), 'x'); // непустой — как в бою
+        const alien = path.join(base, 'NotMine-' + hex);    // структура та же, имя чужое
+        fs.mkdirSync(path.join(alien, 'w'), { recursive: true });
+        const psExe = path.join(process.env.SystemRoot || 'C:\\Windows',
+          'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        const cmd = ". '" + dot + "';" +
+          "Remove-HmSecureStagingDir -Path '" + work + "';" +
+          "Remove-HmSecureStagingDir -Path '" + path.join(alien, 'w') + "';" +
+          "Write-Output ('OUTER=' + (Test-Path -LiteralPath '" + outer + "'));" +
+          "Write-Output ('ALIEN=' + (Test-Path -LiteralPath '" + alien + "'))";
+        const r = spawnSync(psExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+          { encoding: 'utf8', timeout: 120000 });
+        const out = (r.stdout || '');
+        assert(/OUTER=False/.test(out),
+          'ВНЕШНИЙ каталог исчез целиком (не только w): ' + out.trim() + ' ' + (r.stderr || '').trim().slice(0, 200));
+        assert(/ALIEN=True/.test(out), 'постороннее имя НЕ тронуто (fail-closed): ' + out.trim());
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+  }
+
+  // Задача 2: classifyRegQuery / REG_NOTFOUND_RE / REG_DENIED_RE удалены — main.js
+  // читает реестр сам (.NET Registry через winPsPayload), вызовов в репозитории нет.
+  // Живые экспорты (launchctl-классификаторы, verifyPostconditions) — на месте.
+  ok('uninstall-exec.js: мёртвый classifyRegQuery не воскрес; живые экспорты целы', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'uninstall-exec.js'), 'utf8');
+    assert(!/function classifyRegQuery/.test(s), 'функция classifyRegQuery не вернулась');
+    assert(!/REG_NOTFOUND_RE\s*=|REG_DENIED_RE\s*=/.test(s), 'мёртвые регэкспы не вернулись');
+    assert(typeof uxMod.classifyRegQuery === 'undefined', 'экспорт classifyRegQuery снят');
+    assert(typeof uxMod.classifyLaunchctlPrint === 'function' &&
+      typeof uxMod.launchctlRemoveError === 'function', 'живые launchctl-классификаторы на месте');
+    assert(typeof uxMod.verifyPostconditions === 'function', 'verifyPostconditions жив');
+  });
+})();
+
+// ===========================================================================
+// claude.ps1 — ревью-фиксы «проверки запуском» (агент fix-claude-probe):
+//   ДЕФЕКТ 1: служебные статусы «Last Result» планировщика (SCHED_S_*, 0x41300..0x41308,
+//             0x41325) читались как код возврата claude -> рабочий CLI сносился
+//             Remove-HmBrokenClaude и шаг краснел на ровном месте;
+//   ДЕФЕКТ 2: Remove-HmBrokenClaude (elevated!) удалял по произвольному найденному пути
+//             -> мог снести чужой claude (свой npm prefix / volta).
+// Функции режутся из БОЕВОГО claude.ps1 и гоняются в Windows PowerShell 5.1; мутационные
+// прогоны доказывают, что тесты КРАСНЕЮТ при возврате каждого дефекта.
+// ===========================================================================
+(function claudeProbeReviewTests() {
+  console.log('== claude.ps1: сентинелы планировщика != код claude; уборка строго по аллоулисту ==');
+
+  const SENTINELS = [267008, 267009, 267010, 267011, 267012, 267013, 267014, 267015, 267016, 267045];
+
+  ok('структура: сентинел-гейт ДО вердикта broken; уборка зовётся только при broken; чужой сломанный claude на финале -> unverified', () => {
+    const s = CLD_PS1();
+    // Дефект 1: полный список SCHED_S_* в Test-HmClaudeRuns, исход — 'unverified'.
+    const fnM = s.match(/function Test-HmClaudeRuns[\s\S]*?\r?\n\}/);
+    assert(fnM, 'Test-HmClaudeRuns на месте');
+    SENTINELS.forEach((c) => assert(fnM[0].includes(String(c)), 'сентинел ' + c + ' учтён'));
+    // Второй якорь — ФИНАЛЬНЫЙ `return 'broken'` (с новой строки), а не ранний
+    // `if (-not $bin) { return 'broken' }` в первой строке функции.
+    assertOrder(fnM[0], "-contains $r.Code) { return 'unverified' }", "\n    return 'broken'",
+      'сентинелы дают unverified РАНЬШЕ вердикта broken');
+    // Дефект 2: аллоулист объявлен (зеркало macos/claude.sh) и удаление им гейтится.
+    assert(/function Test-HmOurClaudeDir/.test(s), 'аллоулист наших каталогов объявлен');
+    assert(/Join-Path \$env:USERPROFILE '\.local\\bin'/.test(s) && /Join-Path \$env:APPDATA 'npm'/.test(s),
+      'в аллоулисте ровно наши места: ~/.local\\bin и %APPDATA%\\npm');
+    const rmM = s.match(/function Remove-HmBrokenClaude[\s\S]*?\r?\n\}/);
+    assert(rmM, 'Remove-HmBrokenClaude на месте');
+    assertOrder(rmM[0], 'Test-HmOurClaudeDir', 'Remove-Item', 'проверка аллоулиста стоит ДО первого Remove-Item');
+    // КАЖДЫЙ вызов уборки — только под вердиктом broken ('unverified' ничего не сносит).
+    const rx = /Remove-HmBrokenClaude \$/g; let m; let calls = 0;
+    while ((m = rx.exec(s)) !== null) {
+      calls++;
+      assert(s.lastIndexOf("($probe -eq 'broken')", m.index) > m.index - 700,
+        'вызов уборки (смещение ' + m.index + ') не под вердиктом broken');
+    }
+    assert(calls >= 1, 'вызов уборки в офлайн-ветке на месте');
+    // Финал: сломанный ЧУЖОЙ claude не краснит шаг и не трогается — путь «не подтвердили».
+    assert(/-eq 'broken' -and -not \(Test-HmOurClaudeDir \(Split-Path \$claudeBin\)\)/.test(s),
+      'финальный вердикт различает наш/чужой каталог');
+    assertOrder(s, '-not (Test-HmOurClaudeDir (Split-Path $claudeBin))', "$probe = 'unverified'",
+      'чужой сломанный claude понижается до unverified, а не exit 1');
+  });
+
+  if (!powershellAvailable()) return;
+
+  // Гарнесс: РЕАЛЬНЫЕ функции из claude.ps1; де-элевация подставная — Gate/Code из env
+  // (HM_T_GATE/HM_T_CODE), чтобы прогнать в т.ч. значения, которых живой бинарь не даст.
+  const cutFn = (src, name) => {
+    const m = src.match(new RegExp('function ' + name + '[\\s\\S]*?\\r?\\n\\}'));
+    assert(m, name + ' извлекается из claude.ps1');
+    return m[0];
+  };
+  const mkHarness = (dir, fns) => {
+    const harness = '\uFEFF' +
+      'param([string]$Bin, [string]$Mode)\r\n' +
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+      'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+      "  if ($env:HM_T_GATE -eq 'null') { return $null }\r\n" +
+      '  [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE }\r\n' +
+      '}\r\n' +
+      fns.join('\r\n') + '\r\n' +
+      "if ($Mode -eq 'probe') { Write-Output (Test-HmClaudeRuns $Bin) }\r\n" +
+      "if ($Mode -eq 'clean') { Write-Output (Remove-HmBrokenClaude $Bin) }\r\n";
+    const hFile = path.join(dir, 'review-harness.ps1');
+    fs.writeFileSync(hFile, harness);
+    return hFile;
+  };
+  const runPs = (hFile, bin, mode, envAdd) => spawnSync('powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', hFile, bin, mode],
+    { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, envAdd) });
+
+  ok('ДЕФЕКТ 1 (прогон PS 5.1): каждый сентинел планировщика -> unverified (НЕ broken); 0 -> works; 1 -> broken; мутант без гейта пойман', () => {
+    const src = CLD_PS1();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldsent-'));
+    try {
+      const hFile = mkHarness(base, [cutFn(src, 'Test-HmClaudeRuns')]);
+      const probe = (file, code) => (runPs(file, 'C:\\fake\\claude.cmd', 'probe',
+        { HM_T_GATE: 'medium', HM_T_CODE: String(code) }).stdout || '').trim();
+      SENTINELS.forEach((c) => {
+        assert.strictEqual(probe(hFile, c), 'unverified',
+          'Last Result ' + c + ' — статус ЗАДАЧИ, не код claude: удалять нечего');
+      });
+      assert.strictEqual(probe(hFile, 0), 'works', 'настоящий exit 0 -> works');
+      assert.strictEqual(probe(hFile, 1), 'broken', 'настоящий exit 1 -> broken (доказанный отказ запуска)');
+      const rNull = (runPs(hFile, 'C:\\fake\\claude.cmd', 'probe', { HM_T_GATE: 'null', HM_T_CODE: '0' }).stdout || '').trim();
+      assert.strictEqual(rNull, 'unverified', 'де-элевация не отчиталась -> unverified (регрессии нет)');
+      // МУТАЦИЯ (возврат дефекта 1): убираем сентинел-гейт — 267014 обязан стать broken,
+      // иначе ассерты выше ничего не сторожат.
+      const fnSrc = cutFn(src, 'Test-HmClaudeRuns');
+      const mutant = fnSrc.split(/\r?\n/).filter((l) => !/-contains \$r\.Code\)/.test(l)).join('\r\n');
+      assert(mutant !== fnSrc, 'мутация применилась (гейт найден и вырезан)');
+      const hMut = path.join(base, 'mutant-probe.ps1');
+      fs.writeFileSync(hMut, fs.readFileSync(hFile, 'utf8').replace(fnSrc, () => mutant));
+      assert.strictEqual(probe(hMut, 267014), 'broken',
+        'дефектная версия даёт broken на 267014 — тест различает фикс и дефект');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ДЕФЕКТ 2 (прогон PS 5.1): чужой claude вне наших каталогов НЕ удаляется; наш (%APPDATA%\\npm, ~/.local\\bin) — удаляется как раньше; мутант без аллоулиста пойман', () => {
+    const src = CLD_PS1();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cldrm-'));
+    try {
+      const home = path.join(base, 'home'); const appdata = path.join(base, 'appdata');
+      const ourNpm = path.join(appdata, 'npm'); const ourLocal = path.join(home, '.local', 'bin');
+      const foreign = path.join(base, 'volta', 'bin');   // «свой npm prefix / volta» пользователя
+      fs.mkdirSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
+      fs.mkdirSync(ourLocal, { recursive: true });
+      fs.mkdirSync(foreign, { recursive: true });
+      fs.writeFileSync(path.join(ourNpm, 'claude.cmd'), '@exit /b 1\r\n');
+      fs.writeFileSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code', 'package.json'), '{}');
+      fs.writeFileSync(path.join(ourLocal, 'claude.exe'), 'x');
+      fs.writeFileSync(path.join(foreign, 'claude.cmd'), '@echo user claude\r\n');
+      const hFile = mkHarness(base, [cutFn(src, 'Test-HmOurClaudeDir'), cutFn(src, 'Remove-HmBrokenClaude')]);
+      const envSb = { USERPROFILE: home, APPDATA: appdata, HM_T_GATE: 'medium', HM_T_CODE: '1' };
+      // 1) ЧУЖОЙ каталог: честный отказ, файл ЖИВ (elevated-скрипт не сносит чужой claude).
+      const r1 = runPs(hFile, path.join(foreign, 'claude.cmd'), 'clean', envSb);
+      assert(/False/.test(r1.stdout || ''), 'уборка вернула $false (отказ): ' + (r1.stdout || '') + (r1.stderr || ''));
+      assert(/не трогаю/.test(r1.stdout || ''), 'человеку сказано, ПОЧЕМУ не тронули');
+      assert(fs.existsSync(path.join(foreign, 'claude.cmd')), 'чужой claude ЖИВ');
+      // 2) НАШ npm-prefix: шим и пакет снесены (регрессии нет).
+      const r2 = runPs(hFile, path.join(ourNpm, 'claude.cmd'), 'clean', envSb);
+      assert(/True/.test(r2.stdout || ''), 'наш артефакт убран: ' + (r2.stdout || '') + (r2.stderr || ''));
+      assert(!fs.existsSync(path.join(ourNpm, 'claude.cmd')), 'сломанный шим удалён');
+      assert(!fs.existsSync(path.join(ourNpm, 'node_modules', '@anthropic-ai', 'claude-code')),
+        'пакет @anthropic-ai/claude-code удалён (иначе перехватит PATH после онлайн-установки)');
+      // 3) НАШ ~/.local\bin (нативный установщик): снесён.
+      runPs(hFile, path.join(ourLocal, 'claude.exe'), 'clean', envSb);
+      assert(!fs.existsSync(path.join(ourLocal, 'claude.exe')), 'наш claude.exe из ~/.local/bin удалён');
+      // МУТАЦИЯ (возврат дефекта 2): вырезаем аллоулист-гейт — чужой файл обязан быть
+      // снесён дефектной версией, иначе ассерт «чужой ЖИВ» ничего не сторожит.
+      const rmSrc = cutFn(src, 'Remove-HmBrokenClaude');
+      const mutant = rmSrc.replace(/if \(-not \(Test-HmOurClaudeDir \$dir\)\) \{[\s\S]*?\r?\n    \}\r?\n/, '');
+      assert(mutant !== rmSrc, 'мутация применилась (гейт найден и вырезан)');
+      const hMut = path.join(base, 'mutant-rm.ps1');
+      fs.writeFileSync(hMut, fs.readFileSync(hFile, 'utf8').replace(rmSrc, () => mutant));
+      runPs(hMut, path.join(foreign, 'claude.cmd'), 'clean', envSb);
+      assert(!fs.existsSync(path.join(foreign, 'claude.cmd')),
+        'дефектная версия сносит чужой файл — тест различает фикс и дефект');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+})();
+
+// reg.exe САМ подменяет символом «?» всё, что непредставимо в кодовой странице
+// консоли, — ещё ДО нашего декодирования. Строка приходит «чистой», без единого
+// признака порчи, и гейт на U+FFFD её не видит. Проверено запуском: греческий
+// путь на русской консоли превращался в «C:\?????\bin» и был бы записан обратно
+// в PATH, уничтожив чужую запись.
+if (process.platform === 'win32') {
+  ok('реестр: значение с непредставимыми символами уходит на .NET, а не портится', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
+    const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+    const env = () => {
+      const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+      return Object.assign({}, process.env, { PATH: s32, Path: s32 });
+    };
+    const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
+      body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
+    )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+
+    const KEY = 'HKCU\\Environment';
+    const NAME = 'HmLossy' + Date.now();
+    // Греческий и акцентированная латиница непредставимы в CP866.
+    const VAL = 'C:\\Ωμέγα\\bin;C:\\Программы\\x';
+    try {
+      assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_SZ').ok, 'пробное значение записано');
+      const fast = M.regQueryFast(KEY, NAME);
+      assert(fast === null,
+        'быстрый путь ОБЯЗАН отказаться от значения с потерянными символами, а вернул: '
+        + (fast && fast.data));
+      const got = M.regQueryValueTyped(KEY, NAME);
+      assert(got.ok && got.found, 'итоговое чтение состоялось');
+      assert(got.data === VAL, 'значение пришло целым через .NET: ' + got.data);
+      assert(got.data.indexOf('?') === -1, 'в итоговом значении нет подменных «?»');
+    } finally {
+      try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой всегда */ }
+    }
+  });
+}

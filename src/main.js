@@ -2500,7 +2500,87 @@ function hkcuSubkeyOf(keyPath) {
   return m ? m[1] : '';
 }
 
+// Кодовая страница консоли — ОДИН раз за сессию (chcp.com ~30 мс).
+// reg.exe печатает в ней, и именно её отсутствие делало кириллицу мусором.
+let _consoleCp;
+function consoleCodePage() {
+  if (_consoleCp !== undefined) return _consoleCp;
+  _consoleCp = 0;
+  try {
+    const chcp = remoteFetch.sysBin('chcp.com');
+    if (chcp) {
+      const r = spawnSync(chcp, [], { encoding: 'latin1', windowsHide: true, timeout: 8000 });
+      const m = String(r.stdout || '').match(/(\d{3,5})/);
+      if (m) _consoleCp = parseInt(m[1], 10) || 0;
+    }
+  } catch (e) { /* не определили — читаем медленным, но заведомо верным путём */ }
+  return _consoleCp;
+}
+
+let _cpDecoder;
+function cpDecoder() {
+  if (_cpDecoder !== undefined) return _cpDecoder;
+  _cpDecoder = null;
+  const cp = consoleCodePage();
+  if (!cp) return _cpDecoder;
+  for (const label of ['cp' + cp, 'ibm' + cp, 'windows-' + cp]) {
+    try { _cpDecoder = new TextDecoder(label); return _cpDecoder; } catch (e) { /* следующий */ }
+  }
+  return _cpDecoder;
+}
+
+// БЫСТРОЕ чтение через reg.exe (~30 мс против ~830 мс у .NET-пути: тот поднимает
+// целый powershell.exe на КАЖДОЕ значение и морозил главный процесс на секунды —
+// окно уходило в «не отвечает» на старте и после каждого удаления).
+// Корректность обеспечивает декодирование РЕАЛЬНОЙ кодовой страницей консоли:
+// беда была не в reg.exe, а в чтении его вывода как UTF-8.
+// Возвращает результат ТОЛЬКО когда он однозначен; во всех сомнительных случаях —
+// null, и решает медленный, но авторитетный .NET-путь (в т.ч. «значения нет»,
+// чтобы не зависеть от языка сообщений reg.exe).
+function regQueryFast(keyPath, valueName) {
+  const dec = cpDecoder();
+  if (!dec) return null;
+  const reg = remoteFetch.sysBin('reg.exe');
+  if (!reg) return null;
+  let r;
+  try {
+    r = spawnSync(reg, ['query', keyPath, '/v', valueName],
+      { windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) { return null; }
+  if (!r || r.error || r.status !== 0) return null;   // «нет значения» и ошибки — .NET-пути
+  let out;
+  try { out = dec.decode(r.stdout || Buffer.alloc(0)); } catch (e) { return null; }
+  const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp('^\\s*' + esc + '\\s{2,}(REG_[A-Z_]+)\\s{2,}(.*)$', 'im').exec(out);
+  if (!m) return null;
+  const type = m[1];
+  // Многострочные и двоичные типы через текстовый вывод разбирать нельзя.
+  if (type !== 'REG_SZ' && type !== 'REG_EXPAND_SZ') return null;
+  const data = m[2].replace(/\s+$/, '');
+  // Символ замены = вывод декодировался неверно. Молчаливо принять такое нельзя:
+  // именно испорченное значение однажды затирало чужие записи PATH.
+  if (data.indexOf('�') >= 0) return null;
+  // И «?» — тоже потеря, только более коварная. reg.exe САМ подменяет им символы,
+  // непредставимые в кодовой странице консоли, ещё ДО того как мы что-то
+  // декодируем: на русской консоли «C:\Ωμέγα\bin» приезжает как «C:\?????\bin»,
+  // причём совершенно «чистой» строкой без единого признака порчи.
+  // Проверено запуском. В путях Windows «?» недопустим, так что ложных отказов
+  // почти не будет, а цена отказа — лишь уход на медленный .NET-путь, который
+  // читает верно.
+  if (data.indexOf('?') >= 0) return null;
+  return { ok: true, found: true, type, data };
+}
+
 function regQueryValueTyped(keyPath, valueName) {
+  const fast = IS_WIN ? regQueryFast(keyPath, valueName) : null;
+  if (fast) return fast;
+  return regQueryValueDotNet(keyPath, valueName);
+}
+
+// Авторитетное чтение через .NET: медленно, но без единой зависимости от кодовой
+// страницы и от языка системы. Сюда попадают «значения нет», ошибки и всё,
+// в чём быстрый путь не уверен.
+function regQueryValueDotNet(keyPath, valueName) {
   const parts = regPathParts(keyPath);
   if (!parts) return { ok: false, error: 'реестр: неподдерживаемый ключ (' + keyPath + ')' };
   const sub = parts.sub;
@@ -3036,32 +3116,62 @@ ipcMain.handle('mac-selfheal', async () => {
   //    `open -n` обязателен: без него macOS просто активировала бы уже
   //    запущенный экземпляр того же bundle id вместо запуска с нового тома.
   const helper = [
-    'DMG="$1"; PID="$2";',
-    // Ждём выхода установщика, но не дольше 30 с (вдруг окно не закрылось).
-    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done;',
+    'DMG="$1"; PID="$2"; ST="$3";',
+    // Ждём выхода установщика. Дождаться ОБЯЗАТЕЛЬНО: пока мы живы, наш замок
+    // единственного экземпляра не отпущен, и запущенный помощником свежий
+    // установщик просто закроется сам. Потолок щедрый — 120 с.
+    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
     'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
-    '/usr/bin/open "$DMG" >/dev/null 2>&1;',
-    // Тома Hamidun только что отцеплены — значит появившийся том заведомо СВЕЖИЙ.
-    'i=0; while [ $i -lt 60 ]; do',
-    '  for v in /Volumes/Hamidun*; do',
-    '    if [ -d "$v/Hamidun Setup.app" ]; then /usr/bin/open -n -a "$v/Hamidun Setup.app"; exit 0; fi;',
-    '  done;',
-    '  sleep 1; i=$((i+1));',
-    'done;',
-    'exit 1',
+    // Монтируем САМИ и берём точку монтирования ИЗ ВЫВОДА. Раньше том искали
+    // перебором /Volumes/Hamidun*, полагаясь на то, что старые уже отцеплены.
+    // Но том держит Finder (человек как раз из окна образа и запускался), detach
+    // не проходит, macOS монтирует «Hamidun Setup 1» рядом — а перебор брал
+    // первый по алфавиту, то есть СТАРЫЙ, всё ещё карантинный том. Человек
+    // получал тот же экран блокировки и надпись «Готово». Свой mount-point
+    // такой ошибки не допускает: он заведомо от ЭТОГО монтирования.
+    'MP=$(/usr/bin/hdiutil attach -nobrowse "$DMG" 2>/dev/null | /usr/bin/sed -n "s|.*\\(/Volumes/.*\\)$|\\1|p" | /usr/bin/tail -1);',
+    'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
+    // open -n обязателен: без него macOS активировала бы уже запущенный
+    // экземпляр того же bundle id вместо запуска с нового тома.
+    'if /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf ok > "$ST"; exit 0; fi;',
+    'printf relaunch-failed > "$ST"; exit 1',
   ].join(' ');
+  // Хлебная крошка: помощник работает уже после нашего выхода, и без неё любой
+  // его отказ был бы невидим — окно просто исчезало бы навсегда. Свежий
+  // экземпляр читает этот файл при старте и показывает, что пошло не так.
+  const statusFile = path.join(os.homedir(), 'Library', 'Application Support',
+    'HamidunSetup', 'selfheal.status');
+  try {
+    fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+    fs.writeFileSync(statusFile, 'started');
+  } catch (e) { /* без крошки починка всё равно поедет */ }
   try {
     // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
     // в имени файла бывают пробелы и скобки («… (1).dmg»).
-    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid)],
+    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile],
       { detached: true, stdio: 'ignore' });
     child.unref();
   } catch (e) {
     return { ok: false, error: 'helper-failed', dmg };
   }
-  // ok здесь означает «карантин снят и починка запущена», а не «всё готово»:
-  // остальное произойдёт уже после нашего выхода.
+  // ok здесь означает «карантин снят и починка ЗАПУЩЕНА», а не «всё готово»:
+  // остальное произойдёт уже после нашего выхода. Renderer обязан говорить
+  // человеку именно это, а не «открыл свежее окно образа».
   return { ok: true, dmg, handoff: true };
+});
+
+// Что рассказал о себе прошлый прогон самолечения. Читаем при старте: если
+// починка провалилась уже после нашего выхода, человек обязан увидеть причину,
+// а не пустоту.
+ipcMain.handle('mac-selfheal-status', () => {
+  if (process.platform !== 'darwin') return { status: '' };
+  const p = path.join(os.homedir(), 'Library', 'Application Support',
+    'HamidunSetup', 'selfheal.status');
+  try {
+    const s = String(fs.readFileSync(p, 'utf8')).trim().slice(0, 40);
+    try { fs.rmSync(p, { force: true }); } catch (e) { /* прочитали — и хватит */ }
+    return { status: s };
+  } catch (e) { return { status: '' }; }
 });
 
 ipcMain.handle('quit', () => app.quit());

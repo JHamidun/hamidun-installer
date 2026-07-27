@@ -471,40 +471,11 @@ function computeUserPathWithout(rawPath, dir) {
   return { changed: removed > 0, removed, value: kept.join(';') };
 }
 
-// P1: reg.exe отдаёт код 1 И на «значение/ключ не найдены» (штатное отсутствие),
-// И на «Access is denied» (реальная ошибка) — по коду их НЕ различить. Различаем
-// по тексту диагностики (reg.exe пишет её по-английски даже на локализованной
-// Windows; ru-фолбэки на случай локализации). Неузнанный код 1 → fail-closed.
-const REG_NOTFOUND_RE = /unable to find the specified|specified registry key or value|cannot find the (registry|specified)|was unable to find|не удаёт?с?я найти|не удалось найти|указанн\w*\s+(раздел|параметр)|раздел или параметр реестра/i;
-const REG_DENIED_RE = /access is denied|permission denied|отказано в доступе|доступ запрещ/i;
-
-// P1-7: чистый tri-state классификатор результата `reg query <key> /v <value>`.
-// НЕ смешивает «значения нет» с ошибкой query/парсера:
-//   { ok:true, found:true, type, data } — значение прочитано;
-//   { ok:true, found:false }            — ключа/значения ШТАТНО нет (код 1 + not-found);
-//   { ok:false, error }                 — любая другая ошибка запуска/кода/парсинга
-//                                         (в т.ч. код 1 «Access is denied» или код 1 без
-//                                         распознанной not-found диагностики)
-//                                         → вызывающий обязан дать failed, НЕ absent.
-function classifyRegQuery(valueName, execResult) {
-  if (!execResult || typeof execResult !== 'object') return { ok: false, error: 'нет результата reg query' };
-  if (execResult.error) return { ok: false, error: String((execResult.error && execResult.error.message) || execResult.error) };
-  if (execResult.status !== 0) {
-    // P1: код 1 → absent ТОЛЬКО при ЯВНО распознанной not-found диагностике.
-    // «Access is denied» и любой нераспознанный код 1 → ошибка (НЕ absent).
-    if (execResult.status === 1) {
-      const msg = String(execResult.stderr || '') + '\n' + String(execResult.stdout || '');
-      if (REG_DENIED_RE.test(msg)) return { ok: false, error: 'reg query: доступ запрещён (код 1)' };
-      if (REG_NOTFOUND_RE.test(msg)) return { ok: true, found: false };
-      return { ok: false, error: 'reg query: код 1 без распознанной not-found диагностики: ' + msg.trim().slice(0, 200) };
-    }
-    return { ok: false, error: 'reg query: код ' + execResult.status };
-  }
-  const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = String(execResult.stdout || '').match(new RegExp('^\\s*' + esc + '\\s+(REG_(?:EXPAND_)?SZ)\\s+(.*)$', 'im'));
-  if (!m) return { ok: false, error: 'вывод reg query не разобрался как REG_(EXPAND_)SZ (это ОШИБКА, не absent)' };
-  return { ok: true, found: true, type: m[1], data: m[2].replace(/\r$/, '') };
-}
+// Классификатор `reg query` (classifyRegQuery + REG_NOTFOUND_RE/REG_DENIED_RE) удалён:
+// main.js читает реестр САМ (.NET Registry через winPsPayload, base64 — см. там же
+// P1-7), парсить вывод reg.exe больше никому не нужно. Tri-state контракт regQuery
+// ({ ok, found, type, data } | { ok:false, error }) живёт у вызывающего
+// verifyPostconditions — helpers.regQuery подаётся снаружи.
 
 // P1-6: пост-проверка деинсталляции по ТОЧНЫМ managed-целям плана — НЕ глобальная
 // детекция («любой uv/nomad/Claude.app на машине»): чужая установка не даёт ни
@@ -602,6 +573,6 @@ module.exports = {
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
   removeFileGated, removeDirTreeGated, anyOwnerMarker,
   allowedRcFiles, computeUserPathWithout,
-  classifyRegQuery, classifyLaunchctlPrint, launchctlRemoveError,
+  classifyLaunchctlPrint, launchctlRemoveError,
   verifyPostconditions
 };

@@ -42,5 +42,8 @@ contextBridge.exposeInMainWorld('installer', {
   sendTelemetry: (payload) => ipcRenderer.invoke('send-telemetry', payload),
   // macOS: снять карантин с образа, перемонтировать и перезапуститься из свежего тома
   macSelfHeal: () => ipcRenderer.invoke('mac-selfheal'),
+  // Чем закончилась ПРОШЛАЯ попытка починки: её хвост работает уже после нашего
+  // выхода, и без этой крошки любой его отказ был бы невидим.
+  macSelfHealStatus: () => ipcRenderer.invoke('mac-selfheal-status'),
   quit: () => ipcRenderer.invoke('quit')
 });

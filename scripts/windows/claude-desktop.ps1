@@ -295,6 +295,6 @@ try {
     if ($cdProc) {
         try { $cdProc | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue } catch { }
     }
-    if ($cache) { try { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+    if ($cache) { Remove-HmSecureStagingDir -Path $cache }
 }
 exit $rc

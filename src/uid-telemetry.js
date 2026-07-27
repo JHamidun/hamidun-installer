@@ -49,9 +49,17 @@ function resolveUid(opts) {
     // «Hamidun-Setup-Windows--u123456 (1).exe» → 123456.
     // « (1)» Windows дописывает при повторном скачивании: без этой обрезки повторно
     // скачавший человек терял бы привязку.
+    // uid — это telegram_id, то есть ТОЛЬКО цифры. Разбирать его как «любые
+    // допустимые символы» нельзя: браузеры дописывают к повторной загрузке свой
+    // суффикс, и жадный разбор возвращал несуществующий идентификатор.
+    //   Windows/Chrome: «Hamidun-Setup-Windows--u123456 (1).exe»
+    //   Safari:         «Hamidun-Setup-Mac--u123456-2.dmg»
+    // Второй случай давал uid «123456-2» — хуже анонимности: бот не сматчит
+    // человека, а его события выглядят как отдельный пользователь. И это ровно
+    // тот человек, ради которого всё делалось: упёрся в блокировку и перекачал.
     const uidFromName = (name) => {
-      const base = String(name).replace(/\.[A-Za-z0-9]+$/, '').replace(/\s*\(\d+\)$/, '');
-      const m = /--u([A-Za-z0-9_-]{1,32})$/.exec(base);
+      const base = String(name).replace(/\.[A-Za-z0-9]+$/, '');
+      const m = /--u(\d{1,32})(?:\s*\(\d+\)|-\d{1,3})?$/.exec(base);
       return m ? sanitizeUid(m[1]) : '';
     };
     const fromExe = uidFromName(path.basename(exePath));

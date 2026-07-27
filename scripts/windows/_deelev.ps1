@@ -100,6 +100,30 @@ function Set-HmDirAcl {
     Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
 }
 
+# --- УБОРКА staging-ПАРЫ — ЕДИНСТВЕННЫЙ законный способ сноса staging-каталога.
+#     New-HmSecureStagingDir отдаёт наружу РАБОЧИЙ подкаталог `w` ВНУТРИ запертого
+#     HmDeElev-<hex>. Снос по возвращённому пути убирал только `w`, а внешний
+#     Admins-only каталог оставался в %ProgramData% НАВСЕГДА (пользователь стереть
+#     его не может — на этой машине их скопились сотни). Поэтому: имя `w` ->
+#     поднимаемся к родителю (образец — stagingRootOf в src/main.js). Fail-closed:
+#     код исполняется под админом, удалять можно ТОЛЬКО каталог, чьё имя строго
+#     HmDeElev-<32 hex> (тот же шаблон, что у pruneStaleSecureDirs в main.js);
+#     любое другое имя после подъёма — НЕ трогаем вовсе: ошибка в вычислении пути
+#     не должна стоить пользователю чужого каталога. ---
+function Remove-HmSecureStagingDir {
+    param([string]$Path)
+    try {
+        if (-not $Path) { return }
+        $root = ([string]$Path).TrimEnd('\', '/')
+        if ([System.IO.Path]::GetFileName($root) -eq 'w') {
+            $root = [System.IO.Path]::GetDirectoryName($root)
+        }
+        if (-not $root) { return }
+        if ([System.IO.Path]::GetFileName($root) -notmatch '^HmDeElev-[0-9a-f]{32}$') { return }
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+
 # --- PRIVATE high-integrity staging-каталог под ProgramData. Рождается атомарно с DACL
 #     {SYSTEM,Administrators: FullControl}, protection on (без наследования Users). Elevated
 #     дополнительно ставит владельца = Administrators (иначе owner=self сохраняет неявный
@@ -165,7 +189,7 @@ function New-HmSecureStagingDir {
             $usedFallback = $true
         }
         if ((-not (Test-Path -LiteralPath $dir)) -or $usedFallback) {
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-HmSecureStagingDir -Path $dir
             $usedFallback = $true
             [void][System.IO.Directory]::CreateDirectory($dir)
             if (-not (Test-Path -LiteralPath $dir)) {
@@ -209,7 +233,7 @@ function New-HmSecureStagingDir {
         $attr = (Get-Item -LiteralPath $dir -Force).Attributes
         if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
             [Console]::Error.WriteLine('HMSECFAIL: каталог оказался ссылкой (junction-подмена)')
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
 
         # Каталог ОБЯЗАН быть ПУСТЫМ.
@@ -224,7 +248,7 @@ function New-HmSecureStagingDir {
             [Console]::Error.WriteLine('HMSECFAIL: в свежесозданном каталоге уже есть объекты (' +
                 (($stray | Select-Object -First 3 | ForEach-Object { $_.Name }) -join ', ') +
                 ') — возможна подмена в момент создания')
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
 
         # Владелец УЖЕ задан атомарно в SD выше (не post-icacls — иначе окно с owner=user + WRITE_DAC).
@@ -235,7 +259,7 @@ function New-HmSecureStagingDir {
             $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             if ($owner -ne 'S-1-5-32-544') {
                 [Console]::Error.WriteLine('HMSECFAIL: владелец каталога = ' + $owner + ', ожидался S-1-5-32-544 (Administrators)')
-                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                Remove-HmSecureStagingDir -Path $dir; return $null
             }
         }
         foreach ($ace in $acl.Access) {
@@ -247,7 +271,7 @@ function New-HmSecureStagingDir {
                 # Посторонний ACE. Elevated -> недопустимо (fail-closed). Medium -> нет privesc
                 # (родитель уже medium), но такой ACE не должен появляться при protection on.
                 if ($Elevated) {
-                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                    Remove-HmSecureStagingDir -Path $dir; return $null
                 }
             }
         }
@@ -271,16 +295,16 @@ function New-HmSecureStagingDir {
             [void][System.IO.Directory]::CreateDirectory($work)
         } catch {
             [Console]::Error.WriteLine('HMSECFAIL: не удалось создать рабочий подкаталог: ' + $_.Exception.Message)
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
         if (-not (Test-Path -LiteralPath $work)) {
             [Console]::Error.WriteLine('HMSECFAIL: рабочий подкаталог не создался')
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
         $wattr = (Get-Item -LiteralPath $work -Force).Attributes
         if ($wattr -band [System.IO.FileAttributes]::ReparsePoint) {
             [Console]::Error.WriteLine('HMSECFAIL: рабочий подкаталог оказался ссылкой (junction-подмена)')
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
         # Ребёнок ACE наследует, но наследование и владельца доводим явно — наружу уходит
         # ИМЕННО этот путь, и он обязан удовлетворять тем же инвариантам, что проверяет
@@ -291,7 +315,7 @@ function New-HmSecureStagingDir {
             Set-HmDirAcl -Path $work -Acl $wAcl
         } catch {
             [Console]::Error.WriteLine('HMSECFAIL: не удалось запереть рабочий подкаталог: ' + $_.Exception.Message)
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
         if ($Elevated) {
             $wOwner = (Get-HmDirAcl -Path $work).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
@@ -302,13 +326,13 @@ function New-HmSecureStagingDir {
             if ($wOwner -ne 'S-1-5-32-544') {
                 [Console]::Error.WriteLine('HMSECFAIL: владелец рабочего подкаталога = ' +
                     ($wOwner -replace '^S-1-5-21-[\d-]+$', '<sid>') + ', ожидался S-1-5-32-544')
-                Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                Remove-HmSecureStagingDir -Path $dir; return $null
             }
         }
         $wAclFinal = Get-HmDirAcl -Path $work
         if (-not $wAclFinal.AreAccessRulesProtected) {
             [Console]::Error.WriteLine('HMSECFAIL: наследование на рабочем подкаталоге не снято')
-            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+            Remove-HmSecureStagingDir -Path $dir; return $null
         }
         foreach ($ace in $wAclFinal.Access) {
             $sid = $null
@@ -318,7 +342,7 @@ function New-HmSecureStagingDir {
                 [Console]::Error.WriteLine('HMSECFAIL: посторонний ACE в рабочем подкаталоге: ' +
                     ($sid -replace '^S-1-5-21-[\d-]+$', '<sid>'))
                 if ($Elevated) {
-                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
+                    Remove-HmSecureStagingDir -Path $dir; return $null
                 }
             }
         }
@@ -640,7 +664,9 @@ function Invoke-HmDeElevated {
     } finally {
         & $schtasks '/Delete' '/TN' $tag '/F' 2>&1 | Out-Null
         if ($xmlFile) { Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue }
-        if ($dir)     { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        # $dir = рабочий `w` ВНУТРИ запертого HmDeElev-<hex>: голый Remove-Item убирал бы
+        # только `w`, внешний каталог копился в %ProgramData% — помощник поднимается к родителю.
+        if ($dir)     { Remove-HmSecureStagingDir -Path $dir }
         $env:Path         = $savedPath
         $env:PSModulePath = $savedPsm
     }

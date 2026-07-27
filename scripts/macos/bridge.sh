@@ -87,6 +87,36 @@ if [ "$TRAY_OK" = "1" ]; then
 else
   MODE_ARG="<string>$DST/bridge_agent.py</string><string>--headless</string>"
 fi
+# ПРОВЕРКА ЗАПУСКОМ до того, как отдать агента launchd. Причина: живой случай —
+# на маке процесс съел 99% CPU и перегрел ноут. KeepAlive заставляет launchd
+# поднимать агента заново ПОСЛЕ ЛЮБОЙ смерти, а если он падает сразу (нет модуля,
+# битый конфиг, несовместимый Python), это превращается в бесконечный цикл
+# «запустился — упал — запустился», и каждый оборот стоит полного старта Python.
+# Ниже стоят ограничители, но сначала — просто не отдавать launchd заведомо
+# нерабочего агента.
+AGENT_OK=0
+"$PY" -m py_compile "$DST/bridge_agent.py" >/dev/null 2>&1 && AGENT_OK=1
+if [ "$AGENT_OK" = "1" ]; then
+  # Живой прогон: агент обязан продержаться пару секунд, а не умереть на старте.
+  "$PY" "$DST/bridge_agent.py" --headless >/dev/null 2>&1 &
+  PROBE_PID=$!
+  sleep 3
+  if kill -0 "$PROBE_PID" 2>/dev/null; then
+    kill "$PROBE_PID" 2>/dev/null || true
+    wait "$PROBE_PID" 2>/dev/null || true
+  else
+    AGENT_OK=0
+  fi
+fi
+if [ "$AGENT_OK" != "1" ]; then
+  echo "  ВНИМАНИЕ: агент моста не запускается на этой системе — автозапуск НЕ ставлю."
+  echo "  (иначе система бесконечно перезапускала бы его и грела процессор)"
+  rm -f "$LA" 2>/dev/null || true
+  launchctl remove com.hamidun.bridge 2>/dev/null || true
+  echo "OK: AI-мост распакован, автозапуск пропущен (агент не стартовал)"
+  exit 0
+fi
+
 cat > "$LA" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,7 +125,20 @@ cat > "$LA" <<EOF
   <key>ProgramArguments</key>
   <array><string>$PY</string>$MODE_ARG</array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- KeepAlive БЕЗ УСЛОВИЙ поднимал агента даже после того, как человек сам его
+       закрыл, и после штатного выхода. SuccessfulExit=false = поднимаем только
+       после АВАРИЙНОГО завершения. -->
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <!-- Жёсткий предел частоты перезапусков. Значение по умолчанию (10 с) НЕ
+       спасает: если агент прожил дольше него, launchd поднимает следующий
+       экземпляр немедленно, и падающий раз в 15 секунд агент грузит процессор
+       непрерывно. 300 с превращают худший случай в незаметный. -->
+  <key>ThrottleInterval</key><integer>300</integer>
+  <!-- Мост — фоновая мелочь, он не должен соревноваться за процессор с тем,
+       что человек делает руками. -->
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
 </dict></plist>
 EOF
 launchctl unload "$LA" 2>/dev/null || true
