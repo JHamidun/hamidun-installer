@@ -340,9 +340,32 @@ async function launchApp(ctx) {
     : { executablePath: path.join(ctx.appDir, 'Hamidun Setup.exe'), args: [], env: ctx.env, timeout: 180000 };
   log('запуск:', ctx.source ? 'source (electron ' + ROOT + ')' : launchOpts.executablePath);
   const app = await electron.launch(launchOpts);
+
+  // Улики, ПЕРЕЖИВАЮЩИЕ смерть страницы. Без них падение выглядит как безликий
+  // «page.textContent: Timeout» — при этом и скриншот молча не сохраняется, потому
+  // что снимать уже нечего. Разбор такого падения по логу невозможен: не видно,
+  // упал ли renderer, вышел ли главный процесс и с каким кодом.
+  try {
+    const proc = app.process();
+    if (proc && proc.stderr) {
+      proc.stderr.on('data', (b) => {
+        const s = String(b).trim();
+        if (s) log('[main stderr]', s.slice(0, 500));
+      });
+    }
+    if (proc) proc.on('exit', (code, sig) => log('[main] процесс ВЫШЕЛ: код=' + code + ' сигнал=' + sig));
+  } catch (e) { /* улики необязательны — прогон важнее */ }
+  app.on('close', () => log('[app] приложение закрылось'));
+
   const page = await app.firstWindow({ timeout: 120000 });
   await page.waitForLoadState('domcontentloaded');
   LAST_PAGE = page;                       // чтобы аварийный выход оставил улики
+  page.on('crash', () => log('[page] RENDERER УПАЛ'));
+  page.on('close', () => log('[page] страница закрыта'));
+  page.on('pageerror', (e) => log('[page error]', String(e && e.message).slice(0, 300)));
+  page.on('console', (m) => {
+    if (m.type() === 'error') log('[console error]', m.text().slice(0, 300));
+  });
   log('окно поднялось:', await page.title());
   return { app, page };
 }
@@ -507,7 +530,16 @@ async function waitTerminal(page, timeout) {
 async function shot(page, name) {
   const p = path.join(ROOT, 'release', 'e2e-' + name + '.png');
   try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch (e) { /* ignore */ }
-  await page.screenshot({ path: p, fullPage: false }).catch(() => {});
+  // Ошибку съёмки НЕ глотаем. Раньше здесь стоял пустой catch, и лог писал
+  // «скриншот: <путь>» даже когда файла не появилось — а не появлялся он ровно
+  // тогда, когда важнее всего: страница уже мертва. Разбор падения уходил
+  // в никуда: артефактов нет, а лог утверждает, что они есть.
+  let err = null;
+  await page.screenshot({ path: p, fullPage: false }).catch((e) => { err = e; });
+  if (err) {
+    log('СКРИНШОТ НЕ СНЯТ (страница недоступна):', String(err.message).slice(0, 200));
+    return;
+  }
   log('скриншот:', p);
 }
 
