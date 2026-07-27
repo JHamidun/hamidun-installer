@@ -213,7 +213,24 @@ if ($DRY) {
         exit 1
     }
     Write-Host "  Целостность подтверждена (SHA-256 дерева): vendor\nomad-src"
-    & $uv tool install --python 3.12 "$src"
+    # Собираем из КОПИИ, а не из vendor напрямую. uv/setuptools кладут артефакты сборки
+    # (build\, *.egg-info\) РЯДОМ С ИСХОДНИКОМ: после первой же установки дерево
+    # vendor\nomad-src меняется, и при ПОВТОРНОМ запуске установщика гейт целостности
+    # честно говорит «vendor подменён» — компонент больше не ставится никогда.
+    # Проверено запуском: 4929 файлов в дереве превращались в 7374, SHA переставал
+    # совпадать. На macOS это уже было сделано (nomad.sh, BUILD_SRC) — переносим сюда.
+    $buildSrc = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
+    $srcForInstall = $src
+    try {
+        New-Item -ItemType Directory -Force -Path $buildSrc -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath (Join-Path $src '*') -Destination $buildSrc -Recurse -Force -ErrorAction Stop
+        $srcForInstall = $buildSrc
+    } catch {
+        Write-Host "  Не удалось подготовить временную копию исходников ($($_.Exception.Message)) — ставлю из vendor напрямую."
+        $buildSrc = ''
+    }
+    & $uv tool install --python 3.12 "$srcForInstall"
+    if ($buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
     if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
     # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с

@@ -2970,7 +2970,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/--force/.test(nps), 'nomad.ps1: НЕТ --force');
   assert(!/использую как есть/.test(nps), 'nomad.ps1: старой ветки «использую как есть» нет');
   assert(/if \(-not \$DRY -and -not \$srcTrusted\) \{/.test(nps), 'nomad.ps1: гейт $srcTrusted');
-  assertOrder(nps, '-not $srcTrusted) {', 'tool install --python 3.12 "$src"',
+  assertOrder(nps, '-not $srcTrusted) {', 'tool install --python 3.12 "$srcForInstall"',
     'nomad.ps1: skip-гейт (exit 120) ПЕРЕД uv tool install');
 });
 
@@ -3003,14 +3003,16 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
   assert(!/--force/.test(nps), 'nomad.ps1: НИ ОДНОГО --force');
-  assert(/& \$uv tool install --python 3\.12 "\$src"/.test(nps), 'nomad.ps1: uv tool install без --force');
+  // Ставим из КОПИИ проверенного дерева (uv/setuptools собирают IN-TREE и портят vendor,
+  // из-за чего повторный запуск падал на гейте целостности), но по-прежнему без --force.
+  assert(/& \$uv tool install --python 3\.12 "\$srcForInstall"/.test(nps), 'nomad.ps1: uv tool install без --force');
   assert(/uv\\tools\\nomad-agent/.test(nps) && /\.local\\share\\uv\\tools\\nomad-agent/.test(nps),
     'nomad.ps1: guard проверяет nomad-agent tool (APPDATA + .local\\share)');
   assert(/\.local\\bin\\nmd\.exe/.test(nps) && /\.local\\bin\\nomad-agent/.test(nps) && /\.local\\bin\\nomad-acp/.test(nps),
     'nomad.ps1: проверяются шимы nmd/nomad-agent/nomad-acp(.exe)');
   const guardPs = nps.slice(nps.indexOf('$existingNomad = @('), nps.indexOf('$existingNomad = @(') + 900);
   assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
-  assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$src"',
+  assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$srcForInstall"',
     'nomad.ps1: guard ПЕРЕД uv tool install');
 });
 
@@ -4536,6 +4538,23 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   } finally {
     fs.rmSync(sb, { recursive: true, force: true });
   }
+});
+
+ok('Nomad собирается из КОПИИ — иначе повторная установка падает на гейте целостности', () => {
+  // uv/setuptools кладут артефакты сборки (build\, *.egg-info\) РЯДОМ С ИСХОДНИКОМ.
+  // После первой установки дерево vendor меняется, и при ПОВТОРНОМ запуске установщика
+  // гейт честно говорит «vendor подменён» — компонент не ставится больше никогда.
+  // Проверено запуском на реальном uv: 2 файла в исходнике превращались в 7.
+  // На macOS это уже было сделано (BUILD_SRC), на Windows — не было.
+  const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  assertOrder(ps, 'Get-HmTreeSha256', 'uv tool install', 'Windows: сверка целостности ДО установки');
+  assert(/hm-nomad-build-/.test(ps), 'Windows: сборка идёт из временной копии');
+  assert(/tool install --python 3\.12 "\$srcForInstall"/.test(ps),
+    'Windows: uv получает КОПИЮ, а не путь в vendor');
+  assert(/Remove-Item -LiteralPath \$buildSrc/.test(ps), 'Windows: копия убирается');
+  assert(/BUILD_SRC=/.test(sh) && /uv tool install --python 3\.12 "\$BUILD_SRC"/.test(sh),
+    'macOS: тот же приём на месте');
 });
 
 ok('Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)', () => {

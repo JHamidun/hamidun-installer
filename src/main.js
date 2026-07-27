@@ -2837,20 +2837,35 @@ function macFindOurDmg() {
       if (m && okDmg(m[1].trim())) return m[1].trim();
     }
   } catch (e) { /* образ мог быть уже отцеплен — идём дальше */ }
-  // 2) Обычные места, куда браузеры кладут скачанное.
+  // 2) Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
+  //    Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
+  //    и плоский обход находил образ только если тот лежал ровно в корне. Глубину
+  //    ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
   const home = os.homedir();
-  for (const dir of ['Downloads', 'Desktop', 'Documents', '']) {
-    try {
-      const d = dir ? path.join(home, dir) : home;
-      const hit = fs.readdirSync(d)
-        .filter((f) => /^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(f))
-        .map((f) => path.join(d, f))
-        .filter(okDmg)
-        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
-      if (hit) return hit;
-    } catch (e) { /* каталога может не быть */ }
-  }
-  return '';
+  const SKIP = /^(Library|Applications|\.Trash|node_modules|\.git|Pictures|Music|Movies)$/i;
+  const found = [];
+  const walk = (d, depth) => {
+    if (depth < 0 || found.length >= 40) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name.startsWith('.') || SKIP.test(e.name)) continue;
+        walk(p, depth - 1);
+      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(e.name) && okDmg(p)) {
+        found.push(p);
+      }
+    }
+  };
+  for (const dir of ['Downloads', 'Desktop', 'Documents']) walk(path.join(home, dir), 2);
+  if (!found.length) walk(home, 1);          // корень профиля — без углубления
+  if (!found.length) return '';
+  // Самый свежий: человек мог скачать заново, и чинить надо именно новый образ.
+  found.sort((a, b) => {
+    try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch (e) { return 0; }
+  });
+  return found[0];
 }
 
 ipcMain.handle('mac-selfheal', async () => {
