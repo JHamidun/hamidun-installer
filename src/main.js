@@ -137,11 +137,22 @@ const INSTALL_UID = uidTelemetry.resolveUid();
 const LOG_DIR = path.join(os.homedir(), '.hamidun-setup');
 const LOG_PATH = path.join(LOG_DIR, 'install.log');
 let logDirReady = false;
+// Дескриптор держим ОТКРЫТЫМ. fs.appendFileSync открывает и закрывает файл на
+// КАЖДОЙ строке, а установочные скрипты (pip, uv, npm) выдают их десятками тысяч:
+// это десятки тысяч синхронных open/write/close в главном процессе — он же качает
+// насос сообщений окна. Один открытый дескриптор убирает две трети работы и
+// сохраняет главное свойство журнала: строка на диске сразу, переживает падение.
+let logFd = null;
 function logToFile(id, line) {
   try {
     if (!logDirReady) { fs.mkdirSync(LOG_DIR, { recursive: true }); logDirReady = true; }
-    fs.appendFileSync(LOG_PATH, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
-  } catch (e) { /* logging must never break the install */ }
+    if (logFd === null) logFd = fs.openSync(LOG_PATH, 'a');
+    fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
+  } catch (e) {
+    // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
+    // строка откроет заново. Журналирование НИКОГДА не должно ломать установку.
+    if (logFd !== null) { try { fs.closeSync(logFd); } catch (e2) { /* ignore */ } logFd = null; }
+  }
 }
 
 let mainWindow = null;

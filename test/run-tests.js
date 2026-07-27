@@ -6574,3 +6574,101 @@ if (process.platform === 'win32') {
     }
   });
 }
+
+// ===========================================================================
+// Журнал установки разгонял процессор до нескольких ядер и грел ноутбук.
+// Живой случай на Mac M4: процесс «Hamidun» — 523% ЦП, 11 часов процессорного
+// времени, ноутбук выключили вручную.
+// Две причины, обе на КАЖДОЙ строке вывода (а их десятки тысяч — pip, uv, npm):
+//   1) в интерфейсе `log.textContent += line` пересоздавал текстовый узел целиком,
+//      а чтение scrollHeight принудительно пересчитывало вёрстку мегабайтного блока;
+//   2) в главном процессе fs.appendFileSync открывал и закрывал файл на каждую
+//      строку — замер: 20 000 строк = 11,8 с синхронной блокировки против 0,185 с
+//      с открытым дескриптором.
+// ===========================================================================
+(function installLogPerformance() {
+  const vm = require('vm');
+
+  ok('журнал в интерфейсе: кольцо строк, одна перерисовка на кадр', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const start = src.indexOf('const LOG_MAX_LINES');
+    const end = src.indexOf('\n// Часы на ИДУЩЕМ шаге', start);
+    assert(start > 0 && end > start, 'блок журнала найден');
+    const block = src.slice(start, end);
+
+    let layoutReads = 0;
+    let textWrites = 0;
+    const logEl = {
+      _t: '',
+      get textContent() { return this._t; },
+      set textContent(v) { this._t = v; textWrites++; },
+      get scrollHeight() { layoutReads++; return this._t.length; },
+      get scrollTop() { return 0; },
+      set scrollTop(v) { /* прокрутка */ },
+      get clientHeight() { return 100; },
+    };
+    const frames = [];
+    const ctx = {
+      $: () => logEl,
+      requestAnimationFrame: (fn) => { frames.push(fn); },
+      setTimeout: (fn) => { frames.push(fn); },
+      String: String, Math: Math, console: console,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(block + '\n; this.__append = appendLog; this.__lines = LOG_LINES;', ctx);
+
+    const N = 40000;
+    for (let i = 0; i < N; i++) ctx.__append('Collecting package==1.0.' + i);
+    while (frames.length) frames.shift()();
+
+    assert(ctx.__lines.length <= 800, 'журнал ограничен: ' + ctx.__lines.length + ' строк из ' + N);
+    assert(textWrites < 100, 'перерисовок ' + textWrites + ', а не по одной на строку');
+    assert(layoutReads < 200, 'чтений вёрстки ' + layoutReads + ', а не ' + N);
+    assert(logEl.textContent.length < 200000,
+      'в DOM держится ' + Math.round(logEl.textContent.length / 1024) + ' КБ, а не мегабайты');
+    // Хвост важнее всего: человек смотрит на последние строки.
+    assert(logEl.textContent.indexOf('1.0.' + (N - 1)) >= 0, 'последняя строка на месте');
+
+    // Полоски прогресса перерисовывают строку возвратом каретки — они не должны
+    // плодить строки (иначе журнал раздувается в разы на ровном месте).
+    const before = ctx.__lines.length;
+    for (let i = 0; i < 500; i++) ctx.__append('\rЗагрузка ' + i + '%');
+    while (frames.length) frames.shift()();
+    assert(ctx.__lines.length <= before + 1,
+      'возврат каретки не плодит строки (+' + (ctx.__lines.length - before) + ')');
+  });
+
+  ok('журнал на диске: дескриптор открыт один раз, а не на каждую строку', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const i = s.indexOf('function logToFile');
+    assert(i > 0, 'функция найдена');
+    const body = s.slice(i, s.indexOf('\n}', i));
+    assert(!/appendFileSync/.test(body),
+      'appendFileSync убран — он открывал и закрывал файл на КАЖДОЙ строке');
+    assert(/openSync/.test(body) && /writeSync/.test(body), 'пишем в открытый дескриптор');
+    // Дескриптор мог протухнуть — обязан быть сброс, иначе журнал умрёт молча.
+    assert(/logFd = null/.test(s), 'при ошибке дескриптор сбрасывается для переоткрытия');
+
+    // Поведенчески: та же нагрузка обязана укладываться на порядок быстрее.
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-log-'));
+    try {
+      const N = 4000;
+      const LINE = '[2026-07-27T12:00:00.000Z] [pydeps] Collecting package==1.0.0\n';
+      const p1 = path.join(d, 'a.log');
+      const p2 = path.join(d, 'b.log');
+      let t = Date.now();
+      for (let k = 0; k < N; k++) fs.appendFileSync(p1, LINE);
+      const msOld = Date.now() - t;
+      const fd = fs.openSync(p2, 'a');
+      t = Date.now();
+      for (let k = 0; k < N; k++) fs.writeSync(fd, LINE);
+      const msNew = Date.now() - t;
+      fs.closeSync(fd);
+      assert(fs.readFileSync(p1, 'utf8') === fs.readFileSync(p2, 'utf8'), 'содержимое идентично');
+      assert(msNew * 3 < msOld,
+        'открытый дескриптор быстрее втрое и более: было ' + msOld + ' мс, стало ' + msNew + ' мс');
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+})();

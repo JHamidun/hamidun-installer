@@ -1064,10 +1064,50 @@ function envForRun() {
   };
 }
 
-function appendLog(line) {
+// Журнал установки. Раньше здесь было `log.textContent += line + '\n'` плюс чтение
+// scrollHeight на КАЖДОЙ строке — и это разгоняло приложение до нескольких ядер.
+// Живой случай: на Mac процесс съел 523% процессора и перегрел ноутбук.
+// Почему так дорого:
+//   • `textContent +=` читает ВЕСЬ накопленный текст и записывает заново — то есть
+//     пересоздаёт текстовый узел целиком. При 40 000 строках (обычный объём для pip,
+//     uv и npm) это мегабайты, скопированные десятки тысяч раз;
+//   • чтение scrollHeight — принудительный синхронный пересчёт вёрстки этого же
+//     мегабайтного блока, тоже на каждой строке.
+// Теперь: кольцо из последних строк + одна перерисовка на кадр. ПОЛНЫЙ журнал
+// никуда не девается — главный процесс пишет его в install.log целиком.
+const LOG_MAX_LINES = 800;
+const LOG_LINES = [];
+let LOG_DIRTY = false;
+
+function flushLog() {
+  LOG_DIRTY = false;
   const log = $('#log');
-  log.textContent += line + '\n';
-  log.scrollTop = log.scrollHeight;
+  if (!log) return;
+  // Прилипание к низу — только если человек и так внизу. Иначе автопрокрутка
+  // вырывала бы у него из рук журнал, который он читает.
+  const atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 40;
+  log.textContent = LOG_LINES.join('\n') + '\n';
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function appendLog(line) {
+  const s = String(line == null ? '' : line);
+  // Полоски прогресса (pip, uv, curl) перерисовывают строку возвратом каретки.
+  // Без этого каждая перерисовка становилась ОТДЕЛЬНОЙ строкой — журнал раздувался
+  // в разы на ровном месте.
+  const parts = s.split('\r');
+  const last = parts[parts.length - 1];
+  if (parts.length > 1 && LOG_LINES.length) {
+    LOG_LINES[LOG_LINES.length - 1] = last;
+  } else {
+    LOG_LINES.push(last);
+  }
+  while (LOG_LINES.length > LOG_MAX_LINES) LOG_LINES.shift();
+
+  if (LOG_DIRTY) return;                 // перерисовка уже запланирована на этот кадр
+  LOG_DIRTY = true;
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flushLog);
+  else setTimeout(flushLog, 16);
 }
 
 // Часы на ИДУЩЕМ шаге. Просьба живых пользователей: «он крутит эту штуку и непонятно,
