@@ -6150,15 +6150,25 @@ asyncTests().then(() => {
         // под нагрузкой (идут сборки и заливки) спавн reg.exe не укладывается в
         // таймаут, путь честно уступает медленному, а тест краснеет на исправном коде.
         // Проверяем то, что действительно обязано выполняться ВСЕГДА.
+        // Авторитетный путь обязан быть верным ВСЕГДА — он и есть источник истины.
+        assert(slow.ok && slow.data === VAL, 'авторитетный путь: байт в байт');
+        assert(slow.type === 'REG_EXPAND_SZ', 'авторитетный путь сохранил тип');
+        assert(slow.data.indexOf('%SystemRoot%') >= 0,
+          '%VAR% не раскрыт — чужие переменные не запекаются в литералы');
+        // Быстрый путь вправе уступить (вернуть null): под нагрузкой спавн reg.exe
+        // не укладывается в таймаут, на неизвестной кодовой странице нет декодера.
+        // Тогда решает .NET. Но ЕСЛИ он ответил — ответ обязан совпадать до байта.
+        // ВАЖНО: все проверки, разыменовывающие fast, живут ТОЛЬКО здесь. Прошлая
+        // версия «анти-флейк»-правки ставила гард, а следующей же строкой обращалась
+        // к fast.type — и падала TypeError ровно в том случае, ради которого правилась.
         if (fast === null) {
-          console.log('    (быстрый путь уступил медленному — под нагрузкой это штатно)');
+          console.log('    (быстрый путь уступил авторитетному — это штатно)');
         } else {
           assert(fast.data === VAL, 'быстрый путь: байт в байт (' + fast.data + ')');
+          assert(fast.type === 'REG_EXPAND_SZ', 'быстрый путь сохранил тип');
+          assert(fast.data.indexOf('%SystemRoot%') >= 0, 'быстрый путь: %VAR% не раскрыт');
+          assert(fast.data === slow.data, 'быстрый и авторитетный пути согласованы');
         }
-        assert(slow.ok && slow.data === VAL, 'авторитетный путь: байт в байт');
-        assert(fast.type === 'REG_EXPAND_SZ' && slow.type === 'REG_EXPAND_SZ', 'тип сохранён обоими');
-        assert(VAL.indexOf('%SystemRoot%') >= 0 && fast.data.indexOf('%SystemRoot%') >= 0,
-          '%VAR% не раскрыт — чужие переменные не запекаются в литералы');
         // Отсутствующее значение — не ошибка, а честный found:false.
         const miss = M.regQueryValueTyped(KEY, NAME + '_nope');
         assert(miss.ok === true && miss.found === false, 'отсутствующее значение: found=false');
@@ -6440,11 +6450,22 @@ asyncTests().then(() => {
         'вызов уборки (смещение ' + m.index + ') не под вердиктом broken');
     }
     assert(calls >= 1, 'вызов уборки в офлайн-ветке на месте');
-    // Финал: сломанный ЧУЖОЙ claude не краснит шаг и не трогается — путь «не подтвердили».
+    // Финал: сломанный ЧУЖОЙ claude НЕ трогаем (файлы не наши), но и УСПЕХОМ не
+    // объявляем. Раньше он понижался до 'unverified' и дальше печатал
+    // «OK: Claude Code CLI установлен» с кодом 0 — зелёная галочка при заведомо
+    // неработающем claude. Человек уходил уверенным, что всё хорошо.
     assert(/-eq 'broken' -and -not \(Test-HmOurClaudeDir \(Split-Path \$claudeBin\)\)/.test(s),
       'финальный вердикт различает наш/чужой каталог');
-    assertOrder(s, '-not (Test-HmOurClaudeDir (Split-Path $claudeBin))', "$probe = 'unverified'",
-      'чужой сломанный claude понижается до unverified, а не exit 1');
+    assert(/\$brokenForeign = \$true/.test(s), 'чужой сломанный claude помечается отдельно');
+    const bf = s.indexOf('if ($brokenForeign) {');
+    assert(bf > 0, 'ветка чужого сломанного claude есть');
+    const bfBody = s.slice(bf, s.indexOf('\n}', bf));
+    assert(/exit 1/.test(bfBody), 'чужой сломанный claude даёт ЧЕСТНЫЙ отказ, а не успех');
+    assert(!/Remove-Item/.test(bfBody), 'чужие файлы при этом НЕ удаляются');
+    assert(/npm uninstall -g/.test(bfBody), 'человеку сказано, что именно сделать');
+    // И «OK: … установлен» не должен быть достижим из этой ветки.
+    assertOrder(s, 'if ($brokenForeign) {', 'OK: Claude Code CLI установлен',
+      'отказ печатается РАНЬШЕ любого сообщения об успехе');
   });
 
   if (!powershellAvailable()) return;
@@ -6490,11 +6511,25 @@ asyncTests().then(() => {
       assert.strictEqual(probe(hFile, 1), 'broken', 'настоящий exit 1 -> broken (доказанный отказ запуска)');
       const rNull = (runPs(hFile, 'C:\\fake\\claude.cmd', 'probe', { HM_T_GATE: 'null', HM_T_CODE: '0' }).stdout || '').trim();
       assert.strictEqual(rNull, 'unverified', 'де-элевация не отчиталась -> unverified (регрессии нет)');
-      // МУТАЦИЯ (возврат дефекта 1): убираем сентинел-гейт — 267014 обязан стать broken,
-      // иначе ассерты выше ничего не сторожат.
+      // Перечисление сентинелов — не единственная защита. Планировщик отдаёт и другие
+      // служебные значения (SCHED_E_*, HRESULT-ы вроде 0x80070005, коды аварийного
+      // завершения хоста). Код возврата ПРОГРАММЫ — маленькое число; всё вне 0..255
+      // программа вернуть не может, и принимать это за «сломан» = снести рабочий CLI.
+      [267100, 267300, -2147024891, -1073741819, 2147942405, 256, 999].forEach((c) => {
+        assert.strictEqual(probe(hFile, c), 'unverified',
+          'код вне 0..255 (' + c + ') — статус инфраструктуры, не приговор бинарю');
+      });
+      assert.strictEqual(probe(hFile, 255), 'broken', 'граница 255 — ещё настоящий код возврата');
+
+      // МУТАЦИЯ (возврат дефекта 1): убираем ОБЕ защиты — и перечисление, и правило
+      // диапазона. Только тогда 267014 снова становится broken. Мутация лишь одной
+      // из двух ничего не докажет: вторая её перекроет — это и есть эшелонирование.
       const fnSrc = cutFn(src, 'Test-HmClaudeRuns');
-      const mutant = fnSrc.split(/\r?\n/).filter((l) => !/-contains \$r\.Code\)/.test(l)).join('\r\n');
-      assert(mutant !== fnSrc, 'мутация применилась (гейт найден и вырезан)');
+      const mutant = fnSrc.split(/\r?\n/)
+        .filter((l) => !/-contains \$r\.Code\)/.test(l))
+        .filter((l) => !/\$r\.Code -lt 0 -or \$r\.Code -gt 255/.test(l))
+        .join('\r\n');
+      assert(mutant !== fnSrc, 'мутация применилась (обе защиты найдены и вырезаны)');
       const hMut = path.join(base, 'mutant-probe.ps1');
       fs.writeFileSync(hMut, fs.readFileSync(hFile, 'utf8').replace(fnSrc, () => mutant));
       assert.strictEqual(probe(hMut, 267014), 'broken',
@@ -6679,5 +6714,104 @@ if (process.platform === 'win32') {
     } finally {
       fs.rmSync(d, { recursive: true, force: true });
     }
+  });
+})();
+
+// ===========================================================================
+// Четвёртый круг ревью. Все находки — в правках ПРЕДЫДУЩЕГО круга.
+// ===========================================================================
+(function fourthRoundFixes() {
+  const vm = require('vm');
+
+  // Проверка «запуском» из bridge.sh сталкивалась с single-instance-замком уже
+  // РАБОТАЮЩЕГО агента (порт 127.0.0.1:1079), объявляла его сломанным, СНОСИЛА
+  // рабочий автозапуск, убивала живой мост — и печатала «OK».
+  // То есть повторная установка ломала работающий компонент под видом успеха.
+  ok('мост: повторная установка не сносит чужой рабочий автозапуск', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'bridge.sh'), 'utf8');
+    // Разрушительных вызовов не осталось нигде в файле.
+    assert(!/rm -f "\$LA"/.test(s), 'plist автозапуска больше не удаляется при неудаче пробы');
+    assert(!/launchctl remove com\.hamidun\.bridge/.test(s), 'живой агент больше не выгружается насильно');
+    // Перед пробой свой агент останавливается — иначе она обречена.
+    assertOrder(s, 'launchctl unload "$LA"', 'py_compile',
+      'работающий агент останавливается ДО пробы (он держит порт-замок 1079)');
+    // При неудаче прежнее состояние возвращается.
+    assert(/cp "\$LA_BAK" "\$LA"/.test(s), 'прежний plist восстанавливается');
+    assert(/launchctl load "\$LA"/.test(s), 'и снова загружается');
+    assertOrder(s, 'HAD_LA=1', 'launchctl unload "$LA"', 'наличие прежнего автозапуска запоминается заранее');
+  });
+
+  // Строка с возвратом каретки ЗАТИРАЛА предыдущую строку журнала — в том числе
+  // строку ошибки. Строка, оканчивающаяся на CR, уничтожала сразу две.
+  // main.js уже режет вывод на полные логические строки (split /\r?\n/), поэтому
+  // пришедший \r — это перерисовка ВНУТРИ строки, а не продолжение предыдущей.
+  ok('журнал: строка с возвратом каретки не стирает предыдущую', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const start = src.indexOf('const LOG_MAX_LINES');
+    const end = src.indexOf('\n// Часы на ИДУЩЕМ шаге', start);
+    assert(start > 0 && end > start, 'блок журнала найден');
+    const logEl = {
+      _t: '', get textContent() { return this._t; }, set textContent(v) { this._t = v; },
+      get scrollHeight() { return this._t.length; }, get scrollTop() { return 0; },
+      set scrollTop(v) { /* прокрутка */ }, get clientHeight() { return 100; },
+    };
+    const frames = [];
+    const ctx = {
+      $: () => logEl,
+      requestAnimationFrame: (fn) => frames.push(fn),
+      setTimeout: (fn) => frames.push(fn),
+      String: String, Math: Math, console: console,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(src.slice(start, end) + '\n; this.__append = appendLog; this.__lines = LOG_LINES;', ctx);
+    const L = ctx.__lines;
+    const flush = () => { while (frames.length) frames.shift()(); };
+
+    ctx.__append('=== Установка Python-пакетов ===');
+    ctx.__append('[!] ОШИБКА: не хватает места на диске');
+    ctx.__append('\rDownloading numpy 10%\rDownloading numpy 100%');
+    flush();
+    assert(L.indexOf('[!] ОШИБКА: не хватает места на диске') >= 0,
+      'строка ошибки уцелела — раньше её стирала полоска прогресса: ' + JSON.stringify(L));
+    assert(L[L.length - 1] === 'Downloading numpy 100%', 'от полоски остался последний кадр');
+
+    // Хвостовой CR: раньше подставлял ПУСТУЮ строку вместо содержимого и убивал соседнюю.
+    L.length = 0;
+    ctx.__append('важное сообщение');
+    ctx.__append('Загрузка 100%\r');
+    flush();
+    assert(L.indexOf('важное сообщение') >= 0, 'соседняя строка цела при хвостовом CR');
+    assert(L[L.length - 1] === 'Загрузка 100%', 'пустая строка не подставилась: ' + JSON.stringify(L));
+
+    // Обычные строки по-прежнему каждая своя, и предел объёма держится.
+    L.length = 0;
+    for (let i = 0; i < 3000; i++) ctx.__append('строка ' + i);
+    flush();
+    assert(L.length <= 800, 'кольцо держит предел: ' + L.length);
+    assert(L[L.length - 1] === 'строка 2999', 'хвост на месте');
+  });
+
+  // Быстрый путь чтения реестра включался только там, где слепой перебор имён
+  // угадывал кодировку — то есть на русской консоли. На английской (437/850),
+  // японской (932), UTF-8 (65001) декодер не создавался, и фикс ×27 «окно не
+  // морозится» молча НЕ РАБОТАЛ.
+  ok('реестр: кодовые страницы покрыты явными именами + ASCII-путь', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(/CP_LABELS/.test(s), 'таблица имён кодировок заведена');
+    [65001, 866, 1251, 1252, 932, 936, 949, 950].forEach((cp) => {
+      assert(new RegExp('\\b' + cp + '\\s*:').test(s), 'кодовая страница ' + cp + ' учтена');
+    });
+    // Для DOS-страниц без WHATWG-имени (437/850/852) есть путь через чистый ASCII.
+    assert(/function isPureAscii/.test(s), 'ASCII-путь для страниц без декодера есть');
+    const fast = s.slice(s.indexOf('function regQueryFast'), s.indexOf('function regQueryValueTyped'));
+    assert(/isPureAscii\(buf\)/.test(fast), 'быстрый путь умеет работать без декодера на чистом ASCII');
+    assert(/return null/.test(fast), 'непонятная кодировка всё равно уступает авторитетному пути');
+    // Проверяем, что имена действительно принимаются движком.
+    [['utf-8', 65001], ['ibm866', 866], ['windows-1251', 1251], ['windows-1252', 1252],
+      ['shift_jis', 932], ['gbk', 936], ['euc-kr', 949], ['big5', 950]].forEach(([label, cp]) => {
+      let okLabel = true;
+      try { new TextDecoder(label); } catch (e) { okLabel = false; }
+      assert(okLabel, 'движок знает «' + label + '» для cp' + cp);
+    });
   });
 })();

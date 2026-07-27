@@ -2528,16 +2528,41 @@ function consoleCodePage() {
   return _consoleCp;
 }
 
+// Явные имена кодировок для ходовых кодовых страниц. Слепой перебор
+// 'cp<N>'/'ibm<N>'/'windows-<N>' угадывал только 866 и 1251 — то есть быстрый путь
+// жил лишь на русской консоли, а на английской, западноевропейской, японской и
+// UTF-8 молча отключался, и фикс ×27 (окно не морозится) там НЕ РАБОТАЛ.
+const CP_LABELS = {
+  65001: 'utf-8',
+  866: 'ibm866', 1251: 'windows-1251', 1252: 'windows-1252',
+  1250: 'windows-1250', 1253: 'windows-1253', 1254: 'windows-1254',
+  1255: 'windows-1255', 1256: 'windows-1256', 1257: 'windows-1257', 1258: 'windows-1258',
+  932: 'shift_jis', 936: 'gbk', 949: 'euc-kr', 950: 'big5',
+  28591: 'iso-8859-1', 28592: 'iso-8859-2', 28595: 'iso-8859-5',
+};
+
 let _cpDecoder;
 function cpDecoder() {
   if (_cpDecoder !== undefined) return _cpDecoder;
   _cpDecoder = null;
   const cp = consoleCodePage();
   if (!cp) return _cpDecoder;
-  for (const label of ['cp' + cp, 'ibm' + cp, 'windows-' + cp]) {
+  const tries = [];
+  if (CP_LABELS[cp]) tries.push(CP_LABELS[cp]);
+  tries.push('cp' + cp, 'ibm' + cp, 'windows-' + cp);
+  for (const label of tries) {
     try { _cpDecoder = new TextDecoder(label); return _cpDecoder; } catch (e) { /* следующий */ }
   }
   return _cpDecoder;
+}
+
+// Строго ASCII? Тогда декодировать нечего: 437, 850, 852 и прочие DOS-страницы
+// совпадают с ASCII в диапазоне 0-127, а WHATWG-имени у них нет. Это покрывает
+// подавляющее большинство западных установок, где пути к реестру — латиница.
+// Любой байт со старшим битом → отказ, и решает авторитетный .NET-путь.
+function isPureAscii(buf) {
+  for (let i = 0; i < buf.length; i++) if (buf[i] > 0x7f) return false;
+  return true;
 }
 
 // БЫСТРОЕ чтение через reg.exe (~30 мс против ~830 мс у .NET-пути: тот поднимает
@@ -2550,7 +2575,6 @@ function cpDecoder() {
 // чтобы не зависеть от языка сообщений reg.exe).
 function regQueryFast(keyPath, valueName) {
   const dec = cpDecoder();
-  if (!dec) return null;
   const reg = remoteFetch.sysBin('reg.exe');
   if (!reg) return null;
   let r;
@@ -2559,8 +2583,16 @@ function regQueryFast(keyPath, valueName) {
       { windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) { return null; }
   if (!r || r.error || r.status !== 0) return null;   // «нет значения» и ошибки — .NET-пути
+  const buf = r.stdout || Buffer.alloc(0);
   let out;
-  try { out = dec.decode(r.stdout || Buffer.alloc(0)); } catch (e) { return null; }
+  if (dec) {
+    try { out = dec.decode(buf); } catch (e) { return null; }
+  } else if (isPureAscii(buf)) {
+    // Декодера для этой кодовой страницы нет, но и декодировать нечего.
+    out = buf.toString('latin1');
+  } else {
+    return null;                                      // непонятная кодировка → .NET
+  }
   const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const m = new RegExp('^\\s*' + esc + '\\s{2,}(REG_[A-Z_]+)\\s{2,}(.*)$', 'im').exec(out);
   if (!m) return null;
