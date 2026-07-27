@@ -219,14 +219,22 @@ if ($DRY) {
     # честно говорит «vendor подменён» — компонент больше не ставится никогда.
     # Проверено запуском: 4929 файлов в дереве превращались в 7374, SHA переставал
     # совпадать. На macOS это уже было сделано (nomad.sh, BUILD_SRC) — переносим сюда.
+    # ВАЖНО: копируем каталог целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок.
+    # Copy-Item -LiteralPath "...\*" в Windows PowerShell 5.1 (а это боевой интерпретатор)
+    # НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов: исключения нет, catch не
+    # срабатывает, и uv получает пустой каталог. Проверено запуском: 2 файла -> 0.
     $buildSrc = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
     $srcForInstall = $src
     try {
-        New-Item -ItemType Directory -Force -Path $buildSrc -ErrorAction Stop | Out-Null
-        Copy-Item -LiteralPath (Join-Path $src '*') -Destination $buildSrc -Recurse -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $src -Destination $buildSrc -Recurse -Force -ErrorAction Stop
+        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
+        if (-not (Test-Path -LiteralPath (Join-Path $buildSrc 'pyproject.toml'))) {
+            throw 'копия исходников пуста (нет pyproject.toml)'
+        }
         $srcForInstall = $buildSrc
     } catch {
         Write-Host "  Не удалось подготовить временную копию исходников ($($_.Exception.Message)) — ставлю из vendor напрямую."
+        if (Test-Path -LiteralPath $buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
         $buildSrc = ''
     }
     & $uv tool install --python 3.12 "$srcForInstall"

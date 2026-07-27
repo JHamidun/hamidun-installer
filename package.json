@@ -116,7 +116,8 @@
     },
     "portable": {
       "requestExecutionLevel": "admin",
-      "artifactName": "Hamidun-Setup-Windows.${ext}"
+      "artifactName": "Hamidun-Setup-Windows.${ext}",
+      "unpackDirName": true
     },
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {

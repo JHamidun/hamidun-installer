@@ -33,7 +33,7 @@ if [ -n "${HM_DRY_RUN:-}" ]; then
   else
     echo "  [dry-run] WOULD: git clone/fetch конфига с GitHub (в dry-run НЕ выполняется)"
   fi
-  echo "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна)"
+  echo "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна; секреты — ключи/tg-сессия — в бэкап НЕ кладутся)"
   if [ "$ADDITIVE" -eq 1 ]; then
     echo "  [dry-run] WOULD (add-missing): скопировать ТОЛЬКО недостающие файлы (существующее НЕ трогать); ~/.claude НЕ переносится и не стирается; preserve-list исключён"
   else
@@ -98,12 +98,37 @@ PRESERVE_DIR_GLOBS="--exclude=memory/ --exclude=projects/ --exclude=todos/ --exc
 # ВАЖНО: неполный бэкап НЕ фатален — оригинал ~/.claude НЕ переносится и не стирается,
 # данные на месте. Предупреждаем и ПРОДОЛЖАЕМ (это иначе, чем раньше, где бэкап был
 # единственной копией перед wipe).
+# СЕКРЕТЫ В БЭКАП НЕ КЛАДЁМ (зеркало config.ps1: robocopy /XF в бэкапе): копий хранится
+# 3 ротируемых, то есть ключи и telegram-сессия РАЗМНОЖАЛИСЬ БЫ в трёх экземплярах рядом
+# с ~/.claude. Список исключений — РОВНО тот же, что в Windows-версии:
+# .credentials.master.env, .credentials.json, tg_session.session* (глоб покрывает
+# -wal/-shm/-journal). Оригиналы остаются в ~/.claude нетронутыми (preserve-list merge их
+# не перезаписывает) — бэкап без них полноценно выполняет роль сейф-нета.
+BACKUP_EXCLUDES="--exclude=.credentials.master.env --exclude=.credentials.json --exclude=tg_session.session*"
 if [ -d "$CLAUDE_HOME" ]; then
   STAMP=$(date +%Y%m%d-%H%M%S)
   BACKUP_DIR="$CLAUDE_HOME.backup.$STAMP"
-  echo "Резервная копия ~/.claude → $BACKUP_DIR (храню 3 последние, старые удаляю)..."
-  if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
-    SRC_N=$(find "$CLAUDE_HOME" 2>/dev/null | wc -l | tr -d ' ')
+  echo "Резервная копия ~/.claude → $BACKUP_DIR (без ключей и tg-сессии; храню 3 последние, старые удаляю)..."
+  BACKUP_OK=0
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a $BACKUP_EXCLUDES "$CLAUDE_HOME/" "$BACKUP_DIR/" 2>/dev/null && BACKUP_OK=1
+  else
+    # Fallback без rsync: cp -R копирует ВСЁ, затем вычищаем секреты из КОПИИ тем же
+    # списком (robocopy /XF режет имена на любой глубине — find -name делает то же).
+    if cp -R "$CLAUDE_HOME" "$BACKUP_DIR" 2>/dev/null; then
+      if find "$BACKUP_DIR" \( -name '.credentials.master.env' -o -name '.credentials.json' -o -name 'tg_session.session*' \) -exec rm -f {} + 2>/dev/null; then
+        BACKUP_OK=1
+      else
+        # Секреты вычистить не удалось — бэкап с ключами держать нельзя (fail-closed).
+        rm -rf "$BACKUP_DIR" 2>/dev/null
+        echo "ВНИМАНИЕ: не удалось исключить секреты из бэкапа — копия удалена (оригинал ~/.claude цел)."
+      fi
+    fi
+  fi
+  if [ "$BACKUP_OK" -eq 1 ]; then
+    # Сверка полноты считает источник БЕЗ исключённых секретов — иначе каждый бэкап
+    # с ключами ложно рапортовал бы «неполный».
+    SRC_N=$(find "$CLAUDE_HOME" ! -name '.credentials.master.env' ! -name '.credentials.json' ! -name 'tg_session.session*' 2>/dev/null | wc -l | tr -d ' ')
     DST_N=$(find "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d ' ')
     if [ "${DST_N:-0}" -lt "${SRC_N:-0}" ]; then
       echo "ВНИМАНИЕ: неполный бэкап ~/.claude (часть файлов недоступна). НЕ критично: оригинал НЕ переносится и не стирается — данные на месте. Продолжаю."

@@ -251,7 +251,11 @@ let _frontedForInstall = false;
 // посреди докачки не должно оставлять пользователю нестираемые гигабайты в %ProgramData%.
 function cleanupAllSecureDirs() {
   for (const d of SECURE_DIRS.values()) {
-    try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    // ВНЕШНИЙ каталог, а не рабочий подкаталог «w»: staging двухуровневый, и
+    // удаление только «w» оставляло в %ProgramData% запертый Admins-only
+    // HmDeElev-*, который пользователь не может стереть сам. Ровно для этого
+    // и заведён stagingRootOf — здесь его забыли применить.
+    try { fs.rmSync(stagingRootOf(d), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
   }
   SECURE_DIRS.clear();
 }
@@ -287,13 +291,38 @@ function pruneStaleSecureDirs() {
   } catch (e) { /* уборка мусора не должна ломать запуск */ }
 }
 
-app.whenReady().then(() => {
-  createWindow();
-  try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ }
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Второй запуск установщика недопустим. Целевая аудитория — новички: первый клик
+// даёт запрос прав и ~минуту тишины на распаковке, и человек кликает ещё раз.
+// Два элевейтед-экземпляра параллельно ставили бы одно и то же в ~/.claude,
+// npm prefix и uv tools, а portable-стаб вдобавок рекурсивно чистит ОБЩИЙ каталог
+// распаковки — то есть второй запуск выдёргивал ресурсы из-под первого.
+// Поднимаем уже открытое окно вместо запуска второй копии.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const wins = BrowserWindow.getAllWindows();
+    const w = wins.length ? wins[0] : null;
+    if (!w) return;
+    try {
+      if (w.isMinimized()) w.restore();
+      w.show();
+      w.focus();
+    } catch (e) { /* окно могло закрыться — не роняем установку */ }
   });
-});
+
+  app.whenReady().then(() => {
+    createWindow();
+    try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ }
+    // Прерванное удаление (антивирус убил процесс, пропало питание) оставляло
+    // маркер переименованным — и кнопка «Удалить» исчезала навсегда. Возвращаем
+    // маркер, чтобы человек мог просто повторить удаление.
+    try { receipts.recoverOrphanTombstones(os.homedir()); } catch (e) { /* best-effort */ }
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   killChildren();
@@ -1431,6 +1460,12 @@ async function winMakeSecureDir() {
     const s32 = path.dirname(path.dirname(path.dirname(ps)));   // ...\System32 из валидированного powershell.exe
     const psmLit = path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules').replace(/'/g, "''");
     const inline =
+      // Кодировку консоли задаём ПЕРВОЙ командой. powershell 5.1 пишет stdout и stderr
+      // в кодовой странице консоли (CP866 на русской Windows), а Node читает трубу как
+      // UTF-8 — и причина отказа («Отказано в доступе») приезжала пользователю, в лог и
+      // в телеметрию кракозябрами. Для компонентных скриптов это уже делается (см. выше).
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;" +
+      "$OutputEncoding=[System.Text.Encoding]::UTF8;" +
       "$ErrorActionPreference='Stop';" +
       "$env:PSModulePath='" + psmLit + "';" +
       ". '" + deLit + "';" +
@@ -1693,19 +1728,14 @@ ipcMain.handle('launch-course', () => {
 // running) Electron process still carries the stale PATH. Re-read Machine +
 // User PATH from the registry and add the places `claude` lands in.
 function regQueryValue(keyPath, valueName) {
-  try {
-    // reg.exe по АБСОЛЮТНОМУ пути из валидированного System32 (FIX-E).
-    const reg = remoteFetch.sysBin('reg.exe');
-    if (!reg) return '';
-    // timeout ОБЯЗАТЕЛЕН: без него зависший reg.exe (агрессивный AV/EDR песочит
-    // консольные бинари, повреждённый куст реестра) вешает main-процесс Electron
-    // навсегда — detect-state не резолвится, кнопка «Установить» никогда не
-    // включается. Двойник regQueryValueTyped уже имеет timeout:20000.
-    const out = execFileSync(reg, ['query', keyPath, '/v', valueName],
-      { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const m = out.match(new RegExp('^\\s*' + valueName + '\\s+REG(?:_EXPAND)?_SZ\\s+(.+)$', 'im'));
-    return m ? m[1].trim() : '';
-  } catch (e) { return ''; }
+  // Через .NET, а не через консольный вывод reg.exe: тот печатает в кодовой
+  // странице консоли (CP866 на русской Windows), и путь вида
+  // C:\Users\Жемал\AppData\... приезжал сюда мусором — собранный PATH получался
+  // с битыми записями, и claude из терминала не находился.
+  // У regQueryValueTyped есть таймаут: без него зависший запрос (агрессивный
+  // AV/EDR, повреждённый куст) морозил бы main-процесс навсегда.
+  const r = regQueryValueTyped(keyPath, valueName);
+  return (r && r.ok && r.found) ? String(r.data || '').trim() : '';
 }
 
 // npm global prefix БЕЗ спавна npm через shell (FIX-E: убираем shell-строки).
@@ -2420,12 +2450,122 @@ ipcMain.handle('detect-state', () => {
 //   { ok:true, found:true, type, data } | { ok:true, found:false } | { ok:false, error }.
 // «Нет значения» НЕ смешивается с ошибкой запуска/кода/парсера — любая ошибка у
 // вызывающих обязана дать failed (fail-closed), а НЕ absent.
+// Соответствие .NET RegistryValueKind ↔ имена типов reg.exe (их ждут вызывающие).
+const REG_KIND_TO_TYPE = {
+  String: 'REG_SZ', ExpandString: 'REG_EXPAND_SZ', DWord: 'REG_DWORD',
+  QWord: 'REG_QWORD', Binary: 'REG_BINARY', MultiString: 'REG_MULTI_SZ',
+};
+const REG_TYPE_TO_KIND = {
+  REG_SZ: 'String', REG_EXPAND_SZ: 'ExpandString', REG_DWORD: 'DWord',
+  REG_QWORD: 'QWord', REG_BINARY: 'Binary', REG_MULTI_SZ: 'MultiString',
+};
+
+// Запустить однострочник PowerShell и получить ответ в виде base64-строки.
+// ЗАЧЕМ base64: reg.exe и сам powershell 5.1 печатают в кодировке КОНСОЛИ
+// (CP866 на русской Windows), Node читает трубу как UTF-8 — кириллица
+// превращается в «?». Для PATH это было разрушительно: чужая запись
+// «C:\Программы\Python\Scripts» после нашей перезаписи навсегда становилась
+// «C:\?????\Python\Scripts». base64 — чистый ASCII, кодировка перестаёт
+// участвовать в разговоре вообще.
+function winPsPayload(inline) {
+  const ps = remoteFetch.winPowershellPath();
+  if (!ps) return { ok: false, error: 'PowerShell не найден в System32 (fail-closed)' };
+  const r = spawnSync(ps, ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-NonInteractive', '-Command', inline],
+    { encoding: 'ascii', windowsHide: true, timeout: 20000, env: detectSpawnEnv() });
+  if (r.error) return { ok: false, error: String(r.error.message || r.error) };
+  const out = String(r.stdout || '');
+  const m = out.match(/HMREG1:([A-Za-z0-9+/=]+)/);
+  if (!m) return { ok: false, error: 'реестр: пустой ответ (код ' + r.status + ')' };
+  try {
+    return { ok: true, payload: JSON.parse(Buffer.from(m[1], 'base64').toString('utf8')) };
+  } catch (e) {
+    return { ok: false, error: 'реестр: неразбираемый ответ' };
+  }
+}
+
+// Разбор пути вида «HKCU\Environment» / «HKLM\SYSTEM\...». Запись разрешена
+// ТОЛЬКО в HKCU (см. regWriteValueTyped/regDeleteValueTyped — там hive обязан
+// быть CurrentUser); HKLM читается для машинного PATH.
+// Неизвестный куст или пустой подключ → null (вызывающий отказывает, fail-closed).
+function regPathParts(keyPath) {
+  const m = String(keyPath || '').match(/^(HKCU|HKEY_CURRENT_USER|HKLM|HKEY_LOCAL_MACHINE)\\(.+)$/i);
+  if (!m) return null;
+  const hive = /^HKLM|^HKEY_LOCAL_MACHINE/i.test(m[1]) ? 'LocalMachine' : 'CurrentUser';
+  return { hive, sub: m[2] };
+}
+
+// Только HKCU — для операций записи/удаления.
+function hkcuSubkeyOf(keyPath) {
+  const m = String(keyPath || '').match(/^(?:HKCU|HKEY_CURRENT_USER)\\(.+)$/i);
+  return m ? m[1] : '';
+}
+
 function regQueryValueTyped(keyPath, valueName) {
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { ok: false, error: 'reg.exe не найден в System32 (fail-closed)' };
-  const r = spawnSync(reg, ['query', keyPath, '/v', valueName],
-    { encoding: 'utf8', windowsHide: true, timeout: 20000 });
-  return uninstallExec.classifyRegQuery(valueName, r);
+  const parts = regPathParts(keyPath);
+  if (!parts) return { ok: false, error: 'реестр: неподдерживаемый ключ (' + keyPath + ')' };
+  const sub = parts.sub;
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::" + parts.hive + ".OpenSubKey(" + q(sub) + ",$false);" +
+    "if ($null -eq $k) { $o=@{found=$false} } else {" +
+    "  $has=@($k.GetValueNames() | Where-Object { $_ -eq " + q(valueName) + " }).Count -gt 0;" +
+    "  if (-not $has) { $o=@{found=$false} } else {" +
+    // DoNotExpandEnvironmentNames: REG_EXPAND_SZ обязан прийти СЫРЫМ, иначе чужие
+    // %VAR% раскроются и мы запишем обратно уже развёрнутый мусор.
+    "    $v=$k.GetValue(" + q(valueName) + ",$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);" +
+    "    $o=@{found=$true; kind=$k.GetValueKind(" + q(valueName) + ").ToString(); data=[string]$v} } }" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  const p = r.payload || {};
+  if (p.error) return { ok: false, error: 'реестр: ' + p.error };
+  if (!p.found) return { ok: true, found: false };
+  const type = REG_KIND_TO_TYPE[p.kind] || p.kind;
+  return { ok: true, found: true, type, data: String(p.data == null ? '' : p.data) };
+}
+
+// Запись значения HKCU через .NET. Значение передаётся в base64 — иначе длинный
+// PATH с кириллицей и кавычками не пережил бы ни командную строку, ни CP866.
+function regWriteValueTyped(keyPath, valueName, data, type) {
+  const sub = hkcuSubkeyOf(keyPath);
+  if (!sub) return { ok: false, error: 'реестр: поддерживается только HKCU (' + keyPath + ')' };
+  const kind = REG_TYPE_TO_KIND[type];
+  if (!kind) return { ok: false, error: 'реестр: неизвестный тип значения ' + type };
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const b64 = Buffer.from(String(data), 'utf8').toString('base64');
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(" + q(sub) + ",$true);" +
+    "if ($null -eq $k) { throw 'нет ключа " + sub.replace(/'/g, '') + "' }" +
+    "$val=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + b64 + "'));" +
+    "$k.SetValue(" + q(valueName) + ",$val,[Microsoft.Win32.RegistryValueKind]::" + kind + ");" +
+    "$o=@{ok=$true}" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  if (r.payload && r.payload.error) return { ok: false, error: 'реестр: ' + r.payload.error };
+  return { ok: true };
+}
+
+// Удаление значения HKCU через .NET (та же причина — кодировка диагностики).
+function regDeleteValueTyped(keyPath, valueName) {
+  const sub = hkcuSubkeyOf(keyPath);
+  if (!sub) return { ok: false, error: 'реестр: поддерживается только HKCU (' + keyPath + ')' };
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const inline =
+    "$ErrorActionPreference='Stop'; try {" +
+    "$k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(" + q(sub) + ",$true);" +
+    "if ($null -eq $k) { throw 'нет ключа' }" +
+    "$k.DeleteValue(" + q(valueName) + ",$false); $o=@{ok=$true}" +
+    "} catch { $o=@{error=$_.Exception.Message} }" +
+    "; Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $o -Compress))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return { ok: false, error: r.error };
+  if (r.payload && r.payload.error) return { ok: false, error: 'реестр: ' + r.payload.error };
+  return { ok: true };
 }
 
 // Разрешённые HKCU-ключи для удаления значений — ТОЛЬКО автозапуск Run.
@@ -2438,19 +2578,14 @@ function winRegDeleteValue(t) {
   if (!WIN_REG_ALLOWED_KEYS.has(String(t.key).toLowerCase())) {
     return { status: 'failed', message: 'ЗАЩИТА: ключ реестра вне аллоулиста: ' + t.key };
   }
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
   const keyPath = 'HKCU\\' + t.key;
   // P1-7: tri-state — ошибка чтения/парсинга ≠ «значения нет» (та давала бы absent
   // и ложный успех). Любая ошибка → failed.
   const q0 = regQueryValueTyped(keyPath, t.value);
-  if (!q0.ok) return { status: 'failed', message: 'reg query: ' + q0.error };
+  if (!q0.ok) return { status: 'failed', message: 'чтение реестра: ' + q0.error };
   if (!q0.found) return { status: 'absent', message: 'значения нет' };
-  try {
-    execFileSync(reg, ['delete', keyPath, '/v', t.value, '/f'], { windowsHide: true, stdio: 'ignore' });
-  } catch (e) {
-    return { status: 'failed', message: 'reg delete: ' + String((e && e.message) || e) };
-  }
+  const del = regDeleteValueTyped(keyPath, t.value);
+  if (!del.ok) return { status: 'failed', message: 'удаление значения: ' + del.error };
   const q1 = regQueryValueTyped(keyPath, t.value);
   if (!q1.ok) return { status: 'failed', message: 'верификация reg: ' + q1.error };
   if (q1.found) return { status: 'failed', message: 'значение реестра осталось' };
@@ -2476,24 +2611,25 @@ function winRemoveUserPathEntry(t, guardOpts) {
       return { status: 'failed', message: 'проверка каталога PATH-записи: ' + String((e && e.code) || e) };
     }
   }
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return { status: 'failed', message: 'reg.exe не найден в System32 (fail-closed)' };
   // P1-7: tri-state — ошибка чтения PATH ≠ «PATH нет» (иначе ложный absent).
   const cur = regQueryValueTyped('HKCU\\Environment', 'Path');
   if (!cur.ok) return { status: 'failed', message: 'чтение PATH: ' + cur.error };
   if (!cur.found) return { status: 'absent', message: 'пользовательского PATH нет' };
+  // Гейт на порчу: чужая запись важнее нашей. Если в прочитанном PATH есть
+  // символ замены U+FFFD или «?» там, где мы ждём путь, — значит значение
+  // приехало испорченным, и переписывать его НЕЛЬЗЯ ни при каких условиях:
+  // лучше оставить нашу лишнюю запись, чем стереть чужой кириллический путь.
+  if (/�/.test(cur.data)) {
+    return { status: 'failed', message: 'PATH прочитан с потерей символов — не переписываю (сохранность чужих записей важнее)' };
+  }
   const upd = uninstallExec.computeUserPathWithout(cur.data, dir);
   if (!upd.changed) return { status: 'absent', message: 'записи в PATH нет' };
-  try {
-    execFileSync(reg, ['add', 'HKCU\\Environment', '/v', 'Path', '/t', cur.type, '/d', upd.value, '/f'],
-      { windowsHide: true, stdio: 'ignore' });
-  } catch (e) {
-    return { status: 'failed', message: 'запись PATH: ' + String((e && e.message) || e) };
-  }
+  const w = regWriteValueTyped('HKCU\\Environment', 'Path', upd.value, cur.type);
+  if (!w.ok) return { status: 'failed', message: 'запись PATH: ' + w.error };
   const after = regQueryValueTyped('HKCU\\Environment', 'Path');
   if (!after.ok || !after.found || after.data !== upd.value) {
     // Верификация не сошлась — пробуем вернуть исходное значение (не теряем PATH).
-    try { execFileSync(reg, ['add', 'HKCU\\Environment', '/v', 'Path', '/t', cur.type, '/d', cur.data, '/f'], { windowsHide: true, stdio: 'ignore' }); } catch (e) { /* лучшее из возможного */ }
+    regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);
     return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — вернул исходный' };
   }
   return { status: 'removed', message: 'убрал «' + dir + '» из пользовательского PATH' };
@@ -2825,7 +2961,7 @@ function macFindOurDmg() {
   const okDmg = (p) => {
     try {
       if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
-      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(path.basename(p))) return false;
+      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(path.basename(p))) return false;
       return fs.statSync(p).isFile();
     } catch (e) { return false; }
   };
@@ -2853,7 +2989,7 @@ function macFindOurDmg() {
       if (e.isDirectory()) {
         if (e.name.startsWith('.') || SKIP.test(e.name)) continue;
         walk(p, depth - 1);
-      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._-]*\.dmg$/i.test(e.name) && okDmg(p)) {
+      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(e.name) && okDmg(p)) {
         found.push(p);
       }
     }
@@ -2872,42 +3008,60 @@ ipcMain.handle('mac-selfheal', async () => {
   if (process.platform !== 'darwin') return { ok: false, error: 'not-darwin' };
   const dmg = macFindOurDmg();
   if (!dmg) return { ok: false, error: 'dmg-not-found' };
-  const run = (bin, args, timeout) => {
-    try {
-      execFileSync(bin, args, { encoding: 'utf8', timeout: timeout || 30000, stdio: 'ignore' });
-      return true;
-    } catch (e) { return false; }
-  };
-  // Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной».
-  run('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', dmg]);
-  // Отцепляем ВСЕ наши тома, а не первый: при повторных попытках macOS монтирует
-  // «Hamidun Setup 1», «Hamidun Setup 2»… и человек снова запускался со старого,
-  // ещё карантинного тома.
+  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» —
+  //    и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
+  //    «Готово», закрывали окно, и он получал ровно тот же заблокированный
+  //    установщик. Отсутствие исключения — не доказательство.
   try {
-    for (const v of fs.readdirSync('/Volumes')) {
-      if (!/^Hamidun Setup/i.test(v)) continue;
-      run('/usr/bin/hdiutil', ['detach', path.join('/Volumes', v), '-force'], 20000);
-    }
-  } catch (e) { /* /Volumes нечитаем — не критично */ }
-  // Открываем заново: карантина на образе больше нет → приложение внутри не будет
-  // транслоцировано.
-  if (!run('/usr/bin/open', [dmg], 30000)) return { ok: false, error: 'open-failed', dmg };
-  // Ждём появления .app на свежем томе и запускаем ИМЕННО его.
-  const deadline = Date.now() + 25000;
-  let appPath = '';
-  while (Date.now() < deadline && !appPath) {
-    try {
-      for (const v of fs.readdirSync('/Volumes')) {
-        if (!/^Hamidun Setup/i.test(v)) continue;
-        const cand = path.join('/Volumes', v, 'Hamidun Setup.app');
-        if (fs.existsSync(cand)) { appPath = cand; break; }
-      }
-    } catch (e) { /* том ещё монтируется */ }
-    if (!appPath) await new Promise((r) => setTimeout(r, 500));
+    execFileSync('/usr/bin/xattr', ['-dr', 'com.apple.quarantine', dmg],
+      { timeout: 20000, stdio: 'ignore' });
+  } catch (e) { /* атрибута могло и не быть — проверяем ниже */ }
+  let quarantined = false;
+  try {
+    // Код 0 = атрибут ЕСТЬ (значит снять не удалось), ненулевой = атрибута нет.
+    execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', dmg],
+      { timeout: 10000, stdio: 'ignore' });
+    quarantined = true;
+  } catch (e) { quarantined = false; }
+  if (quarantined) return { ok: false, error: 'quarantine-not-cleared', dmg };
+
+  // 2) Хвост операции выполняет ОТЦЕПЛЁННЫЙ помощник, переживающий наш выход.
+  //    Нельзя отцеплять том из процесса, который с этого тома и запущен: при
+  //    штатном сценарии (человек запустил приложение прямо из окна образа)
+  //    `hdiutil detach -force` выдёргивает backing store у собственного
+  //    исполняемого файла, и установщик умирает посреди «починки» — окно просто
+  //    исчезает, без свежего образа и без объяснений.
+  //    Помощник: ждёт нашего выхода → отцепляет ВСЕ тома Hamidun → открывает
+  //    образ → дожидается ПОЯВЛЕНИЯ тома → запускает приложение оттуда.
+  //    `open -n` обязателен: без него macOS просто активировала бы уже
+  //    запущенный экземпляр того же bundle id вместо запуска с нового тома.
+  const helper = [
+    'DMG="$1"; PID="$2";',
+    // Ждём выхода установщика, но не дольше 30 с (вдруг окно не закрылось).
+    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 60 ]; do sleep 0.5; i=$((i+1)); done;',
+    'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
+    '/usr/bin/open "$DMG" >/dev/null 2>&1;',
+    // Тома Hamidun только что отцеплены — значит появившийся том заведомо СВЕЖИЙ.
+    'i=0; while [ $i -lt 60 ]; do',
+    '  for v in /Volumes/Hamidun*; do',
+    '    if [ -d "$v/Hamidun Setup.app" ]; then /usr/bin/open -n -a "$v/Hamidun Setup.app"; exit 0; fi;',
+    '  done;',
+    '  sleep 1; i=$((i+1));',
+    'done;',
+    'exit 1',
+  ].join(' ');
+  try {
+    // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
+    // в имени файла бывают пробелы и скобки («… (1).dmg»).
+    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid)],
+      { detached: true, stdio: 'ignore' });
+    child.unref();
+  } catch (e) {
+    return { ok: false, error: 'helper-failed', dmg };
   }
-  if (!appPath) return { ok: false, error: 'volume-not-ready', dmg };
-  if (!run('/usr/bin/open', ['-a', appPath], 30000)) return { ok: false, error: 'relaunch-failed', dmg, appPath };
-  return { ok: true, dmg, appPath };
+  // ok здесь означает «карантин снят и починка запущена», а не «всё готово»:
+  // остальное произойдёт уже после нашего выхода.
+  return { ok: true, dmg, handoff: true };
 });
 
 ipcMain.handle('quit', () => app.quit());

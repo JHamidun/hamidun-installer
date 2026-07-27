@@ -216,6 +216,32 @@ function restoreReceipt(homedir, id) {
   }
 }
 
+// Осиротевшие tombstone от ПРЕРВАННОГО удаления. Цикл удаления длится десятками
+// секунд (taskkill, rmSync с ретраями, реестр с таймаутами, launchctl), и если
+// процесс убили жёстко — антивирус, диспетчер задач, пропало питание — маркер
+// остаётся переименованным навсегда. Тогда readReceipt отдаёт null, интерфейс
+// считает компонент «без квитанции» и ПРЯЧЕТ кнопку «Удалить»: половина
+// артефактов удалена, компонент фактически стоит, а убрать его больше нельзя —
+// только переустановить и удалять заново.
+// Возвращаем маркер на место, чтобы человек мог просто повторить удаление.
+// Живой маркер НЕ трогаем (он новее tombstone — значит компонент переустановили).
+function recoverOrphanTombstones(homedir) {
+  const dir = receiptsDir(homedir);
+  const restored = [];
+  let names;
+  try { names = fs.readdirSync(dir); }
+  catch (e) { return { ok: true, restored }; }        // каталога нет — нечего чинить
+  for (const name of names) {
+    if (name.slice(-TOMBSTONE_SUFFIX.length) !== TOMBSTONE_SUFFIX) continue;
+    const id = name.slice(0, -TOMBSTONE_SUFFIX.length).replace(/\.json$/, '');
+    if (!id) continue;
+    try { if (fs.existsSync(receiptPath(homedir, id))) continue; } catch (e) { continue; }
+    const r = restoreReceipt(homedir, id);
+    if (r.ok) restored.push(id);
+  }
+  return { ok: true, restored };
+}
+
 // P1-1: хвосты атомарной записи маркера (<id>.json.*.bak / <id>.json.*.tmp).
 // Осиротевший .bak после finalize воскресил бы «удалённый» компонент через
 // recoverBak — finalize обязан подчистить и его.
@@ -281,5 +307,6 @@ module.exports = {
   EXIT_SKIP, isSkipExit, shouldRecordInstall,
   receiptsDir, receiptPath, tombstonePath, parseReceiptLine, buildReceipt,
   writeReceipt, readReceipt, hasReceipt,
-  deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt
+  deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt,
+  recoverOrphanTombstones
 };

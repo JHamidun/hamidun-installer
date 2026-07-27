@@ -259,13 +259,27 @@ if (-not $installFailed) {
 
 # Фиксируем, какие скиллы разложили МЫ — чтобы на СЛЕДУЮЩЕМ прогоне снятие пака реально удаляло
 # их, а не считало «пред-существующими» (иначе прунинг — молчаливый no-op после первой установки).
+# КРИТИЧНО (data-loss): в список идёт ТОЛЬКО реально доложенное нами =
+# (скиллы источника МИНУС $preExisting) ∪ прошлый список $ourPrev.
+# Писать ВЕСЬ список источника нельзя: пред-существующий каталог ЮЗЕРА, чьё имя совпало
+# с нашим паком (git-workflow, security-audit, database-design…), на следующем прогоне
+# считался бы «нашим» ($ourPrev.ContainsKey) и сносился Remove-Item -Recurse при снятом
+# паке — вместе с файлами пользователя, которые первый прогон корректно сберёг.
+# Объединение с $ourPrev обязательно: без него на 2-м прогоне разность пуста (наши
+# вчерашние скиллы уже «пред-существуют») и снятие пака переставало бы работать с 3-го.
+# $pruneDisabled (перечисление $preExisting не удалось) → список НЕ обновляем: разность
+# от неполного $preExisting пометила бы скиллы юзера как наши. Старый файл остаётся.
 # Не записалось → прунинг просто останется консервативным (fail-safe, ничего чужого не удалим).
-if (-not $installFailed -and -not $skillsReparse) {
+if (-not $installFailed -and -not $skillsReparse -and -not $pruneDisabled) {
     try {
         $srcSkills = Join-Path $srcClaude 'skills'
         if (Test-Path -LiteralPath $srcSkills) {
-            (Get-ChildItem -Directory -LiteralPath $srcSkills -ErrorAction Stop | ForEach-Object { $_.Name }) |
-                Set-Content -LiteralPath $ourListPath -Encoding UTF8 -ErrorAction Stop
+            $ourNow = @{}
+            Get-ChildItem -Directory -LiteralPath $srcSkills -ErrorAction Stop | ForEach-Object {
+                if (-not $preExisting.ContainsKey($_.Name)) { $ourNow[$_.Name] = $true }
+            }
+            foreach ($n in @($ourPrev.Keys)) { $ourNow[$n] = $true }
+            Set-Content -LiteralPath $ourListPath -Value @($ourNow.Keys | Sort-Object) -Encoding UTF8 -ErrorAction Stop
         }
     } catch { }
 }

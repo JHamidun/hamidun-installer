@@ -628,25 +628,50 @@ function renderVendorBlock() {
 // перемонтирует его и перезапускается из свежего тома. Просить человека копировать
 // команду в Терминал — плохой путь: живой случай показал, что там ошибаются (образ
 // лежал не в «Загрузках», команда падала, и человек упирался в тупик).
+// Защёлка самолечения. Кнопок ДВЕ (в модалке и в несмываемом баннере), и раньше,
+// пока шла первая попытка, со второй кнопки можно было запустить починку ещё раз —
+// а вторая попытка force-отцепляет том, с которого уже стартует новый установщик.
+// Флаг общий на модуль: пока вызов идёт, повторный клик с ЛЮБОЙ кнопки невозможен.
+// disabled на кнопках — только видимая часть; сама защита — этот флаг.
+let SELF_HEAL_BUSY = false;
+// Обе кнопки разом: блокируем и показываем, что починка уже идёт.
+function setSelfHealButtonsBusy(busy) {
+  ['mac-selfheal', 'mac-selfheal-banner'].forEach((bid) => {
+    const b = document.getElementById(bid);
+    if (!b) return;
+    b.disabled = busy;
+    if (busy) {
+      if (!b.dataset.idleLabel) b.dataset.idleLabel = b.textContent;
+      b.textContent = 'Чиню…';
+    } else if (b.dataset.idleLabel) {
+      b.textContent = b.dataset.idleLabel;
+    }
+  });
+}
 function bindMacSelfHeal(btnId, statusId) {
   const btn = document.getElementById(btnId);
   if (!btn || btn.dataset.bound === '1') return;
   btn.dataset.bound = '1';
   btn.addEventListener('click', async () => {
+    if (SELF_HEAL_BUSY) return; // починка уже идёт — второй запуск невозможен
+    SELF_HEAL_BUSY = true;
     const st = document.getElementById(statusId);
     const say = (s) => { if (st) st.textContent = s; };
-    btn.disabled = true;
+    setSelfHealButtonsBusy(true);
     say('Ищу образ и снимаю карантин…');
     let res = null;
     try { res = await window.installer.macSelfHeal(); } catch (e) { res = { ok: false, error: String(e) }; }
     if (res && res.ok) {
+      // Защёлку НЕ отпускаем: приложение сейчас перезапустится из свежего тома,
+      // и повторная починка в этот момент отцепила бы том у него из-под ног.
       say('Готово — открыл свежее окно образа и запускаю установщик оттуда. Это окно можно закрыть.');
       // Себя закрываем с задержкой: пусть новый экземпляр успеет подняться, иначе
       // человек увидит, что «всё исчезло», и решит, что сломалось.
       setTimeout(() => { try { window.installer.quit(); } catch (e) { /* */ } }, 2500);
       return;
     }
-    btn.disabled = false;
+    SELF_HEAL_BUSY = false;
+    setSelfHealButtonsBusy(false);
     const why = (res && res.error) || 'неизвестно';
     if (why === 'dmg-not-found') {
       say('Не нашёл файл образа (Hamidun-Setup-Mac.dmg) — похоже, он удалён. Скачай установщик заново.');
@@ -1026,6 +1051,12 @@ function appendLog(line) {
 // Подпись докачки (там проценты настоящие) не трогаем: она перерисовывается своим
 // обработчиком прогресса.
 let STEP_TIMER = null;
+// Фаза внутри шага ПОСЛЕ конца докачки («Устанавливаю»). Пока фаза пуста, часы
+// уступают подписи докачки (там настоящие проценты). Раньше уступали ВСЕГДА по
+// признаку «%» в тексте — и после «Скачиваю 100%» замирали навсегда: вся установка
+// шла под замершей подписью, ровно то, на что жаловались живые пользователи.
+let STEP_CLOCK_PHASE = '';
+function setStepClockPhase(phase) { STEP_CLOCK_PHASE = phase || ''; }
 function startStepClock(id, baseLabel) {
   stopStepClock();
   const t0 = Date.now();
@@ -1035,15 +1066,21 @@ function startStepClock(id, baseLabel) {
     const spans = step.querySelectorAll('span');
     const el = spans.length ? spans[spans.length - 1] : null;
     if (!el) return;
-    // Если докачка уже переписала подпись на «Скачиваю 42%…» — не мешаем ей.
-    if (/%/.test(el.textContent || '')) return;
+    // Пока докачка рисует НАСТОЯЩИЕ проценты — не мешаем ей. Но когда докачка
+    // дошла до конца (фаза установки, см. handleRemoteProgress) — часы снова
+    // главные и обязаны тикать до реального завершения шага.
+    if (!STEP_CLOCK_PHASE) {
+      if (/%/.test(el.textContent || '')) return;
+    }
     const s = Math.floor((Date.now() - t0) / 1000);
-    el.textContent = baseLabel + ' — идёт ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    const phase = STEP_CLOCK_PHASE ? STEP_CLOCK_PHASE + ', ' : '';
+    el.textContent = baseLabel + ' — ' + phase + 'идёт ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   };
   STEP_TIMER = setInterval(tick, 1000);
 }
 function stopStepClock() {
   if (STEP_TIMER) { clearInterval(STEP_TIMER); STEP_TIMER = null; }
+  STEP_CLOCK_PHASE = '';
 }
 
 // Общий прогресс прогона в ПРОЦЕНТАХ. Проценты настоящие — доля пройденных
@@ -1207,10 +1244,7 @@ async function runComponents(ids, env) {
     if (comp && isRemote) {
       setStepLabel(id, `${comp.name} — Скачиваю…`);
       appendLog(`[↓] Докачка ${comp.name} из облака…`);
-      offP = window.installer.onRemoteProgress((p) => {
-        if (!p || p.id !== id) return;
-        setStepLabel(id, remoteProgressLabel(comp.name, p));
-      });
+      offP = window.installer.onRemoteProgress((p) => handleRemoteProgress(id, comp.name, p));
     }
 
     // verify читает HM_SELECTED, чтобы печатать "skip" для НЕ выбранных. Компоненты,
@@ -1322,6 +1356,27 @@ async function runComponents(ids, env) {
     integrityFailed: unresolved.filter(([, k]) => k === 'integrity').map(([i]) => i),
     gracefulSkipped,
   };
+}
+
+// Событие прогресса докачки для идущего шага (вынесено из runComponents, чтобы
+// тестироваться без Electron). Пока идут байты — рисуем настоящие проценты и часы
+// молчат. Когда докачка ДОШЛА ДО КОНЦА (100% или received==total) — у КАЖДОГО
+// докачиваемого компонента дальше начинается собственно установка, и событий
+// прогресса больше не будет: если подпись не сменить, на всю самую долгую фазу
+// экран замирает на «Скачиваю 100%» (жалоба живых пользователей). Поэтому здесь
+// подпись переключается на «Устанавливаю…», а часам возвращается право тикать
+// (setStepClockPhase) до реального завершения шага.
+function handleRemoteProgress(id, name, p) {
+  if (!p || p.id !== id) return;
+  const doneDl = (p.pct != null && p.pct >= 100) || (p.total > 0 && p.received >= p.total);
+  if (doneDl) {
+    setStepClockPhase('Устанавливаю');
+    setStepLabel(id, `${name} — Устанавливаю…`);
+    return;
+  }
+  // Сеть могла оборваться и докачка началась заново (ретрай) — проценты снова главные.
+  setStepClockPhase('');
+  setStepLabel(id, remoteProgressLabel(name, p));
 }
 
 // «Скачиваю 45% · 12 из 27 МБ» — подпись шага докачки (received/total шлёт main).

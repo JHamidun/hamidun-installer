@@ -109,9 +109,16 @@ function New-HmSecureStagingDir {
           [Parameter(Mandatory = $true)][string]$Icacls,
           [Parameter(Mandatory = $true)][bool]$Elevated)
     try {
-        if (-not (Test-Path -LiteralPath $ProgramData)) { return $null }
+        if (-not (Test-Path -LiteralPath $ProgramData)) {
+            [Console]::Error.WriteLine('HMSECFAIL: нет каталога ProgramData: ' + $ProgramData)
+            return $null
+        }
         $dir = Join-Path $ProgramData ('HmDeElev-' + [guid]::NewGuid().ToString('N'))
-        if (Test-Path -LiteralPath $dir) { return $null }   # CREATE_NEW: занят (невозможно, но fail-closed)
+        if (Test-Path -LiteralPath $dir) {
+            # CREATE_NEW: имя занято (практически невозможно, но fail-closed).
+            [Console]::Error.WriteLine('HMSECFAIL: случайное имя каталога уже занято — возможна подмена')
+            return $null
+        }
 
         $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
         $system = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -161,7 +168,10 @@ function New-HmSecureStagingDir {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
             $usedFallback = $true
             [void][System.IO.Directory]::CreateDirectory($dir)
-            if (-not (Test-Path -LiteralPath $dir)) { return $null }
+            if (-not (Test-Path -LiteralPath $dir)) {
+                [Console]::Error.WriteLine('HMSECFAIL: не удалось создать каталог даже фолбэком: ' + $dir)
+                return $null
+            }
             # ВАЖНО: у $sd задан владелец Administrators, а Set-Acl попытается применить и
             # его — и упадёт по привилегиям, обнулив весь фолбэк. Поэтому применяем DACL
             # ОТДЕЛЬНЫМ дескриптором БЕЗ владельца, а владельца ставим ниже через icacls.
@@ -178,7 +188,12 @@ function New-HmSecureStagingDir {
             }
             Set-HmDirAcl -Path $dir -Acl $sdDacl
         }
-        if (-not (Test-Path -LiteralPath $dir)) { return $null }
+        # Молчаливый $null здесь стоил бы человеку бесполезного «примитив не вернул путь»
+        # вместо настоящей причины — ровно ради причин и заводился HMSECFAIL.
+        if (-not (Test-Path -LiteralPath $dir)) {
+            [Console]::Error.WriteLine('HMSECFAIL: каталог исчез после назначения прав: ' + $dir)
+            return $null
+        }
         # Владелец мог остаться создателем (политика «Object creator») — доводим до
         # Administrators. Если не удалось, финальная проверка владельца ниже отвергнет каталог.
         if ($Elevated) {
@@ -193,6 +208,7 @@ function New-HmSecureStagingDir {
         # Отвергаем reparse-point (junction-подмена).
         $attr = (Get-Item -LiteralPath $dir -Force).Attributes
         if ($attr -band [System.IO.FileAttributes]::ReparsePoint) {
+            [Console]::Error.WriteLine('HMSECFAIL: каталог оказался ссылкой (junction-подмена)')
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
 
@@ -258,10 +274,12 @@ function New-HmSecureStagingDir {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
         if (-not (Test-Path -LiteralPath $work)) {
+            [Console]::Error.WriteLine('HMSECFAIL: рабочий подкаталог не создался')
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
         $wattr = (Get-Item -LiteralPath $work -Force).Attributes
         if ($wattr -band [System.IO.FileAttributes]::ReparsePoint) {
+            [Console]::Error.WriteLine('HMSECFAIL: рабочий подкаталог оказался ссылкой (junction-подмена)')
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; return $null
         }
         # Ребёнок ACE наследует, но наследование и владельца доводим явно — наружу уходит
@@ -392,6 +410,93 @@ function Test-HmTrustedSigner {
     return ''
 }
 
+# --- УБОРКА ОСИРОТЕВШИХ одноразовых задач планировщика (HmDeElev_*/HmLaunch_*). ---
+#
+# Задача удаляется в finally Invoke-HmDeElevated (и в cleanup() main.js для HmLaunch_*),
+# но если установщик ЗАКРЫЛИ/УБИЛИ посреди установки, finally не исполняется — задачи
+# оставались в планировщике пользователя НАВСЕГДА и копились с каждым прерванным
+# запуском. In-process гарантии при kill невозможны в принципе, поэтому надёжность
+# достигается ПОДМЕТАНИЕМ: при каждой загрузке примитива (дот-сорс внизу файла) сносим
+# сирот ПРОШЛЫХ прерванных запусков — своих (HmDeElev_*) и главного процесса (HmLaunch_*).
+#
+# НЕЛЬЗЯ удалить задачу, которую прямо сейчас гоняет ПАРАЛЛЕЛЬНЫЙ экземпляр установщика:
+# его родитель опрашивает «Last Result», и снос задачи провалил бы ему установку. Поэтому
+# решение «сирота или нет» — консервативное, по СОСТОЯНИЮ и ВОЗРАСТУ:
+#   • State Running/Queued → живая, не трогаем;
+#   • возраст < MaxAgeMinutes (60) → возможно, живая у параллельного экземпляра
+#     (сама задача живёт ≤10 мин по ExecutionTimeLimit, родитель ждёт ≤630 с — час
+#     покрывает всё с многократным запасом), не трогаем;
+#   • возраст неизвестен (нет ни даты регистрации, ни файла задачи, ни факта запуска)
+#     → fail-safe, НЕ удаляем (лучше лишняя задача, чем сорванная чужая установка).
+# Возраст берём локаль-независимо: RegistrationInfo.Date (наш XML теперь пишет её сам) →
+# CreationTime файла задачи в System32\Tasks (покрывает HmLaunch_* из main.js и задачи
+# старых версий без Date) → LastRunTime (для «никогда не запускалась» планировщик отдаёт
+# сентинел 1899/1999 года — отсекается порогом Year > 2000).
+#
+# БЕЗ модуля ScheduledTasks (в урезанном PSModulePath его автозагрузка падает — тот же
+# класс сбоя, что у Get-Acl выше) — только COM Schedule.Service, он модулей не требует.
+
+# Чистое решение «задача — сирота?» — вынесено отдельно, тестируется БЕЗ планировщика.
+function Test-HmTaskIsOrphan {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [int]$State = 0,            # TASK_STATE_*: 2=Queued, 3=Ready, 4=Running
+        [string]$RegDate = '',      # RegistrationInfo.Date (ISO-строка) или ''
+        [object]$FileBorn = $null,  # CreationTime файла задачи (datetime) или $null
+        [object]$LastRun = $null,   # LastRunTime (datetime; сентинел <2000 = не запускалась)
+        [string]$ExcludeTag = '',
+        [int]$MaxAgeMinutes = 60,
+        [object]$Now = $null
+    )
+    if ($null -eq $Now) { $Now = Get-Date }
+    # Только НАШИ одноразовые теги (hex-хвост) — никакой чужой задачи не касаемся.
+    if ($Name -notmatch '^Hm(DeElev|Launch)_[0-9a-fA-F]{8,64}$') { return $false }
+    if ($ExcludeTag -and ($Name -eq $ExcludeTag)) { return $false }
+    if ($State -eq 4 -or $State -eq 2) { return $false }   # Running/Queued = живая
+    $born = $null
+    if ($RegDate) { try { $born = [datetime]$RegDate } catch { $born = $null } }   # [datetime]-каст = invariant culture
+    if ((-not $born) -and ($FileBorn -is [datetime]) -and $FileBorn.Year -gt 2000) { $born = $FileBorn }
+    if ((-not $born) -and ($LastRun -is [datetime]) -and $LastRun.Year -gt 2000) { $born = $LastRun }
+    if (-not $born) { return $false }   # возраст неизвестен → fail-safe, не удаляем
+    return (($Now - $born).TotalMinutes -ge $MaxAgeMinutes)
+}
+
+# Подметание корневой папки планировщика. Возвращает имена удалённых задач (может пусто).
+# Любой сбой (COM недоступен, нет прав на чужую задачу) — молча пропускаем: уборка
+# best-effort и НИКОГДА не роняет установку.
+function Remove-HmOrphanTasks {
+    param([string]$ExcludeTag = '', [int]$MaxAgeMinutes = 60)
+    $removed = @()
+    try {
+        $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+        $tasksDir = Join-Path (Join-Path $sysRoot 'System32') 'Tasks'
+        $svc = New-Object -ComObject 'Schedule.Service'
+        $svc.Connect()
+        $root = $svc.GetFolder('\')
+        $now = Get-Date
+        # GetTasks(1) = TASK_ENUM_HIDDEN: наши задачи создаются <Hidden>true</Hidden>.
+        foreach ($t in @($root.GetTasks(1))) {
+            $name = ''; $state = 0; $regDate = ''; $fileBorn = $null; $lastRun = $null
+            try { $name = [string]$t.Name } catch { continue }
+            if ($name -notmatch '^Hm(DeElev|Launch)_') { continue }   # чужие не читаем вовсе
+            try { $state = [int]$t.State } catch { $state = 0 }
+            try { $regDate = [string]$t.Definition.RegistrationInfo.Date } catch { $regDate = '' }
+            try {
+                $f = Join-Path $tasksDir $name
+                if (Test-Path -LiteralPath $f) { $fileBorn = (Get-Item -LiteralPath $f -Force).CreationTime }
+            } catch { $fileBorn = $null }
+            try { $lastRun = $t.LastRunTime } catch { $lastRun = $null }
+            if (Test-HmTaskIsOrphan -Name $name -State $state -RegDate $regDate -FileBorn $fileBorn `
+                    -LastRun $lastRun -ExcludeTag $ExcludeTag -MaxAgeMinutes $MaxAgeMinutes -Now $now) {
+                try { $root.DeleteTask($name, 0); $removed += $name } catch { }
+            }
+        }
+    } catch { }
+    # БЕЗ `, $removed`: вызывающий собирает через @(...), а «массив в массиве» давал бы
+    # Count=1 и «System.Object[]» вместо имён. Пустой массив → пустой конвейер → @() = 0.
+    return $removed
+}
+
 function Invoke-HmDeElevated {
     param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
 
@@ -461,10 +566,14 @@ function Invoke-HmDeElevated {
         $userXml    = [System.Security.SecurityElement]::Escape($userId)
         $psExeXml   = [System.Security.SecurityElement]::Escape($psExe)
         $wrapArgXml = [System.Security.SecurityElement]::Escape($wrapArgs)
+        # <Date> (ISO, ToString('s') — invariant): по ней Remove-HmOrphanTasks на СЛЕДУЮЩИХ
+        # запусках отличает свежую задачу (возможно, живую у параллельного экземпляра) от
+        # осиротевшей после убитого установщика. В схеме RegistrationInfo Date идёт ПЕРВОЙ.
+        $regDateXml = [System.Security.SecurityElement]::Escape((Get-Date).ToString('s'))
         $taskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Hamidun de-elevated one-shot</Description></RegistrationInfo>
+  <RegistrationInfo><Date>$regDateXml</Date><Description>Hamidun de-elevated one-shot</Description></RegistrationInfo>
   <Principals>
     <Principal id="Author">
       <UserId>$userXml</UserId>
@@ -537,3 +646,17 @@ function Invoke-HmDeElevated {
     }
     return $result
 }
+
+# --- АВТО-УБОРКА при КАЖДОЙ загрузке примитива (дот-сорс из vscode.ps1/extension.ps1). ---
+# Сироты появляются, когда установщик убили посреди установки — finally выше не исполнился.
+# Подметаем их здесь, на СЛЕДУЮЩЕМ запуске: живые задачи параллельных экземпляров защищены
+# состоянием/возрастом внутри Test-HmTaskIsOrphan. Best-effort: любой сбой не мешает
+# установке. ВАЖНО: вызов стоит ПОСЛЕДНИМ в файле — все функции уже объявлены (в этом
+# файле уже был баг «функция вызвана до объявления», порядок здесь не случаен).
+try {
+    $hmOrphanTags = @(Remove-HmOrphanTasks)
+    if ($hmOrphanTags.Count -gt 0) {
+        Write-Host ("Планировщик: убраны осиротевшие задачи прерванных установок (" +
+            $hmOrphanTags.Count + "): " + ($hmOrphanTags -join ', '))
+    }
+} catch { }

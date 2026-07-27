@@ -49,9 +49,37 @@ function resolveUid(opts) {
     // «Hamidun-Setup-Windows--u123456 (1).exe» → 123456.
     // « (1)» Windows дописывает при повторном скачивании: без этой обрезки повторно
     // скачавший человек терял бы привязку.
-    const base = path.basename(exePath).replace(/\.[A-Za-z0-9]+$/, '').replace(/\s*\(\d+\)$/, '');
-    const m = /--u([A-Za-z0-9_-]{1,32})$/.exec(base);
-    if (m) return sanitizeUid(m[1]);
+    const uidFromName = (name) => {
+      const base = String(name).replace(/\.[A-Za-z0-9]+$/, '').replace(/\s*\(\d+\)$/, '');
+      const m = /--u([A-Za-z0-9_-]{1,32})$/.exec(base);
+      return m ? sanitizeUid(m[1]) : '';
+    };
+    const fromExe = uidFromName(path.basename(exePath));
+    if (fromExe) return fromExe;
+
+    // macOS: приложение запускается ИЗ ОБРАЗА, поэтому его собственный путь —
+    // /Volumes/Hamidun Setup/Hamidun Setup.app, а имя скачанного файла
+    // (Hamidun-Setup-Mac--u123456.dmg) до него не доезжает никак. Спрашиваем сам
+    // смонтированный образ, из какого файла он поднят. Без этого привязка событий
+    // к человеку на маке не работала вовсе — половина установок оставалась анонимной.
+    const platform = o.platform || process.platform;
+    if (platform === 'darwin') {
+      const exec = o.execFileSync || require('child_process').execFileSync;
+      try {
+        const out = exec('/usr/bin/hdiutil', ['info'], { encoding: 'utf8', timeout: 15000 });
+        for (const line of String(out).split(/\r?\n/)) {
+          const im = /^image-path\s*:\s*(.+)$/.exec(line.trim());
+          if (!im) continue;
+          const name = path.basename(im[1].trim());
+          // Только НАШ образ: у человека могут быть смонтированы посторонние dmg,
+          // и брать uid из чужого имени файла — значит пускать внешние данные
+          // в тело события.
+          if (!/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(name)) continue;
+          const got = uidFromName(name);
+          if (got) return got;
+        }
+      } catch (e) { /* образ уже отцеплен или hdiutil недоступен — остаёмся анонимными */ }
+    }
   } catch (e) { /* uid необязателен: без него всё работает, просто анонимно */ }
   return '';
 }

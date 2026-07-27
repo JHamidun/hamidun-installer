@@ -45,6 +45,16 @@ if ($vsix -and -not $DRY) { Confirm-HmArtifact $vsix }
 # Поэтому кладём ПРОВЕРЕННЫЙ vsix в читаемое пользователем место и ставим оттуда.
 # Эскалации это не даёт: vsix и так исполняется редактором при MEDIUM integrity, а
 # целостность подтверждена ВЫШЕ, под админом, до копирования.
+# Копия vsix (до 80 МБ) не должна оставаться в %TEMP%. Объявлена ДО создания копии, а
+# убирается — ОДНИМ механизмом, в finally вокруг всего остатка скрипта (см. try ниже):
+# так уборку получает и каждый exit, и необработанное исключение, без перечисления путей.
+function Remove-HmVsixTemp {
+    if ($script:vsixTemp) {
+        Remove-Item -LiteralPath $script:vsixTemp -Force -ErrorAction SilentlyContinue
+        $script:vsixTemp = ''
+    }
+}
+
 $vsixTemp = ''
 if ($vsix -and -not $DRY) {
     try {
@@ -62,13 +72,11 @@ if ($vsix -and -not $DRY) {
     }
 }
 
-# Копия vsix (до 80 МБ) не должна оставаться в %TEMP% — убираем на КАЖДОМ выходе.
-function Remove-HmVsixTemp {
-    if ($script:vsixTemp) {
-        Remove-Item -LiteralPath $script:vsixTemp -Force -ErrorAction SilentlyContinue
-        $script:vsixTemp = ''
-    }
-}
+# С этого места в %TEMP% может лежать копия vsix — ЛЮБОЙ выход (exit 0/1, исключение)
+# обязан пройти через finally с уборкой. Тело блока намеренно НЕ переиндентировано:
+# PowerShell к отступам безразличен, а here-string settings.json обязан держать '@ в
+# нулевой колонке.
+try {
 
 # Cursor должен быть ЗАКРЫТ, иначе --install-extension падает с 'aborted' (баг с теста).
 # НО не убиваем силой Cursor, открытый ПОЛЬЗОВАТЕЛЕМ — это потеря несохранённой работы.
@@ -211,11 +219,10 @@ if (-not $installed -and -not $DRY -and $userCursorSpared -and (Get-Process Curs
     if (Install-Into $cursorCli 'Cursor') { $installed = $true }
 }
 
-if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; Remove-HmVsixTemp; exit 0 }
+if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; exit 0 }
 # Cursor нет вообще — делать нечего (панель Claude в VS Code ставит компонент vscode). Не провал.
 if (-not $cursorCli) {
     Write-Host "Cursor не установлен — пропускаю. Панель Claude Code уже в VS Code (компонент vscode)."
-    Remove-HmVsixTemp
     exit 0
 }
 # Cursor есть, но расширение не встало.
@@ -224,5 +231,8 @@ if ($script:DeElevFailed) {
 } else {
     Write-Host "Расширение в Cursor не установилось автоматически. В Cursor: панель расширений -> найди '$extId' -> Install. Claude Code также работает в терминале командой 'claude'."
 }
-Remove-HmVsixTemp
 exit 1
+} finally {
+    # Уборка копии vsix на ЛЮБОМ выходе из блока выше (exit 0/1, необработанное исключение).
+    Remove-HmVsixTemp
+}

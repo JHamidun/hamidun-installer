@@ -5,6 +5,8 @@ $ProgressPreference = 'SilentlyContinue'
 # irm|iex ниже тянет ОФИЦИАЛЬНЫЙ установщик claude.ai по HTTPS (доверие = TLS + подлинность домена).
 # Своего SHA-256 для него нет (плавающая версия). Форсим TLS 1.2, чтобы PS5.1 не откатился на TLS1.0.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+# Invoke-HmDeElevated: проверочный ЗАПУСК claude (user-writable бинарь) — только де-элевированно.
+. (Join-Path $PSScriptRoot '_deelev.ps1')
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -25,46 +27,6 @@ function Update-Path {
     if (${env:ProgramFiles(x86)}) { $parts += (Join-Path ${env:ProgramFiles(x86)} 'Git\cmd') }
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
-
-Update-Path
-$DRY = [bool]$env:HM_DRY_RUN
-$cache = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'npm-cache' } else { '' }
-$npmExit = $null
-if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
-    Write-Host "Ставлю Claude Code CLI из встроенного npm-кеша (офлайн)..."
-    if ($DRY) { Write-Host "  [dry-run] WOULD: npm install -g @anthropic-ai/claude-code --offline --cache $cache"; exit 0 }
-    npm install -g '@anthropic-ai/claude-code' --offline --cache $cache --no-audit --no-fund
-    $npmExit = $LASTEXITCODE
-    if ($npmExit -ne 0) {
-        Write-Host "Офлайн-установка npm вернула код ${npmExit}. Пробую онлайн-установщик..."
-        try {
-            Invoke-RestMethod "https://claude.ai/install.ps1" -TimeoutSec 120 | Invoke-Expression
-        } catch {
-            Write-Host "Онлайн-установщик тоже не сработал ($($_.Exception.Message))."
-            # claude.ai гео-блокируется из РФ (403), а registry.npmjs.org доступен —
-            # третий шаг: обычный npm install из онлайн-реестра (зеркально macos/claude.sh).
-            Write-Host "Пробую npm install из онлайн-реестра npmjs..."
-            npm install -g '@anthropic-ai/claude-code' --no-audit --no-fund
-            $npmExit = $LASTEXITCODE
-        }
-    }
-} else {
-    if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://claude.ai/install.ps1 | iex (или npm install -g @anthropic-ai/claude-code)"; exit 0 }
-    Write-Host "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
-    try {
-        Invoke-RestMethod "https://claude.ai/install.ps1" -TimeoutSec 120 | Invoke-Expression
-    } catch {
-        Write-Host "Нативный установщик не сработал ($($_.Exception.Message)). Пробую npm..."
-        if (Get-Command npm -ErrorAction SilentlyContinue) {
-            npm install -g '@anthropic-ai/claude-code'
-            $npmExit = $LASTEXITCODE
-        } else {
-            Write-Host "npm недоступен — установите компонент Node.js."; exit 1
-        }
-    }
-}
-
-Update-Path
 
 # Честная проверка: ищем реальный бинарь, а не доверяем коду установщика.
 function Find-ClaudeBinary {
@@ -118,13 +80,108 @@ function Add-ToUserPath($dir) {
     if ($env:Path.Split(';') -notcontains $dir) { $env:Path = $env:Path.TrimEnd(';') + ';' + $dir }
 }
 
-$claudeBin = Find-ClaudeBinary
-if ($claudeBin) {
-    Add-ToUserPath (Split-Path $claudeBin)
-    Add-ToUserPath (Join-Path $env:USERPROFILE '.local\bin')
-    Write-Host "OK: Claude Code CLI установлен ($claudeBin). Открой НОВЫЙ терминал, чтобы работала команда claude."
-    exit 0
+# Проверка ЗАПУСКОМ (урок macOS, зеркало scripts/macos/claude.sh — на маке это уже
+# случилось у живого человека): НУЛЕВОЙ КОД npm НИЧЕГО НЕ ДОКАЗЫВАЕТ. Настоящий бинарь
+# Claude ставится ПЛАТФОРМЕННЫМ optional-пакетом (@anthropic-ai/claude-code-win32-*).
+# Если его в кеше нет, npm считает optional-зависимость необязательной, ОТЧИТЫВАЕТСЯ
+# УСПЕХОМ и оставляет обёртку, чей запуск печатает «claude native binary not installed»
+# и падает. Человек увидел бы зелёную галочку и нерабочий claude — худший исход из всех.
+# Поэтому проверяем не код установки, а РАБОТУ: команда обязана ответить на --version.
+# P0-инвариант (тот же, что у editor-CLI в vscode.ps1): claude лежит в user-writable
+# каталоге, а этот скрипт исполняется ELEVATED — запускаем ТОЛЬКО де-элевированно
+# (Invoke-HmDeElevated), НЕ под админом. Возвращает:
+#   'works'      — ответил, код 0: бинарь рабочий;
+#   'broken'     — запуск состоялся (Gate=medium), код НЕ 0: на диске нерабочая обёртка;
+#   'unverified' — де-элевация недоступна/не отчиталась: проверить нельзя, и это НЕ
+#                  доказательство поломки (fail-open к прежней проверке «бинарь на диске»).
+function Test-HmClaudeRuns($bin) {
+    if (-not $bin) { return 'broken' }
+    $r = Invoke-HmDeElevated $bin @('--version')
+    if ($null -eq $r -or $r.Gate -ne 'medium') { return 'unverified' }
+    if ($r.Code -eq 0) { return 'works' }
+    return 'broken'
 }
 
-Write-Host "ОШИБКА: Claude Code CLI не установился."
-exit 1
+# Убираем нерабочую обёртку (зеркало rm -f / rm -rf в claude.sh): иначе она перехватит
+# PATH/Find-ClaudeBinary и «claude» будет падать даже после успешной онлайн-установки
+# в другой каталог.
+function Remove-HmBrokenClaude($bin) {
+    if (-not $bin) { return }
+    $dir = Split-Path $bin
+    foreach ($n in @('claude', 'claude.cmd', 'claude.ps1', 'claude.exe')) {
+        Remove-Item -LiteralPath (Join-Path $dir $n) -Force -ErrorAction SilentlyContinue
+    }
+    # npm-шимы живут в prefix, сам пакет — в prefix\node_modules (у ~/.local\bin его нет).
+    $pkg = Join-Path $dir 'node_modules\@anthropic-ai\claude-code'
+    if (Test-Path -LiteralPath $pkg) { Remove-Item -LiteralPath $pkg -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Update-Path
+$DRY = [bool]$env:HM_DRY_RUN
+$cache = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'npm-cache' } else { '' }
+$offlineOk = $false      # офлайн-путь дал claude, который НЕ доказан сломанным
+$probedBin = ''          # кэш проверки, чтобы не гонять де-элевированный запуск дважды
+$probedResult = ''
+if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Host "Ставлю Claude Code CLI из встроенного npm-кеша (офлайн)..."
+    if ($DRY) { Write-Host "  [dry-run] WOULD: npm install -g @anthropic-ai/claude-code --offline --cache $cache; затем проверка ЗАПУСКОМ claude --version (де-элевированно)"; exit 0 }
+    npm install -g '@anthropic-ai/claude-code' --offline --cache $cache --no-audit --no-fund
+    $npmExit = $LASTEXITCODE
+    if ($npmExit -eq 0) {
+        Update-Path
+        $bin = Find-ClaudeBinary
+        $probe = Test-HmClaudeRuns $bin
+        $probedBin = $bin; $probedResult = $probe
+        if ($probe -eq 'broken') {
+            Write-Host "Офлайн-установка отчиталась успехом, но claude не запускается (в кеше нет платформенного бинаря) — убираю нерабочую обёртку и пробую онлайн-путь."
+            Remove-HmBrokenClaude $bin
+            $probedBin = ''; $probedResult = ''
+        } else {
+            $offlineOk = $true
+        }
+    } else {
+        Write-Host "Офлайн-установка npm вернула код ${npmExit}. Пробую онлайн-установщик..."
+    }
+}
+
+if (-not $offlineOk) {
+    if ($DRY) { Write-Host "  [dry-run] WOULD: irm https://claude.ai/install.ps1 | iex (или npm install -g @anthropic-ai/claude-code)"; exit 0 }
+    Write-Host "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
+    try {
+        Invoke-RestMethod "https://claude.ai/install.ps1" -TimeoutSec 120 | Invoke-Expression
+    } catch {
+        Write-Host "Нативный установщик не сработал ($($_.Exception.Message))."
+        # claude.ai гео-блокируется из РФ (403), а registry.npmjs.org доступен —
+        # запасной шаг: обычный npm install из онлайн-реестра (зеркально macos/claude.sh).
+        if (Get-Command npm -ErrorAction SilentlyContinue) {
+            Write-Host "Пробую npm install из онлайн-реестра npmjs..."
+            npm install -g '@anthropic-ai/claude-code' --no-audit --no-fund
+        } else {
+            Write-Host "npm недоступен — установите компонент Node.js."; exit 1
+        }
+    }
+}
+
+Update-Path
+
+$claudeBin = Find-ClaudeBinary
+if (-not $claudeBin) {
+    Write-Host "ОШИБКА: Claude Code CLI не установился."
+    exit 1
+}
+# Финальный вердикт — тоже ЗАПУСКОМ (результат переиспользуем, если бинарь тот же):
+# если и онлайн-путь оставил нерабочую обёртку — честный красный статус БЕЗ «OK»-квитанции,
+# а не зелёная галочка при неработающем claude.
+$probe = if ($claudeBin -eq $probedBin -and $probedResult) { $probedResult } else { Test-HmClaudeRuns $claudeBin }
+if ($probe -eq 'broken') {
+    Write-Host "ОШИБКА: claude найден ($claudeBin), но НЕ запускается (обёртка без платформенного бинаря) — установка не засчитана. Повтори установку компонента при доступной сети."
+    exit 1
+}
+Add-ToUserPath (Split-Path $claudeBin)
+Add-ToUserPath (Join-Path $env:USERPROFILE '.local\bin')
+if ($probe -eq 'works') {
+    Write-Host "OK: Claude Code CLI установлен и отвечает на --version ($claudeBin). Открой НОВЫЙ терминал, чтобы работала команда claude."
+} else {
+    Write-Host "OK: Claude Code CLI установлен ($claudeBin; проверить запуском де-элевированно не удалось). Открой НОВЫЙ терминал, чтобы работала команда claude."
+}
+exit 0
