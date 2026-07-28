@@ -3478,11 +3478,12 @@ ok('main.js (source): reg — только HKCU из аллоулиста клю
   assert(/WIN_REG_ALLOWED_KEYS/.test(code), 'аллоулист ключей реестра');
   assert(/t\.hive !== 'HKCU'/.test(code), 'не-HKCU → отказ');
   // Разбор значения типизирован (regQueryValueTyped) и тип СОХРАНЯЕТСЯ при
-  // перезаписи PATH. Слой чтения: быстрый путь reg.exe допустим ТОЛЬКО с
-  // декодированием реальной кодовой страницы консоли и с fallback на
-  // авторитетный .NET-путь; корректность обоих путей доказывается
-  // ПОВЕДЕНЧЕСКИМИ тестами ниже («реестр (поведение): …» — round-trip кириллицы,
-  // сырой REG_EXPAND_SZ, found:false, запрет HKLM).
+  // перезаписи PATH. Слой чтения: ТОЛЬКО авторитетный .NET-путь — разбор
+  // текстового вывода reg.exe удалён насовсем (best-fit подменял символы
+  // «похожим ASCII» без единого признака порчи, это неисправимо); корректность
+  // доказывается ПОВЕДЕНЧЕСКИМИ тестами ниже («реестр (поведение): …» —
+  // round-trip кириллицы, best-fit байт в байт, сырой REG_EXPAND_SZ,
+  // found:false, запрет HKLM, пакетный regQueryManyDotNet).
   assert(/regQueryValueTyped\(/.test(code), 'типизированное чтение значения реестра (regQueryValueTyped)');
   assert(/computeUserPathWithout/.test(code), 'PATH правится чистой точной функцией');
   assert(/вернул исходный/.test(code), 'верификация записи PATH с восстановлением при расхождении');
@@ -3558,9 +3559,11 @@ ok('main.js: PATH с потерянными символами не перепи
 });
 
 // ===========================================================================
-// РЕЕСТР — ПОВЕДЕНЧЕСКИ. Слой чтения переделан (быстрый путь через reg.exe с
-// декодированием реальной кодовой страницы консоли + авторитетный .NET-фолбэк),
-// поэтому НИКАКИХ грепов по исходнику: функции слоя ВЫРЕЗАЮТСЯ из main.js,
+// РЕЕСТР — ПОВЕДЕНЧЕСКИ. Слой чтения переделан: разбор текстового вывода
+// reg.exe УДАЛЁН НАСОВСЕМ (best-fit подменял символы «похожим ASCII» без
+// единого признака порчи — неисправимо), остался ТОЛЬКО авторитетный .NET-путь,
+// а скорость возвращена пакетным чтением regQueryManyDotNet. Поэтому НИКАКИХ
+// грепов по исходнику: функции слоя ВЫРЕЗАЮТСЯ из main.js,
 // исполняются с настоящими spawnSync/remote-fetch и проверяются НА РЕАЛЬНОМ
 // HKCU\Environment пробными значениями HmProbe* (уникальный хвост на прогон;
 // Path и чужие значения НЕ трогаем; за собой убираем в finally и ПРОВЕРЯЕМ это).
@@ -3576,7 +3579,7 @@ ok('main.js: PATH с потерянными символами не перепи
     assert(a > 0 && b > a, 'слой реестра найден в main.js (REG_KIND_TO_TYPE … WIN_REG_ALLOWED_KEYS)');
     return new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'IS_WIN',
       '"use strict";\n' + s.slice(a, b) +
-      '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };')(
+      '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryManyDotNet, regWriteValueTyped, regDeleteValueTyped };')(
       deps.spawnSync, deps.remoteFetch, deps.detectSpawnEnv, deps.IS_WIN);
   }
 
@@ -3608,7 +3611,7 @@ ok('main.js: PATH с потерянными символами не перепи
     }
   };
 
-  ok('реестр (поведение): кириллица переживает round-trip; fast-путь обязан совпадать с .NET', () => {
+  ok('реестр (поведение): кириллица переживает round-trip; боевое чтение ≡ .NET', () => {
     withProbe('Cyr', (L, name) => {
       const data = 'C:\\Программы\\Проба (тест);D:\\Ещё Кириллица';
       const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_SZ');
@@ -3618,14 +3621,42 @@ ok('main.js: PATH с потерянными символами не перепи
         '.NET-путь вернул значение байт в байт: ' + JSON.stringify(dn));
       const t = L.regQueryValueTyped(REG_KEY, name);
       assert(t.ok && t.found && t.type === 'REG_SZ' && t.data === data,
-        'боевое чтение (fast→.NET) вернуло значение байт в байт — мохибейк «C:\\?????\\…» = ' +
+        'боевое чтение вернуло значение байт в байт — мохибейк «C:\\?????\\…» = ' +
         'ровно тот дефект, что затирал чужие записи PATH: ' + JSON.stringify(t));
-      const f = L.regQueryFast(REG_KEY, name);
-      if (f) {
-        assert.deepStrictEqual(f, dn,
-          'fast-путь, когда берётся отвечать, обязан совпасть с авторитетным .NET');
-      }
+      // Боевое чтение — тонкая обёртка над .NET-путём; результат обязан совпадать
+      // ПОЛНОСТЬЮ. ВАЖНО: кириллица на консоли 866 представима, поэтому этот тест
+      // best-fit-порчу НЕ ловит в принципе — её стережёт следующий тест.
+      assert.deepStrictEqual(t, dn, 'боевое чтение и .NET-путь — один и тот же результат');
     });
+  });
+
+  // Best-fit — тихий и неисправимый дефект удалённого «быстрого пути»: reg.exe
+  // печатает в кодовой странице консоли и для символов с best-fit-отображением
+  // подставляет ПОХОЖИЙ ASCII, а не «?». Проверено на консоли 866:
+  // «José» → «Jose», «Müller» → «Muller», «Dev’s» → «Dev's», «a…b» → «a:b»
+  // (появляется ДВОЕТОЧИЕ — структурный символ пути). Строка приходила идеально
+  // чистой, гейты на U+FFFD и «?» её не ловили; компонент в каталоге с
+  // диакритикой детектировался как отсутствующий, а пост-проверка удаления
+  // рапортовала «чисто», хотя запись в PATH оставалась. Единственный честный
+  // страж — round-trip БАЙТ В БАЙТ через боевое чтение на ЭТИХ четырёх пробах.
+  ok('реестр (поведение): best-fit не подменяет символы — José/Müller/Dev’s/a…b байт в байт', () => {
+    const cases = [
+      ['Jose',  'C:\\Users\\Jos\u00e9\\AppData\\Local\\bin', 'Jose'],
+      ['Muell', 'C:\\M\u00fcller\\tools',                    'Muller'],
+      ['Apos',  'C:\\Dev\u2019s Tools\\x',                   "Dev's"],
+      ['Ellip', 'a\u2026b',                                  'a:b'],
+    ];
+    for (const [suffix, data, degraded] of cases) {
+      withProbe('Bf' + suffix, (L, name) => {
+        const w = L.regWriteValueTyped(REG_KEY, name, data, 'REG_SZ');
+        assert(w.ok === true, 'запись пробы «' + suffix + '»: ' + JSON.stringify(w));
+        const r = L.regQueryValueTyped(REG_KEY, name);
+        assert(r.ok === true && r.found === true && r.type === 'REG_SZ',
+          'чтение пробы «' + suffix + '»: ' + JSON.stringify(r));
+        assert.strictEqual(r.data, data,
+          'байт в байт; best-fit разбора reg.exe отдавал бы «чистое» ложное «' + degraded + '»');
+      });
+    }
   });
 
   ok('реестр (поведение): REG_EXPAND_SZ приходит СЫРЫМ — чужие %VAR% не раскрываются, тип сохранён', () => {
@@ -3643,6 +3674,63 @@ ok('main.js: PATH с потерянными символами не перепи
           label + ': %VAR% остались литералами — раскрытие запекло бы чужие переменные при перезаписи PATH: ' + r.data);
       }
     });
+  });
+
+  // Пакетное чтение — то, ради чего быстрый путь вообще существовал: старт
+  // powershell.exe стоит сотен миллисекунд, и платить их за КАЖДОЕ значение
+  // нельзя (окно уходило в «не отвечает»). Скорость возвращена одним запуском
+  // интерпретатора на всю пачку. Порядок результатов обязан совпадать с порядком
+  // запросов (freshWindowsPath различает машинный и пользовательский PATH
+  // ИНДЕКСОМ), ошибки — на своих местах, и пачка ощутимо быстрее поштучного.
+  ok('реестр (поведение): regQueryManyDotNet — пачка одним запуском, порядок = порядку запросов, быстрее поштучного', () => {
+    const L = live();
+    const names = [0, 1, 2, 3].map((i) => 'HmProbeMany' + i + '_' + rnd);
+    try {
+      names.forEach((n, i) => {
+        const w = L.regWriteValueTyped(REG_KEY, n, 'HmV' + i + '-' + rnd, 'REG_SZ');
+        assert(w.ok === true, 'проба ' + n + ' записана: ' + JSON.stringify(w));
+      });
+      // Нарочно вперемешку: найденные НЕ в порядке записи, отсутствующее,
+      // неподдерживаемый ключ, чтение HKLM — всё в одной пачке.
+      const reqs = [
+        { key: REG_KEY, name: names[2] },
+        { key: REG_KEY, name: 'HmProbeManyMissing_' + rnd },
+        { key: REG_KEY, name: names[0] },
+        { key: 'HKXX\\Bogus', name: 'x' },
+        { key: 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', name: 'Path' },
+        { key: REG_KEY, name: names[1] },
+        { key: REG_KEY, name: names[3] },
+      ];
+      const t0 = Date.now();
+      const got = L.regQueryManyDotNet(reqs);
+      const batchMs = Date.now() - t0;
+      assert(Array.isArray(got) && got.length === reqs.length,
+        'результатов ровно столько, сколько запросов: ' + (got && got.length));
+      const at = (i) => JSON.stringify(got[i]);
+      assert(got[0].ok && got[0].found && got[0].data === 'HmV2-' + rnd, '[0] = names[2]: ' + at(0));
+      assert(got[1].ok === true && got[1].found === false, '[1] отсутствующее → found:false: ' + at(1));
+      assert(got[2].ok && got[2].found && got[2].data === 'HmV0-' + rnd, '[2] = names[0]: ' + at(2));
+      assert(got[3].ok === false && /ключ/.test(got[3].error || ''),
+        '[3] неподдерживаемый ключ → ошибка НА СВОЁМ месте, соседи не сдвинуты: ' + at(3));
+      assert(got[4].ok && got[4].found && String(got[4].data).length > 0,
+        '[4] машинный PATH (HKLM) читается в той же пачке');
+      assert(got[5].ok && got[5].found && got[5].data === 'HmV1-' + rnd, '[5] = names[1]: ' + at(5));
+      assert(got[6].ok && got[6].found && got[6].data === 'HmV3-' + rnd, '[6] = names[3]: ' + at(6));
+      // Скорость: 7 значений одним запуском против 4 поштучных запусков .NET.
+      const t1 = Date.now();
+      for (const n of names) {
+        const r = L.regQueryValueDotNet(REG_KEY, n);
+        assert(r.ok && r.found, 'поштучное чтение ' + n + ': ' + JSON.stringify(r));
+      }
+      const singleMs = Date.now() - t1;
+      assert(batchMs * 1.5 < singleMs,
+        'пачка ощутимо быстрее поштучного: batch(7 знач.)=' + batchMs + 'мс против 4×поштучно=' + singleMs + 'мс');
+    } finally {
+      for (const n of names) { try { L.regDeleteValueTyped(REG_KEY, n); } catch (e) { /* уборка всегда */ } }
+      const after = L.regQueryManyDotNet(names.map((n) => ({ key: REG_KEY, name: n })));
+      after.forEach((r, i) => assert(r && r.ok === true && r.found === false,
+        'уборка за собой: ' + names[i] + ' удалён (' + JSON.stringify(r) + ')'));
+    }
   });
 
   ok('реестр (поведение): отсутствующее значение → found:false, а НЕ ошибка', () => {
@@ -6100,35 +6188,44 @@ asyncTests().then(() => {
   // в обе стороны (проверено: пропадал регион с encoding:'ascii' и слоем реестра).
   const codeOf = (s) => s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
 
-  // reg.exe печатает данные И диагностику в кодовой странице консоли (CP866 на
-  // русской Windows). Node читал трубу как UTF-8: «C:\Программы\Python» после
-  // нашей перезаписи PATH навсегда становилось «C:\?????\Python», а удаление
-  // скрепки/моста ВСЕГДА рапортовало провал (русское «не удалось найти» не
-  // совпадало ни с одной веткой распознавания).
-  // Правило изменилось и это осознанно: reg.exe вернулся, потому что беда была НЕ
-  // в нём, а в чтении его вывода как UTF-8. Полный отказ от reg.exe стоил ×27
-  // скорости (31 мс → 830 мс) на СИНХРОННОМ вызове в главном процессе — окно
-  // уходило в «не отвечает» на секунды при каждом запуске и удалении.
-  // Теперь инвариант такой: читать reg.exe можно, декодировать его вывод как
-  // UTF-8 — нельзя; писать в реестр консольным reg.exe — нельзя.
-  ok('реестр: вывод reg.exe декодируется кодовой страницей, а не как UTF-8', () => {
+  // Правило изменилось ещё раз, и это осознанно: разбор ТЕКСТОВОГО вывода
+  // reg.exe удалён НАСОВСЕМ. Прошлая итерация вернула reg.exe с декодированием
+  // реальной кодовой страницы — и оказалась неисправимой: reg.exe для символов
+  // с best-fit-отображением подставляет ПОХОЖИЙ ASCII, а не «?» (проверено на
+  // консоли 866: «José»→«Jose», «Müller»→«Muller», «Dev’s»→«Dev's», «a…b»→«a:b»
+  // — появляется двоеточие, структурный символ пути). Порча происходит ВНУТРИ
+  // reg.exe ДО всякого декодирования, строка приходит идеально чистой — гейты
+  // на U+FFFD и «?» бессильны, «правильный» декодер ничего не спасает.
+  // Скорость возвращена не разбором текста, а ПАКЕТИРОВАНИЕМ (regQueryManyDotNet:
+  // один запуск интерпретатора на все значения). Инвариант: чтение значения не
+  // теряет и не подменяет НИ ОДИН символ (поведенческий best-fit-тест выше).
+  ok('реестр: разбор текстового вывода reg.exe удалён — чтение ТОЛЬКО через .NET, скорость пакетированием', () => {
     const s = MAIN();
     const code = codeOf(s);
     assert(!/'add', 'HKCU/.test(code), 'запись реестра НЕ через reg add');
-    assert(/consoleCodePage\(/.test(code) && /TextDecoder\(/.test(code),
-      'кодовая страница консоли определяется и используется для декодирования');
-    // Ни один вызов reg.exe не смеет читаться как текст в UTF-8.
-    const fast = s.slice(s.indexOf('function regQueryFast'), s.indexOf('function regQueryValueTyped'));
-    assert(fast.length > 100, 'быстрый путь найден');
-    assert(!/encoding:\s*'utf8'/.test(fast), 'вывод reg.exe НЕ читается как UTF-8');
-    assert(/dec\.decode\(/.test(fast), 'вывод декодируется реальной кодовой страницей');
-    assert(/return null/.test(fast), 'в сомнительных случаях быстрый путь уступает авторитетному');
+    // В КОДЕ (без комментариев) не осталось ни быстрого пути, ни его свиты.
+    for (const token of ['regQueryFast', 'consoleCodePage', 'cpDecoder', 'CP_LABELS', 'isPureAscii', 'TextDecoder(', 'chcp']) {
+      assert(code.indexOf(token) === -1, 'в коде не осталось «' + token + '»');
+    }
+    assert(!/reg\.exe/.test(code), 'в коде нет ни одного обращения к reg.exe');
+    // Боевое чтение — тонкая обёртка над авторитетным .NET-путём, без спавнов.
+    const typed = code.slice(code.indexOf('function regQueryValueTyped'), code.indexOf('function regQueryManyDotNet'));
+    assert(typed.length > 10, 'тело regQueryValueTyped найдено');
+    assert(/return regQueryValueDotNet\(keyPath, valueName\);/.test(typed),
+      'regQueryValueTyped всегда идёт в regQueryValueDotNet');
+    assert(!/spawnSync/.test(typed), 'обёртка сама ничего не спавнит');
+    // Пакетное чтение заведено и держит контракт «порядок = порядку запросов».
+    const many = code.slice(code.indexOf('function regQueryManyDotNet'), code.indexOf('function regQueryValueDotNet'));
+    assert(many.length > 100, 'пакетное чтение (regQueryManyDotNet) есть');
+    assert(/reqs\.map\(/.test(many), 'результаты соотносятся с запросами ПО ИНДЕКСУ');
   });
 
-  // Быстрый и авторитетный пути обязаны давать ОДИНАКОВЫЙ результат на трудном
-  // значении, иначе однажды разойдутся именно на кириллице.
+  // Боевое и авторитетное чтение обязаны давать ОДИНАКОВЫЙ результат на трудном
+  // значении. Теперь это тождество по построению (typed → .NET) — тест стережёт,
+  // что оно не разъедется снова: кириллица, %VAR% сырым, тип значения, и всё это
+  // в спартанском окружении (PATH = только System32, как в бою).
   if (process.platform === 'win32') {
-    ok('реестр (прогон): быстрый и .NET-путь согласованы на кириллице и %VAR%', () => {
+    ok('реестр (прогон): боевое чтение ≡ .NET на кириллице и %VAR%; тип сохранён', () => {
       const s = MAIN();
       const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
       const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
@@ -6136,45 +6233,27 @@ asyncTests().then(() => {
         const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
         return Object.assign({}, process.env, { PATH: s32, Path: s32 });
       };
-      const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
-        body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
-      )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+      const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN',
+        body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryManyDotNet, regWriteValueTyped, regDeleteValueTyped };'
+      )(require('child_process').spawnSync, rf, env, Buffer, true);
 
       const KEY = 'HKCU\\Environment';
       const NAME = 'HmProbeSuite' + Date.now();
       const VAL = 'C:\\Программы\\Python;C:\\Users\\Жемал\\bin;%SystemRoot%\\System32';
       try {
         assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_EXPAND_SZ').ok, 'пробное значение записано');
-        const fast = M.regQueryFast(KEY, NAME);
-        const slow = M.regQueryValueDotNet(KEY, NAME);
-        // Контракт быстрого пути: ЛИБО верные данные, ЛИБО null (тогда решает
-        // авторитетный .NET). Требовать non-null нельзя — это делает тест флакующим:
-        // под нагрузкой (идут сборки и заливки) спавн reg.exe не укладывается в
-        // таймаут, путь честно уступает медленному, а тест краснеет на исправном коде.
-        // Проверяем то, что действительно обязано выполняться ВСЕГДА.
         // Авторитетный путь обязан быть верным ВСЕГДА — он и есть источник истины.
+        const slow = M.regQueryValueDotNet(KEY, NAME);
         assert(slow.ok && slow.data === VAL, 'авторитетный путь: байт в байт');
         assert(slow.type === 'REG_EXPAND_SZ', 'авторитетный путь сохранил тип');
         assert(slow.data.indexOf('%SystemRoot%') >= 0,
           '%VAR% не раскрыт — чужие переменные не запекаются в литералы');
-        // Быстрый путь вправе уступить (вернуть null): под нагрузкой спавн reg.exe
-        // не укладывается в таймаут, на неизвестной кодовой странице нет декодера.
-        // Тогда решает .NET. Но ЕСЛИ он ответил — ответ обязан совпадать до байта.
-        // ВАЖНО: все проверки, разыменовывающие fast, живут ТОЛЬКО здесь. Прошлая
-        // версия «анти-флейк»-правки ставила гард, а следующей же строкой обращалась
-        // к fast.type — и падала TypeError ровно в том случае, ради которого правилась.
-        if (fast === null) {
-          console.log('    (быстрый путь уступил авторитетному — это штатно)');
-        } else {
-          assert(fast.data === VAL, 'быстрый путь: байт в байт (' + fast.data + ')');
-          assert(fast.type === 'REG_EXPAND_SZ', 'быстрый путь сохранил тип');
-          assert(fast.data.indexOf('%SystemRoot%') >= 0, 'быстрый путь: %VAR% не раскрыт');
-          assert(fast.data === slow.data, 'быстрый и авторитетный пути согласованы');
-        }
+        // Боевое чтение обязано совпадать с авторитетным ДО БАЙТА — оно и есть он.
+        const typed = M.regQueryValueTyped(KEY, NAME);
+        assert.deepStrictEqual(typed, slow, 'боевое чтение ≡ .NET-путь');
         // Отсутствующее значение — не ошибка, а честный found:false.
         const miss = M.regQueryValueTyped(KEY, NAME + '_nope');
         assert(miss.ok === true && miss.found === false, 'отсутствующее значение: found=false');
-        assert(M.regQueryFast(KEY, NAME + '_nope') === null, 'быстрый путь не судит об отсутствии');
         assert(M.regWriteValueTyped('HKLM\\SYSTEM\\X', 'Y', 'z', 'REG_SZ').ok === false, 'запись в HKLM невозможна');
       } finally {
         try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой в любом случае */ }
@@ -6583,13 +6662,14 @@ asyncTests().then(() => {
   });
 })();
 
-// reg.exe САМ подменяет символом «?» всё, что непредставимо в кодовой странице
-// консоли, — ещё ДО нашего декодирования. Строка приходит «чистой», без единого
-// признака порчи, и гейт на U+FFFD её не видит. Проверено запуском: греческий
-// путь на русской консоли превращался в «C:\?????\bin» и был бы записан обратно
-// в PATH, уничтожив чужую запись.
+// reg.exe САМ подменял символом «?» всё, что непредставимо в кодовой странице
+// консоли (а best-fit-символы — похожим ASCII, см. поведенческий best-fit-тест),
+// ещё ДО нашего декодирования. Быстрый путь удалён насовсем; инвариант теперь
+// один: боевое чтение не теряет и не подменяет НИ ОДИН символ. Греческий на
+// русской консоли — исторический репродюсер: «C:\Ωμέγα\bin» приезжал как
+// «C:\?????\bin» и был бы записан обратно в PATH, уничтожив чужую запись.
 if (process.platform === 'win32') {
-  ok('реестр: значение с непредставимыми символами уходит на .NET, а не портится', () => {
+  ok('реестр: непредставимые в консоли символы приходят целыми — без «?» и подмен', () => {
     const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
     const body = s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
     const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
@@ -6597,9 +6677,9 @@ if (process.platform === 'win32') {
       const s32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
       return Object.assign({}, process.env, { PATH: s32, Path: s32 });
     };
-    const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
-      body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryFast, regWriteValueTyped, regDeleteValueTyped };'
-    )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder);
+    const M = new Function('spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN',
+      body + '\n; return { regQueryValueTyped, regQueryValueDotNet, regQueryManyDotNet, regWriteValueTyped, regDeleteValueTyped };'
+    )(require('child_process').spawnSync, rf, env, Buffer, true);
 
     const KEY = 'HKCU\\Environment';
     const NAME = 'HmLossy' + Date.now();
@@ -6607,14 +6687,14 @@ if (process.platform === 'win32') {
     const VAL = 'C:\\Ωμέγα\\bin;C:\\Программы\\x';
     try {
       assert(M.regWriteValueTyped(KEY, NAME, VAL, 'REG_SZ').ok, 'пробное значение записано');
-      const fast = M.regQueryFast(KEY, NAME);
-      assert(fast === null,
-        'быстрый путь ОБЯЗАН отказаться от значения с потерянными символами, а вернул: '
-        + (fast && fast.data));
       const got = M.regQueryValueTyped(KEY, NAME);
       assert(got.ok && got.found, 'итоговое чтение состоялось');
-      assert(got.data === VAL, 'значение пришло целым через .NET: ' + got.data);
+      assert.strictEqual(got.data, VAL, 'значение пришло целым, байт в байт: ' + got.data);
       assert(got.data.indexOf('?') === -1, 'в итоговом значении нет подменных «?»');
+      // И в пачке то же значение обязано прийти целым (тот же .NET-транспорт).
+      const many = M.regQueryManyDotNet([{ key: KEY, name: NAME }]);
+      assert(many.length === 1 && many[0].ok && many[0].found, 'пакетное чтение состоялось');
+      assert.strictEqual(many[0].data, VAL, 'пачка отдала значение байт в байт');
     } finally {
       try { M.regDeleteValueTyped(KEY, NAME); } catch (e) { /* убираем за собой всегда */ }
     }
@@ -6815,27 +6895,40 @@ if (process.platform === 'win32') {
     assert(L[L.length - 1] === 'строка 2999', 'хвост на месте');
   });
 
-  // Быстрый путь чтения реестра включался только там, где слепой перебор имён
-  // угадывал кодировку — то есть на русской консоли. На английской (437/850),
-  // японской (932), UTF-8 (65001) декодер не создавался, и фикс ×27 «окно не
-  // морозится» молча НЕ РАБОТАЛ.
-  ok('реестр: кодовые страницы покрыты явными именами + ASCII-путь', () => {
+  // Быстрый путь (и вся его кухня кодовых страниц) удалён. «×27 окно не
+  // морозится» теперь держится на двух вещах, и обе — стеречь:
+  //   1) freshWindowsPath читает машинный И пользовательский PATH ОДНИМ
+  //      запуском интерпретатора (regQueryManyDotNet), а не двумя спавнами;
+  //   2) кэш PATH сбрасывается ТОЧЕЧНО (invalidatePathCache после
+  //      компонентного скрипта и после правки PATH), а НЕ на каждом проходе
+  //      детекции — иначе каждый проход платит запуск интерпретатора заново.
+  ok('реестр: PATH читается одной пачкой (HKLM+HKCU), кэш сбрасывается точечно', () => {
     const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-    assert(/CP_LABELS/.test(s), 'таблица имён кодировок заведена');
-    [65001, 866, 1251, 1252, 932, 936, 949, 950].forEach((cp) => {
-      assert(new RegExp('\\b' + cp + '\\s*:').test(s), 'кодовая страница ' + cp + ' учтена');
-    });
-    // Для DOS-страниц без WHATWG-имени (437/850/852) есть путь через чистый ASCII.
-    assert(/function isPureAscii/.test(s), 'ASCII-путь для страниц без декодера есть');
-    const fast = s.slice(s.indexOf('function regQueryFast'), s.indexOf('function regQueryValueTyped'));
-    assert(/isPureAscii\(buf\)/.test(fast), 'быстрый путь умеет работать без декодера на чистом ASCII');
-    assert(/return null/.test(fast), 'непонятная кодировка всё равно уступает авторитетному пути');
-    // Проверяем, что имена действительно принимаются движком.
-    [['utf-8', 65001], ['ibm866', 866], ['windows-1251', 1251], ['windows-1252', 1252],
-      ['shift_jis', 932], ['gbk', 936], ['euc-kr', 949], ['big5', 950]].forEach(([label, cp]) => {
-      let okLabel = true;
-      try { new TextDecoder(label); } catch (e) { okLabel = false; }
-      assert(okLabel, 'движок знает «' + label + '» для cp' + cp);
-    });
+    const code = s.replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+    // 1) Оба PATH — одним вызовом пачки, поштучных чтений в freshWindowsPath нет.
+    const fwp = code.slice(code.indexOf('function freshWindowsPath()'), code.indexOf('let _detPathCache'));
+    assert(fwp.length > 100, 'freshWindowsPath найден');
+    assert((fwp.match(/regQueryManyDotNet\(/g) || []).length === 1,
+      'машинный и пользовательский PATH читаются ОДНИМ вызовом regQueryManyDotNet');
+    assert(/HKLM\\\\SYSTEM\\\\CurrentControlSet[\s\S]*?HKCU\\\\Environment/.test(fwp),
+      'в пачке — машинный (HKLM) И пользовательский (HKCU) PATH');
+    assert(!/regQueryValueDotNet\(/.test(fwp) && !/regQueryValueTyped\(/.test(fwp),
+      'поштучных чтений реестра в freshWindowsPath не осталось');
+    // 2) Проход детекции кэш PATH НЕ трогает…
+    const drc = code.slice(code.indexOf('function detResetCaches'), code.indexOf('function invalidatePathCache'));
+    assert(drc.length > 10, 'detResetCaches найден');
+    assert(!/_detPathCache/.test(drc),
+      'detResetCaches НЕ сбрасывает кэш PATH (иначе каждый проход детекции = спавн интерпретатора)');
+    // …сброс — точечный и существует.
+    const inv = code.slice(code.indexOf('function invalidatePathCache'), code.indexOf('function freshWindowsPathCached'));
+    assert(/_detPathCache = ''/.test(inv), 'invalidatePathCache честно сбрасывает кэш PATH');
+    // Вызывается после завершения компонентного скрипта…
+    const closeIdx = code.indexOf("child.on('close'");
+    assert(closeIdx > 0, 'обработчик завершения компонентного скрипта найден');
+    assert(/invalidatePathCache\(\);/.test(code.slice(closeIdx, closeIdx + 400)),
+      'завершение компонентного скрипта сбрасывает кэш (скрипт мог дописать PATH)');
+    // …и после удаления записи из PATH.
+    const wrp = code.slice(code.indexOf('function winRemoveUserPathEntry'), code.indexOf('function macBundleIdOf'));
+    assert(/invalidatePathCache\(\);/.test(wrp), 'правка PATH (удаление записи) сбрасывает кэш');
   });
 })();

@@ -1157,6 +1157,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
+      invalidatePathCache();   // скрипт мог дописать в PATH — перечитаем при следующей детекции
       try { clearInterval(stallTimer); } catch (e) { /* ignore */ }
       try { outR.flush(); errR.flush(); } catch (e) { /* ignore */ }  // последняя строка без \n
       logLine(`=== exit code: ${code} ===`);
@@ -1782,9 +1783,15 @@ function expandWinEnv(str) {
 }
 
 function freshWindowsPath() {
-  const machine = expandWinEnv(regQueryValue(
-    'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path'));
-  const user = expandWinEnv(regQueryValue('HKCU\\Environment', 'Path'));
+  // ОДИН запуск интерпретатора на оба значения вместо двух. Раньше это были
+  // два отдельных спавна, и на старте окно замирало на секунды.
+  const got = regQueryManyDotNet([
+    { key: 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', name: 'Path' },
+    { key: 'HKCU\\Environment', name: 'Path' },
+  ]);
+  const val = (r) => (r && r.ok && r.found) ? String(r.data || '').trim() : '';
+  const machine = expandWinEnv(val(got[0]));
+  const user = expandWinEnv(val(got[1]));
   const parts = [];
   const seen = new Set();
   const push = (chunk) => {
@@ -1814,7 +1821,13 @@ function freshWindowsPath() {
 // спавнов reg.exe схлопываются в одну, а Get-Acl по одному и тому же бинарю — в один.
 let _detPathCache = '';
 let _detOwnerCache = null;
-function detResetCaches() { _detPathCache = ''; _detOwnerCache = new Map(); }
+// PATH из реестра НЕ сбрасываем на каждом проходе детекции: чтение стоит
+// запуска интерпретатора, а сам PATH меняется только когда МЫ что-то ставим
+// или удаляем. Раньше он перечитывался при каждом проходе, и это была часть
+// той самой заморозки окна. Явный сброс — invalidatePathCache() после
+// установки/удаления компонента.
+function detResetCaches() { _detOwnerCache = new Map(); }
+function invalidatePathCache() { _detPathCache = ''; }
 function freshWindowsPathCached() {
   if (!_detPathCache) _detPathCache = freshWindowsPath();
   return _detPathCache;
@@ -2511,118 +2524,57 @@ function hkcuSubkeyOf(keyPath) {
   return m ? m[1] : '';
 }
 
-// Кодовая страница консоли — ОДИН раз за сессию (chcp.com ~30 мс).
-// reg.exe печатает в ней, и именно её отсутствие делало кириллицу мусором.
-let _consoleCp;
-function consoleCodePage() {
-  if (_consoleCp !== undefined) return _consoleCp;
-  _consoleCp = 0;
-  try {
-    const chcp = remoteFetch.sysBin('chcp.com');
-    if (chcp) {
-      const r = spawnSync(chcp, [], { encoding: 'latin1', windowsHide: true, timeout: 8000 });
-      const m = String(r.stdout || '').match(/(\d{3,5})/);
-      if (m) _consoleCp = parseInt(m[1], 10) || 0;
-    }
-  } catch (e) { /* не определили — читаем медленным, но заведомо верным путём */ }
-  return _consoleCp;
-}
-
-// Явные имена кодировок для ходовых кодовых страниц. Слепой перебор
-// 'cp<N>'/'ibm<N>'/'windows-<N>' угадывал только 866 и 1251 — то есть быстрый путь
-// жил лишь на русской консоли, а на английской, западноевропейской, японской и
-// UTF-8 молча отключался, и фикс ×27 (окно не морозится) там НЕ РАБОТАЛ.
-const CP_LABELS = {
-  65001: 'utf-8',
-  866: 'ibm866', 1251: 'windows-1251', 1252: 'windows-1252',
-  1250: 'windows-1250', 1253: 'windows-1253', 1254: 'windows-1254',
-  1255: 'windows-1255', 1256: 'windows-1256', 1257: 'windows-1257', 1258: 'windows-1258',
-  932: 'shift_jis', 936: 'gbk', 949: 'euc-kr', 950: 'big5',
-  28591: 'iso-8859-1', 28592: 'iso-8859-2', 28595: 'iso-8859-5',
-};
-
-let _cpDecoder;
-function cpDecoder() {
-  if (_cpDecoder !== undefined) return _cpDecoder;
-  _cpDecoder = null;
-  const cp = consoleCodePage();
-  if (!cp) return _cpDecoder;
-  const tries = [];
-  if (CP_LABELS[cp]) tries.push(CP_LABELS[cp]);
-  tries.push('cp' + cp, 'ibm' + cp, 'windows-' + cp);
-  for (const label of tries) {
-    try { _cpDecoder = new TextDecoder(label); return _cpDecoder; } catch (e) { /* следующий */ }
-  }
-  return _cpDecoder;
-}
-
-// Строго ASCII? Тогда декодировать нечего: 437, 850, 852 и прочие DOS-страницы
-// совпадают с ASCII в диапазоне 0-127, а WHATWG-имени у них нет. Это покрывает
-// подавляющее большинство западных установок, где пути к реестру — латиница.
-// Любой байт со старшим битом → отказ, и решает авторитетный .NET-путь.
-function isPureAscii(buf) {
-  for (let i = 0; i < buf.length; i++) if (buf[i] > 0x7f) return false;
-  return true;
-}
-
-// БЫСТРОЕ чтение через reg.exe (~30 мс против ~830 мс у .NET-пути: тот поднимает
-// целый powershell.exe на КАЖДОЕ значение и морозил главный процесс на секунды —
-// окно уходило в «не отвечает» на старте и после каждого удаления).
-// Корректность обеспечивает декодирование РЕАЛЬНОЙ кодовой страницей консоли:
-// беда была не в reg.exe, а в чтении его вывода как UTF-8.
-// Возвращает результат ТОЛЬКО когда он однозначен; во всех сомнительных случаях —
-// null, и решает медленный, но авторитетный .NET-путь (в т.ч. «значения нет»,
-// чтобы не зависеть от языка сообщений reg.exe).
-function regQueryFast(keyPath, valueName) {
-  const dec = cpDecoder();
-  const reg = remoteFetch.sysBin('reg.exe');
-  if (!reg) return null;
-  let r;
-  try {
-    r = spawnSync(reg, ['query', keyPath, '/v', valueName],
-      { windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) { return null; }
-  if (!r || r.error || r.status !== 0) return null;   // «нет значения» и ошибки — .NET-пути
-  const buf = r.stdout || Buffer.alloc(0);
-  let out;
-  if (dec) {
-    try { out = dec.decode(buf); } catch (e) { return null; }
-  } else if (isPureAscii(buf)) {
-    // Декодера для этой кодовой страницы нет, но и декодировать нечего.
-    out = buf.toString('latin1');
-  } else {
-    return null;                                      // непонятная кодировка → .NET
-  }
-  const esc = String(valueName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = new RegExp('^\\s*' + esc + '\\s{2,}(REG_[A-Z_]+)\\s{2,}(.*)$', 'im').exec(out);
-  if (!m) return null;
-  const type = m[1];
-  // Многострочные и двоичные типы через текстовый вывод разбирать нельзя.
-  if (type !== 'REG_SZ' && type !== 'REG_EXPAND_SZ') return null;
-  // Режем ТОЛЬКО возврат каретки, а не любой пробельный хвост. `\s+$` съедал
-  // хвостовые пробелы САМОГО значения: если после удаления нашей записи последней
-  // в PATH оказывалась запись с пробелом на конце, записанное и перечитанное
-  // не совпадали ВСЕГДА → срабатывал откат, и запись не убиралась никогда,
-  // сколько ни повторяй. Удалённый classifyRegQuery резал именно `\r$`.
-  const data = m[2].replace(/\r$/, '');
-  // Символ замены = вывод декодировался неверно. Молчаливо принять такое нельзя:
-  // именно испорченное значение однажды затирало чужие записи PATH.
-  if (data.indexOf('�') >= 0) return null;
-  // И «?» — тоже потеря, только более коварная. reg.exe САМ подменяет им символы,
-  // непредставимые в кодовой странице консоли, ещё ДО того как мы что-то
-  // декодируем: на русской консоли «C:\Ωμέγα\bin» приезжает как «C:\?????\bin»,
-  // причём совершенно «чистой» строкой без единого признака порчи.
-  // Проверено запуском. В путях Windows «?» недопустим, так что ложных отказов
-  // почти не будет, а цена отказа — лишь уход на медленный .NET-путь, который
-  // читает верно.
-  if (data.indexOf('?') >= 0) return null;
-  return { ok: true, found: true, type, data };
-}
-
+// Единственный путь чтения — авторитетный. Быстрый разбор вывода reg.exe УДАЛЁН,
+// и вот почему: reg.exe печатает в кодовой странице консоли, а символы, у которых
+// есть best-fit-отображение, он подменяет ПОХОЖИМ ASCII, а не «?». Значение
+// приходит идеально чистым и при этом неверным — ни один гейт такого не поймает.
+// Проверено запуском на этой машине (консоль 866): «C:\Users\José\…» → «Jose»,
+// «Müller» → «Muller», «Dev’s» → «Dev's», а «a…b» → «a:b» — появляется двоеточие,
+// структурно значимый символ пути. Четыре искажения из шести проб.
+// Последствия были тихими и неприятными: компонент, установленный в каталог с
+// диакритикой, детектировался как отсутствующий; пост-проверка удаления
+// рапортовала «чисто», хотя запись в PATH оставалась.
+// Скорость возвращена не разбором текста, а ПАКЕТНЫМ чтением (regQueryManyDotNet):
+// один запуск интерпретатора на все нужные значения вместо одного на каждое.
 function regQueryValueTyped(keyPath, valueName) {
-  const fast = IS_WIN ? regQueryFast(keyPath, valueName) : null;
-  if (fast) return fast;
   return regQueryValueDotNet(keyPath, valueName);
+}
+
+// Несколько значений ОДНИМ запуском. Старт powershell.exe — это сотни миллисекунд,
+// и платить их за каждое значение нельзя: именно из-за этого окно уходило в «не
+// отвечает» на секунды. Читаем пачкой, платим один раз.
+// Возвращает массив результатов в том же порядке, что и запросы.
+function regQueryManyDotNet(reqs) {
+  if (!reqs || !reqs.length) return [];
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const parts = [];
+  for (const r of reqs) {
+    const p = regPathParts(r.key);
+    if (!p) { parts.push("$out += ,@{error='неподдерживаемый ключ'}"); continue; }
+    parts.push(
+      "try{" +
+      "$k=[Microsoft.Win32.Registry]::" + p.hive + ".OpenSubKey(" + q(p.sub) + ",$false);" +
+      "if($null -eq $k){$out += ,@{found=$false}}else{" +
+      "$has=@($k.GetValueNames()|Where-Object{$_ -eq " + q(r.name) + "}).Count -gt 0;" +
+      "if(-not $has){$out += ,@{found=$false}}else{" +
+      "$v=$k.GetValue(" + q(r.name) + ",$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);" +
+      "$out += ,@{found=$true;kind=$k.GetValueKind(" + q(r.name) + ").ToString();data=[string]$v}}}" +
+      "}catch{$out += ,@{error=$_.Exception.Message}}"
+    );
+  }
+  const inline =
+    "$ErrorActionPreference='Stop';$out=@();" + parts.join(';') +
+    ";Write-Output ('HMREG1:'+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json @($out) -Compress -Depth 4))))";
+  const r = winPsPayload(inline);
+  if (!r.ok) return reqs.map(() => ({ ok: false, error: r.error }));
+  const arr = Array.isArray(r.payload) ? r.payload : [r.payload];
+  return reqs.map((_, i) => {
+    const p = arr[i];
+    if (!p) return { ok: false, error: 'реестр: пустой ответ' };
+    if (p.error) return { ok: false, error: 'реестр: ' + p.error };
+    if (!p.found) return { ok: true, found: false };
+    return { ok: true, found: true, type: REG_KIND_TO_TYPE[p.kind] || p.kind, data: String(p.data == null ? '' : p.data) };
+  });
 }
 
 // Авторитетное чтение через .NET: медленно, но без единой зависимости от кодовой
@@ -2770,6 +2722,7 @@ function winRemoveUserPathEntry(t, guardOpts) {
     regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);
     return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — вернул исходный' };
   }
+  invalidatePathCache();   // запись убрана — кэш PATH протух
   return { status: 'removed', message: 'убрал «' + dir + '» из пользовательского PATH' };
 }
 
