@@ -2599,7 +2599,12 @@ function regQueryFast(keyPath, valueName) {
   const type = m[1];
   // Многострочные и двоичные типы через текстовый вывод разбирать нельзя.
   if (type !== 'REG_SZ' && type !== 'REG_EXPAND_SZ') return null;
-  const data = m[2].replace(/\s+$/, '');
+  // Режем ТОЛЬКО возврат каретки, а не любой пробельный хвост. `\s+$` съедал
+  // хвостовые пробелы САМОГО значения: если после удаления нашей записи последней
+  // в PATH оказывалась запись с пробелом на конце, записанное и перечитанное
+  // не совпадали ВСЕГДА → срабатывал откат, и запись не убиралась никогда,
+  // сколько ни повторяй. Удалённый classifyRegQuery резал именно `\r$`.
+  const data = m[2].replace(/\r$/, '');
   // Символ замены = вывод декодировался неверно. Молчаливо принять такое нельзя:
   // именно испорченное значение однажды затирало чужие записи PATH.
   if (data.indexOf('�') >= 0) return null;
@@ -2734,8 +2739,15 @@ function winRemoveUserPathEntry(t, guardOpts) {
       return { status: 'failed', message: 'проверка каталога PATH-записи: ' + String((e && e.code) || e) };
     }
   }
+  // ЗДЕСЬ — только АВТОРИТЕТНЫЙ путь чтения, без быстрой оптимизации.
+  // Операция разрушительная (перезапись чужого PATH), а быстрый путь разбирает
+  // ТЕКСТОВЫЙ вывод reg.exe: он не различает значение с переводом строки, зависит
+  // от кодовой страницы и однажды уже срезал хвостовые пробелы. Расхождение на
+  // один символ между чтением и сверкой означает либо вечный откат, либо
+  // затирание чужой записи. Лишняя доля секунды в редкой операции удаления —
+  // несопоставимо дешевле.
   // P1-7: tri-state — ошибка чтения PATH ≠ «PATH нет» (иначе ложный absent).
-  const cur = regQueryValueTyped('HKCU\\Environment', 'Path');
+  const cur = regQueryValueDotNet('HKCU\\Environment', 'Path');
   if (!cur.ok) return { status: 'failed', message: 'чтение PATH: ' + cur.error };
   if (!cur.found) return { status: 'absent', message: 'пользовательского PATH нет' };
   // Гейт на порчу: чужая запись важнее нашей. Если в прочитанном PATH есть
@@ -2749,7 +2761,10 @@ function winRemoveUserPathEntry(t, guardOpts) {
   if (!upd.changed) return { status: 'absent', message: 'записи в PATH нет' };
   const w = regWriteValueTyped('HKCU\\Environment', 'Path', upd.value, cur.type);
   if (!w.ok) return { status: 'failed', message: 'запись PATH: ' + w.error };
-  const after = regQueryValueTyped('HKCU\\Environment', 'Path');
+  // Сверка — ТЕМ ЖЕ авторитетным путём, что и чтение выше. Сравнивать значения,
+  // прочитанные РАЗНЫМИ способами, значит ловить расхождение самих способов,
+  // а не результат записи.
+  const after = regQueryValueDotNet('HKCU\\Environment', 'Path');
   if (!after.ok || !after.found || after.data !== upd.value) {
     // Верификация не сошлась — пробуем вернуть исходное значение (не теряем PATH).
     regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);

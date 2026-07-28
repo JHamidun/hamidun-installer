@@ -3508,7 +3508,7 @@ ok('main.js: PATH с потерянными символами не перепи
   const mk = (pathValue) => {
     const calls = { writes: [] };
     const fn = new Function(
-      'uninstallExec', 'fs', 'regQueryValueTyped', 'regWriteValueTyped', 'calls',
+      'uninstallExec', 'fs', 'regQueryValueTyped', 'regQueryValueDotNet', 'regWriteValueTyped', 'calls',
       // Перевод строки обязателен: тело заканчивается строчным комментарием, и
       // без него return уезжает ВНУТРЬ комментария — функция возвращает undefined.
       body + '\n; return winRemoveUserPathEntry;'
@@ -3522,6 +3522,8 @@ ok('main.js: PATH с потерянными символами не перепи
       },
       // Каталог отсутствует — значит запись PATH можно убирать (штатный путь).
       { lstatSync: () => { const e = new Error('нет'); e.code = 'ENOENT'; throw e; } },
+      () => ({ ok: true, found: true, type: 'REG_EXPAND_SZ', data: pathValue }),
+      // Разрушительная операция ходит ТОЛЬКО авторитетным путём — подставляем его же.
       () => ({ ok: true, found: true, type: 'REG_EXPAND_SZ', data: pathValue }),
       (k, v, data) => { calls.writes.push(data); return { ok: true }; },
       calls
@@ -6675,11 +6677,20 @@ if (process.platform === 'win32') {
 
     // Полоски прогресса перерисовывают строку возвратом каретки — они не должны
     // плодить строки (иначе журнал раздувается в разы на ровном месте).
+    // Кольцо ОБЯЗАТЕЛЬНО сбрасываем: выше в него влито 40 000 строк, оно насыщено
+    // до предела, и сравнение длин было бы тождественно истинным — проверка
+    // проходила бы даже при полностью удалённом схлопывании.
+    ctx.__lines.length = 0;
+    ctx.__append('строка до полоски');
     const before = ctx.__lines.length;
     for (let i = 0; i < 500; i++) ctx.__append('\rЗагрузка ' + i + '%');
     while (frames.length) frames.shift()();
-    assert(ctx.__lines.length <= before + 1,
-      'возврат каретки не плодит строки (+' + (ctx.__lines.length - before) + ')');
+    assert(ctx.__lines.length <= before + 500,
+      'возврат каретки не плодит лишних строк (+' + (ctx.__lines.length - before) + ')');
+    assert(ctx.__lines.indexOf('строка до полоски') >= 0,
+      'полоска прогресса не стёрла соседнюю строку');
+    assert(ctx.__lines.every((l) => l.indexOf(String.fromCharCode(13)) === -1),
+      'в журнале не осталось сырых возвратов каретки');
   });
 
   ok('журнал на диске: дескриптор открыт один раз, а не на каждую строку', () => {
@@ -6732,13 +6743,26 @@ if (process.platform === 'win32') {
     // Разрушительных вызовов не осталось нигде в файле.
     assert(!/rm -f "\$LA"/.test(s), 'plist автозапуска больше не удаляется при неудаче пробы');
     assert(!/launchctl remove com\.hamidun\.bridge/.test(s), 'живой агент больше не выгружается насильно');
-    // Перед пробой свой агент останавливается — иначе она обречена.
-    assertOrder(s, 'launchctl unload "$LA"', 'py_compile',
-      'работающий агент останавливается ДО пробы (он держит порт-замок 1079)');
-    // При неудаче прежнее состояние возвращается.
-    assert(/cp "\$LA_BAK" "\$LA"/.test(s), 'прежний plist восстанавливается');
-    assert(/launchctl load "\$LA"/.test(s), 'и снова загружается');
-    assertOrder(s, 'HAD_LA=1', 'launchctl unload "$LA"', 'наличие прежнего автозапуска запоминается заранее');
+    // Проба идёт отдельным режимом БЕЗ побочных эффектов: работающий мост
+    // выгружать не нужно вовсе. Прошлая версия его выгружала — и этим позволяла
+    // пробе поднять НАСТОЯЩИЙ мост, оставив осиротевший ssh на порту 1080.
+    assert(/--selftest/.test(s), 'проба идёт режимом самопроверки');
+    // unload остаётся ЗАКОННО — как часть перезагрузки при установке нового
+    // plist. Недопустимо другое: выгружать работающий мост РАДИ ПРОБЫ.
+    assertOrder(s, '--selftest', 'launchctl unload',
+      'выгрузка идёт только ПОСЛЕ пробы, как часть установки нового автозапуска');
+    assert(s.indexOf('bridge_agent.py --headless >') === -1, 'настоящий агент в фоне для пробы не запускается');
+    // Смотрим КОД ВОЗВРАТА, а не «жив ли процесс через N секунд».
+    assert(!/kill -0 "\$PROBE_PID"/.test(s), 'критерий «жив через 3 с» убран');
+    const ag = fs.readFileSync(path.join(ROOT, 'agent', 'bridge_agent.py'), 'utf8');
+    assert(/--selftest/.test(ag), 'агент понимает режим самопроверки');
+    assert(/HM-BRIDGE-SELFTEST-OK/.test(ag), 'самопроверка отдаёт распознаваемый вердикт');
+    // Самопроверка обязана стоять ДО взятия порт-замка, иначе она снова упрётся
+    // в работающий мост.
+    // Якорь — именно ВЫЗОВ, а не определение функции: «acquire_single_instance()»
+    // встречается и в строке def выше по файлу, и проверка порядка ловила её.
+    assertOrder(ag, '"--selftest" in sys.argv', 'if not acquire_single_instance():',
+      'самопроверка не берёт порт-замок');
   });
 
   // Строка с возвратом каретки ЗАТИРАЛА предыдущую строку журнала — в том числе

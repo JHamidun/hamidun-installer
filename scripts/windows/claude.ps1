@@ -136,6 +136,19 @@ function Test-HmOurClaudeDir($dir) {
     $ours = @()
     if ($env:USERPROFILE) { $ours += (Join-Path $env:USERPROFILE '.local\bin') }
     if ($env:APPDATA)     { $ours += (Join-Path $env:APPDATA 'npm') }
+    # РЕАЛЬНЫЙ npm-префикс, а не только дефолтный. Мы ставим claude командой
+    # `npm install -g`, и она кладёт его туда, куда указывает КОНФИГ npm — при nvm,
+    # volta или своём prefix это НЕ %APPDATA%\npm. Без этой строки обёртка, которую
+    # поставили МЫ САМИ, считалась чужой: убрать её было нельзя, а с недавних пор
+    # такой случай ещё и честно роняет установку. Find-ClaudeBinary префикс уже
+    # спрашивает — спрашиваем и здесь, чтобы аллоулист совпадал с местом установки.
+    try {
+        $p = (npm config get prefix 2>$null | Select-Object -First 1)
+        if ($p) {
+            $p = ([string]$p).Trim()
+            if ($p -and $p -ne 'undefined' -and (Test-Path -LiteralPath $p)) { $ours += $p }
+        }
+    } catch { }
     $norm = ''
     try { $norm = [System.IO.Path]::GetFullPath($dir).TrimEnd('\') } catch { return $false }
     foreach ($o in $ours) {

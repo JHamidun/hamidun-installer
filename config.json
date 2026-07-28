@@ -1,4 +1,5 @@
 {
+  "offlineEdition": true,
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
   "configRepoBranch": "main",
   "nomad": {
