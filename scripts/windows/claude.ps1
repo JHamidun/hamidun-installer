@@ -185,7 +185,26 @@ $cache = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'npm-cache' } else { '' 
 $offlineOk = $false      # офлайн-путь дал claude, который НЕ доказан сломанным
 $probedBin = ''          # кэш проверки, чтобы не гонять де-элевированный запуск дважды
 $probedResult = ''
-if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+
+# СНИМОК ДО УСТАНОВКИ. Наш `npm install -g` пишет в тот же глобальный prefix, где у
+# человека может УЖЕ стоять СВОЯ рабочая установка claude. Если она работает —
+# офлайн-установку не запускаем вовсе: незачем перетирать рабочее ради известного
+# офлайн-отказа (нет платформенного бинаря в кеше → npm=0 → вердикт broken →
+# Remove-HmBrokenClaude снёс бы ЧУЖОЙ рабочий claude, а онлайн-путь из РФ упёрся бы
+# в 403 — и у человека не осталось бы ничего). Инвариант: удаляем только то, что
+# положили МЫ (отсутствовало ИЛИ было сломано ДО прогона), не работавшее до нас.
+$preExisting = 'none'
+if (-not $DRY) {
+    $preBin = Find-ClaudeBinary
+    if ($preBin) { $preExisting = Test-HmClaudeRuns $preBin }   # works | broken | unverified
+}
+if ($preExisting -eq 'works') {
+    Write-Host "Claude Code CLI уже установлен и отвечает на --version ($preBin) — не трогаю."
+    $offlineOk = $true
+    $probedBin = $preBin; $probedResult = 'works'
+}
+
+if (-not $offlineOk -and $cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
     Write-Host "Ставлю Claude Code CLI из встроенного npm-кеша (офлайн)..."
     if ($DRY) { Write-Host "  [dry-run] WOULD: npm install -g @anthropic-ai/claude-code --offline --cache $cache; затем проверка ЗАПУСКОМ claude --version (де-элевированно)"; exit 0 }
     npm install -g '@anthropic-ai/claude-code' --offline --cache $cache --no-audit --no-fund
@@ -197,12 +216,15 @@ if ($cache -and (Test-Path $cache) -and (Get-Command npm -ErrorAction SilentlyCo
         $probedBin = $bin; $probedResult = $probe
         if ($probe -eq 'broken') {
             Write-Host "Офлайн-установка отчиталась успехом, но claude не запускается (в кеше нет платформенного бинаря) — пробую онлайн-путь."
-            if (Remove-HmBrokenClaude $bin) {
+            # Удаляем ТОЛЬКО если до нас в этом каталоге не было рабочего claude:
+            # снимок $preExisting='works' сюда не дойдёт (офлайн-ветку мы бы не
+            # запускали), но каталог мог сменить путь — страхуемся ещё раз здесь.
+            if ($preExisting -ne 'works' -and (Remove-HmBrokenClaude $bin)) {
                 # нерабочая обёртка снесена — финальный Find/пробу начнём с чистого листа
                 $probedBin = ''; $probedResult = ''
             }
-            # отказ уборки (чужой каталог): кэш пробы сохраняем — финал увидит 'broken'
-            # и сам уйдёт путём «не смогли подтвердить» по тому же аллоулисту
+            # отказ уборки (чужой каталог) или работавший до нас claude: кэш пробы
+            # сохраняем — финал увидит 'broken' и уйдёт путём «не смогли подтвердить»
         } else {
             $offlineOk = $true
         }
@@ -240,6 +262,29 @@ if (-not $claudeBin) {
 # если и онлайн-путь оставил нерабочую обёртку — честный красный статус БЕЗ «OK»-квитанции,
 # а не зелёная галочка при неработающем claude.
 $probe = if ($claudeBin -eq $probedBin -and $probedResult) { $probedResult } else { Test-HmClaudeRuns $claudeBin }
+
+# Вердикт запуском пишем в ~/.hamidun-setup/checks.json — финальный чек-лист
+# (verify.ps1) обязан ПЕРЕНЕСТИ его, а не выводить заново по наличию файла.
+# Один факт «claude работает» — один стандарт доказательства.
+function Write-HmCheck($name, $verdict) {
+    try {
+        $dir = Join-Path $env:USERPROFILE '.hamidun-setup'
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
+        $file = Join-Path $dir 'checks.json'
+        $data = @{}
+        if (Test-Path -LiteralPath $file) {
+            try { $data = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json) } catch { $data = New-Object psobject }
+        }
+        $entry = @{ verdict = $verdict; at = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds }
+        # atomic: temp + move (как маркеры/квитанции)
+        $obj = @{}
+        if ($data) { foreach ($p in $data.PSObject.Properties) { $obj[$p.Name] = $p.Value } }
+        $obj[$name] = $entry
+        $tmp = "$file.tmp"
+        ($obj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $file -Force
+    } catch { }   # диагностика не должна ломать установку
+}
 # Красный вердикт «сломан» имеем право выносить только за НАШ артефакт: сломанный claude
 # ВНЕ наших каталогов (свой npm prefix/volta) не трогаем и не хороним им установку —
 # честно уходим путём «не смогли подтвердить» (тот же аллоулист, что у уборки).
@@ -259,17 +304,21 @@ if ($brokenForeign) {
     Write-Host "поэтому трогать его мы не станем — это твои файлы."
     Write-Host "Что сделать: удали свою установку (например 'npm uninstall -g @anthropic-ai/claude-code')"
     Write-Host "и запусти установку компонента заново — тогда мы поставим рабочий claude сами."
+    Write-HmCheck 'claude' 'broken'
     exit 1
 }
 if ($probe -eq 'broken') {
     Write-Host "ОШИБКА: claude найден ($claudeBin), но НЕ запускается (обёртка без платформенного бинаря) — установка не засчитана. Повтори установку компонента при доступной сети."
+    Write-HmCheck 'claude' 'broken'
     exit 1
 }
 Add-ToUserPath (Split-Path $claudeBin)
 Add-ToUserPath (Join-Path $env:USERPROFILE '.local\bin')
 if ($probe -eq 'works') {
+    Write-HmCheck 'claude' 'works'
     Write-Host "OK: Claude Code CLI установлен и отвечает на --version ($claudeBin). Открой НОВЫЙ терминал, чтобы работала команда claude."
 } else {
+    Write-HmCheck 'claude' 'unverified'
     Write-Host "OK: Claude Code CLI установлен ($claudeBin; проверить запуском де-элевированно не удалось). Открой НОВЫЙ терминал, чтобы работала команда claude."
 }
 exit 0

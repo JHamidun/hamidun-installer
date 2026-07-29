@@ -7054,3 +7054,50 @@ ok('config.json в репозитории без сборочных маркер
     assert(awaitPos > 0 && finallyPos > awaitPos, 'finally стоит ПОСЛЕ await-промиса');
   });
 })();
+
+// ===========================================================================
+// Глубокое ревью: claude.ps1 + verify.ps1. Инвариант «удаляем только положенное
+// НАМИ; один факт — один стандарт доказательства».
+// ===========================================================================
+(function claudeOwnershipAndVerdict() {
+  const claude = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude.ps1'), 'utf8');
+  const verify = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'verify.ps1'), 'utf8');
+
+  // Снимок ДО офлайн-установки: рабочий чужой claude не перетирается и не сносится.
+  ok('claude.ps1: рабочий claude не трогаем (снимок $preExisting)', () => {
+    const s = claude();
+    assert(/\$preExisting = 'none'/.test(s), 'снимок инициализируется');
+    assert(/if \(\$preExisting -eq 'works'\)/.test(s), 'при works офлайн-установка пропускается');
+    // Офлайн-ветка не запускается, если claude уже работает.
+    assert(/if \(-not \$offlineOk -and \$cache/.test(s),
+      'офлайн-ветка гейтится флагом offlineOk (works → не входим)');
+    // Удаление сломанного — только если до нас НЕ было рабочего.
+    assert(/preExisting -ne 'works' -and \(Remove-HmBrokenClaude/.test(s),
+      'Remove-HmBrokenClaude не трогает работавший до прогона claude');
+  });
+
+  // Вердикт запуском переносится в checks.json, verify его читает, а не судит по файлу.
+  ok('claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит', () => {
+    const c = claude();
+    assert(/function Write-HmCheck/.test(c), 'claude.ps1 умеет писать вердикт');
+    const writes = (c.match(/Write-HmCheck 'claude'/g) || []).length;
+    assert(writes >= 3, 'вердикт пишется во всех исходах (' + writes + ')');
+    ['works', 'broken', 'unverified'].forEach((v) =>
+      assert(c.indexOf("Write-HmCheck 'claude' '" + v + "'") >= 0, 'записывается вердикт ' + v));
+
+    const v = verify();
+    const block = v.slice(v.indexOf("if (-not (Test-Selected 'claude'))"), v.indexOf('# --- Конфиг'));
+    assert(/checks\.json/.test(block), 'verify читает checks.json');
+    // CHECK ok — ТОЛЬКО при verdict=works; наличие файла даёт лишь строку пути.
+    assert(/verdict -eq 'works'\)\s*\{\s*Write-Host "CHECK ok Claude CLI"/.test(block),
+      'CHECK ok выводится только при verdict=works');
+    assert(/if \(\$claudeBin\) \{ Write-Host "  claude: \$claudeBin" \}/.test(block),
+      'под наличием файла — только путь, не CHECK ok');
+    // Нет вердикта / broken → fail, а не зелёная галочка.
+    assert(/Write-Host "CHECK fail Claude CLI"/.test(block), 'без вердикта → fail');
+    // Строки распознаются рендерерным регэкспом.
+    const re = /^CHECK (ok|fail|skip)\s+(.*)$/;
+    ['CHECK ok Claude CLI', 'CHECK skip Claude CLI (установлен, запуск не проверен)', 'CHECK fail Claude CLI']
+      .forEach((l) => assert(re.test(l), 'рендерер распознаёт: ' + l));
+  });
+})();

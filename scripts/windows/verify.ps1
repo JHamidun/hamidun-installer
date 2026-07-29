@@ -97,11 +97,31 @@ function Find-ClaudeBinary {
 if (-not (Test-Selected 'claude')) {
     Write-Host "CHECK skip Claude CLI"
 } else {
+    # ОДИН факт — ОДИН стандарт доказательства. claude.ps1 проверяет claude ЗАПУСКОМ
+    # (--version де-элевированно) и пишет вердикт в ~/.hamidun-setup/checks.json.
+    # Здесь мы ПЕРЕНОСИМ его, а не выводим заново по наличию файла: наличие обёртки
+    # ничего не доказывает (её оставляет и провалившаяся офлайн-установка), и «✓» по
+    # файлу давало зелёную галочку при неработающем claude. Git/Node рядом тоже
+    # проверяются запуском — исключения для claude быть не должно.
+    $verdict = $null
+    try {
+        $cf = Join-Path $env:USERPROFILE '.hamidun-setup\checks.json'
+        if (Test-Path -LiteralPath $cf) {
+            $j = Get-Content -Raw -LiteralPath $cf | ConvertFrom-Json
+            if ($j.claude) { $verdict = [string]$j.claude.verdict }
+        }
+    } catch { }
     $claudeBin = Find-ClaudeBinary
-    if ($claudeBin) {
-        Write-Host "  claude: $claudeBin"
+    if ($claudeBin) { Write-Host "  claude: $claudeBin" }
+    if ($verdict -eq 'works') {
         Write-Host "CHECK ok Claude CLI"
+    } elseif ($verdict -eq 'unverified') {
+        # Установлен, но запуск подтвердить не удалось (де-элевация недоступна и т.п.).
+        # НЕ ok (не врём про работу) и НЕ fail (не пугаем при вероятно рабочем) — skip
+        # с пояснением; строку рендерер распознаёт тем же префиксом.
+        Write-Host "CHECK skip Claude CLI (установлен, запуск не проверен)"
     } else {
+        # broken ИЛИ вердикта нет вовсе (claude.ps1 не дошёл до записи) — не подтверждено.
         Write-Host "CHECK fail Claude CLI"
     }
 }
