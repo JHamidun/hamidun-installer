@@ -56,6 +56,7 @@ if [ "$TRAY_OK" != "1" ]; then
 fi
 
 CFG="$DST/config.json"
+CFG_OK=1   # «Сервер настроен» объявляем ТОЛЬКО если правка конфига реально удалась
 if [ ! -f "$CFG" ]; then
   cat > "$CFG" <<EOF
 {
@@ -71,10 +72,18 @@ elif [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then
   # config.json уже есть, но издатель пересобрал установщик с адресом сервера — доставляем
   # новый endpoint/token в существующий конфиг, сохраняя ssh/enabled ученика. Иначе агент
   # простаивал бы с пустым endpoint, хотя сообщение говорило бы «сервер настроен». perl всегда есть.
-  EP="$HM_BRIDGE_ENDPOINT" TK="${HM_BRIDGE_TOKEN:-}" /usr/bin/perl -pi -e '
+  # Сбой правки НЕ глотаем (раньше `|| true` съедал его, а внизу печаталось «Сервер настроен»).
+  EP="$HM_BRIDGE_ENDPOINT" /usr/bin/perl -pi -e '
     s/("enrollEndpoint"\s*:\s*")[^"]*(")/$1.$ENV{EP}.$2/e;
-    s/("bridgeToken"\s*:\s*")[^"]*(")/$1.$ENV{TK}.$2/e;
-  ' "$CFG" 2>/dev/null || true
+  ' "$CFG" 2>/dev/null || CFG_OK=0
+  # Пустой HM_BRIDGE_TOKEN НЕ затирает сохранённый bridgeToken ученика: config.json — PRESERVE
+  # (src/uninstall-targets.js), токен ценен, а переменная в окружении бывает пустой.
+  # Пишем ТОЛЬКО непустое значение.
+  if [ -n "${HM_BRIDGE_TOKEN:-}" ]; then
+    TK="$HM_BRIDGE_TOKEN" /usr/bin/perl -pi -e '
+      s/("bridgeToken"\s*:\s*")[^"]*(")/$1.$ENV{TK}.$2/e;
+    ' "$CFG" 2>/dev/null || CFG_OK=0
+  fi
 fi
 
 LA="$HOME/Library/LaunchAgents/com.hamidun.bridge.plist"
@@ -160,6 +169,14 @@ cat > "$LA" <<EOF
 EOF
 launchctl unload "$LA" 2>/dev/null || true
 launchctl load "$LA" 2>/dev/null || true
+# ТРАНЗАКЦИЯ: строкой выше мы выгрузили прежний (возможно, РАБОТАВШИЙ) мост — успех можно
+# объявлять только после подтверждения, что новый реально числится в launchd. Раньше оба
+# результата выбрасывались (`|| true`) и «OK: AI-мост установлен» печаталось безусловно.
+# bash 3.2 / переносимо: launchctl list + grep, без непереносимого `print gui/`. grep БЕЗ -q:
+# -q закрывает пайп на первом совпадении, launchctl ловит SIGPIPE, и под `set -o pipefail`
+# подтверждение РАБОЧЕГО моста становилось бы ложным отказом.
+LOAD_OK=0
+if launchctl list 2>/dev/null | grep "com.hamidun.bridge" >/dev/null; then LOAD_OK=1; fi
 
 # CLI-прокси: агент пишет cli_proxy.env, но сам его никто не подключает —
 # идемпотентно добавляем source-строку в ~/.zshrc и ~/.bash_profile
@@ -188,7 +205,17 @@ done
 echo "HM-RECEIPT path $DST"
 echo "HM-RECEIPT launchagent com.hamidun.bridge|$LA"
 
+# Транзакция не подтвердилась → честная ошибка, БЕЗ «OK: AI-мост установлен»:
+# прежний автозапуск уже выгружен, а новый мост в launchd не числится.
+if [ "$LOAD_OK" != "1" ]; then
+  echo "ОШИБКА: launchd не подтвердил загрузку моста (com.hamidun.bridge отсутствует в launchctl list)."
+  echo "  Прежний автозапуск выгружен, новый не поднялся — успех установки не объявляю."
+  echo "  Файл автозапуска записан: $LA — можно попробовать вручную: launchctl load \"$LA\""
+  exit 1
+fi
+
 if [ "$TRAY_OK" = "1" ]; then TRAY_MSG="значок в меню-баре"; else TRAY_MSG="фоновый режим без значка"; fi
-if [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). Сервер настроен."
+if [ -n "${HM_BRIDGE_ENDPOINT:-}" ] && [ "$CFG_OK" = "1" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). Сервер настроен."
+elif [ -n "${HM_BRIDGE_ENDPOINT:-}" ]; then echo "OK: AI-мост установлен ($TRAY_MSG). ВНИМАНИЕ: адрес сервера в конфиг записать не удалось — настройка сервера НЕ подтверждена."
 else echo "OK: AI-мост установлен ($TRAY_MSG). Сервер ещё не настроен — включится после доступа в боте."; fi
 exit 0

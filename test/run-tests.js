@@ -7101,3 +7101,274 @@ ok('config.json в репозитории без сборочных маркер
       .forEach((l) => assert(re.test(l), 'рендерер распознаёт: ' + l));
   });
 })();
+
+// ===========================================================================
+// Глубокое ревью (Opus+Fable): подсистема МОСТА (bridge.ps1 / bridge.sh).
+// Три инварианта:
+//   1) пустое значение НЕ перезаписывает непустое в конфиге ученика
+//      (bridgeToken/enrollEndpoint; config.json — PRESERVE в uninstall-targets,
+//      значит значения ценны, а повторная установка их стирала);
+//   2) замена работающего сервиса — ТРАНЗАКЦИЯ: после `launchctl load`
+//      загрузка ПОДТВЕРЖДАЕТСЯ (launchctl list) ДО «OK: AI-мост установлен»;
+//   3) гейт работоспособности автозапуска — свойство ПОДСИСТЕМЫ: selftest
+//      агента есть и на Windows (ДО записи HKCU\Run), не только на macOS.
+// Прогоны БЕЗ побочных эффектов: bridge.ps1 идёт ЦЕЛИКОМ в песочнице
+// (LOCALAPPDATA=tmp; New-ItemProperty/Start-Process/Get-Command закрыты
+// функциями драйвера — функция в PS имеет приоритет над cmdlet; де-элевация —
+// стаб _deelev.ps1 рядом с копией скрипта, БЕЗ schtasks и БЕЗ реального
+// HKCU\Run); bridge.sh — фрагментами с launchctl-функцией-стабом и sandbox-HOME.
+// ===========================================================================
+(function bridgeSubsystemInvariants() {
+  const PS51 = path.join(process.env.SystemRoot || 'C:\\Windows',
+    'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const psSrc = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'bridge.ps1'), 'utf8');
+  const shSrc = () => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'bridge.sh'), 'utf8');
+
+  // --- Статика: инварианты видны в коде (идут на любой ОС) ---
+  ok('мост (статика): guard пустого токена, selftest-гейт до Run, launchctl подтверждается', () => {
+    const ps = psSrc();
+    // И-1 (Windows): запись bridgeToken в update-ветке — ТОЛЬКО под условием непустоты.
+    const upd = ps.slice(ps.indexOf('elseif ($env:HM_BRIDGE_ENDPOINT)'), ps.indexOf('# 5.'));
+    assert(upd.length > 50, 'ps1: update-ветка конфига найдена');
+    const guard = upd.indexOf('if ($env:HM_BRIDGE_TOKEN)');
+    assert(guard >= 0, 'ps1: guard непустоты токена есть');
+    assert(!/\$cfg\.bridgeToken\s*=/.test(upd.slice(0, guard)) && !/Add-Member/.test(upd.slice(0, guard)),
+      'ps1: безусловной записи токена ДО guard не осталось');
+    assertOrder(upd, 'if ($env:HM_BRIDGE_TOKEN)', '$cfg.bridgeToken',
+      'ps1: bridgeToken пишется только внутри guard');
+    // Побочно: сбой записи конфига → «Сервер настроен» не объявляется.
+    assert(/\$cfgOk = \$false/.test(upd), 'ps1: catch помечает конфиг несписанным');
+    assert(/\$env:HM_BRIDGE_ENDPOINT -and \$cfgOk/.test(ps), 'ps1: «Сервер настроен» гейтится $cfgOk');
+    // И-3 (Windows): selftest де-элевированно и ДО записи HKCU\Run; Run — внутри if ($agentOk).
+    assertOrder(ps, "Invoke-HmDeElevated $py @($agentPath, '--selftest')",
+      "New-ItemProperty -Path 'HKCU:", 'ps1: selftest идёт ДО записи Run');
+    assert(/if \(\$agentOk\) \{\s*\r?\n\s*New-ItemProperty/.test(ps),
+      'ps1: запись Run — только внутри гейта $agentOk');
+    assert(!/& \$py\b/.test(ps.replace(/#[^\n]*/g, '')),
+      'ps1: user-writable python НЕ исполняется напрямую под elevated (SECURITY #6)');
+    assert(/HM-RECEIPT reg[^\n]*HamidunBridge/.test(ps) && /if \(\$agentOk\) \{ Write-Host "HM-RECEIPT reg/.test(ps),
+      'ps1: реестровая квитанция эмитится только при реально записанном Run');
+
+    const sh = shSrc();
+    // Комментарии срезаем: строки-пояснения цитируют и «OK: AI-мост установлен»,
+    // и старый код — порядок и отсутствие проверяем ТОЛЬКО по коду.
+    const shCode = sh.replace(/^\s*#[^\n]*$/gm, '');
+    // И-1 (macOS): подстановка bridgeToken — только под guard непустоты; старая
+    // безусловная строка TK="${HM_BRIDGE_TOKEN:-}" (пустое затирало токен) удалена.
+    assert(shCode.indexOf('TK="${HM_BRIDGE_TOKEN:-}"') === -1, 'sh: безусловная подстановка токена удалена');
+    assertOrder(shCode, '[ -n "${HM_BRIDGE_TOKEN:-}" ]', 's/("bridgeToken"',
+      'sh: bridgeToken пишется только под guard непустоты');
+    assert(!/"\$CFG" 2>\/dev\/null \|\| true/.test(shCode), 'sh: сбой правки конфига больше не глотается (|| true)');
+    // И-2 (macOS): после load — подтверждение через launchctl list (bash 3.2, без print gui/).
+    assertOrder(shCode, 'launchctl load "$LA"', 'launchctl list', 'sh: подтверждение идёт ПОСЛЕ load');
+    assert(!/launchctl print gui\//.test(shCode), 'sh: без launchctl print gui/ (bash 3.2 переносимость)');
+    assertOrder(shCode, 'if [ "$LOAD_OK" != "1" ]', 'OK: AI-мост установлен',
+      'sh: проверка транзакции стоит ДО объявления успеха');
+    assert(/if \[ "\$LOAD_OK" != "1" \]; then\n(.*\n){1,5}?\s*exit 1/.test(shCode),
+      'sh: неподтверждённая транзакция → честная ошибка (exit 1)');
+  });
+
+  // --- Синтаксис (bridge-скрипты не входили в старые syntax-списки) ---
+  if (powershellAvailable()) {
+    ok('bridge.ps1: PowerShell 5.1 парсер без ошибок (синтаксис + BOM)', () => {
+      const script = path.join(ROOT, 'scripts', 'windows', 'bridge.ps1');
+      const b = fs.readFileSync(script);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'первые байты — UTF-8 BOM');
+      const cmd = "$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('" + script +
+        "',[ref]$null,[ref]$e);if($e -and $e.Count -gt 0){$e|%{[Console]::Error.WriteLine($_.Message)};exit 3};exit 0";
+      const r = spawnSync(PS51, ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 60000 });
+      assert(r.status === 0, 'ParseFile: ' + (r.stderr || r.stdout || ''));
+    });
+  }
+  if (bashAvailable()) {
+    ok('bridge.sh: bash -n без синтаксических ошибок', () => {
+      const r = spawnSync('bash', ['-n', path.join(ROOT, 'scripts', 'macos', 'bridge.sh')], { encoding: 'utf8', timeout: 30000 });
+      assert(r.status === 0, 'bash -n: ' + (r.stderr || ''));
+    });
+  }
+
+  // --- Функциональные прогоны bridge.ps1 (PS 5.1, песочница) ---
+  function mkBridgeWinSandbox() {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-bridge-'));
+    const scriptsDir = path.join(base, 'scripts');
+    fs.mkdirSync(scriptsDir);
+    fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', 'bridge.ps1'), path.join(scriptsDir, 'bridge.ps1'));
+    // Стаб примитива де-элевации ($PSScriptRoot копии → сорсится ОН, не настоящий):
+    // НИКАКОГО schtasks; код возврата selftest задаёт тест через HM_TEST_SELFTEST_EXIT.
+    fs.writeFileSync(path.join(scriptsDir, '_deelev.ps1'), Buffer.concat([
+      Buffer.from([0xEF, 0xBB, 0xBF]),
+      Buffer.from([
+        'function Invoke-HmDeElevated {',
+        '  param($Exe, [string[]]$ArgList = @())',
+        '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("DEELEV " + ($ArgList -join " "))',
+        '  if ($ArgList -contains "--selftest") { return [pscustomobject]@{ Gate = "medium"; Code = [int]$env:HM_TEST_SELFTEST_EXIT } }',
+        '  return [pscustomobject]@{ Gate = "medium"; Code = 0 }',
+        '}'
+      ].join('\r\n'), 'utf8')
+    ]));
+    const agentDir = path.join(base, 'agent');
+    fs.mkdirSync(agentDir);
+    fs.writeFileSync(path.join(agentDir, 'bridge_agent.py'), '# stub agent (never executed by test)\n');
+    const localApp = path.join(base, 'localapp');
+    fs.mkdirSync(localApp);
+    const logPath = path.join(base, 'calls.log');
+    fs.writeFileSync(logPath, '');
+    // Драйвер: функции ЗАКРЫВАЮТ одноимённые cmdlets → реестр/explorer не трогаются,
+    // а вызовы протоколируются в HM_TEST_LOG. Get-Command отдаёт фейковый python —
+    // прогон герметичен и не зависит от софта машины (сам python не исполняется).
+    const driver = path.join(base, 'driver.ps1');
+    fs.writeFileSync(driver, Buffer.concat([
+      Buffer.from([0xEF, 0xBB, 0xBF]),
+      Buffer.from([
+        "$ErrorActionPreference = 'Continue'",
+        'function Get-Command { param($Name, $ErrorAction)',
+        '  if ("$Name" -eq "python") { return [pscustomobject]@{ Source = "C:\\HmFakePy\\python.exe" } }',
+        '  return [pscustomobject]@{ Source = "$Name" }',
+        '}',
+        'function New-ItemProperty { param($Path, $Name, $Value, $PropertyType, [switch]$Force)',
+        '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("REG-WRITE " + $Path + "|" + $Name + "|" + $Value)',
+        '}',
+        'function Start-Process { param($FilePath, $ArgumentList, $ErrorAction)',
+        '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("START " + $FilePath)',
+        '}',
+        '& (Join-Path $PSScriptRoot "scripts\\bridge.ps1")',
+        'exit $LASTEXITCODE'
+      ].join('\r\n'), 'utf8')
+    ]));
+    return { base, agentDir, localApp, logPath, driver };
+  }
+  function seedWinCfg(sb, cfg) {
+    const dir = path.join(sb.localApp, 'HamidunBridge');
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, 'config.json');
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+    return p;
+  }
+  function runBridgePs1(sb, extraEnv) {
+    const env = Object.assign({}, process.env, {
+      LOCALAPPDATA: sb.localApp, HM_AGENT_DIR: sb.agentDir, HM_TEST_LOG: sb.logPath
+    });
+    ['HM_DRY_RUN', 'HM_VENDOR', 'HM_BRIDGE_TOKEN', 'HM_BRIDGE_ENDPOINT', 'HM_BRIDGE_PACDOMAINS']
+      .forEach((k) => delete env[k]);
+    Object.assign(env, extraEnv || {});
+    return spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb.driver + "'; exit $LASTEXITCODE"],
+      { encoding: 'utf8', timeout: 120000, env });
+  }
+  const studentCfg = () => ({
+    enrollEndpoint: 'https://old.example/enroll', bridgeToken: 'STUDENT-TOKEN',
+    ssh: { host: 'vps.example', port: 22, user: 'u1', keyPath: 'k', password: '' },
+    socksPort: 1080, httpPort: 1081, pacPort: 1082,
+    pacDomains: ['claude.ai', 'anthropic.com'], enabled: true
+  });
+
+  if (powershellAvailable()) {
+    ok('bridge.ps1 (прогон PS 5.1): пустой HM_BRIDGE_TOKEN НЕ затирает токен ученика; selftest OK → Run пишется ПОСЛЕ selftest', () => {
+      const sb = mkBridgeWinSandbox();
+      try {
+        const cfgPath = seedWinCfg(sb, studentCfg());
+        const r = runBridgePs1(sb, { HM_BRIDGE_ENDPOINT: 'https://new.example/enroll', HM_TEST_SELFTEST_EXIT: '0' });
+        assert(r.status === 0, 'exit 0, а не ' + r.status + ': ' + (r.stderr || r.stdout || ''));
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        assert.strictEqual(cfg.bridgeToken, 'STUDENT-TOKEN', 'непустой токен ученика ЦЕЛ при пустом HM_BRIDGE_TOKEN');
+        assert.strictEqual(cfg.enrollEndpoint, 'https://new.example/enroll', 'endpoint издателя доставлен');
+        assert.strictEqual(cfg.ssh.host, 'vps.example', 'ssh ученика цел');
+        assert.strictEqual(cfg.enabled, true, 'enabled ученика цел');
+        const log = fs.readFileSync(sb.logPath, 'utf8');
+        assert(/DEELEV [^\n]*--selftest/.test(log), 'selftest прогнан де-элевированно');
+        assert(/REG-WRITE HKCU:[^\n]*\|HamidunBridge\|/.test(log), 'Run-ключ записан (перехвачен стабом, selftest прошёл)');
+        assertOrder(log, '--selftest', 'REG-WRITE', 'selftest идёт ДО записи Run');
+        assert(r.stdout.indexOf('OK: AI-мост установлен') >= 0, 'успех объявлен');
+        assert(r.stdout.indexOf('Сервер настроен') >= 0, 'конфиг записан → «Сервер настроен»');
+      } finally { fs.rmSync(sb.base, { recursive: true, force: true }); }
+    });
+
+    ok('bridge.ps1 (прогон PS 5.1): selftest падает → HKCU\\Run НЕ пишется, успех не объявляется; непустой токен при этом доставлен', () => {
+      const sb = mkBridgeWinSandbox();
+      try {
+        const cfgPath = seedWinCfg(sb, studentCfg());
+        const r = runBridgePs1(sb, {
+          HM_BRIDGE_ENDPOINT: 'https://new.example/enroll',
+          HM_BRIDGE_TOKEN: 'NEW-TOKEN', HM_TEST_SELFTEST_EXIT: '1'
+        });
+        assert(r.status === 0, 'распаковано без автозапуска — это НЕ провал шага (exit ' + r.status + ')');
+        const log = fs.readFileSync(sb.logPath, 'utf8');
+        assert(/DEELEV [^\n]*--selftest/.test(log), 'selftest прогнан');
+        assert(log.indexOf('REG-WRITE') === -1, 'ветка записи HKCU\\Run НЕ достигнута');
+        assert(log.indexOf('START') === -1, 'запуск «сейчас» тоже не делался (агент нерабочий)');
+        assert(r.stdout.indexOf('OK: AI-мост установлен') === -1, '«установлен» НЕ объявлен');
+        assert(r.stdout.indexOf('распакован') >= 0, 'честное «распакован, автозапуск не ставился»');
+        assert(r.stdout.indexOf('HM-RECEIPT path') >= 0, 'путь в квитанции остаётся (каталог создан)');
+        assert(r.stdout.indexOf('HM-RECEIPT reg') === -1, 'реестровой квитанции нет — Run не писали');
+        // Guard не ломает штатную доставку: НЕПУСТОЙ токен обновлён (конфиг правится до гейта).
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        assert.strictEqual(cfg.bridgeToken, 'NEW-TOKEN', 'непустой HM_BRIDGE_TOKEN доставлен');
+      } finally { fs.rmSync(sb.base, { recursive: true, force: true }); }
+    });
+  } else {
+    console.log('  ⚠️  powershell недоступен — функциональные прогоны bridge.ps1 пропущены.');
+  }
+
+  // --- Функциональные прогоны bridge.sh (bash, фрагменты + sandbox) ---
+  if (bashAvailable()) {
+    ok('bridge.sh (прогон): пустой HM_BRIDGE_TOKEN НЕ затирает токен ученика; непустой — доставляется', () => {
+      const probe = spawnSync('bash', ['-c', 'command -v /usr/bin/perl'], { encoding: 'utf8', timeout: 15000 });
+      if (probe.status !== 0) SKIP('нет /usr/bin/perl — фрагмент конфига не прогнать');
+      const s = shSrc();
+      const i = s.indexOf('CFG="$DST/config.json"');
+      const j = s.indexOf('LA="$HOME/Library/LaunchAgents');
+      assert(i >= 0 && j > i, 'фрагмент конфига найден');
+      const frag = s.slice(i, j);
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-brsh-')).replace(/\\/g, '/');
+      try {
+        const cfgPath = base + '/config.json';
+        fs.writeFileSync(cfgPath, JSON.stringify(studentCfg(), null, 2));
+        const run = (tok) => spawnSync('bash', ['-c',
+          'set -uo pipefail\nDST="$1"\nHM_BRIDGE_ENDPOINT="https://new.example/enroll"\nHM_BRIDGE_TOKEN="' + tok + '"\n' +
+          frag + '\necho "CFG_OK=$CFG_OK"\n', 'bash', base], { encoding: 'utf8', timeout: 30000 });
+        let r = run('');   // пустой токен
+        assert(r.status === 0, 'фрагмент отработал: ' + (r.stderr || ''));
+        let cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        assert.strictEqual(cfg.bridgeToken, 'STUDENT-TOKEN', 'пустой HM_BRIDGE_TOKEN НЕ затёр токен ученика');
+        assert.strictEqual(cfg.enrollEndpoint, 'https://new.example/enroll', 'endpoint издателя доставлен');
+        assert(r.stdout.indexOf('CFG_OK=1') >= 0, 'правка конфига подтверждена (CFG_OK=1)');
+        r = run('NEW-TOKEN');   // непустой — штатная доставка не сломана
+        assert(r.status === 0, 'второй прогон: ' + (r.stderr || ''));
+        cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        assert.strictEqual(cfg.bridgeToken, 'NEW-TOKEN', 'непустой HM_BRIDGE_TOKEN доставлен');
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+
+    ok('bridge.sh (прогон, launchctl-стаб): загрузка НЕ подтверждена → НЕТ «OK: AI-мост установлен», exit 1; подтверждена → успех', () => {
+      const s = shSrc();
+      const i = s.indexOf('launchctl unload "$LA"');
+      assert(i > 0, 'хвост скрипта (замена сервиса) найден');
+      const frag = s.slice(i);
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-brlc-')).replace(/\\/g, '/');
+      try {
+        const home = base + '/home';
+        fs.mkdirSync(home, { recursive: true });
+        // launchctl — функция-стаб В ТОМ ЖЕ шелле (без PATH/chmod-хрупкости на Windows):
+        // failMode: load возвращает 1, list пуст; okMode: list отдаёт метку.
+        const pre = (okMode) =>
+          'set -uo pipefail\nHOME="' + home + '"\n' +
+          'launchctl() {\n  case "$1" in\n' +
+          '    load) return ' + (okMode ? '0' : '1') + ' ;;\n' +
+          '    list) ' + (okMode ? 'echo "123 0 com.hamidun.bridge"; ' : '') + 'return 0 ;;\n' +
+          '  esac\n  return 0\n}\n' +
+          'LA="$HOME/com.hamidun.bridge.plist"\nDST="$HOME/HamidunBridge"\n' +
+          'TRAY_OK=1\nCFG_OK=1\nHM_BRIDGE_ENDPOINT=""\n';
+        let r = spawnSync('bash', ['-c', pre(false) + frag], { encoding: 'utf8', timeout: 30000 });
+        assert(r.stdout.indexOf('OK: AI-мост установлен') === -1,
+          'успех НЕ объявлен при неподтверждённой загрузке: ' + r.stdout);
+        assert(r.stdout.indexOf('ОШИБКА') >= 0, 'честная ошибка напечатана');
+        assert.strictEqual(r.status, 1, 'exit 1 при неподтверждённой транзакции (получен ' + r.status + ')');
+        r = spawnSync('bash', ['-c', pre(true) + frag], { encoding: 'utf8', timeout: 30000 });
+        assert.strictEqual(r.status, 0, 'exit 0 при подтверждённой загрузке: ' + (r.stderr || r.stdout || ''));
+        assert(r.stdout.indexOf('OK: AI-мост установлен') >= 0, 'успех объявлен после подтверждения');
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+  } else {
+    console.log('  ⚠️  bash недоступен — функциональные прогоны bridge.sh пропущены.');
+  }
+})();

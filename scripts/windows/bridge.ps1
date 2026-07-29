@@ -92,6 +92,7 @@ if (-not $deElevOk) {
 
 # 4. конфиг агента (если ещё нет)
 $cfgPath = Join-Path $dst 'config.json'
+$cfgOk = $true   # «Сервер настроен» объявляем ТОЛЬКО если запись конфига реально удалась
 if (-not (Test-Path $cfgPath)) {
     $domains = if ($env:HM_BRIDGE_PACDOMAINS) { $env:HM_BRIDGE_PACDOMAINS.Split(',') } else { @('claude.ai', 'anthropic.com', 'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'claudeusercontent.com', 'sora.com', 'higgsfield.ai') }
     $cfgJson = ([ordered]@{
@@ -110,37 +111,72 @@ if (-not (Test-Path $cfgPath)) {
     try {
         $cfg = Get-Content -Raw $cfgPath | ConvertFrom-Json
         $cfg.enrollEndpoint = "$($env:HM_BRIDGE_ENDPOINT)"
-        if ($null -ne $cfg.PSObject.Properties['bridgeToken']) { $cfg.bridgeToken = "$($env:HM_BRIDGE_TOKEN)" }
-        else { $cfg | Add-Member -NotePropertyName bridgeToken -NotePropertyValue "$($env:HM_BRIDGE_TOKEN)" -Force }
+        # Пустой HM_BRIDGE_TOKEN НЕ затирает сохранённый bridgeToken ученика: env установщика
+        # на Windows строится с нуля и токен туда часто не попадает вовсе, а config.json —
+        # PRESERVE-файл (src/uninstall-targets.js), его значения ценны. Пишем ТОЛЬКО непустое.
+        if ($env:HM_BRIDGE_TOKEN) {
+            if ($null -ne $cfg.PSObject.Properties['bridgeToken']) { $cfg.bridgeToken = "$($env:HM_BRIDGE_TOKEN)" }
+            else { $cfg | Add-Member -NotePropertyName bridgeToken -NotePropertyValue "$($env:HM_BRIDGE_TOKEN)" -Force }
+        }
         [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
-    } catch { Write-Host "Не удалось обновить адрес сервера в существующем config.json: $($_.Exception.Message)" }
+    } catch {
+        # Битый JSON / сбой записи: адрес сервера НЕ доставлен — «Сервер настроен» внизу
+        # печатать нельзя (раньше catch только логировал, а успех объявлялся всё равно).
+        $cfgOk = $false
+        Write-Host "Не удалось обновить адрес сервера в существующем config.json: $($_.Exception.Message)"
+    }
 }
 
-# 5. автозапуск (Run) + запуск сейчас (трей)
+# 5. гейт работоспособности + автозапуск (Run) + запуск сейчас (трей)
 $run = if (Test-Path $pyw) { $pyw } else { $py }
 $agentPath = Join-Path $dst 'bridge_agent.py'
-New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
-# SECURITY (#6): запуск трея сейчас — НЕ Start-Process под ELEVATED (это стартовало бы
-# user-writable pythonw/python под АДМИНОМ; medium-малварь юзера подменит бинарь -> RCE).
-# Запускаем ДЕ-ЭЛЕВИРОВАННО через explorer.exe (паттерн mascot.ps1): explorer стартует .cmd-
-# лаунчер токеном ОБОЛОЧКИ (medium integrity), не под админом. Трей — long-running процесс,
-# поэтому НЕ Invoke-HmDeElevated (он блокирует и удаляет одноразовую задачу -> убил бы трей).
-# Лаунчер задаёт фиксированный cwd; UTF-8 + `chcp 65001` — на случай не-ASCII пути профиля.
-# Если запуск сейчас не удастся — трей поднимется при следующем входе в Windows через HKCU\Run.
-$launchCmd = Join-Path $dst 'launch-bridge.cmd'
-$cmdBody = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$dst`"`r`nstart `"`" `"$run`" `"$agentPath`"`r`n"
-try {
-    [System.IO.File]::WriteAllText($launchCmd, $cmdBody, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
-    Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$launchCmd`"" -ErrorAction Stop
-} catch {
-    Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."
+# Гейт работоспособности автозапуска — свойство ПОДСИСТЕМЫ (парити с bridge.sh): агент
+# прогоняется режимом --selftest (без побочных эффектов: не берёт порт-замок, не поднимает
+# серверы, не трогает системный прокси) ДО записи HKCU\Run. Раньше Run прописывался ВСЛЕПУЮ —
+# заведомо нерабочий агент молча запускался бы при каждом входе в Windows.
+# SECURITY (#6): $py user-writable — selftest гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevated),
+# как pip/import выше. FAIL-CLOSED: примитив недоступен ($null) или Gate != 'medium' →
+# работоспособность НЕ доказана → автозапуск НЕ прописываем. Существующий Run-ключ, если
+# он был, НЕ трогаем — как bridge.sh не трогает прежний LaunchAgent при провале пробы.
+$agentOk = $false
+$stRes = Invoke-HmDeElevated $py @($agentPath, '--selftest')
+if ($null -ne $stRes -and $stRes.Gate -eq 'medium' -and $stRes.Code -eq 0) { $agentOk = $true }
+if ($agentOk) {
+    New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
+    # SECURITY (#6): запуск трея сейчас — НЕ Start-Process под ELEVATED (это стартовало бы
+    # user-writable pythonw/python под АДМИНОМ; medium-малварь юзера подменит бинарь -> RCE).
+    # Запускаем ДЕ-ЭЛЕВИРОВАННО через explorer.exe (паттерн mascot.ps1): explorer стартует .cmd-
+    # лаунчер токеном ОБОЛОЧКИ (medium integrity), не под админом. Трей — long-running процесс,
+    # поэтому НЕ Invoke-HmDeElevated (он блокирует и удаляет одноразовую задачу -> убил бы трей).
+    # Лаунчер задаёт фиксированный cwd; UTF-8 + `chcp 65001` — на случай не-ASCII пути профиля.
+    # Если запуск сейчас не удастся — трей поднимется при следующем входе в Windows через HKCU\Run.
+    $launchCmd = Join-Path $dst 'launch-bridge.cmd'
+    $cmdBody = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$dst`"`r`nstart `"`" `"$run`" `"$agentPath`"`r`n"
+    try {
+        [System.IO.File]::WriteAllText($launchCmd, $cmdBody, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$launchCmd`"" -ErrorAction Stop
+    } catch {
+        Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."
+    }
+} else {
+    Write-Host "  ВНИМАНИЕ: агент моста не прошёл самопроверку на этой системе — автозапуск НЕ прописываю."
+    Write-Host "  (иначе Windows молча запускала бы нерабочий агент при каждом входе)"
 }
 
 # P0-4: квитанция владения — ТОЧНЫЕ пути/реестр созданных артефактов (main соберёт в receipt).
+# Реестровую строку эмитим ТОЛЬКО если Run-ключ реально писали (гейт агента пройден).
 Write-Host "HM-RECEIPT path $dst"
-Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|HamidunBridge"
+if ($agentOk) { Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|HamidunBridge" }
 
 $trayMsg = if ($trayOk) { 'значок в трее' } else { 'фоновый режим без значка (pystray/pillow не встали)' }
-if ($env:HM_BRIDGE_ENDPOINT) { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер настроен — включай в трее." }
-else { Write-Host "OK: AI-мост установлен ($trayMsg). Сервер ещё не настроен — мост включится, когда получишь доступ в боте." }
+if (-not $agentOk) {
+    # Автозапуска нет — «мост установлен» был бы неправдой. Распакован — честно (парити bridge.sh).
+    Write-Host "OK: AI-мост распакован, автозапуск не ставился (агент не прошёл самопроверку)"
+} elseif ($env:HM_BRIDGE_ENDPOINT -and $cfgOk) {
+    Write-Host "OK: AI-мост установлен ($trayMsg). Сервер настроен — включай в трее."
+} elseif ($env:HM_BRIDGE_ENDPOINT) {
+    Write-Host "OK: AI-мост установлен ($trayMsg). ВНИМАНИЕ: адрес сервера в конфиг записать не удалось — настройка сервера НЕ подтверждена."
+} else {
+    Write-Host "OK: AI-мост установлен ($trayMsg). Сервер ещё не настроен — мост включится, когда получишь доступ в боте."
+}
 exit 0
