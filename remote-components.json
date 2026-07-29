@@ -267,63 +267,63 @@
     {
       "remoteId": "node",
       "name": "Node.js LTS (macOS pkg)",
-      "sizeBytes": 91495148,
-      "sha256": "9bbf868f9c32c9daef01b1a7e4ea5d3197deda0cbd540488c54ee5b06fe47f81",
+      "sizeBytes": 91505368,
+      "sha256": "7439d4c542a207385aba7768b88a98b4839c028ff6f3a2a414aa4780300d85ec",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-darwin-9bbf868f9c32c9daef01b1a7e4ea5d3197deda0cbd540488c54ee5b06fe47f81.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-darwin-7439d4c542a207385aba7768b88a98b4839c028ff6f3a2a414aa4780300d85ec.zip"
         }
       ],
       "installRelPath": "scripts/macos/node.sh",
       "gatedFiles": {
-        "node.pkg": "e5a6701100066156d69da48878e4b95986733b0688e0b83afbe1093778e3fffd"
+        "node.pkg": "c2e424f198dab39b5c68e8b06e0cdba9761dca9b5b432941fce6399d6460dabb"
       },
       "platform": "darwin"
     },
     {
       "remoteId": "vscode",
       "name": "Visual Studio Code (macOS)",
-      "sizeBytes": 531433049,
-      "sha256": "62efb502058bd1ce271befaddb182250c2bc9df86620a543d5b1df0da632b688",
+      "sizeBytes": 545316118,
+      "sha256": "3c964feb2982b3efc2f36123d4170fcee75113a93d5ad1d4d9e116d3d9621114",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/vscode-darwin-62efb502058bd1ce271befaddb182250c2bc9df86620a543d5b1df0da632b688.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/vscode-darwin-3c964feb2982b3efc2f36123d4170fcee75113a93d5ad1d4d9e116d3d9621114.zip"
         }
       ],
       "installRelPath": "scripts/macos/vscode.sh",
       "gatedFiles": {
-        "vscode.zip": "459f13ea6ca9d4fb246804d253a58ec69528d62e382f592790efc559fbaaa5df"
+        "vscode.zip": "43772e51141f0b837d5b1e8f1bfac15776e8c1f414484de68ea2f20162e8d0b4"
       },
       "platform": "darwin"
     },
     {
       "remoteId": "cursor",
       "name": "Cursor (macOS dmg)",
-      "sizeBytes": 428005840,
-      "sha256": "3797c21a87aa1fb91d7d7af92b868c2e7745f4ea6ca7a43c98cb31f326116b96",
+      "sizeBytes": 428111455,
+      "sha256": "894ead8ff6e0587312994354bdd657fe823fc82f21e03330e530350d71a9d00f",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/cursor-darwin-3797c21a87aa1fb91d7d7af92b868c2e7745f4ea6ca7a43c98cb31f326116b96.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/cursor-darwin-894ead8ff6e0587312994354bdd657fe823fc82f21e03330e530350d71a9d00f.zip"
         }
       ],
       "installRelPath": "scripts/macos/cursor.sh",
       "gatedFiles": {
-        "cursor.dmg": "42b1edea8912eb0b2fc686ea89a4a0047aaaf43da4f7d8eb34a4bafa35d477b1"
+        "cursor.dmg": "b546fc30fc408aa8e04bd3a3f8e042f535549f209bc79400de66e6ef7c36de1e"
       },
       "platform": "darwin"
     },
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 67760090,
-      "sha256": "345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b",
+      "sizeBytes": 67760159,
+      "sha256": "6d14bf1f7bbdeb998c5de80b6272a03bb66cfaecb71f5d9820607c6516d22277",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-345205ffcc3c4d578ddb9d5acfcb3aa14412e4f186cd8aa303224c1434b8023b.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-6d14bf1f7bbdeb998c5de80b6272a03bb66cfaecb71f5d9820607c6516d22277.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -383,12 +383,12 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps, macOS)",
-      "sizeBytes": 157467839,
-      "sha256": "82aac3ab3e3fee5116f22ba9b34ad50a0f6b3c41ff2a48fd912d0ff781ef0e36",
+      "sizeBytes": 156873995,
+      "sha256": "d165e5270158e928c09e2e176a96f2934f4ee2f924d1c657d87948ba6163bb0c",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-82aac3ab3e3fee5116f22ba9b34ad50a0f6b3c41ff2a48fd912d0ff781ef0e36.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-d165e5270158e928c09e2e176a96f2934f4ee2f924d1c657d87948ba6163bb0c.zip"
         }
       ],
       "installRelPath": "scripts/macos/pydeps.sh",
