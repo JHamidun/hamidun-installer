@@ -6213,11 +6213,20 @@ asyncTests().then(() => {
     const s = MAIN();
     const code = codeOf(s);
     assert(!/'add', 'HKCU/.test(code), 'запись реестра НЕ через reg add');
-    // В КОДЕ (без комментариев) не осталось ни быстрого пути, ни его свиты.
-    for (const token of ['regQueryFast', 'consoleCodePage', 'cpDecoder', 'CP_LABELS', 'isPureAscii', 'TextDecoder(', 'chcp']) {
+    // Быстрый путь реестра (разбор текстового вывода reg.exe) удалён целиком.
+    for (const token of ['regQueryFast', 'cpDecoder', 'isPureAscii']) {
       assert(code.indexOf(token) === -1, 'в коде не осталось «' + token + '»');
     }
+    // reg.exe НЕ участвует в реестре нигде (best-fit-подмена José→Jose неисправима).
     assert(!/reg\.exe/.test(code), 'в коде нет ни одного обращения к reg.exe');
+    // Декодирование консоли (decodeConsole/consoleCodePage/TextDecoder) — отдельный
+    // примитив для tasklist и подобного; РЕЕСТРА он касаться не должен ни в одной
+    // из читающих реестр функций, иначе best-fit-риск вернётся через заднюю дверь.
+    const regRead = code.slice(code.indexOf('function regQueryValueDotNet'), code.indexOf('function winRegDeleteValue'));
+    assert(regRead.length > 100, 'блок реестровых функций найден');
+    for (const token of ['decodeConsole', 'consoleCodePage', 'TextDecoder', 'reg.exe']) {
+      assert(regRead.indexOf(token) === -1, 'реестровое чтение НЕ использует «' + token + '»');
+    }
     // Боевое чтение — тонкая обёртка над авторитетным .NET-путём, без спавнов.
     const typed = code.slice(code.indexOf('function regQueryValueTyped'), code.indexOf('function regQueryManyDotNet'));
     assert(typed.length > 10, 'тело regQueryValueTyped найдено');
@@ -6959,3 +6968,89 @@ ok('config.json в репозитории без сборочных маркер
   assert(!('edition' in cfg),
     'edition — артефакт сборки, в коммите его быть не должно');
 });
+
+// ===========================================================================
+// Глубокое ревью (Opus+Fable), фиксы ЯДРА. Общий класс всех прошлых кругов:
+// «факт объявляется по признаку, который его не доказывает; вердикт, который
+// доказывает, не переносится». Здесь закрыты инварианты И-5 (сбой чтения ≠
+// результат), кодовая страница для tasklist, и замок установки на уровне процесса.
+// ===========================================================================
+(function deepReviewCoreFixes() {
+  const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const codeOf = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const cutRegLayer = () => {
+    const s = MAIN();
+    return s.slice(s.indexOf('const REG_KIND_TO_TYPE'), s.indexOf('function winRegDeleteValue'));
+  };
+
+  // И-5: неудачное чтение реестра — НЕ результат. freshWindowsPath при сбое обязан
+  // (а) не строить огрызок и не кэшировать его, (б) вернуть partial=true.
+  // Раньше страховка `if(!joined) joined=process.env.PATH` была МЁРТВОЙ (два push
+  // выше делали parts непустым всегда) и три круга создавала иллюзию защиты.
+  if (process.platform === 'win32') {
+    ok('freshWindowsPath: сбой чтения реестра → partial, огрызок не кэшируется', () => {
+      const body = cutRegLayer();
+      const s = MAIN();
+      // codeOf: в комментарии рядом я ПОЯСНЯЮ, что мёртвой строки больше нет — без
+      // среза комментариев тест поймал бы это пояснение и ложно упал.
+      const fpCode = codeOf(s.slice(s.indexOf('function freshWindowsPath()'), s.indexOf('// ---- кэши')));
+      assert(!/if \(!joined\) joined = process\.env\.PATH/.test(fpCode),
+        'мёртвая строка-страховка удалена (создавала ложное ощущение защиты)');
+      assert(/partial:\s*failed/.test(fpCode), 'результат помечается partial при сбое');
+
+      // Прогон: заглушка regQueryManyDotNet → ok:false на оба запроса.
+      const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+      const env = () => {
+        const s32 = path.join(process.env.SystemRoot || 'C:\Windows', 'System32');
+        return Object.assign({}, process.env, { PATH: s32, Path: s32 });
+      };
+      let calls = 0;
+      const M = new Function(
+        'spawnSync', 'remoteFetch', 'detectSpawnEnv', 'Buffer', 'IS_WIN', 'TextDecoder',
+        'os', 'path', 'expandWinEnv', 'npmPrefixFromRc', 'regQueryManyDotNet', '__count',
+        body.slice(0, body.indexOf('function regQueryManyDotNet')) +   // до пакетного чтения
+        s.slice(s.indexOf('function freshWindowsPath()'), s.indexOf('let _detPathCache')) +
+        '\n; return { freshWindowsPath };'
+      )(require('child_process').spawnSync, rf, env, Buffer, true, TextDecoder,
+        require('os'), require('path'),
+        (x) => x,                                   // expandWinEnv — тождество
+        () => '',                                   // npmPrefixFromRc — пусто
+        () => { calls++; return [{ ok: false, error: 'заблокировано' }, { ok: false, error: 'заблокировано' }]; },
+        () => {});
+      const r = M.freshWindowsPath();
+      assert(r && r.partial === true, 'сбой чтения → partial=true (получили ' + JSON.stringify(r && r.partial) + ')');
+      // Один ретрай: заглушка звана дважды.
+      assert(calls === 2, 'при сбое делается ровно один ретрай (вызовов: ' + calls + ')');
+    });
+  }
+
+  // Вывод tasklist декодируется кодовой страницей консоли, а не UTF-8 — иначе
+  // кириллический владелец explorer стал бы мусором и дал ложный баннер «под
+  // чужой учёткой». decodeConsole — общий примитив, но РЕЕСТРА он не касается.
+  ok('tasklist читается через decodeConsole, реестр — нет', () => {
+    const s = MAIN();
+    const fw = s.slice(s.indexOf('function detectForeignUserWarning'),
+      s.indexOf('function detectForeignUserWarning') + 3000);
+    assert(/decodeConsole\(/.test(fw), 'вывод tasklist декодируется примитивом консоли');
+    assert(!/encoding: 'utf8'[^\n]*tasklist/i.test(s), 'tasklist не читается как utf8');
+    // decodeConsole определён и умеет буфер.
+    assert(/function decodeConsole/.test(s), 'примитив decodeConsole есть');
+  });
+
+  // Замок установки — свойство ПРОЦЕССА, а не окна. Ctrl+R сбрасывал renderer, и
+  // второй прогон стартовал поверх живых дочерних. Теперь _installBusy в main.
+  ok('замок установки живёт в main и снимается только после завершения шага', () => {
+    const s = MAIN();
+    assert(/let _installBusy = false/.test(s), 'флаг замка объявлен в main');
+    const h = s.slice(s.indexOf("ipcMain.handle('run-component'"), s.indexOf("ipcMain.handle('open-external'"));
+    assert(/if \(_installBusy\)/.test(h), 'повторный вход отклоняется');
+    assert(/_installBusy = true/.test(h), 'замок берётся на входе');
+    // Снятие — в finally, ПОСЛЕ await (иначе снялось бы до завершения процесса).
+    assert(/\} finally \{[\s\S]*_installBusy = false/.test(h), 'замок снимается в finally');
+    assert(/return await new Promise/.test(h),
+      'промис ожидается через await — finally ждёт реального завершения шага');
+    const awaitPos = h.indexOf('return await new Promise');
+    const finallyPos = h.indexOf('_installBusy = false');
+    assert(awaitPos > 0 && finallyPos > awaitPos, 'finally стоит ПОСЛЕ await-промиса');
+  });
+})();

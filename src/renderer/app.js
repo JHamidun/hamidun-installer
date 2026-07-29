@@ -209,6 +209,10 @@ async function detectAndApply() {
     if (!r || !r.ok) return;
     STATE.detected = r.state || {};
     STATE.manifestPath = r.manifestPath || '';
+    // pathReadOk===false → системный PATH прочитать не удалось (EDR/политика
+    // заблокировали powershell.exe и т.п.), и «не установлено» ниже может быть
+    // ложным. Честно предупреждаем, а не молча предлагаем переустановить рабочее.
+    STATE.pathReadFailed = (r.pathReadOk === false);
     Object.keys(STATE.detected).forEach((id) => {
       const c = STATE.byId[id];
       if (STATE.detected[id].installed && c && !c.hidden && !STATE.repair[id]) {
@@ -217,6 +221,7 @@ async function detectAndApply() {
     });
     renderGroups();
     renderInstalledBanner();
+    renderPathReadWarning();
   } finally {
     STATE.detectDone = true;
     refreshDerived();
@@ -238,6 +243,23 @@ function renderInstalledBanner() {
     'умолчанию сняты. Доустановка добавит только НЕДОСТАЮЩЕЕ и не затронет то, что уже стоит ' +
     '(твои скиллы и настройки в ~/.claude в безопасности). Чтобы поставить заново — включи ' +
     'компонент или нажми «Переустановить начисто».';
+  const hero = document.querySelector('#view-select .hero');
+  if (hero) hero.insertAdjacentElement('afterend', el);
+}
+
+// Красный баннер: системный PATH прочитать не удалось, детекция ненадёжна.
+// Без него человек видел бы «не установлено» на реально установленных компонентах
+// (EDR/политика заблокировали powershell.exe) и переустанавливал бы поверх рабочего.
+function renderPathReadWarning() {
+  const existing = document.getElementById('pathread-warn');
+  if (!STATE.pathReadFailed) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const el = document.createElement('div');
+  el.id = 'pathread-warn';
+  el.className = 'preflight-warn';
+  el.innerHTML = '⚠️ Не удалось прочитать системный PATH (возможно, антивирус или политика ' +
+    'блокируют системные команды). Список ниже может ошибочно показывать уже установленные ' +
+    'программы как отсутствующие — проверь по факту, прежде чем ставить их заново.';
   const hero = document.querySelector('#view-select .hero');
   if (hero) hero.insertAdjacentElement('afterend', el);
 }

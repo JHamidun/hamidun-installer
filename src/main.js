@@ -160,6 +160,8 @@ let mainWindow = null;
 // Track live installer child processes so we can kill orphans if the window
 // closes mid-install (otherwise silent installers keep running invisibly).
 const CHILDREN = new Set();
+// Замок «идёт установка компонента» на уровне ПРОЦЕССА (переживает Ctrl+R окна).
+let _installBusy = false;
 
 // win32: Admins-only staging-каталоги докачки, ЖИВЫЕ в этом процессе (remoteId → dir).
 // Нужны для двух вещей: (1) ретрай компонента в той же сессии переиспользует УЖЕ
@@ -354,6 +356,51 @@ app.on('before-quit', () => { killChildren(); cleanupAllSecureDirs(); });
 // into whatever HOME the process token has, so a foreign account silently sets
 // up the wrong profile. Returns a human-readable RU string, or '' when there's
 // nothing to warn about / we can't tell reliably.
+// Декодирование вывода КОНСОЛЬНОГО инструмента Windows (tasklist, reg, chcp…):
+// он печатает в кодовой странице консоли, а НЕ в UTF-8. Чтение буфера как UTF-8
+// превращает кириллицу в мусор — этот класс уже кусал реестр. Кодовую страницу
+// определяем один раз за сессию через chcp.com.
+// ВАЖНО: это НЕ для чтения ПУТЕЙ (там reg.exe делает best-fit-подмену «José→Jose»,
+// и текстовый разбор запрещён). Здесь — только имена/сравнения, где важна читаемая
+// кириллица, а не байт-в-байт точность структурных символов.
+let _consoleCp;
+function consoleCodePage() {
+  if (_consoleCp !== undefined) return _consoleCp;
+  _consoleCp = 0;
+  try {
+    const chcp = remoteFetch.sysBin('chcp.com');
+    if (chcp) {
+      const r = spawnSync(chcp, [], { encoding: 'latin1', windowsHide: true, timeout: 8000 });
+      const m = String(r.stdout || '').match(/(\d{3,5})/);
+      if (m) _consoleCp = parseInt(m[1], 10) || 0;
+    }
+  } catch (e) { /* не определили — ниже честный фолбэк */ }
+  return _consoleCp;
+}
+const _CP_LABELS = {
+  65001: 'utf-8', 866: 'ibm866', 1251: 'windows-1251', 1252: 'windows-1252',
+  437: null, 850: null, 852: null,   // DOS-страницы без WHATWG-имени → ASCII-путь
+};
+let _consoleDecoder;
+function decodeConsole(buf) {
+  if (!buf) return '';
+  if (_consoleDecoder === undefined) {
+    _consoleDecoder = null;
+    const cp = consoleCodePage();
+    const tries = [];
+    if (_CP_LABELS[cp]) tries.push(_CP_LABELS[cp]);
+    tries.push('cp' + cp, 'ibm' + cp, 'windows-' + cp);
+    for (const label of tries) {
+      try { _consoleDecoder = new TextDecoder(label); break; } catch (e) { /* следующий */ }
+    }
+  }
+  if (_consoleDecoder) { try { return _consoleDecoder.decode(buf); } catch (e) { /* ниже */ } }
+  // Декодера нет (DOS-страница без имени и т.п.): для ASCII latin1 совпадает с
+  // содержимым, а на не-ASCII данные исказятся — но это лишь имя владельца для
+  // сравнения, а не путь, и fail-open ниже (нет '\' → молчим) страхует.
+  return Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf);
+}
+
 function detectForeignUserWarning() {
   try {
     if (!IS_WIN) {
@@ -385,9 +432,15 @@ function detectForeignUserWarning() {
     if (!tasklist) return '';
     let out = '';
     try {
-      out = execFileSync(tasklist,
+      // encoding НЕ 'utf8': tasklist.exe печатает в кодовой странице консоли
+      // (CP866 на русской Windows), и имя владельца с кириллицей приезжало бы
+      // мусором. Нам важен только формат DOMAIN\user (наличие '\') и сравнение с
+      // tokenUser — берём вывод буфером и декодируем реальной кодовой страницей,
+      // тем же примитивом, что и реестр (тот же класс дефекта закрыт там).
+      const buf = execFileSync(tasklist,
         ['/v', '/fi', 'imagename eq explorer.exe', '/fo', 'csv', '/nh'],
-        { encoding: 'utf8', windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+        { windowsHide: true, timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+      out = decodeConsole(buf);
     } catch (e) { return ''; } // tasklist недоступен/таймаут — молчим
     // Собираем владельцев ВСЕХ explorer.exe (при fast-user-switching их несколько).
     // Реальный владелец ВСЕГДА в формате DOMAIN\user — это локале-НЕзависимый признак
@@ -771,6 +824,17 @@ function buildInstallEnv(rendererEnv) {
 ipcMain.handle('run-component', async (_evt, payload) => {
   const { id } = payload || {};
 
+  // «В момент времени идёт не более одной операции над машиной» — инвариант
+  // ПРОЦЕССА, а не экрана. Раньше защёлка жила только в renderer, и перезагрузка
+  // окна (Ctrl+R) сбрасывала её: новый renderer запускал компонент повторно, пока
+  // дочерние процессы прошлого запуска ещё работали (два msiexec/uv в одни и те же
+  // каталоги). Замок в main переживает перезагрузку окна.
+  if (_installBusy) {
+    return { id, ok: false, code: -1, error: 'установка уже идёт в этом установщике — дождитесь завершения текущего шага' };
+  }
+  _installBusy = true;
+  try {
+
   // m1 (defense-in-depth): renderer гасит «Установить» при vendorBlock, но MAIN —
   // единственный авторитет запуска. Заблокировано (translocation / оторванный офлайн-
   // vendor у офлайн-издания) → НЕ запускаем ни один компонент, даже если IPC как-то дошёл.
@@ -1082,7 +1146,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   }
 
   // send/sendChannel уже объявлены выше (используются и для докачки, и для лога).
-  return new Promise((resolve) => {
+  // await, а НЕ голый return: иначе finally (снимающий замок _installBusy) сработал
+  // бы СРАЗУ после возврата промиса, не дождавшись завершения дочернего процесса.
+  return await new Promise((resolve) => {
     let child;
     logLine('=== start ===');
     try {
@@ -1223,6 +1289,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       resolve({ id, ok: okRun || skipped, code, skipped });
     });
   });
+  } finally {
+    _installBusy = false;   // замок снимается ТОЛЬКО после реального завершения шага
+  }
 });
 
 ipcMain.handle('open-external', (_e, url) => {
@@ -1789,15 +1858,21 @@ function expandWinEnv(str) {
 function freshWindowsPath() {
   // ОДИН запуск интерпретатора на оба значения вместо двух. Раньше это были
   // два отдельных спавна, и на старте окно замирало на секунды.
-  const got = regQueryManyDotNet([
+  const readBoth = () => regQueryManyDotNet([
     { key: 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', name: 'Path' },
     { key: 'HKCU\\Environment', name: 'Path' },
   ]);
-  // Различаем «прочитали и там пусто» и «НЕ СМОГЛИ прочитать». Второе — не повод
-  // строить огрызок PATH: без машинной ветки git/node/python становятся невидимы,
-  // компоненты показываются неустановленными, и кнопка «перепроверить» этого не
-  // чинит, потому что огрызок закэширован. Сбой реален: заблокированный политикой
-  // или EDR интерпретатор, таймаут, пустой ответ.
+  let got = readBoth();
+  // Сбой транспорта роняет ОБА значения разом (winPsPayload при таймауте/пустом
+  // ответе возвращает ok:false на весь пакет). Даём один ретрай — единичный
+  // ETIMEDOUT под нагрузкой не должен ослеплять детекцию на весь сеанс.
+  if (got.some((r) => !r || !r.ok)) got = readBoth();
+  // Различаем «прочитали и там пусто» и «НЕ СМОГЛИ прочитать». Второе — НЕ
+  // результат: без машинной ветки git/node/python становятся невидимы, и
+  // компоненты показываются неустановленными. Признак неполноты обязан дойти до
+  // вызывающего (иначе «не смог прочитать» неотличимо от «не установлено»), и
+  // огрызок нельзя кэшировать. Сбой реален: заблокированный политикой/EDR
+  // powershell.exe, таймаут, повреждённый куст.
   const failed = got.some((r) => !r || !r.ok);
   const val = (r) => (r && r.ok && r.found) ? String(r.data || '').trim() : '';
   const machine = expandWinEnv(val(got[0]));
@@ -1819,10 +1894,11 @@ function freshWindowsPath() {
   // shell (FIX-E). Дефолтные локации уже добавлены push() выше.
   const prefix = npmPrefixFromRc();
   if (prefix && !seen.has(prefix.toLowerCase())) { seen.add(prefix.toLowerCase()); parts.push(prefix); }
-  let joined = parts.join(';');
-  if (!joined) joined = process.env.PATH || '';
-  // Неполный результат наружу отдаём, но помечаем: кэшировать его нельзя.
-  return failed ? { path: joined, partial: true } : { path: joined, partial: false };
+  // Прежней строки `if (!joined) joined = process.env.PATH` тут БОЛЬШЕ НЕТ: она
+  // была мёртвой (два push выше делают parts непустым всегда) и создавала ложное
+  // ощущение защищённости. Наследовать process.env под элевацией нельзя —
+  // medium-процесс мог бы подсунуть чужой ProgramFiles (см. buildInstallEnv).
+  return { path: parts.join(';'), partial: failed };
 }
 
 // ---- кэши ОДНОГО прохода детекции --------------------------------------
@@ -1832,6 +1908,11 @@ function freshWindowsPath() {
 // спавнов reg.exe схлопываются в одну, а Get-Acl по одному и тому же бинарю — в один.
 let _detPathCache = '';
 let _detOwnerCache = null;
+// Прочитали ли системный PATH последним проходом детекции. false = чтение реестра
+// не удалось, и «не установлено» на экране может означать «не смог посмотреть».
+// Признак уезжает в detect-state, а renderer показывает честный баннер вместо
+// молчаливого «переустанови всё поверх рабочего».
+let _lastPathReadOk = true;
 // PATH из реестра НЕ сбрасываем на каждом проходе детекции: чтение стоит
 // запуска интерпретатора, а сам PATH меняется только когда МЫ что-то ставим
 // или удаляем. Раньше он перечитывался при каждом проходе, и это была часть
@@ -1839,9 +1920,11 @@ let _detOwnerCache = null;
 // установки/удаления компонента.
 function detResetCaches() { _detOwnerCache = new Map(); }
 function invalidatePathCache() { _detPathCache = ''; }
+function lastPathReadOk() { return _lastPathReadOk; }
 function freshWindowsPathCached() {
   if (_detPathCache) return _detPathCache;
   const r = freshWindowsPath();
+  _lastPathReadOk = !r.partial;
   // НЕПОЛНЫЙ результат НЕ кэшируем: иначе один сбой чтения реестра замораживал
   // огрызок PATH на весь сеанс, компоненты показывались неустановленными, и
   // «перепроверить» ничего не меняло. Следующий проход попробует заново.
@@ -2469,7 +2552,11 @@ ipcMain.handle('detect-state', () => {
         receipted: receipts.hasReceipt(home, id)
       };
     }
-    return { ok: true, state, manifestPath: manifest.manifestPath(home) };
+    // pathReadOk=false на Windows → детекция шла по неполному PATH, и «не
+    // установлено» могло означать «не смог прочитать системный PATH». Renderer
+    // покажет честный баннер, а не предложит переустановить поверх рабочего.
+    const pathReadOk = (process.platform !== 'win32') || lastPathReadOk();
+    return { ok: true, state, manifestPath: manifest.manifestPath(home), pathReadOk };
   } catch (e) {
     return { ok: false, error: String(e), state: {} };
   }
