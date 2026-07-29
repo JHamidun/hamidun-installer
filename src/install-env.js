@@ -49,7 +49,11 @@ function filterRendererEnv(rendererEnv) {
 // Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят — они
 // по природе user-writable (abs-path fallback в user-профиль — принятый остаток).
 function authoritativeWinSystemEnv(winRoot, drive) {
-  const path = require('path');
+  // Всегда win32-семантика (вызывается ТОЛЬКО из if(IS_WIN) в main.js, см. main.js:768) —
+  // path.win32 явно, а не host-зависимый require('path'): иначе на CI-раннере macOS/Linux
+  // (path === path.posix) join('C:\\Windows\\', 'Program Files') не строил бы Windows-путь,
+  // и функция была бы непроверяема без физической Windows-машины.
+  const path = require('path').win32;
   const root = String(winRoot);
   const drv = String(drive);
   const pf = path.join(drv, 'Program Files');

@@ -981,6 +981,7 @@ module.exports = {
   winPowershellPath,
   winProgramData,
   decodeConsole,          // для тестов: ошибка распаковки декодируется реальной CP консоли
+  consoleCodePage,        // для тестов: некоторые DOS-страницы (437/850/852) не кодируют кириллицу вовсе
   // security-хелперы (для отчёта/тестов)
   ensureCacheSecure,      // Windows: проверка атомарно-защищённого кэша (без create/icacls)
   verifyDirSecureWin,     // SID-based проверка owner+DACL (Windows)

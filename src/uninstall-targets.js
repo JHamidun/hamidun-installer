@@ -36,6 +36,16 @@
 
 const path = require('path');
 
+// P0 (портируемость тестов): ctx.platform — ЯВНЫЙ параметр, независимый от
+// process.platform (продукт всегда вызывает с ctx.platform === process.platform,
+// но тесты намеренно проверяют win32-ветку логики и на не-Windows CI-раннере —
+// иначе win32-путь целиком непроверяем без физической Windows-машины). Общий
+// require('path') резолвится в path.win32 ТОЛЬКО когда сам процесс — Windows;
+// на macOS/Linux он был path.posix и молча ломал разделители в win32-сценарии
+// (обратные слэши не считались разделителями). platformPath(ctx.platform)
+// выбирает правильный модуль ПО ПАРАМЕТРУ, а не по хосту.
+function platformPath(platform) { return platform === 'win32' ? path.win32 : path.posix; }
+
 // v1: компоненты, у которых АВТО-УДАЛЕНИЕ ВРЕМЕННО ОТКЛЮЧЕНО (устанавливаются, но не
 // удаляются установщиком). Nomad — из-за TOCTOU/data-loss риска в сносе venv/шимов
 // (Codex P0). Гейт применяется и в UI (кнопка «Удалить» скрыта), и в main (ранний
@@ -51,21 +61,24 @@ const MASCOT_TEAM_ID = '3VN93XA9DY';
 const BRIDGE_RC_LINE = '[ -f "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" ] && . "$HOME/Library/Application Support/HamidunBridge/cli_proxy.env" # Hamidun Bridge CLI proxy';
 
 // Известные install-корни, производные ТОЛЬКО от home (не из подменяемого env).
-function winLocalAppData(home) { return path.join(home, 'AppData', 'Local'); }
-function winRoamingAppData(home) { return path.join(home, 'AppData', 'Roaming'); }
+// Всегда Windows-контекст (вызываются только из isWin-веток) — path.win32 явно,
+// вне зависимости от того, на каком хосте выполняется тест/сборка.
+function winLocalAppData(home) { return path.win32.join(home, 'AppData', 'Local'); }
+function winRoamingAppData(home) { return path.win32.join(home, 'AppData', 'Roaming'); }
 
 // Целевая папка курса: значение из ВШИТОГО config.json (course.targetDirDefault),
 // НЕ из renderer-env. Зеркало логики course.ps1/course.sh (expand %USERPROFILE%,
 // защита от Windows-пути на macOS).
 function resolveCourseTarget(raw, home, platform) {
-  const def = path.join(home, 'HamidunCourse');
+  const P = platformPath(platform);
+  const def = P.join(home, 'HamidunCourse');
   if (!raw || typeof raw !== 'string') return def;
   if (platform === 'win32') {
     return raw.replace(/%USERPROFILE%/gi, home);
   }
   // macOS/Linux: Windows-стилевые пути (% или \) → дефолт, ~ → home.
   if (/[%\\]/.test(raw)) return def;
-  if (raw.startsWith('~')) return path.join(home, raw.slice(1));
+  if (raw.startsWith('~')) return P.join(home, raw.slice(1));
   return raw;
 }
 
@@ -85,6 +98,7 @@ function uninstallTargets(id, ctx) {
   if (!ctx || !ctx.home || !ctx.platform) return null;
   const home = ctx.home;
   const isWin = ctx.platform === 'win32';
+  const P = platformPath(ctx.platform);
   const targets = [];
   const preserve = [];
   const notes = [];
@@ -92,31 +106,31 @@ function uninstallTargets(id, ctx) {
   switch (id) {
     case 'course': {
       const target = resolveCourseTarget(ctx.courseTargetRaw, home, ctx.platform);
-      const courseDir = path.join(target, 'vibecoding-course');
+      const courseDir = P.join(target, 'vibecoding-course');
       // Контент архива курса (тот же набор, что install-скрипт сносит при обновлении).
-      for (const sub of ['tracks', path.join('.claude', 'skills'), path.join('.claude', 'commands'), path.join('.course', 'knowledge')]) {
-        targets.push({ type: 'dirtree', path: path.join(courseDir, sub), why: 'контент архива курса' });
+      for (const sub of ['tracks', P.join('.claude', 'skills'), P.join('.claude', 'commands'), P.join('.course', 'knowledge')]) {
+        targets.push({ type: 'dirtree', path: P.join(courseDir, sub), why: 'контент архива курса' });
       }
       for (const f of ['CLAUDE.md', 'AGENTS.md', 'README.md',
-        path.join('.course', 'config.yaml'), path.join('.course', 'state.example.json')]) {
-        targets.push({ type: 'file', path: path.join(courseDir, f) });
+        P.join('.course', 'config.yaml'), P.join('.course', 'state.example.json')]) {
+        targets.push({ type: 'file', path: P.join(courseDir, f) });
       }
       // Ярлык на рабочем столе — имя ТОЛЬКО из вшитого config.json.
       const shortcut = String(ctx.courseShortcut || 'Курс вайбкодинг (Claude Code)');
-      const desktop = ctx.desktop || path.join(home, 'Desktop');
-      targets.push({ type: 'file', path: path.join(desktop, shortcut + (isWin ? '.lnk' : '.command')) });
+      const desktop = ctx.desktop || P.join(home, 'Desktop');
+      targets.push({ type: 'file', path: P.join(desktop, shortcut + (isWin ? '.lnk' : '.command')) });
       // Родители — только если пусты. ПРОГРЕСС УЧЕНИКА СВЯЩЕНЕН: sandbox,
       // state.json, identity.json, settings.local.json переживают удаление —
       // если они есть, каталоги НЕ пусты и остаются.
-      targets.push({ type: 'emptydir', path: path.join(courseDir, '.claude') });
-      targets.push({ type: 'emptydir', path: path.join(courseDir, '.course') });
+      targets.push({ type: 'emptydir', path: P.join(courseDir, '.claude') });
+      targets.push({ type: 'emptydir', path: P.join(courseDir, '.course') });
       targets.push({ type: 'emptydir', path: courseDir });
       targets.push({ type: 'emptydir', path: target });
       preserve.push(
-        path.join(courseDir, 'sandbox'),
-        path.join(courseDir, '.course', 'state.json'),
-        path.join(courseDir, '.course', 'identity.json'),
-        path.join(courseDir, '.claude', 'settings.local.json')
+        P.join(courseDir, 'sandbox'),
+        P.join(courseDir, '.course', 'state.json'),
+        P.join(courseDir, '.course', 'identity.json'),
+        P.join(courseDir, '.claude', 'settings.local.json')
       );
       notes.push('Прогресс курса (sandbox, state.json, identity.json, накопленные разрешения) НЕ удаляется.');
       notes.push('Наставник в ~/.claude и твои данные НЕ тронуты.');
@@ -125,17 +139,17 @@ function uninstallTargets(id, ctx) {
 
     case 'uv': {
       if (isWin) {
-        const dest = path.join(winLocalAppData(home), 'Programs', 'uv');
+        const dest = P.join(winLocalAppData(home), 'Programs', 'uv');
         // ТОЛЬКО наши точные файлы — НЕ рекурсивный снос каталога.
-        targets.push({ type: 'file', path: path.join(dest, 'uv.exe') });
-        targets.push({ type: 'file', path: path.join(dest, 'uvx.exe') });
+        targets.push({ type: 'file', path: P.join(dest, 'uv.exe') });
+        targets.push({ type: 'file', path: P.join(dest, 'uvx.exe') });
         targets.push({ type: 'emptydir', path: dest });
         // PATH-запись убираем ТОЛЬКО если каталог опустел/исчез (чужие файлы в нём →
         // запись остаётся, чтобы не сломать чужие инструменты).
         targets.push({ type: 'pathentry', dir: dest, onlyIfDirGone: true });
       } else {
-        targets.push({ type: 'file', path: path.join(home, '.local', 'bin', 'uv') });
-        targets.push({ type: 'file', path: path.join(home, '.local', 'bin', 'uvx') });
+        targets.push({ type: 'file', path: P.join(home, '.local', 'bin', 'uv') });
+        targets.push({ type: 'file', path: P.join(home, '.local', 'bin', 'uvx') });
         // ~/.local/bin — ОБЩИЙ каталог (claude/nomad и др.): НИКОГДА не удаляем.
       }
       notes.push('Python и чужие инструменты НЕ трогаю.');
@@ -144,25 +158,25 @@ function uninstallTargets(id, ctx) {
 
     case 'bridge': {
       if (isWin) {
-        const dst = path.join(winLocalAppData(home), 'HamidunBridge');
-        targets.push({ type: 'file', path: path.join(dst, 'bridge_agent.py') });
+        const dst = P.join(winLocalAppData(home), 'HamidunBridge');
+        targets.push({ type: 'file', path: P.join(dst, 'bridge_agent.py') });
         // config.json (SSH-креды ученика) СОХРАНЯЕТСЯ → каталог не пуст → остаётся.
         targets.push({ type: 'emptydir', path: dst });
         targets.push({ type: 'reg', hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', value: 'HamidunBridge' });
-        preserve.push(path.join(dst, 'config.json'));
+        preserve.push(P.join(dst, 'config.json'));
       } else {
-        const dst = path.join(home, 'Library', 'Application Support', 'HamidunBridge');
+        const dst = P.join(home, 'Library', 'Application Support', 'HamidunBridge');
         targets.push({
           type: 'launchagent', label: 'com.hamidun.bridge',
-          plist: path.join(home, 'Library', 'LaunchAgents', 'com.hamidun.bridge.plist')
+          plist: P.join(home, 'Library', 'LaunchAgents', 'com.hamidun.bridge.plist')
         });
-        targets.push({ type: 'file', path: path.join(dst, 'bridge_agent.py') });
+        targets.push({ type: 'file', path: P.join(dst, 'bridge_agent.py') });
         targets.push({ type: 'emptydir', path: dst });
         // P0-6: удаляем ТОЛЬКО строку, ТОЧНО РАВНУЮ installer-строке из bridge.sh
         // (BRIDGE_RC_LINE, verbatim) — НЕ любую строку, содержащую маркер-подстроку.
-        targets.push({ type: 'profileline', file: path.join(home, '.zshrc'), line: BRIDGE_RC_LINE });
-        targets.push({ type: 'profileline', file: path.join(home, '.bash_profile'), line: BRIDGE_RC_LINE });
-        preserve.push(path.join(dst, 'config.json'));
+        targets.push({ type: 'profileline', file: P.join(home, '.zshrc'), line: BRIDGE_RC_LINE });
+        targets.push({ type: 'profileline', file: P.join(home, '.bash_profile'), line: BRIDGE_RC_LINE });
+        preserve.push(P.join(dst, 'config.json'));
       }
       notes.push('config.json моста (SSH-настройки) НЕ удаляется.');
       break;
@@ -170,23 +184,23 @@ function uninstallTargets(id, ctx) {
 
     case 'mascot': {
       if (isWin) {
-        const destDir = path.join(winLocalAppData(home), 'Programs', 'ClaudeMascot');
+        const destDir = P.join(winLocalAppData(home), 'Programs', 'ClaudeMascot');
         targets.push({ type: 'killproc', image: 'claude-mascot.exe' });
         // Каталог приложения (installer-owned, пользовательских данных не содержит).
         targets.push({ type: 'dirtree', path: destDir, why: 'каталог приложения скрепки' });
-        targets.push({ type: 'file', path: path.join(home, '.claude-mascot', '.installed') });
-        targets.push({ type: 'emptydir', path: path.join(home, '.claude-mascot') });
+        targets.push({ type: 'file', path: P.join(home, '.claude-mascot', '.installed') });
+        targets.push({ type: 'emptydir', path: P.join(home, '.claude-mascot') });
         targets.push({ type: 'reg', hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', value: 'ClaudeMascot' });
       } else {
         targets.push({
           type: 'launchagent', label: 'com.hamidun.claude-mascot',
-          plist: path.join(home, 'Library', 'LaunchAgents', 'com.hamidun.claude-mascot.plist')
+          plist: P.join(home, 'Library', 'LaunchAgents', 'com.hamidun.claude-mascot.plist')
         });
         if (ctx.mascotMac && ctx.mascotMac.appName && /\.app$/i.test(ctx.mascotMac.appName)) {
           targets.push({ type: 'killproc', pattern: 'claude-mascot' });
           targets.push({
             type: 'appbundle',
-            path: path.join(home, 'Applications', ctx.mascotMac.appName),
+            path: P.join(home, 'Applications', ctx.mascotMac.appName),
             expectBundleId: String(ctx.mascotMac.bundleId || ''),
             teamId: MASCOT_TEAM_ID
           });
@@ -195,8 +209,8 @@ function uninstallTargets(id, ctx) {
           // бандла подтвердить нечем → .app НЕ удаляем (fail-closed).
           notes.push('Vendor недоступен — .app скрепки не удаляю (не могу подтвердить идентичность). Удали из ~/Applications вручную.');
         }
-        targets.push({ type: 'file', path: path.join(home, '.claude-mascot', '.installed') });
-        targets.push({ type: 'emptydir', path: path.join(home, '.claude-mascot') });
+        targets.push({ type: 'file', path: P.join(home, '.claude-mascot', '.installed') });
+        targets.push({ type: 'emptydir', path: P.join(home, '.claude-mascot') });
       }
       notes.push('Хуки в ~/.claude/settings.json НЕ трогаю (там могут быть твои правки).');
       break;
