@@ -41,100 +41,100 @@
     {
       "remoteId": "git",
       "name": "Git for Windows",
-      "sizeBytes": 64671441,
-      "sha256": "46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725",
+      "sizeBytes": 64883078,
+      "sha256": "568b89b4cba7326cca5074a3c0e56c5531b43511f3f084513a8035a03095586f",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/git-win32-46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/git-win32-568b89b4cba7326cca5074a3c0e56c5531b43511f3f084513a8035a03095586f.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/git-win32-46c0d499951efc2c67a502ba1cb9dc2592daa2dd0f53e24482d720803de60725.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/git-win32-568b89b4cba7326cca5074a3c0e56c5531b43511f3f084513a8035a03095586f.zip"
         }
       ],
       "installRelPath": "scripts/windows/git.ps1",
       "gatedFiles": {
-        "git-setup.exe": "2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983"
+        "git-setup.exe": "af12577d0fdff74243a5988197aa49b957d5044edc17004f6ddf0768996f1dca"
       },
       "platform": "win32"
     },
     {
       "remoteId": "node",
       "name": "Node.js LTS",
-      "sizeBytes": 31625209,
-      "sha256": "8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8",
+      "sizeBytes": 31686975,
+      "sha256": "33fff6f8a54d54153c291c7da0055f99f278bbe8e945abfbe56bda755569e241",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-win32-8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/node-win32-33fff6f8a54d54153c291c7da0055f99f278bbe8e945abfbe56bda755569e241.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/node-win32-8fccfa7fb6cd92f813dbd3b198fa9fb15271bacaa9de03c136647560124d5ed8.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/node-win32-33fff6f8a54d54153c291c7da0055f99f278bbe8e945abfbe56bda755569e241.zip"
         }
       ],
       "installRelPath": "scripts/windows/node.ps1",
       "gatedFiles": {
-        "node-lts.msi": "ae5d9e9f6c85b8d35717f499ba907259ec80672c289858bae19074355906a240"
+        "node-lts.msi": "af4a0651a26f04ac240f00fec872f305547ca2aa56301c41dfd63a29eb2ab836"
       },
       "platform": "win32"
     },
     {
       "remoteId": "vscode",
       "name": "Visual Studio Code",
-      "sizeBytes": 215296104,
-      "sha256": "0d2021b21fd8f0ecbc0ded69f78de2a1bf4ce61134a63a9f6e12193f5a140c06",
+      "sizeBytes": 231891400,
+      "sha256": "c893667e93338bbd2c36fc83a2a97c170019a34a9fc8f9a49856ce969af86962",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/vscode-win32-0d2021b21fd8f0ecbc0ded69f78de2a1bf4ce61134a63a9f6e12193f5a140c06.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/vscode-win32-c893667e93338bbd2c36fc83a2a97c170019a34a9fc8f9a49856ce969af86962.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/vscode-win32-0d2021b21fd8f0ecbc0ded69f78de2a1bf4ce61134a63a9f6e12193f5a140c06.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/vscode-win32-c893667e93338bbd2c36fc83a2a97c170019a34a9fc8f9a49856ce969af86962.zip"
         }
       ],
       "installRelPath": "scripts/windows/vscode.ps1",
       "gatedFiles": {
-        "vscode-setup.exe": "46b5a269597ddffa1a349212074b4ef12c9edbad6a69c193c10b1794a1a53582"
+        "vscode-setup.exe": "8cd4350898dec154d97104c9126bd52aebb387bb6824b4349ffba1c347fded34"
       },
       "platform": "win32"
     },
     {
       "remoteId": "cursor",
       "name": "Cursor",
-      "sizeBytes": 196461736,
-      "sha256": "7292bbdb271116ca70ac74bb3db48e1a40dc2b9f7885b0e0b27b82adb1e2ca57",
+      "sizeBytes": 199075485,
+      "sha256": "5390f12755068de842b82ca5d1b8dca065a095d0c003d8c2cfd6a668b3185fb1",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/cursor-win32-7292bbdb271116ca70ac74bb3db48e1a40dc2b9f7885b0e0b27b82adb1e2ca57.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/cursor-win32-5390f12755068de842b82ca5d1b8dca065a095d0c003d8c2cfd6a668b3185fb1.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/cursor-win32-7292bbdb271116ca70ac74bb3db48e1a40dc2b9f7885b0e0b27b82adb1e2ca57.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/cursor-win32-5390f12755068de842b82ca5d1b8dca065a095d0c003d8c2cfd6a668b3185fb1.zip"
         }
       ],
       "installRelPath": "scripts/windows/cursor.ps1",
       "gatedFiles": {
-        "cursor-setup.exe": "8624437fd7d3741252209be2a86a50e5c30a467ba5c1cd5c7713c91bb30a9905"
+        "cursor-setup.exe": "2071af190d0b01325a791f19e2936387ccc8232e1c4960bf790bb71bf8444a96"
       },
       "platform": "win32"
     },
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 966347054,
-      "sha256": "f15e54ed9a30d205ad1084ea87b92c59fa90968283edd930163f913b08157e15",
+      "sizeBytes": 1051595315,
+      "sha256": "893eff20df8259d00cb56da0a931229f5c36bae19b9ef112b0ddfc866668c8dd",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-win32-f15e54ed9a30d205ad1084ea87b92c59fa90968283edd930163f913b08157e15.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-win32-893eff20df8259d00cb56da0a931229f5c36bae19b9ef112b0ddfc866668c8dd.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-win32-f15e54ed9a30d205ad1084ea87b92c59fa90968283edd930163f913b08157e15.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-win32-893eff20df8259d00cb56da0a931229f5c36bae19b9ef112b0ddfc866668c8dd.zip"
         }
       ],
       "installRelPath": "scripts/windows/claude.ps1",
@@ -206,16 +206,16 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps)",
-      "sizeBytes": 121329519,
-      "sha256": "16912f07c7397ff37142b9cfb5bc1d8e1956145ceb998f01d07ec0fdc7af779b",
+      "sizeBytes": 120735675,
+      "sha256": "3c59593f189aca2e0783ac317bfbee979e3fd2889f9b6cb5beaef14b20332db9",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-win32-16912f07c7397ff37142b9cfb5bc1d8e1956145ceb998f01d07ec0fdc7af779b.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-win32-3c59593f189aca2e0783ac317bfbee979e3fd2889f9b6cb5beaef14b20332db9.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-win32-16912f07c7397ff37142b9cfb5bc1d8e1956145ceb998f01d07ec0fdc7af779b.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-win32-3c59593f189aca2e0783ac317bfbee979e3fd2889f9b6cb5beaef14b20332db9.zip"
         }
       ],
       "installRelPath": "scripts/windows/pydeps.ps1",
@@ -227,21 +227,21 @@
     {
       "remoteId": "extension",
       "name": "VS Code extensions (Claude Code + шрифт)",
-      "sizeBytes": 81749764,
-      "sha256": "786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217",
+      "sizeBytes": 89359513,
+      "sha256": "d83dc9ace3b991c310b1532003338807ed9ed8e80659e9befc9888660762e9ad",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-win32-786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-win32-d83dc9ace3b991c310b1532003338807ed9ed8e80659e9befc9888660762e9ad.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-win32-786f71a510f7b8e7287856b26cbf3e55707d2d10fda1792b2940f39247976217.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-win32-d83dc9ace3b991c310b1532003338807ed9ed8e80659e9befc9888660762e9ad.zip"
         }
       ],
       "installRelPath": "scripts/windows/extension.ps1",
       "gatedFiles": {
-        "claude-code.vsix": "d1815451304a397871c3bc624e2a67dd5ba915193b6be5a294b8f9f08ef95fcb",
+        "claude-code.vsix": "6dde2235271dc80f596f46bc07fa999fd505aae140a53a09330360652e188857",
         "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f"
       },
       "platform": "win32"
