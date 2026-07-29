@@ -204,6 +204,48 @@ function winPowershellPath() {
   return null;
 }
 
+// powershell.exe пишет stdout/stderr в КОДОВОЙ СТРАНИЦЕ КОНСОЛИ (обычно CP866 на
+// ru-RU Windows), а НЕ в UTF-8 — даже когда вывод перенаправлен в pipe (тот же
+// класс дефекта уже закрыт в main.js для tasklist.exe примитивом decodeConsole).
+// unpackZip читал этот вывод как 'utf8' — любая кириллица в тексте исключения
+// .NET (локализованные сообщения) или в пути превращалась в кракозябры прямо в
+// сообщении об ошибке, которое видит пользователь. Кодовую страницу определяем
+// один раз за процесс через chcp.com (тот же бинарь, что и в main.js).
+let _consoleCp;
+function consoleCodePage() {
+  if (_consoleCp !== undefined) return _consoleCp;
+  _consoleCp = 0;
+  try {
+    const chcp = sysBin('chcp.com');
+    if (chcp) {
+      const r = spawnSync(chcp, [], { encoding: 'latin1', windowsHide: true, timeout: 8000 });
+      const m = String(r.stdout || '').match(/(\d{3,5})/);
+      if (m) _consoleCp = parseInt(m[1], 10) || 0;
+    }
+  } catch (e) { /* не определили — ниже честный фолбэк */ }
+  return _consoleCp;
+}
+const _CP_LABELS = {
+  65001: 'utf-8', 866: 'ibm866', 1251: 'windows-1251', 1252: 'windows-1252',
+  437: null, 850: null, 852: null,   // DOS-страницы без WHATWG-имени → ASCII-путь
+};
+let _consoleDecoder;
+function decodeConsole(buf) {
+  if (!buf) return '';
+  if (_consoleDecoder === undefined) {
+    _consoleDecoder = null;
+    const cp = consoleCodePage();
+    const tries = [];
+    if (_CP_LABELS[cp]) tries.push(_CP_LABELS[cp]);
+    tries.push('cp' + cp, 'ibm' + cp, 'windows-' + cp);
+    for (const label of tries) {
+      try { _consoleDecoder = new TextDecoder(label); break; } catch (e) { /* следующий */ }
+    }
+  }
+  if (_consoleDecoder) { try { return _consoleDecoder.decode(buf); } catch (e) { /* ниже */ } }
+  return Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf);
+}
+
 // Каталог ProgramData на системном диске (admin-owned корень для staging).
 // Диск берём из валидированного System32, а НЕ из %ProgramData% env (анти-spoof).
 function winProgramData() {
@@ -716,12 +758,16 @@ function unpackZip(zipPath, destDir) {
       const psScript =
         'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
         "[System.IO.Compression.ZipFile]::ExtractToDirectory('" + zp + "','" + dp + "')";
+      // encoding НЕ 'utf8': powershell.exe пишет в кодовой странице консоли
+      // (см. decodeConsole выше) — берём вывод буфером и декодируем реальной CP,
+      // иначе кириллица в тексте .NET-исключения приезжает пользователю мусором.
       const r = spawnSync(ps,
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-        { windowsHide: true, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+        { windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
       if (r.error) return { ok: false, error: String(r.error.message || r.error) };
       if (r.status !== 0) {
-        return { ok: false, error: String((r.stderr || r.stdout || ('powershell exit ' + r.status)) || '').trim() };
+        const text = decodeConsole(r.stderr) || decodeConsole(r.stdout);
+        return { ok: false, error: (text || ('powershell exit ' + r.status)).trim() };
       }
     } else {
       // ditto ПЕРВЫМ, unzip — запасным. Причина из живой установки: в архивах есть
@@ -934,6 +980,7 @@ module.exports = {
   sysBin,
   winPowershellPath,
   winProgramData,
+  decodeConsole,          // для тестов: ошибка распаковки декодируется реальной CP консоли
   // security-хелперы (для отчёта/тестов)
   ensureCacheSecure,      // Windows: проверка атомарно-защищённого кэша (без create/icacls)
   verifyDirSecureWin,     // SID-based проверка owner+DACL (Windows)

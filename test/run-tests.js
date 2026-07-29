@@ -7372,3 +7372,54 @@ ok('config.json в репозитории без сборочных маркер
     console.log('  ⚠️  bash недоступен — функциональные прогоны bridge.sh пропущены.');
   }
 })();
+
+// ===========================================================================
+// Глубокое ревью (Opus+Fable): unpackZip (remote-fetch.js) читал stderr/stdout
+// PowerShell как 'utf8'. powershell.exe пишет в КОДОВОЙ СТРАНИЦЕ КОНСОЛИ
+// (обычно CP866 на ru-RU Windows), даже когда вывод перенаправлен в pipe — тот
+// же класс дефекта уже был закрыт для tasklist.exe в main.js примитивом
+// decodeConsole. Любая кириллица в тексте .NET-исключения (или в пути) на
+// ошибке распаковки приезжала пользователю мусором. Фикс: buffer вместо
+// 'utf8' + тот же chcp-based декодер, перенесённый в remote-fetch.js.
+// ===========================================================================
+(function unpackZipConsoleEncoding() {
+  const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+  const src = () => fs.readFileSync(path.join(ROOT, 'src', 'remote-fetch.js'), 'utf8');
+
+  ok('unpackZip (статика): PowerShell-ветка НЕ форсирует encoding:\'utf8\', ошибка декодируется decodeConsole', () => {
+    const s = src();
+    const fn = s.slice(s.indexOf('function unpackZip('), s.indexOf('function removeOldUnpacked('));
+    assert(fn.length > 100, 'unpackZip найдена');
+    const winBranch = fn.slice(fn.indexOf("process.platform === 'win32'"), fn.indexOf('} else {'));
+    assert(!/encoding:\s*'utf8'/.test(winBranch),
+      'Windows-ветка unpackZip больше НЕ форсирует encoding:\'utf8\' на spawnSync (иначе кириллица в ошибке — мусор)');
+    assert(/decodeConsole\(r\.stderr\)/.test(winBranch) && /decodeConsole\(r\.stdout\)/.test(winBranch),
+      'текст ошибки распаковки декодируется через decodeConsole (реальная CP консоли, не utf8-угадывание)');
+  });
+
+  if (process.platform === 'win32') {
+    ok('decodeConsole (запуск): реальный powershell.exe пишет кириллицу в CP консоли — decodeConsole читает верно, наивный utf8 — нет', () => {
+      const ps = rf.winPowershellPath();
+      assert(ps, 'winPowershellPath() нашёл системный powershell.exe');
+      // Реальный процесс пишет ЛОКАЛИЗОВАННЫЙ (не наш) кириллический текст в stderr —
+      // тот же класс вывода, что и текст .NET-исключения на распаковке.
+      const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        "[Console]::Error.WriteLine('Тест кириллицы — ошибка распаковки'); exit 1"],
+        { windowsHide: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+      assert.strictEqual(r.status, 1, 'дочерний процесс упал как ожидалось');
+      assert(Buffer.isBuffer(r.stderr), 'stderr пришёл буфером (encoding не форсирован)');
+      const decoded = rf.decodeConsole(r.stderr);
+      assert(decoded.indexOf('Тест кириллицы') >= 0,
+        'decodeConsole вернул читаемую кириллицу: ' + JSON.stringify(decoded));
+      // Доказываем, что фикс не косметический: наивный utf8-парсинг ЭТОГО ЖЕ буфера
+      // на этой машине даёт мусор (иначе бага и не было бы — пропускаем сравнение,
+      // если консоль и так UTF-8-8, напр. CI под chcp 65001).
+      const naive = r.stderr.toString('utf8');
+      if (naive.indexOf('Тест кириллицы') === -1) {
+        assert(naive !== decoded, 'utf8-декодирование того же буфера отличается от decodeConsole (подтверждает дефект)');
+      }
+    });
+  } else {
+    console.log('  ⚠️  не Windows — функциональный прогон decodeConsole/unpackZip пропущен.');
+  }
+})();
