@@ -5141,8 +5141,13 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
       '  echo "/dev/disk9s1        Apple_HFS        ' + SB + '/Volumes/Hamidun Setup"\n' +
       'fi\nexit 0\n');
     fs.writeFileSync(path.join(sb, 'bin', 'open'),
-      '#!/bin/sh\necho "open $*" >> "$HM_LOG"\nexit 0\n');
-    for (const f of ['hdiutil', 'open']) {
+      '#!/bin/sh\necho "open $*" >> "$HM_LOG"\ntouch "$HM_LAUNCHED"\nexit 0\n');
+    // Помощник больше не верит коду возврата open: он ЖДЁТ, пока процесс реально
+    // появится. Стаб pgrep отвечает «есть» только после того, как open отработал,
+    // иначе тест проверял бы не то, что делает прод.
+    fs.writeFileSync(path.join(sb, 'bin', 'pgrep'),
+      '#!/bin/sh\n[ -f "$HM_LAUNCHED" ] && exit 0\nexit 1\n');
+    for (const f of ['hdiutil', 'open', 'pgrep']) {
       try { fs.chmodSync(path.join(sb, 'bin', f), 0o755); } catch (e) { /* win */ }
     }
 
@@ -5152,6 +5157,7 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
     fs.writeFileSync(path.join(sb, 'run.sh'),
       'export PATH="' + SB + '/bin:$PATH"\n' +
       'export HM_LOG="' + SB + '/log.txt"\n' +
+      'export HM_LAUNCHED="' + SB + '/launched.flag"\n' +
       ': > "$HM_LOG"\n' +
       // «Установщик»: живёт ~0.9 c, перед смертью оставляет маркер в общем логе.
       '( sleep 0.9; echo "INSTALLER-EXITED" >> "$HM_LOG" ) &\n' +
@@ -5795,7 +5801,11 @@ asyncTests().then(() => {
 
     calls[1]({ ok: true }); // успех → перезапуск из свежего тома
     await flush();
-    assert.strictEqual(quits, 1, 'успех → установщик перезапускается');
+    // Выход теперь инициирует ГЛАВНЫЙ процесс, а не окно. Таймер в окне умирал
+    // вместе с окном, а модалка прямо просит его закрыть: человек, закрывший окно
+    // сам, отменял выход, процесс оставался жив и держал замок единственного
+    // экземпляра — свежий установщик закрывался сам, и человек оставался ни с чем.
+    assert.strictEqual(quits, 0, 'окно НЕ инициирует выход (это делает главный процесс)');
     b1.onClick();
     assert.strictEqual(calls.length, 2,
       'после успеха защёлка НЕ отпускается — том нового установщика не отцепить');
@@ -6932,3 +6942,20 @@ if (process.platform === 'win32') {
     assert(/invalidatePathCache\(\);/.test(wrp), 'правка PATH (удаление записи) сбрасывает кэш');
   });
 })();
+
+// Сборочные маркеры не должны попадать в репозиторий. Их пишут ПРЯМО В РАБОЧЕЕ
+// ДЕРЕВО фетчеры vendor (tools/fetch-vendor.ps1, tools/fetch-vendor-mac.sh), и
+// оттуда они дважды уезжали в коммит. Последствие: `npm run dist:mac` даёт .app,
+// который сам себя блокирует (vendorBlockInfo видит offlineEdition без vendor и
+// показывает модалку про карантин с погашенной кнопкой «Установить»), а любой
+// remote-компонент вместо докачки печатает «офлайн-издание — докачка не нужна».
+// Отсутствие маркера раньше не стерёг никто — отсюда рецидив.
+ok('config.json в репозитории без сборочных маркеров', () => {
+  const raw = require('child_process')
+    .execFileSync('git', ['show', 'HEAD:config.json'], { cwd: ROOT, encoding: 'utf8' });
+  const cfg = JSON.parse(raw);
+  assert(!('offlineEdition' in cfg),
+    'offlineEdition — артефакт сборки, в коммите его быть не должно');
+  assert(!('edition' in cfg),
+    'edition — артефакт сборки, в коммите его быть не должно');
+});

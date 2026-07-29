@@ -314,7 +314,11 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => {
     const wins = BrowserWindow.getAllWindows();
     const w = wins.length ? wins[0] : null;
-    if (!w) return;
+    // Окон может не быть вовсе: на macOS закрытие окна НЕ завершает приложение,
+    // и процесс живёт дальше — держа замок единственного экземпляра. Раньше здесь
+    // стоял голый return, и второй запуск в такой ситуации молча умирал: человек
+    // видел, что установщик «не открывается», хотя тот висел в памяти невидимкой.
+    if (!w) { try { createWindow(); } catch (e) { /* не роняем процесс */ } return; }
     try {
       if (w.isMinimized()) w.restore();
       w.show();
@@ -1789,6 +1793,12 @@ function freshWindowsPath() {
     { key: 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', name: 'Path' },
     { key: 'HKCU\\Environment', name: 'Path' },
   ]);
+  // Различаем «прочитали и там пусто» и «НЕ СМОГЛИ прочитать». Второе — не повод
+  // строить огрызок PATH: без машинной ветки git/node/python становятся невидимы,
+  // компоненты показываются неустановленными, и кнопка «перепроверить» этого не
+  // чинит, потому что огрызок закэширован. Сбой реален: заблокированный политикой
+  // или EDR интерпретатор, таймаут, пустой ответ.
+  const failed = got.some((r) => !r || !r.ok);
   const val = (r) => (r && r.ok && r.found) ? String(r.data || '').trim() : '';
   const machine = expandWinEnv(val(got[0]));
   const user = expandWinEnv(val(got[1]));
@@ -1811,7 +1821,8 @@ function freshWindowsPath() {
   if (prefix && !seen.has(prefix.toLowerCase())) { seen.add(prefix.toLowerCase()); parts.push(prefix); }
   let joined = parts.join(';');
   if (!joined) joined = process.env.PATH || '';
-  return joined;
+  // Неполный результат наружу отдаём, но помечаем: кэшировать его нельзя.
+  return failed ? { path: joined, partial: true } : { path: joined, partial: false };
 }
 
 // ---- кэши ОДНОГО прохода детекции --------------------------------------
@@ -1829,8 +1840,13 @@ let _detOwnerCache = null;
 function detResetCaches() { _detOwnerCache = new Map(); }
 function invalidatePathCache() { _detPathCache = ''; }
 function freshWindowsPathCached() {
-  if (!_detPathCache) _detPathCache = freshWindowsPath();
-  return _detPathCache;
+  if (_detPathCache) return _detPathCache;
+  const r = freshWindowsPath();
+  // НЕПОЛНЫЙ результат НЕ кэшируем: иначе один сбой чтения реестра замораживал
+  // огрызок PATH на весь сеанс, компоненты показывались неустановленными, и
+  // «перепроверить» ничего не меняло. Следующий проход попробует заново.
+  if (!r.partial) _detPathCache = r.path;
+  return r.path;
 }
 
 // Окружение для ДЕТЕКЦИОННЫХ спавнов (Windows). Установщик elevated, поэтому
@@ -3144,8 +3160,17 @@ ipcMain.handle('mac-selfheal', async () => {
     'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
     // open -n обязателен: без него macOS активировала бы уже запущенный
     // экземпляр того же bundle id вместо запуска с нового тома.
-    'if /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf ok > "$ST"; exit 0; fi;',
-    'printf relaunch-failed > "$ST"; exit 1',
+    'if ! /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf relaunch-failed > "$ST"; exit 1; fi;',
+    // `open` вернул 0 — это лишь «команда принята». Ждём, пока процесс РЕАЛЬНО
+    // появится: раньше в крошку писали «ok» по коду open, и самый вероятный тихий
+    // провал (свежий экземпляр закрылся сам из-за занятого замка) выглядел успехом.
+    'i=0; while [ $i -lt 20 ]; do',
+    '  if /usr/bin/pgrep -f "Hamidun Setup.app/Contents/MacOS" >/dev/null 2>&1; then',
+    '    printf ok > "$ST"; exit 0;',
+    '  fi;',
+    '  sleep 1; i=$((i+1));',
+    'done;',
+    'printf relaunch-not-seen > "$ST"; exit 1',
   ].join(' ');
   // Хлебная крошка: помощник работает уже после нашего выхода, и без неё любой
   // его отказ был бы невидим — окно просто исчезало бы навсегда. Свежий
@@ -3154,7 +3179,10 @@ ipcMain.handle('mac-selfheal', async () => {
     'HamidunSetup', 'selfheal.status');
   try {
     fs.mkdirSync(path.dirname(statusFile), { recursive: true });
-    fs.writeFileSync(statusFile, 'started');
+    // Пишем не голое слово, а отметку времени и образ: без них отказ полугодовой
+    // давности всплывал в первом же следующем заблокированном запуске и советовал
+    // перекачать заведомо исправный файл.
+    fs.writeFileSync(statusFile, JSON.stringify({ result: 'started', at: Date.now(), dmg }));
   } catch (e) { /* без крошки починка всё равно поедет */ }
   try {
     // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
@@ -3165,6 +3193,13 @@ ipcMain.handle('mac-selfheal', async () => {
   } catch (e) {
     return { ok: false, error: 'helper-failed', dmg };
   }
+  // Выход инициируем ЗДЕСЬ, а не из окна. Раньше это делал renderer таймером на
+  // 6 секунд — но модалка прямо просит «закрой это окно», и человек, закрывший его
+  // сам, уничтожал таймер вместе с окном. Процесс при этом НЕ умирал (на macOS
+  // окно-без-приложения — норма) и продолжал держать замок единственного
+  // экземпляра, поэтому запущенный помощником свежий установщик закрывался сам.
+  // Установщик исчезал с экрана навсегда, а в крошку писалось «ok».
+  setTimeout(() => { try { app.quit(); } catch (e) { /* уже выходим */ } }, 6000);
   // ok здесь означает «карантин снят и починка ЗАПУЩЕНА», а не «всё готово»:
   // остальное произойдёт уже после нашего выхода. Renderer обязан говорить
   // человеку именно это, а не «открыл свежее окно образа».
@@ -3179,9 +3214,20 @@ ipcMain.handle('mac-selfheal-status', () => {
   const p = path.join(os.homedir(), 'Library', 'Application Support',
     'HamidunSetup', 'selfheal.status');
   try {
-    const s = String(fs.readFileSync(p, 'utf8')).trim().slice(0, 40);
+    const raw = String(fs.readFileSync(p, 'utf8')).trim();
+    // Свежесть — по времени файла: помощник пишет голое слово, главный процесс —
+    // объект со временем. Отметка старше получаса относится к ДРУГОЙ попытке
+    // (возможно, к другому образу), и показывать её как «прошлая попытка не
+    // смогла» значит отправлять человека перекачивать заведомо исправный файл.
+    let ageMs = Infinity;
+    try { ageMs = Date.now() - fs.statSync(p).mtimeMs; } catch (e) { /* нет времени — считаем старым */ }
     try { fs.rmSync(p, { force: true }); } catch (e) { /* прочитали — и хватит */ }
-    return { status: s };
+    if (ageMs > 30 * 60 * 1000) return { status: '' };
+    let status = raw.slice(0, 40);
+    if (raw.charAt(0) === '{') {
+      try { status = String((JSON.parse(raw) || {}).result || '').slice(0, 40); } catch (e) { /* оставим сырое */ }
+    }
+    return { status };
   } catch (e) { return { status: '' }; }
 });
 
