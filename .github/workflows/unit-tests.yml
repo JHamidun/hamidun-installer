@@ -1,0 +1,59 @@
+name: Юнит-тесты (гейт push/PR)
+
+# Глубокое ревью (Opus+Fable), находка И-10: ни один workflow не запускался
+# автоматически на push/PR — только вручную (workflow_dispatch) или на
+# специальных ветках (e2e/**, mac-lite/**, probe/**). Любой коммит в main
+# уезжал БЕЗ единой автоматической проверки; test/run-tests.js (350+ тестов,
+# ловит именно те регрессии, что находил ручной рой Opus+Fable) не гейтил
+# ничего сам по себе.
+#
+# Этот workflow — БЫСТРЫЙ и ОБЯЗАТЕЛЬНЫЙ гейт: весь юнит-набор (~2.5 мин
+# локально), синтаксис-проверки .ps1/.sh уже встроены В САМ test/run-tests.js
+# (ParseFile / bash -n для каждого скрипта). continue-on-error здесь НЕ
+# ставим нигде — падение обязано ронять джоб, иначе это не гейт, а видимость.
+#
+# Тяжёлые GUI E2E-прогоны (e2e-win.yml/build-mac*.yml, реальная докачка с
+# S3, десятки минут, macOS-раннеры дороги) сознательно остаются
+# workflow_dispatch/по требованию — гонять их на КАЖДЫЙ push было бы
+# избыточно дорого и медленно; их страхует этот быстрый гейт + ручной запуск
+# перед релизом.
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    branches: ['main']
+
+jobs:
+  unit-tests-windows:
+    name: npm test (Windows — .ps1 + bash-скрипты)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
+        run: npm test
+
+  unit-tests-macos:
+    name: npm test (macOS — .sh скрипты нативно)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Установка зависимостей
+        run: npm ci --no-audit --no-fund
+
+      - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
+        run: npm test
