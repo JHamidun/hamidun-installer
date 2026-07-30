@@ -40,7 +40,11 @@ function vendorRoot() {
   return inside;
 }
 
-// vendor доступен? (на mac при запуске .app из /Applications без dmg — нет)
+// ОФЛАЙН-база рядом? Признак — config-pack (его везёт ТОЛЬКО полный офлайн-vendor).
+// ВАЖНО: это НЕ ответ на вопрос «сиблинг-vendor на месте» — в lite-издании config-pack
+// отсутствует ПО ПОСТРОЕНИЮ (tools/build-lite.js: LITE_KEEP_* = checksums.json + uv +
+// курс, без config-pack). Для «на месте ли то, что обязано быть у ДАННОГО издания»
+// есть editionVendorPresent() ниже.
 function vendorAvailable() {
   try { return fs.existsSync(path.join(vendorRoot(), 'config-pack')); } catch (e) { return false; }
 }
@@ -94,6 +98,37 @@ function isOfflineEdition() {
 function isLiteEdition() {
   try { return readJson('config.json', {}).edition === 'lite'; }
   catch (e) { return false; }
+}
+
+// Сиблинг-vendor, обязательный ДЛЯ ЭТОГО ИЗДАНИЯ, реально на месте?
+//
+// ЗАЧЕМ ОТДЕЛЬНО ОТ vendorAvailable(): признак обязан доказывать именно то, что
+// заявляет. config-pack доказывает «полная офлайн-база рядом», но в lite-издании его
+// НЕТ ПО ПОСТРОЕНИЮ (tools/build-lite.js LITE_KEEP_WIN/LITE_KEEP_MAC; на mac том dmg
+// собирает .github/workflows/build-mac-lite.yml — checksums.json + uv + курс). Поэтому
+// проверка по config-pack давала lite-изданию ВЕЧНУЮ ложную тревогу: маковод запускал
+// .app правильно, из окна смонтированного dmg, и всё равно видел мягкую плашку
+// «файлы рядом не подхватятся». Тот же класс дефекта, что закрывали в claude.ps1/
+// verify.ps1: факт объявлялся по признаку, который его не доказывает.
+//
+// Показательно, что авторы build-lite.js это предвидели («Курс обязателен ещё и потому,
+// что vendorComplete() ищет apps/uv-macos-*.tar.gz и course/*.zip») — но их
+// предусмотрительность обнулялась первой строкой vendorComplete(): !vendorAvailable().
+//
+// Обязательный минимум lite = вшитый checksums.json (ВТОРОЙ fail-closed гейт докачек,
+// без него не пройдёт ни один компонент) + архив uv (uv — BUNDLED_ONLY, не докачивается
+// ниоткуда) + архив курса. Имена — из build-lite.js: mac apps/uv-macos-<arch>.tar.gz,
+// win apps/uv/uv.exe.
+function editionVendorPresent() {
+  if (!isLiteEdition()) return vendorAvailable();
+  let hasChecksums = false;
+  try { hasChecksums = fs.existsSync(path.join(vendorRoot(), 'checksums.json')); }
+  catch (e) { hasChecksums = false; }
+  const hasUv = (process.platform === 'darwin')
+    ? vendorDirHas('apps', (f) => /^uv-macos-.*\.tar\.gz$/i.test(f))
+    : vendorDirHas(path.join('apps', 'uv'), (f) => /^uvx?\.exe$/i.test(f));
+  const hasCourse = vendorDirHas('course', (f) => /\.zip$/i.test(f));
+  return hasChecksums && hasUv && hasCourse;
 }
 
 // Жёсткий стоп ДО установки (только упакованный mac-.app):
@@ -508,7 +543,10 @@ ipcMain.handle('bootstrap', () => {
     // vendor доступен? На mac vendor лежит в dmg РЯДОМ с .app. Если приложение
     // перетащили в /Applications без dmg — vendor не найдётся: офлайн-установка
     // невозможна, компоненты уйдут в онлайн-фолбэк или упадут. UI это подсветит.
-    vendorAvailable: vendorAvailable(),
+    // Проверка ПО ИЗДАНИЮ (editionVendorPresent, НЕ vendorAvailable): в lite нет
+    // config-pack по построению, и проверка по нему жгла мягкую плашку ВСЕГДА —
+    // даже когда маковод запустил .app правильно, из окна смонтированного dmg.
+    vendorAvailable: editionVendorPresent(),
     // macOS App Translocation / оторванный sibling-vendor: жёсткий стоп ДО установки.
     // blocked=true → renderer перекрывает экран блокирующим окном и гасит «Установить».
     vendorBlock: vendorBlockInfo(),

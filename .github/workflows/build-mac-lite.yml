@@ -314,8 +314,14 @@ jobs:
               if u['Key'] == key:
                   s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
                   print('aborted orphan multipart:', u['Key'])
-          s3.delete_object(Bucket=bucket, Key=key)
-          print('old staging dmg deleted (стабильный Hamidun-Setup-Mac.dmg НЕ тронут)')
+          # СТАРЫЙ dmg НЕ УДАЛЯЕМ — заливаем поверх (то же решение, что в build-mac.yml
+          # после коммита 41e36c2). Раньше здесь стоял delete_object, и это было
+          # безопасно ровно пока ссылка нигде не опубликована. С момента, когда
+          # Hamidun-Setup-Mac-Lite.dmg появился на лендинге, delete_object означает
+          # гарантированные 404 для всех, кто зашёл между удалением и концом заливки
+          # 236 МБ из US-раннера в RU-S3 (минуты), а при падении заливки — до
+          # следующего РУЧНОГО прогона. Квота бакета 50 ГБ при занятых ~12 ГБ —
+          # запаса на временное удвоение объекта хватает с избытком.
           cfg = TransferConfig(multipart_threshold=64*1024*1024, multipart_chunksize=64*1024*1024, use_threads=True)
           s3.upload_file('release/Hamidun-Setup-Mac-Lite.dmg', bucket, key,
               ExtraArgs={'ACL': 'public-read', 'ContentType': 'application/x-apple-diskimage'}, Config=cfg)

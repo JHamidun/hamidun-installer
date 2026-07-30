@@ -7488,3 +7488,168 @@ ok('config.json в репозитории без сборочных маркер
     console.log('  ⚠️  не Windows — функциональный прогон decodeConsole/unpackZip пропущен.');
   }
 })();
+
+// ===========================================================================
+// Лёгкое (стриминговое) издание для macOS: мягкая плашка «файлы рядом не
+// подхватятся» горела ВСЕГДА, даже когда маковод запустил .app правильно — из
+// окна смонтированного dmg.
+//
+// Причина того же класса, что закрывали в claude.ps1/verify.ps1: ФАКТ объявлялся
+// по ПРИЗНАКУ, который его не доказывает. vendorAvailable() ищет `config-pack` —
+// он доказывает «полная офлайн-база рядом», но в lite его НЕТ ПО ПОСТРОЕНИЮ
+// (tools/build-lite.js: LITE_KEEP_* = checksums.json + uv + курс). Показательно,
+// что build-lite.js это предвидел («Курс обязателен ещё и потому, что
+// vendorComplete() ищет apps/uv-macos-*.tar.gz и course/*.zip»), но
+// vendorComplete() начинается с !vendorAvailable() — предусмотрительность
+// обнулялась первой строкой.
+//
+// Проверяем НА ЖИВОЙ ЛОГИКЕ, вырезанной из main.js и выполненной в vm с
+// подставной ФС: lite-том dmg (checksums+uv+курс, БЕЗ config-pack) обязан
+// считаться «сиблинг на месте», а перетаскивание в «Программы» (пустой vendor) —
+// нет. Плюс мутация: возврат проверки config-pack в lite-ветку обязан покраснеть.
+// ===========================================================================
+(function liteSiblingVendorDetection() {
+  const vm = require('vm');
+  const MAINSRC = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+
+  // Вырезаем блок функций-детекторов и подставляем ему фейковые fs/path/readJson.
+  // Начинаем от resourceRoot(), а НЕ от vendorRoot(): vendorRoot зовёт resourceRoot,
+  // и без него ReferenceError ГЛОТАЛСЯ внутренними try/catch — тесты, ожидающие
+  // false, зеленели по ложной причине, ничего не проверив. Сторожим это ассертом
+  // на прямой вызов __vendorRoot() в первом же тесте.
+  function cutDetectors(src) {
+    const from = src.indexOf('function resourceRoot()');
+    const to = src.indexOf('\n// Жёсткий стоп ДО установки');
+    assert(from > 0 && to > from, 'блок детекторов vendor найден в main.js');
+    const block = src.slice(from, to);
+    assert(/function vendorRoot\(\)/.test(block) && /function editionVendorPresent\(\)/.test(block),
+      'вырез содержит и vendorRoot, и editionVendorPresent');
+    return block;
+  }
+
+  // Фейковая ФС: набор существующих путей (пути POSIX-стиля, как на macOS).
+  function mkCtx(block, files, edition, platform) {
+    const set = new Set(files);
+    const fakeFs = {
+      existsSync: (p) => set.has(String(p)),
+      readdirSync: (p) => {
+        const pre = String(p).replace(/\/+$/, '') + '/';
+        const out = [];
+        for (const f of set) {
+          if (f.startsWith(pre)) {
+            const rest = f.slice(pre.length);
+            if (rest && rest.indexOf('/') === -1) out.push(rest);
+          }
+        }
+        if (!out.length) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+        return out;
+      },
+    };
+    const ctx = {
+      fs: fakeFs,
+      // НАСТОЯЩИЙ path.posix, а не самодельная склейка: vendorRoot() ищет сиблинг через
+      // path.resolve(resourcesPath, '..','..','..','vendor') — самодельный join не
+      // нормализовал '..', сиблинг «не находился», и тест мерил не то, что думал.
+      path: path.posix,
+      process: { platform, resourcesPath: '/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/Resources', execPath: '/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/MacOS/Hamidun Setup' },
+      app: { isPackaged: true },
+      __dirname: '/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/Resources/app.asar/src',
+      readJson: () => (edition === 'lite' ? { edition: 'lite' } : { offlineEdition: true }),
+      console: console,
+    };
+    vm.createContext(ctx);
+    // vendorRoot() на darwin поднимается на 3 уровня от resourcesPath → '/Volumes/Hamidun Setup/vendor'.
+    vm.runInContext(block + '\n; this.__editionVendorPresent = editionVendorPresent; this.__vendorAvailable = vendorAvailable; this.__vendorRoot = vendorRoot;', ctx);
+    return ctx;
+  }
+
+  const VOL = '/Volumes/Hamidun Setup/vendor';
+  // VOL сам тоже «существует»: vendorRoot() проверяет существование КАТАЛОГА-сиблинга
+  // (fs.existsSync(sibling)) прежде чем его вернуть.
+  const LITE_VOLUME = [
+    VOL,
+    VOL + '/checksums.json',
+    VOL + '/apps/uv-macos-arm64.tar.gz',
+    VOL + '/apps/uv-macos-x64.tar.gz',
+    VOL + '/course/vibecoding-course.zip',
+  ];
+  // Перетащили .app в «Программы» → сиблинга нет вовсе; внутри Resources пусто.
+  const DRAGGED = [];
+  const OFFLINE_VOLUME = LITE_VOLUME.concat([VOL + '/config-pack']);
+
+  ok('lite (macOS): том dmg БЕЗ config-pack считается «сиблинг на месте» — ложной плашки нет', () => {
+    const block = cutDetectors(MAINSRC());
+    const ctx = mkCtx(block, LITE_VOLUME, 'lite', 'darwin');
+    assert.strictEqual(ctx.__vendorRoot(), VOL, 'vendorRoot нашёл сиблинг рядом с .app: ' + ctx.__vendorRoot());
+    assert.strictEqual(ctx.__vendorAvailable(), false,
+      'config-pack в lite отсутствует ПО ПОСТРОЕНИЮ — старый признак честно false');
+    assert.strictEqual(ctx.__editionVendorPresent(), true,
+      'НО издание-осведомлённая проверка обязана дать true (checksums+uv+курс на месте) — иначе плашка горит всегда');
+  });
+
+  ok('lite (macOS): .app перетащили в «Программы» → сиблинга нет → плашка ОБЯЗАНА гореть', () => {
+    const block = cutDetectors(MAINSRC());
+    const ctx = mkCtx(block, DRAGGED, 'lite', 'darwin');
+    assert.strictEqual(ctx.__editionVendorPresent(), false,
+      'без сиблинга lite тоже сломан (uv — BUNDLED_ONLY, курс не докачивается) → предупреждаем');
+  });
+
+  ok('lite (macOS): неполный сиблинг (нет checksums.json / нет uv / нет курса) → плашка горит', () => {
+    const block = cutDetectors(MAINSRC());
+    for (const drop of ['/checksums.json', '/apps/uv-macos-arm64.tar.gz', '/course/vibecoding-course.zip']) {
+      const files = LITE_VOLUME.filter((f) => f !== VOL + drop);
+      // uv: в наборе ДВА архива (arm64+x64) — чтобы проверить именно отсутствие uv,
+      // убираем оба; иначе x64 остаётся и проверка законно проходит.
+      const trimmed = drop.indexOf('uv-macos') !== -1 ? files.filter((f) => f.indexOf('uv-macos') === -1) : files;
+      const ctx = mkCtx(block, trimmed, 'lite', 'darwin');
+      assert.strictEqual(ctx.__editionVendorPresent(), false, 'без ' + drop + ' — не «на месте»');
+    }
+  });
+
+  ok('офлайн (macOS): семантика НЕ изменилась — config-pack по-прежнему обязателен', () => {
+    const block = cutDetectors(MAINSRC());
+    const full = mkCtx(block, OFFLINE_VOLUME, 'offline', 'darwin');
+    assert.strictEqual(full.__editionVendorPresent(), true, 'полный офлайн-том → на месте');
+    const noPack = mkCtx(block, LITE_VOLUME, 'offline', 'darwin');
+    assert.strictEqual(noPack.__editionVendorPresent(), false,
+      'офлайн-издание БЕЗ config-pack — по-прежнему «оторван» (жёсткий гейт офлайна не ослаблен)');
+  });
+
+  ok('МУТАЦИЯ: вернуть проверку config-pack в lite-ветку → тест краснеет (фикс не косметический)', () => {
+    const mutated = cutDetectors(MAINSRC())
+      .replace('function editionVendorPresent() {\n  if (!isLiteEdition()) return vendorAvailable();',
+               'function editionVendorPresent() {\n  if (!isLiteEdition()) return vendorAvailable();\n  if (!vendorAvailable()) return false; // MUTANT');
+    assert(/MUTANT/.test(mutated), 'мутация применилась (иначе тест ничего не доказывает)');
+    const ctx = mkCtx(mutated, LITE_VOLUME, 'lite', 'darwin');
+    assert.strictEqual(ctx.__editionVendorPresent(), false,
+      'мутант обязан вернуть false на корректном lite-томе — именно это и был дефект');
+  });
+
+  ok('bootstrap отдаёт renderer editionVendorPresent, а не vendorAvailable; текст плашки верен для ОБОИХ изданий', () => {
+    const s = MAINSRC();
+    assert(/vendorAvailable: editionVendorPresent\(\)/.test(s),
+      'bootstrap.vendorAvailable считается по изданию');
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const fn = app.slice(app.indexOf('function renderVendorWarning()'), app.indexOf('// ---- модальные окна'));
+    assert(fn.length > 50, 'renderVendorWarning найдена');
+    // Комментарии срезаем: пояснение рядом ЦИТИРУЕТ старую формулировку («офлайн-файлы»),
+    // и проверка по всему фрагменту ловила бы собственный комментарий, а не код.
+    const code = fn.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    assert(!/офлайн-файлы/.test(code),
+      'текст больше не говорит «офлайн-файлы» (в lite это читалось как «плашка не про меня»)');
+    assert(/лежащие рядом с приложением/.test(code), 'текст называет реальную причину — сиблинг рядом с .app');
+    // Жёсткий стоп офлайна не должен внезапно начать зависеть от нового предиката.
+    assert(/if \(!vendorComplete\(\) && isOfflineEdition\(\)\)/.test(s),
+      'жёсткий блок по-прежнему гейтится vendorComplete+isOfflineEdition (blast radius не расширен)');
+  });
+
+  ok('CI: build-mac-lite больше НЕ удаляет опубликованный dmg перед заливкой (404-окно)', () => {
+    const y = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'build-mac-lite.yml'), 'utf8');
+    assert(!/s3\.delete_object/.test(y),
+      'delete_object убран: с момента публикации ссылки он давал гарантированные 404 на время заливки');
+    assert(/abort_multipart_upload/.test(y), 'abort orphan-multipart СВОЕГО ключа сохранён');
+    assert(/СТАРЫЙ dmg НЕ УДАЛЯЕМ/.test(y), 'решение задокументировано в самом workflow');
+    const macFull = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'build-mac.yml'), 'utf8');
+    assert(!/s3\.delete_object/.test(macFull), 'в build-mac.yml delete_object тоже отсутствует (парити)');
+  });
+})();
