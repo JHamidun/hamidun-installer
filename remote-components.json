@@ -318,12 +318,12 @@
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 67760159,
-      "sha256": "6d14bf1f7bbdeb998c5de80b6272a03bb66cfaecb71f5d9820607c6516d22277",
+      "sizeBytes": 67760161,
+      "sha256": "680ded79ba37c78da5731544f0cfe9a1f97899d02731ec93600f583f380a07a1",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-6d14bf1f7bbdeb998c5de80b6272a03bb66cfaecb71f5d9820607c6516d22277.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-680ded79ba37c78da5731544f0cfe9a1f97899d02731ec93600f583f380a07a1.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -383,12 +383,12 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps, macOS)",
-      "sizeBytes": 156873995,
-      "sha256": "d165e5270158e928c09e2e176a96f2934f4ee2f924d1c657d87948ba6163bb0c",
+      "sizeBytes": 156871491,
+      "sha256": "90edb05b10f26ba4c75a40c8e35413bbe7f875140c5020d618f31a167fb0ad22",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-d165e5270158e928c09e2e176a96f2934f4ee2f924d1c657d87948ba6163bb0c.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-90edb05b10f26ba4c75a40c8e35413bbe7f875140c5020d618f31a167fb0ad22.zip"
         }
       ],
       "installRelPath": "scripts/macos/pydeps.sh",
