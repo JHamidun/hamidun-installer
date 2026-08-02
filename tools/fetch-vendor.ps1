@@ -39,6 +39,23 @@ Write-Host "[vendor] VS Code (рекомендуемый редактор, User 
 # URL — редирект на актуальный установщик; IWR следует за ним (-MaximumRedirection).
 Dl "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user" (Join-Path $apps 'vscode-setup.exe')
 
+Write-Host "[vendor] Handy (голосовой ввод, MIT) — NSIS per-user, ставится без админа..."
+# Берём ИМЕННО NSIS (-setup.exe), а не MSI: MSI у Tauri собирается perMachine
+# (Program Files) и требует администратора, NSIS — currentUser в %LOCALAPPDATA%.
+# Ассет арх-специфичный; нам нужен x64 (установщик — x64-приложение).
+try {
+  $hrel = Invoke-RestMethod "https://api.github.com/repos/cjpais/Handy/releases/latest" -Headers $UA
+  $ha = $hrel.assets | Where-Object { $_.name -match '_x64-setup\.exe$' } | Select-Object -First 1
+  if ($ha) {
+    Write-Host "  версия: $($hrel.tag_name) — $($ha.name)"
+    Dl $ha.browser_download_url (Join-Path $apps 'handy-setup.exe')
+  } else {
+    Write-Host "  ! в релизе Handy нет x64-setup.exe — компонент будет пропущен при установке"
+  }
+} catch {
+  Write-Host "  ! GitHub API недоступен для Handy: $($_.Exception.Message)"
+}
+
 Write-Host "[vendor] Python (под версию сборочной машины — чтобы wheels совпали)..."
 $pyver = (& python -c "import platform;print(platform.python_version())" 2>$null)
 if (-not $pyver) { $pyver = '3.12.10' }

@@ -7653,3 +7653,70 @@ ok('config.json в репозитории без сборочных маркер
     assert(!/s3\.delete_object/.test(macFull), 'в build-mac.yml delete_object тоже отсутствует (парити)');
   });
 })();
+
+// ===========================================================================
+// Handy (голосовой ввод) — компонент опциональный, но его обещания обязаны
+// совпадать с тем, что реально произойдёт у новичка. Разведка по исходникам
+// Handy v0.9.4 дала три факта, которые легко потерять при правках:
+//   1) ставим ИМЕННО NSIS (-setup.exe) с флагом /S — он per-user в %LOCALAPPDATA%
+//      и БЕЗ администратора; MSI у Tauri собирается perMachine и требует UAC;
+//   2) модель распознавания в установщик НЕ входит и САМА не качается — значит
+//      скрипт обязан сказать про ручной шаг, иначе «поставили — не работает»;
+//   3) верхняя карточка в списке моделей (Parakeet EN) русского НЕ знает —
+//      про это надо предупредить явно, иначе новичок выберет её.
+// ===========================================================================
+(function handyComponentPromises() {
+  const ps = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'handy.ps1'), 'utf8');
+
+  ok('handy: компонент объявлен, опционален и не требует администратора', () => {
+    const comp = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
+    const all = comp.groups.flatMap((g) => g.components);
+    const h = all.find((c) => c.id === 'handy');
+    assert(h, 'компонент handy есть в components.json');
+    assert.strictEqual(h.default, false, 'по умолчанию НЕ отмечен (тянет ещё сотни МБ модели)');
+    assert.strictEqual(h.needsAdmin, false, 'NSIS per-user — админ не нужен');
+    assert(/модел/i.test(h.desc), 'описание предупреждает про отдельную загрузку модели');
+    assert(Array.isArray(h.platforms) && h.platforms.indexOf('win32') !== -1, 'платформа win32 заявлена');
+  });
+
+  ok('handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата', () => {
+    const s = ps();
+    assert(/handy-setup\.exe/.test(s), 'берём вшитый NSIS-установщик');
+    assert(!/\.msi/i.test(s), 'MSI не используется (он perMachine и требует администратора)');
+    assert(/ArgumentList '\/S'/.test(s), 'тихая установка через /S');
+    assert(/-Wait/.test(s), 'ждём завершения установщика (иначе проверка побежит раньше распаковки)');
+    assert(/Confirm-HmArtifact \$local/.test(s), 'вшитый бинарь проходит sha-гейт');
+    // Успех объявляется по появлению exe, а не по exit code — тот же урок, что с claude.ps1.
+    const tail = s.slice(s.indexOf('$code -ne 0'));
+    assertOrder(tail, 'Test-Path -LiteralPath $appExe', 'OK: Handy установлен',
+      'наличие handy.exe проверяется ДО объявления успеха');
+  });
+
+  ok('handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского', () => {
+    const s = ps();
+    assert(/GigaAM/.test(s) && /Nemotron/.test(s), 'названы модели с русским языком');
+    assert(/Parakeet/.test(s) && /русский НЕ понимает/.test(s),
+      'явно предупреждаем, что верхняя карточка в списке — английская');
+    assert(/272 МБ|751 МБ/.test(s), 'назван реальный объём загрузки модели');
+    assert(/exit 120/.test(s), 'без вшитого установщика — graceful skip, а не ложная ошибка');
+  });
+
+  ok('handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой', () => {
+    const s = ps();
+    assertOrder(s, 'Test-Path -LiteralPath $store', 'Настройки Handy уже есть',
+      'существующий settings_store.json не перезаписываем');
+    assert(/ctrl\+alt\+space/.test(s), 'пре-сид хоткея — Ctrl+Alt+Space');
+    assert(!/'ctrl\+space'/.test(s), 'дефолтный Ctrl+Space не используем (переключает раскладку)');
+    assert(/selected_language.*ru|'ru'/.test(s), 'язык распознавания пре-сидится русским');
+  });
+
+  ok('fetch-config: вшитый конфиг пиннится и оставляет след о версии', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-config.js'), 'utf8');
+    assert(/HM_CONFIG_REF/.test(s), 'ref сборки можно закрепить переменной окружения');
+    assert(/rev-parse', 'HEAD'/.test(s), 'фактический коммит определяется ДО удаления .git');
+    assert(/\.hamidun-config-pack\.json/.test(s), 'штамп версии едет внутрь пака');
+    const iSha = s.indexOf("rev-parse");
+    const iRm = s.indexOf("fs.rmSync(path.join(dest, '.git')");
+    assert(iSha !== -1 && iRm !== -1 && iSha < iRm, 'сначала читаем SHA, потом сносим .git');
+  });
+})();
