@@ -98,10 +98,18 @@ if (Test-Path -LiteralPath $store) {
 } else {
     try {
         New-Item -ItemType Directory -Force -Path $dataDir -ErrorAction Stop | Out-Null
+        # history_limit по умолчанию = 5 записей, а хранение аудио — «preserve_limit»
+        # (то есть привязано к тем же 5). Для человека это значит: вчерашняя диктовка
+        # уже недоступна. Ставим максимум из того, что поддерживает сам Handy:
+        # история 1000 записей и recording_retention_period = months3 — самый долгий
+        # вариант перечисления (Never | PreserveLimit | Days3 | Weeks2 | Months3;
+        # serde rename_all = snake_case, поэтому в JSON именно "months3").
         $seed = @{
             settings = @{
                 selected_language = 'ru'
                 bindings = @{ transcribe = @{ current_binding = 'ctrl+alt+space' } }
+                history_limit = 1000
+                recording_retention_period = 'months3'
             }
         }
         $tmp = "$store.tmp"
@@ -118,10 +126,12 @@ if (Test-Path -LiteralPath $store) {
 Write-Host ""
 Write-Host "ЧТО СДЕЛАТЬ ПОСЛЕ УСТАНОВКИ (один раз, ~2 минуты):"
 Write-Host "  1. Запусти Handy — откроется выбор модели распознавания."
-Write-Host "  2. Выбери модель С РУССКИМ ЯЗЫКОМ:"
-Write-Host "       • GigaAM v3 — около 272 МБ, только русский, самая лёгкая;"
-Write-Host "       • Nemotron Streaming 3.5 — около 751 МБ, 28 языков."
-Write-Host "     ВНИМАНИЕ: самая верхняя карточка в списке (Parakeet EN) русский НЕ понимает."
+Write-Host "  2. Выбери «Parakeet TDT 0.6B v3» — около 705 МБ."
+Write-Host "     Это лучший выбор для русского: точность как у самых тяжёлых моделей,"
+Write-Host "     но работает вдвое быстрее них."
+Write-Host "     Жалко трафика? «Whisper Small» — 257 МБ, точность чуть ниже."
+Write-Host "     ВНИМАНИЕ: не путай с «Parakeet Unified EN» (обычно стоит ПЕРВЫМ в списке) —"
+Write-Host "     вот он русский НЕ понимает. Нужен именно тот, где в названии «v3»."
 Write-Host "  3. Дождись загрузки модели — она качается ОДИН раз и дальше работает без интернета."
 Write-Host "  4. Разреши доступ к микрофону, если Windows спросит."
 Write-Host "Дальше: зажми Ctrl+Alt+Space, продиктуй — текст вставится сам."
