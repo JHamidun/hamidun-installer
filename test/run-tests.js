@@ -7719,6 +7719,220 @@ ok('config.json в репозитории без сборочных маркер
       'хранение записей — months3, самый долгий вариант перечисления Handy');
   });
 
+  // -------------------------------------------------------------------------
+  // Галочка «Сразу разрешить доступ к микрофону» (HM_HANDY_MIC).
+  //
+  // Три вещи, которые обязаны быть правдой и легко ломаются при правках:
+  //   1) БЕЗ галочки реестра не касаемся ВООБЩЕ (даже на чтение) — иначе установщик
+  //      трогает приватность человека, который об этом не просил;
+  //   2) и чтение, и запись идут ДЕ-ЭЛЕВИРОВАННО: установщик работает под админом, его
+  //      HKCU — админская ветка, прямая запись ушла бы не тому пользователю;
+  //   3) уже принятое решение (Allow ИЛИ Deny) не перезаписываем: запрет мог быть
+  //      осознанным, а проверка из-под админа его бы и не увидела.
+  // -------------------------------------------------------------------------
+
+  // Вырезание PS-функции: конец — строка ровно '}' в нулевой колонке (стиль всех .ps1
+  // проекта). Пропала функция → тест падает «пропало», а не зеленеет на пустоте.
+  function cutPsFunction(src, header) {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в handy.ps1 пропало: ' + header);
+    const lines = src.slice(i).split(/\r?\n/);
+    const end = lines.findIndex((l, k) => k > 0 && l === '}');
+    assert(end !== -1, 'не найден конец функции ' + header);
+    return lines.slice(0, end + 1).join('\n');
+  }
+  // Тот же приём для JS (баланс фигурных скобок) — нужен, чтобы гонять кусочки app.js в vm.
+  function cutJsBlock(src, header) {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в app.js пропало: ' + header);
+    const open = src.indexOf('{', i);
+    assert(open !== -1, 'нет тела у: ' + header);
+    let depth = 0;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+    }
+    throw new Error('не нашёл конец блока: ' + header);
+  }
+  const APP = () => fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+
+  ok('handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом', () => {
+    const comp = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
+    const all = comp.groups.flatMap((g) => g.components);
+    const h = all.find((c) => c.id === 'handy');
+    assert(Array.isArray(h.options) && h.options.length >= 1, 'у handy есть options[]');
+    const mic = h.options.find((o) => o.id === 'mic');
+    assert(mic, 'опция mic объявлена');
+    assert.strictEqual(mic.env, 'HM_HANDY_MIC', 'опция едет в скрипт ключом HM_HANDY_MIC');
+    assert.strictEqual(mic.default, true, 'галочка стоит по умолчанию (сам компонент и так опционален)');
+    assert(mic.label && /микрофон/i.test(mic.label), 'подпись галочки говорит про микрофон');
+    assert(mic.hint && /не/i.test(mic.hint), 'подсказка честно говорит, что чужое решение не меняется');
+
+    // ЛЮБАЯ опция ЛЮБОГО компонента обязана: (а) пройти allowlist install-env
+    // (иначе main молча выбросит ключ), (б) реально эмититься из envForRun.
+    const appSrc = APP();
+    const envFn = appSrc.slice(appSrc.indexOf('function envForRun'), appSrc.indexOf('// Журнал установки'));
+    assert(envFn.length > 100, 'тело envForRun найдено');
+    all.forEach((c) => (c.options || []).forEach((o) => {
+      assert(installEnv.isAllowedRendererEnvKey(o.env),
+        o.env + ' (опция ' + c.id + '.' + o.id + ') не разрешён allowlist-ом src/install-env.js');
+      assert(envFn.indexOf(o.env) !== -1,
+        o.env + ' объявлен опцией, но envForRun его не эмитит — до скрипта он не доедет');
+    }));
+    // Функционально: ключ реально проходит фильтр renderer-env (не только «есть в списке»).
+    assert.strictEqual(installEnv.filterRendererEnv({ HM_HANDY_MIC: '1' }).HM_HANDY_MIC, '1',
+      'HM_HANDY_MIC проходит filterRendererEnv');
+  });
+
+  ok('app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит', () => {
+    const vm = require('vm');
+    const appSrc = APP();
+    const script = [
+      cutJsBlock(appSrc, 'function optKey'),
+      cutJsBlock(appSrc, 'function optionOn'),
+      cutJsBlock(appSrc, 'function envForRun'),
+      'function selectedIds(){ return Object.keys(STATE.selected).filter((id) => STATE.selected[id]); }',
+      'this.API = { envForRun };'
+    ].join('\n');
+    const mkState = (opts) => ({
+      config: {}, homedir: 'H', packsData: { core: [], packs: [] },
+      selectedPacks: {}, selectedSkills: {}, detected: {}, repair: {}, repairConfirmed: {},
+      selected: opts.selected, options: opts.options
+    });
+    const run = (opts) => {
+      const sandbox = { STATE: mkState(opts) };
+      vm.runInNewContext(script, sandbox);
+      return sandbox.API.envForRun();
+    };
+    assert.strictEqual(run({ selected: { handy: true }, options: { 'handy.mic': true } }).HM_HANDY_MIC, '1',
+      'выбран + галочка стоит → «1»');
+    assert.strictEqual(run({ selected: { handy: true }, options: { 'handy.mic': false } }).HM_HANDY_MIC, '',
+      'галочку сняли → пусто (скрипт реестра не тронет)');
+    assert.strictEqual(run({ selected: { handy: false }, options: { 'handy.mic': true } }).HM_HANDY_MIC, '',
+      'компонент не выбран → пусто, даже если галочка «висит» включённой в состоянии');
+    assert.strictEqual(run({ selected: { handy: true }, options: {} }).HM_HANDY_MIC, '',
+      'состояния опции нет вовсе → выключена (=== true, а не «не false»)');
+  });
+
+  ok('app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент', () => {
+    const vm = require('vm');
+    const appSrc = APP();
+    const script = [
+      cutJsBlock(appSrc, 'function escapeHtml'),
+      cutJsBlock(appSrc, 'function optKey'),
+      cutJsBlock(appSrc, 'function optionOn'),
+      cutJsBlock(appSrc, 'function renderComponentOptions'),
+      'this.API = { renderComponentOptions };'
+    ].join('\n');
+    const comp = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
+    const handy = comp.groups.flatMap((g) => g.components).find((c) => c.id === 'handy');
+    const render = (on) => {
+      const sandbox = { STATE: { options: { 'handy.mic': on } } };
+      vm.runInNewContext(script, sandbox);
+      return sandbox.API.renderComponentOptions(handy);
+    };
+    const onHtml = render(true);
+    assert(/data-opt="mic"/.test(onHtml), 'чекбокс опции отрисован: ' + onHtml.slice(0, 120));
+    assert(/type="checkbox" data-opt="mic" checked/.test(onHtml), 'включённая опция приходит с checked');
+    assert(onHtml.indexOf(handy.options[0].label) !== -1, 'подпись из components.json на месте');
+    const offHtml = render(false);
+    assert(!/checked/.test(offHtml), 'выключенная опция рисуется БЕЗ checked');
+    // Компонент без options[] не должен получать пустой контейнер.
+    const sandbox = { STATE: { options: {} } };
+    vm.runInNewContext(script, sandbox);
+    assert.strictEqual(sandbox.API.renderComponentOptions({ id: 'git' }), '', 'нет options[] → ничего не рисуем');
+
+    // Структурно: опции видны только у выбранной карточки, а клик по ним не долетает
+    // до обработчика карточки (иначе галочка «разрешить» выключала бы сам компонент).
+    assert(/\$\{checked \? renderComponentOptions\(c\) : ''\}/.test(appSrc),
+      'renderCard показывает опции только у выбранного компонента');
+    assert(/wireComponentOptions\(el, c\);/.test(appSrc), 'обработчики опций провязаны в renderCard');
+    const wire = cutJsBlock(appSrc, 'function wireComponentOptions');
+    assert(/\['pointerdown', 'click'\]\.forEach\(\(ev\) => row\.addEventListener\(ev, \(e\) => e\.stopPropagation\(\)\)\)/.test(wire),
+      'клик по строке опции не пузырится в карточку');
+    assert(/STATE\.options\[optKey\(c\.id, cb\.dataset\.opt\)\] = cb\.checked/.test(wire),
+      'состояние опции пишется по клику');
+  });
+
+  ok('handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)', () => {
+    const s = ps();
+    const fn = cutPsFunction(s, 'function Grant-HmHandyMic');
+    // Гейт стоит ДО любого обращения к реестру — и до чтения тоже.
+    const iGate = fn.indexOf("if ($env:HM_HANDY_MIC -ne '1') { return }");
+    assert(iGate !== -1, 'гейт по HM_HANDY_MIC на месте');
+    ['ConsentStore', 'reg.exe', 'Invoke-HmDeElevated'].forEach((needle) => {
+      const j = fn.indexOf(needle);
+      assert(j === -1 || iGate < j, 'гейт HM_HANDY_MIC обязан стоять ДО «' + needle + '»');
+    });
+    // Никаких обращений к реестру ВНЕ этой функции: весь ConsentStore живёт внутри неё.
+    // .ps1 хранится с CRLF (см. .gitattributes), а cutPsFunction отдаёт кусок с LF —
+    // без нормализации split() не нашёл бы вырезанное тело и «внешним» оказался бы весь файл.
+    const outside = s.replace(/\r\n/g, '\n').split(fn).join('');
+    assert(outside.length < s.length, 'тело функции реально вырезано из исходника (нормализация переводов строк работает)');
+    // Комментарии срезаем: шапка скрипта ОБЪЯСНЯЕТ механизм и по делу цитирует путь
+    // ConsentStore. Без среза проверка ловила собственное пояснение и краснела на
+    // исправном коде — тот же класс ошибки, что уже ловился в тестах реестра и плашки.
+    const outsideCode = outside.split('\n').map((l) => (l.trim().startsWith('#') ? '' : l)).join('\n');
+    assert(outsideCode.indexOf('ConsentStore') === -1,
+      'ConsentStore встречается в КОДЕ только внутри Grant-HmHandyMic (комментарии не в счёт)');
+    // По КОДУ, а не по всему файлу: шапка объясняет, почему прямой `Set-ItemProperty`
+    // здесь запрещён, и сама содержит это имя — проверка по сырому тексту краснела
+    // на собственном объяснении.
+    const codeOnly = s.split(/\r?\n/).map((l) => (l.trim().startsWith('#') ? '' : l)).join('\n');
+    assert(!/Set-ItemProperty|New-ItemProperty|Remove-ItemProperty|New-Item\s+-Path\s+'?HKCU/.test(codeOnly),
+      'прямых записей в реестр (Set-/New-ItemProperty) в коде нет — только де-элевированный reg.exe');
+    // Гейт внутри функции, а не на местах вызова: иначе его забудут в одной из веток.
+    const calls = (s.match(/Grant-HmHandyMic -ExePath \$appExe/g) || []).length;
+    assert(calls >= 3, 'функция вызывается во всех ветках (уже установлен / dry-run / свежая установка), найдено: ' + calls);
+    // ВАЖНО, почему не assertOrder по всему файлу: он сравнивает ПЕРВЫЕ вхождения, а
+    // первый вызов Grant-HmHandyMic относится к ветке «Handy уже установлен» — там exe
+    // на диске заведомо есть, и вызов законно стоит выше сообщения об успехе. Проверяем
+    // то, что действительно нужно: в ветке СВЕЖЕЙ установки согласие пишется ПОСЛЕ того,
+    // как факт появления exe подтверждён.
+    const afterSuccess = s.slice(s.indexOf('OK: Handy установлен'));
+    assert(afterSuccess.indexOf('Grant-HmHandyMic -ExePath $appExe') !== -1,
+      'после свежей установки согласие пишется — вызов есть ниже подтверждения появления exe');
+  });
+
+  ok('handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed', () => {
+    const s = ps();
+    assert(/\. \(Join-Path \$PSScriptRoot '_deelev\.ps1'\)/.test(s), 'подключён единый примитив де-элевации');
+    const fn = cutPsFunction(s, 'function Grant-HmHandyMic');
+    assert(/Invoke-HmDeElevated \$regExe @\('query', \$consentKey, '\/v', 'Value'\)/.test(fn),
+      'ЧТЕНИЕ существующего решения — тоже де-элевированное (из-под админа оно смотрело бы в чужую ветку)');
+    assert(/Invoke-HmDeElevated \$regExe @\('add', \$consentKey, '\/v', 'Value', '\/t', 'REG_SZ', '\/d', 'Allow', '\/f'\)/.test(fn),
+      'ЗАПИСЬ идёт через тот же примитив');
+    // Прямого запуска reg.exe под админом быть не должно ни в одном виде.
+    assert(!/&\s*\$regExe/.test(fn) && !/Start-Process[^\n]*\$regExe/.test(fn),
+      'reg.exe НИКОГДА не запускается напрямую (это была бы запись в админскую ветку)');
+    // fail-closed: примитив не отработал / гейт не medium → НИЧЕГО не пишем.
+    assert(/if \(\$null -eq \$q -or \$q\.Gate -ne 'medium'\)/.test(fn),
+      'непонятный результат проверки → ничего не меняем');
+    assertOrder(fn, "if ($null -eq $q -or $q.Gate -ne 'medium')", "@('add'",
+      'fail-closed-проверка стоит ДО записи');
+    assert(/\$null -ne \$a -and \$a\.Gate -eq 'medium' -and \$a\.Code -eq 0/.test(fn),
+      'успех объявляется только при medium-гейте И нулевом коде reg.exe');
+    // Ключ строится ровно так, как его читает Windows (обратные слэши → решётки).
+    assert(/CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged\\/.test(fn),
+      'ветка ConsentStore\\microphone\\NonPackaged');
+    assert(/\(\$ExePath -replace '\\\\', '#'\)/.test(fn), 'в имени подключа слэши заменены на «#»');
+    assert(/^.*'HKCU\\Software\\Microsoft/m.test(fn), 'ветка именно HKCU (per-user), не HKLM');
+  });
+
+  ok('handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается', () => {
+    const fn = cutPsFunction(ps(), 'function Grant-HmHandyMic');
+    assertOrder(fn, "@('query'", "@('add'", 'сначала спрашиваем, потом пишем');
+    const iFound = fn.indexOf('if ($q.Code -eq 0)');
+    const iAdd = fn.indexOf("@('add'");
+    assert(iFound !== -1, 'проверка «значение уже есть» (код 0 от reg query) на месте');
+    assert(iFound < iAdd, 'проверка существующего значения стоит ДО записи');
+    const between = fn.slice(iFound, iAdd);
+    assert(/\breturn\b/.test(between), 'при существующем значении выходим, НЕ доходя до записи');
+    assert(/не трогаю его/.test(between), 'человеку честно сказано, что его решение оставлено как есть');
+    // Никакого «сначала удалим старое» — ни delete, ни перезаписи мимо проверки.
+    assert(!/@\('delete'/.test(fn), 'существующее значение никогда не удаляется');
+  });
+
   ok('fetch-config: вшитый конфиг пиннится и оставляет след о версии', () => {
     const s = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-config.js'), 'utf8');
     assert(/HM_CONFIG_REF/.test(s), 'ref сборки можно закрепить переменной окружения');

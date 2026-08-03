@@ -19,6 +19,7 @@
 #     русскоязычных пользователей — пре-сидируем другой (ctrl+alt+space).
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
 
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -27,11 +28,83 @@ $appExe  = Join-Path $appDir 'handy.exe'
 # Данные приложения (settings_store.json, каталог моделей) — по bundle identifier.
 $dataDir = Join-Path $env:APPDATA 'com.pais.handy'
 
+# --- Разрешение на микрофон (галочка «Сразу разрешить доступ к микрофону») -------------
+#
+# Windows держит согласия НЕ-упакованных (не из Store) приложений в реестре ПОЛЬЗОВАТЕЛЯ:
+#   HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\
+#   microphone\NonPackaged\<путь к exe>
+# где в имени подключа обратные слэши заменены решётками (C:\X\y.exe -> C:#X#y.exe),
+# а значение Value = "Allow" либо "Deny".
+#
+# ЛОВУШКА, ради которой здесь де-элевация: установщик работает ПОД АДМИНОМ, поэтому его
+# HKCU — ветка АДМИНСКОГО токена. Прямой reg add / Set-ItemProperty записал бы согласие
+# не туда (а если админ — отдельная учётка, то вообще мимо человека за машиной), и Handy
+# всё равно остался бы без микрофона, зато в реестре появилась бы лишняя запись. Поэтому
+# И ЧТЕНИЕ, И ЗАПИСЬ идут через единый укреплённый примитив Invoke-HmDeElevated
+# (_deelev.ps1): одноразовая задача планировщика от имени интерактивного пользователя с
+# LeastPrivilege-токеном. $null или гейт не 'medium' -> НЕ ПИШЕМ НИЧЕГО (fail-closed):
+# лучше остаться без согласия, чем поставить его в чужую ветку.
+#
+# СУЩЕСТВУЮЩЕЕ РЕШЕНИЕ НЕ ПЕРЕЗАПИСЫВАЕМ: если Value уже есть — неважно, Allow или Deny —
+# человек уже высказался (сам или через «Параметры -> Конфиденциальность»), и установщик
+# не вправе это менять. Проверка тоже де-элевированная: из-под админа она смотрела бы в
+# админскую ветку и не увидела бы пользовательский Deny, то есть молча затёрла бы запрет.
+function Grant-HmHandyMic {
+    param([Parameter(Mandatory = $true)][string]$ExePath)
+
+    # Галочка не стоит -> реестра НЕ КАСАЕМСЯ ВООБЩЕ (даже на чтение). Гейт стоит внутри
+    # функции, а не на местах вызова: так его нельзя забыть в одной из веток.
+    if ($env:HM_HANDY_MIC -ne '1') { return }
+
+    $sysRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $regExe  = Join-Path (Join-Path $sysRoot 'System32') 'reg.exe'
+    $consentKey = 'HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged\' +
+                  ($ExePath -replace '\\', '#')
+
+    if ($DRY) {
+        Write-Host "  [dry-run] WOULD: де-элевированно (Invoke-HmDeElevated) проверить $consentKey и записать Value=Allow — ТОЛЬКО если решения там ещё нет"
+        return
+    }
+    if (-not (Test-Path -LiteralPath $regExe)) {
+        Write-Host "  Микрофон: не найден $regExe — разрешение не записываю."
+        return
+    }
+
+    # (1) Есть ли уже решение? Код 0 = значение найдено, 1 = нет такого значения/ключа.
+    $q = Invoke-HmDeElevated $regExe @('query', $consentKey, '/v', 'Value')
+    if ($null -eq $q -or $q.Gate -ne 'medium') {
+        Write-Host "  Микрофон: проверку от имени пользователя выполнить не удалось — ничего не меняю."
+        Write-Host "  Разрешить вручную: Параметры -> Конфиденциальность и защита -> Микрофон."
+        return
+    }
+    if ($q.Code -eq 0) {
+        Write-Host "  Микрофон: решение для Handy в Windows уже записано — не трогаю его."
+        return
+    }
+
+    # (2) Пишем Allow — тоже де-элевированно, в ветку РЕАЛЬНОГО пользователя.
+    $a = Invoke-HmDeElevated $regExe @('add', $consentKey, '/v', 'Value', '/t', 'REG_SZ', '/d', 'Allow', '/f')
+    if ($null -ne $a -and $a.Gate -eq 'medium' -and $a.Code -eq 0) {
+        Write-Host "  Микрофон: доступ для Handy разрешён (настройки приватности Windows)."
+        Write-Host "HM-RECEIPT reg HKCU|$($consentKey.Substring(5))|Value"
+        return
+    }
+    $why = 'причина неизвестна'
+    if ($null -eq $a) { $why = 'примитив де-элевации не отработал' }
+    elseif ($a.Gate -ne 'medium') { $why = "гейт де-элевации: $($a.Gate)" }
+    else { $why = "reg.exe вернул $($a.Code)" }
+    Write-Host "  Микрофон: разрешение записать не удалось ($why)."
+    Write-Host "  Разрешить вручную: Параметры -> Конфиденциальность и защита -> Микрофон -> Разрешить классическим приложениям."
+}
+
 Write-Host "Проверяю Handy (голосовой ввод)..."
 if (Test-Path -LiteralPath $appExe) {
     Write-Host "Handy уже установлен: $appExe"
     if (-not $DRY) {
         # Настройки не трогаем: у пользователя мог быть выбран свой хоткей/модель.
+        # А вот галочку микрофона отрабатываем и на повторном запуске: человек мог
+        # прогнать установщик второй раз именно ради неё.
+        Grant-HmHandyMic -ExePath $appExe
         Write-Host "HM-RECEIPT path $appDir"
         exit 0
     }
@@ -46,6 +119,7 @@ if ($DRY) {
         Write-Host "  [dry-run] WOULD: установщик Handy не вшит — компонент был бы пропущен (exit 120)"
     }
     Write-Host "  [dry-run] WOULD: пре-сид $dataDir\settings_store.json (язык ru, хоткей ctrl+alt+space) — ТОЛЬКО если файла нет"
+    Grant-HmHandyMic -ExePath $appExe   # без HM_HANDY_MIC=1 не печатает ничего — и это правда
     Write-Host "[dry-run] Handy: без изменений."
     exit 0
 }
@@ -122,6 +196,10 @@ if (Test-Path -LiteralPath $store) {
         Write-Host "  Пред-настройку записать не удалось ($($_.Exception.Message)) — Handy запустится с настройками по умолчанию."
     }
 }
+
+# Согласие на микрофон — после того, как exe реально появился на диске: до этого
+# писать разрешение не на что.
+Grant-HmHandyMic -ExePath $appExe
 
 Write-Host ""
 Write-Host "ЧТО СДЕЛАТЬ ПОСЛЕ УСТАНОВКИ (один раз, ~2 минуты):"

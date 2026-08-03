@@ -12,3 +12,4 @@ vendor/*
 *.exe
 __pycache__/
 *.pyc
+Microsoft/

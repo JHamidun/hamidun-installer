@@ -10,6 +10,11 @@ let STATE = {
   groups: [],
   byId: {},        // id -> component
   selected: {},    // id -> bool
+  // Опции компонента — галочки ВНУТРИ карточки ("<id компонента>.<id опции>" -> bool).
+  // Объявляются в components.json полем options[]; значение по умолчанию — options[].default.
+  // Едут в install-скрипт отдельным env-ключом (см. envForRun), и только пока сам
+  // компонент выбран: снятая карточка не должна ничего разрешать за человека.
+  options: {},
   logPath: '',     // ~/.hamidun-setup/install.log (из bootstrap)
   freeGB: null,    // свободное место на диске в ГБ (preflight, из bootstrap)
   checks: [],      // результаты "CHECK ok/fail/skip <ярлык>" от компонента verify
@@ -87,6 +92,9 @@ async function init() {
     g.components.forEach((c) => {
       STATE.byId[c.id] = c;
       STATE.selected[c.id] = !!c.default;
+      // Галочки внутри карточки. Значение ВСЕГДА инициализируем явно, чтобы optionOn()
+      // мог сравнивать строго (=== true) и «нет ключа» никогда не читалось как «включено».
+      (c.options || []).forEach((o) => { STATE.options[optKey(c.id, o.id)] = o.default === true; });
     })
   );
 
@@ -321,6 +329,17 @@ function toggle(id) {
   refreshDerived();
 }
 
+// ---- опции компонента (галочки внутри карточки) ----------------------
+
+// Ключ состояния одной опции. Плоская карта, а не вложенный объект: её удобно
+// целиком отдавать в тесты и невозможно случайно «потерять» при перерендере.
+function optKey(compId, optId) { return String(compId) + '.' + String(optId); }
+
+// Строго === true: опция считается включённой ТОЛЬКО если её явно включили
+// (инициализацией из options[].default или кликом). Любое «значения нет» = выключена,
+// потому что эти галочки разрешают действия от имени человека.
+function optionOn(compId, optId) { return STATE.options[optKey(compId, optId)] === true; }
+
 function selectedIds() {
   return Object.keys(STATE.selected).filter((id) => STATE.selected[id]);
 }
@@ -382,9 +401,11 @@ function renderCard(c) {
         ${updBadge}
       </div>
       <div class="card-desc">${c.desc}</div>
+      ${checked ? renderComponentOptions(c) : ''}
       ${installed ? renderInstalledActions(c) : ''}
     </div>`;
   el.addEventListener('click', () => toggle(c.id));
+  wireComponentOptions(el, c);
   if (installed) wireInstalledActions(el, c);
   // Клик по «?» показывает подсказку и НЕ должен переключать карточку.
   const info = el.querySelector('.info');
@@ -401,6 +422,34 @@ function renderCard(c) {
     info.addEventListener('focus', flip);
   }
   return el;
+}
+
+// Галочки-опции внутри карточки (components.json → options[]). Показываем их ТОЛЬКО
+// у выбранного компонента: у снятой карточки опция ничего не значит и лишь путает.
+// Стили инлайновые — новых классов в styles.css эта фича не заводит.
+function renderComponentOptions(c) {
+  const opts = c.options || [];
+  if (!opts.length) return '';
+  return `<div class="comp-options" data-id="${escapeHtml(c.id)}">` + opts.map((o) => `
+      <label style="display:flex;align-items:flex-start;gap:7px;margin-top:6px;font-size:12px;color:var(--text-muted);cursor:pointer">
+        <input type="checkbox" data-opt="${escapeHtml(o.id)}" ${optionOn(c.id, o.id) ? 'checked' : ''}
+               style="width:13px;height:13px;flex:0 0 auto;margin-top:2px;accent-color:var(--h-primary);cursor:pointer" />
+        <span>${escapeHtml(o.label || o.id)}${o.hint ? `<br><span style="opacity:.8">${escapeHtml(o.hint)}</span>` : ''}</span>
+      </label>`).join('') + '</div>';
+}
+
+// Клик по опции НЕ должен снимать саму карточку (иначе галочка «разрешить» выключала бы
+// компонент). Состояние пишем без перерендера — чекбокс не теряет фокус.
+function wireComponentOptions(el, c) {
+  const row = el.querySelector('.comp-options');
+  if (!row) return;
+  ['pointerdown', 'click'].forEach((ev) => row.addEventListener(ev, (e) => e.stopPropagation()));
+  row.querySelectorAll('input[data-opt]').forEach((cb) =>
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      STATE.options[optKey(c.id, cb.dataset.opt)] = cb.checked;
+    })
+  );
 }
 
 // Ряд действий для УЖЕ установленного компонента: доустановка (аддитивно, по умолчанию),
@@ -1104,7 +1153,12 @@ function envForRun() {
     HM_REPAIR: Object.keys(STATE.repair || {}).filter((id) => STATE.repair[id]).join(','),
     // P0-1: перезапись ~/.claude отдельно подтверждена диалогом (main требует ОБА флага).
     HM_REPAIR_CONFIRMED: Object.keys(STATE.repairConfirmed || {})
-      .filter((id) => STATE.repairConfirmed[id] && STATE.repair[id]).join(',')
+      .filter((id) => STATE.repairConfirmed[id] && STATE.repair[id]).join(','),
+    // Опции компонентов (components.json → options[]). Ключи перечислены ЯВНО, а не
+    // собраны циклом по данным: каждый обязан быть в allowlist src/install-env.js, и
+    // явный список — единственный способ увидеть расхождение тестом, а не в проде.
+    // «1» только если И компонент выбран, И галочка стоит.
+    HM_HANDY_MIC: (STATE.selected['handy'] && optionOn('handy', 'mic')) ? '1' : ''
   };
 }
 

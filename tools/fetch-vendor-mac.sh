@@ -36,6 +36,30 @@ echo "[vendor-mac] Node.js LTS (universal2 pkg)..."
 VER=$(curl -fsSL https://nodejs.org/dist/index.json | "$PY" -c 'import sys,json;print(next(x["version"] for x in json.load(sys.stdin) if x["lts"]))')
 dl "https://nodejs.org/dist/$VER/node-$VER.pkg" "$APPS/node.pkg"
 
+echo "[vendor-mac] Handy (голосовой ввод, MIT) — ДВА арх-специфичных dmg..."
+# Handy, в отличие от Cursor, universal-сборки НЕ даёт: в релизе отдельные
+# Handy_<ver>_aarch64.dmg и Handy_<ver>_x64.dmg. dmg нашего установщика universal,
+# поэтому кладём ОБА — handy.sh берёт нужный по arch_tag (как для uv).
+gh_api https://api.github.com/repos/cjpais/Handy/releases/latest > /tmp/handy-rel.json 2>/dev/null || true
+if [ -s /tmp/handy-rel.json ]; then
+  for pair in "aarch64:arm64" "x64:x64"; do
+    SRC_ARCH="${pair%%:*}"; DST_ARCH="${pair##*:}"
+    URL=$("$PY" -c "
+import sys, json
+d = json.load(open('/tmp/handy-rel.json'))
+tag = '_${SRC_ARCH}.dmg'
+print(next((a['browser_download_url'] for a in d.get('assets', []) if a['name'].endswith(tag)), ''))
+" 2>/dev/null)
+    if [ -n "$URL" ]; then
+      dl "$URL" "$APPS/handy-macos-$DST_ARCH.dmg"
+    else
+      echo "  ! в релизе Handy нет ассета *_$SRC_ARCH.dmg — компонент пропустится при установке"
+    fi
+  done
+else
+  echo "  ! GitHub API недоступен для Handy — компонент пропустится при установке"
+fi
+
 echo "[vendor-mac] Cursor (darwin-universal dmg — один файл, оба arch)..."
 # Cursor раздаёт universal-сборку (arm64 + x86_64 в одном .app) → один cursor.dmg
 # работает и на Apple Silicon, и на Intel. Онлайн-фолбэк в cursor.sh тоже universal.

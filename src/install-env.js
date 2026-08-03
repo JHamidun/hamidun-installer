@@ -20,7 +20,11 @@
 const RENDERER_ENV_ALLOW = new Set([
   'hm_config_repo_url', 'hm_config_repo_branch', 'hm_claude_ext_id', 'hm_home',
   'hm_keep_skills', 'hm_all_pack_skills', 'hm_bridge_endpoint', 'hm_bridge_pacdomains',
-  'hm_selected', 'hm_additive', 'hm_repair', 'hm_repair_confirmed'
+  'hm_selected', 'hm_additive', 'hm_repair', 'hm_repair_confirmed',
+  // Опции компонентов (галочки внутри карточки, components.json → options[]).
+  // hm_handy_mic: '1' = человек разрешил записать согласие на микрофон для Handy.
+  // Значение НИЧЕГО не резолвит (не путь, не URL) — только «да/нет» для install-скрипта.
+  'hm_handy_mic'
 ]);
 
 // Сравнение имён РЕГИСТРОНЕЗАВИСИМО: в Windows env 'Path'/'PATH'/'path' — одно имя,
