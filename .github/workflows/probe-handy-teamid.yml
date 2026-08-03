@@ -1,0 +1,64 @@
+name: Probe — Team ID подписи Handy (macOS)
+
+# РАЗОВЫЙ зонд, не часть релизного конвейера.
+#
+# Установка .app у нас идёт через fail-closed гейт подписи с ПИНОМ Team ID издателя
+# (как сделано для Cursor). У Handy этот идентификатор нигде в открытых файлах не лежит:
+# src-tauri/tauri.conf.json содержит signingIdentity:"-" — это ad-hoc для локальных
+# сборок, а настоящий приходит из секрета APPLE_SIGNING_IDENTITY в их CI.
+#
+# Гадать здесь нельзя: неверный пин — это либо отказ ставить у всех пользователей,
+# либо дыра в проверке подписи. Поэтому снимаем идентификатор codesign'ом с
+# ОФИЦИАЛЬНОГО релизного dmg на macOS-раннере и только потом пиннim в handy.sh.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Скачать релизные dmg Handy (обе архитектуры)
+        run: |
+          set -e
+          curl -fsSL https://api.github.com/repos/cjpais/Handy/releases/latest -o rel.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('rel.json'))
+          print('тег релиза:', d['tag_name'])
+          with open('dmgs.txt', 'w') as f:
+              for a in d['assets']:
+                  if a['name'].endswith('.dmg'):
+                      f.write('%s %s\n' % (a['name'], a['browser_download_url']))
+          PY
+          cat dmgs.txt
+          while read -r name url; do
+            echo "качаю $name"
+            curl -fsSL "$url" -o "$name"
+          done < dmgs.txt
+          ls -la *.dmg
+
+      - name: Снять Team ID и проверить нотаризацию
+        run: |
+          set -e
+          for DMG in *.dmg; do
+            echo "══════════ $DMG ══════════"
+            MNT="/tmp/mnt_$(basename "$DMG" .dmg)"
+            mkdir -p "$MNT"
+            hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" >/dev/null
+            APP=$(ls "$MNT" | grep -i '\.app$' | head -1)
+            echo "бандл: $APP"
+            echo "--- codesign: Team ID и Authority ---"
+            codesign -dv --verbose=4 "$MNT/$APP" 2>&1 | grep -Ei 'TeamIdentifier|Authority|^Identifier=' || true
+            echo "--- spctl: принимает ли Gatekeeper ---"
+            spctl -a -vvv -t install "$MNT/$APP" 2>&1 || true
+            echo "--- stapler: пришита ли нотаризация ---"
+            xcrun stapler validate "$MNT/$APP" 2>&1 || true
+            hdiutil detach "$MNT" >/dev/null || true
+          done
+
+      - name: Что делать с результатом
+        run: |
+          echo "TeamIdentifier из логов выше -> HANDY_TEAM_ID в scripts/macos/handy.sh."
+          echo "Если TeamIdentifier=not set — бандл НЕ подписан Developer ID, и ставить"
+          echo "его нашим гейтом нельзя: нужен другой путь (или отказ от mac-поддержки)."
