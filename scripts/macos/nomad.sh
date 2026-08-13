@@ -124,7 +124,25 @@ if [ -z "$DRY" ]; then
   trap 'rm -rf "$BUILD_SRC"' EXIT
   cp -R "$SRC/." "$BUILD_SRC/" || {
     echo "ОШИБКА: не удалось скопировать проверенный nomad-src во временный каталог."; exit 1; }
-  uv tool install --python 3.12 "$BUILD_SRC"
+
+  # На Intel-маках cryptography ставим НЕ свежайшую. Upstream убрал колёса под
+  # macOS x86_64 начиная с 49.0.0: 48.0.1 ещё едет как cp311-abi3-universal2, а
+  # 49 и 50 — только macosx_11_0_arm64. Без готового колеса pip уходит собирать
+  # из исходников, тянет за собой Rust/PyO3 и openssl-sys, и установка падает —
+  # у пользователя это выглядит как каскад ошибок сборки на ровном месте.
+  # Взять версию из uv.lock (46.0.7, universal2) само не выйдет: `uv tool install`
+  # резолвит зависимости заново и lock ИГНОРИРУЕТ — проверено на uv 0.9.13. А вот
+  # -c constraints он уважает, поэтому пин передаём именно так.
+  # На Apple Silicon ограничение НЕ накладываем: там колёса есть для всех версий,
+  # и подсовывать заведомо старую библиотеку ради чужой проблемы незачем.
+  UV_EXTRA=()
+  if [ "$(arch_tag)" = "x64" ]; then
+    CONSTRAINTS="$BUILD_SRC/.hm-constraints.txt"
+    echo 'cryptography>=46.0.7,<49' > "$CONSTRAINTS"
+    UV_EXTRA=(-c "$CONSTRAINTS")
+    echo "  Intel-мак: cryptography ограничена версией с готовым колесом (<49)."
+  fi
+  uv tool install --python 3.12 "${UV_EXTRA[@]}" "$BUILD_SRC"
   export PATH="$HOME/.local/bin:$PATH"
   # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
   # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в

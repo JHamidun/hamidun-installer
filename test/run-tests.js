@@ -3099,6 +3099,23 @@ ok('P0-1 (scripts): nomad.sh/ps1 — vendor-only skip → exit 120 (не 0); к�
   assert(!/\.hamidun-nomad/.test(nps), 'nomad.ps1: НЕТ упоминаний .hamidun-nomad (маркеры не пишутся)');
 });
 
+ok('nomad.sh: на Intel-маке cryptography ограничена версией с колесом — через -c, а не надеждой на uv.lock', () => {
+  const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+  // Upstream убрал колёса под macOS x86_64 с 49.0.0 — без пина установка уходит
+  // собирать из исходников (Rust/PyO3/openssl-sys) и падает каскадом ошибок сборки.
+  assert(/cryptography>=[\d.]+,<49/.test(nsh), 'пин cryptography <49 присутствует');
+  // Ключевое: пин обязан ехать ФАЙЛОМ ОГРАНИЧЕНИЙ. `uv tool install` резолвит
+  // зависимости заново и uv.lock игнорирует — версия из lock сама не подхватится.
+  assert(/-c\s+"?\$CONSTRAINTS"?/.test(nsh) || /UV_EXTRA=\(-c /.test(nsh),
+    'пин передаётся через -c constraints');
+  assert(/uv tool install[^\n]*\$\{UV_EXTRA\[@\]\}/.test(nsh),
+    'constraints реально попадают в команду установки');
+  // И только на Intel: на arm64 колёса есть для всех версий, старить библиотеку незачем.
+  const i = nsh.indexOf('UV_EXTRA=()');
+  const guard = nsh.slice(i, nsh.indexOf('uv tool install', i));
+  assert(/arch_tag/.test(guard) && /x64/.test(guard), 'ограничение только для x64-ветки');
+});
+
 // INSTALL-ГИГИЕНА (VENDOR-ONLY, Фаза 2 Codex round-7): Nomad ставится ТОЛЬКО из вшитого
 // bundled vendor (HM_NOMAD_SRC с pyproject.toml, путь задаёт main из vendorRoot). Ветка
 // git clone УДАЛЕНА ЦЕЛИКОМ — вместе с ней закрыта последняя TOCTOU-P0 (подмена чужого
