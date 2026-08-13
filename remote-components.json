@@ -318,12 +318,12 @@
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 138258897,
-      "sha256": "7bad0ef4df8cf7a5338253f32d6fa4b56368d73438f1d30e0e389296ca5c4e4e",
+      "sizeBytes": 138258909,
+      "sha256": "512c6dcdd2f89c4103ec0eab41dcd4eca68b1cbf8824fffd0f88c4c0d69c2336",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-7bad0ef4df8cf7a5338253f32d6fa4b56368d73438f1d30e0e389296ca5c4e4e.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-512c6dcdd2f89c4103ec0eab41dcd4eca68b1cbf8824fffd0f88c4c0d69c2336.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -383,12 +383,12 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps, macOS)",
-      "sizeBytes": 213556693,
-      "sha256": "2ba8ff4a2a7b23531fc4709d0b689e9b0f3694e30f75031b35240706176af4a1",
+      "sizeBytes": 213556015,
+      "sha256": "d153ef4a66925531a8fd1431915ab8d91b0f524c98b4568af0fbd8c77eb96ec2",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-2ba8ff4a2a7b23531fc4709d0b689e9b0f3694e30f75031b35240706176af4a1.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-d153ef4a66925531a8fd1431915ab8d91b0f524c98b4568af0fbd8c77eb96ec2.zip"
         }
       ],
       "installRelPath": "scripts/macos/pydeps.sh",
@@ -436,6 +436,24 @@
         "handy-setup.exe": "49099af1462b815a3bb7959d96959f5559b0025334c47bb8ed65337c7351d489"
       },
       "platform": "win32"
+    },
+    {
+      "remoteId": "handy",
+      "name": "Handy (голосовой ввод, arm64+x64)",
+      "sizeBytes": 40020949,
+      "sha256": "1a6eec2cedd46b8a62bb09ee587ccb1b90a5a534424e79be91a7e4668a75b255",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/handy-darwin-1a6eec2cedd46b8a62bb09ee587ccb1b90a5a534424e79be91a7e4668a75b255.zip"
+        }
+      ],
+      "installRelPath": "scripts/macos/handy.sh",
+      "gatedFiles": {
+        "handy-macos-arm64.dmg": "3bc52ee4a5010f9a3c50e3519d6510c4aa620bd6b98caa3022ebd3d6372690bc",
+        "handy-macos-x64.dmg": "d58ee765a1b9e3e99953ba338b89c7d898bbe45bfa7cd9b18e72e36049ce5e4e"
+      },
+      "platform": "darwin"
     }
   ]
 }
