@@ -3106,13 +3106,17 @@ ok('nomad.sh: на Intel-маке cryptography ограничена версие
   assert(/cryptography>=[\d.]+,<49/.test(nsh), 'пин cryptography <49 присутствует');
   // Ключевое: пин обязан ехать ФАЙЛОМ ОГРАНИЧЕНИЙ. `uv tool install` резолвит
   // зависимости заново и uv.lock игнорирует — версия из lock сама не подхватится.
-  assert(/-c\s+"?\$CONSTRAINTS"?/.test(nsh) || /UV_EXTRA=\(-c /.test(nsh),
-    'пин передаётся через -c constraints');
-  assert(/uv tool install[^\n]*\$\{UV_EXTRA\[@\]\}/.test(nsh),
-    'constraints реально попадают в команду установки');
+  assert(/uv tool install --python 3\.12 -c "\$CONSTRAINTS" "\$BUILD_SRC"/.test(nsh),
+    'пин едет файлом ограничений прямо в команде установки');
+  // Ветки РАЗДЕЛЬНЫЕ, без массива аргументов: скрипт под `set -u`, а /bin/bash на маке
+  // версии 3.2 — там "${arr[@]}" при пустом массиве считается неустановленной
+  // переменной и роняет установку. Первый заход именно так и сломал Apple Silicon.
+  assert(!/UV_EXTRA/.test(nsh), 'никаких массивов аргументов — bash 3.2 под set -u их не переживает');
+  assert(/uv tool install --python 3\.12 "\$BUILD_SRC"/.test(nsh),
+    'ветка без ограничений сохранена дословно (arm64 ставит как раньше)');
   // И только на Intel: на arm64 колёса есть для всех версий, старить библиотеку незачем.
-  const i = nsh.indexOf('UV_EXTRA=()');
-  const guard = nsh.slice(i, nsh.indexOf('uv tool install', i));
+  const i = nsh.indexOf('CONSTRAINTS="');
+  const guard = nsh.slice(Math.max(0, i - 400), i);
   assert(/arch_tag/.test(guard) && /x64/.test(guard), 'ограничение только для x64-ветки');
 });
 

@@ -135,14 +135,19 @@ if [ -z "$DRY" ]; then
   # -c constraints он уважает, поэтому пин передаём именно так.
   # На Apple Silicon ограничение НЕ накладываем: там колёса есть для всех версий,
   # и подсовывать заведомо старую библиотеку ради чужой проблемы незачем.
-  UV_EXTRA=()
+  # Две явные ветки, а НЕ массив аргументов: скрипт идёт под `set -u`, а на маке
+  # /bin/bash — версии 3.2, где расширение ПУСТОГО массива "${arr[@]}" считается
+  # обращением к неустановленной переменной и роняет установку. То есть аккуратная
+  # на вид сборка аргументов в массив сломала бы Apple Silicon — большинство маков —
+  # ради Intel. Тесты это поймали сразу; ветки дешевле и честнее.
   if [ "$(arch_tag)" = "x64" ]; then
     CONSTRAINTS="$BUILD_SRC/.hm-constraints.txt"
     echo 'cryptography>=46.0.7,<49' > "$CONSTRAINTS"
-    UV_EXTRA=(-c "$CONSTRAINTS")
     echo "  Intel-мак: cryptography ограничена версией с готовым колесом (<49)."
+    uv tool install --python 3.12 -c "$CONSTRAINTS" "$BUILD_SRC"
+  else
+    uv tool install --python 3.12 "$BUILD_SRC"
   fi
-  uv tool install --python 3.12 "${UV_EXTRA[@]}" "$BUILD_SRC"
   export PATH="$HOME/.local/bin:$PATH"
   # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
   # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в
