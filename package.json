@@ -11,12 +11,17 @@
     "fetch:config": "node tools/fetch-config.js",
     "fetch:vendor": "powershell -ExecutionPolicy Bypass -NoProfile -File tools/fetch-vendor.ps1",
     "assert:clean": "node -e \"const p=require('./package.json');const r=(p.build.win.extraResources||[]).find(x=>x.to==='vendor');const dirty=!r||r.from!=='vendor'||/Lite/.test(p.build.win.artifactName||'')||/Lite/.test((p.build.portable||{}).artifactName||'');if(dirty)throw new Error('package.json ostalsya mutirovannym posle dist:win:lite (from=vendor-lite / artifactName ...-Lite) — vosstanovi: git checkout package.json config.json && rm -rf vendor-lite');console.log('[assert:clean] package.json chistyy — sobirayu OFFLINE izdanie iz vendor/.')\"",
-    "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && electron-builder",
-    "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && electron-builder --win",
+    "preflight": "node tools/preflight-build.js",
+    "prune:cache": "node tools/prune-npm-cache.js",
+    "release:check": "node tools/release-check.js",
+    "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run preflight && electron-builder",
+    "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run preflight && electron-builder --win",
     "dist:win:lite": "node tools/build-lite.js",
-    "dist:mac": "npm run fetch:config && electron-builder --mac",
+    "dist:mac": "npm run fetch:config && npm run preflight -- --platform darwin && electron-builder --mac",
     "dist:mac:lite": "node tools/build-lite.js --mac",
     "postinstall": "electron-builder install-app-deps",
+    "sizes": "node tools/sync-sizes.js",
+    "sizes:check": "node tools/sync-sizes.js --check",
     "test": "node test/run-tests.js"
   },
   "devDependencies": {
@@ -119,6 +124,7 @@
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "unpackDirName": true
     },
+    "beforePack": "tools/before-pack.js",
     "afterPack": "tools/mac-adhoc-sign.js",
     "mac": {
       "icon": "build/icon.png",

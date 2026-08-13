@@ -30,7 +30,27 @@ claude_install_ok() {
   return 1
 }
 
-if [ -n "${HM_VENDOR:-}" ] && [ -d "$HM_VENDOR/npm-cache" ] && have npm; then
+# Платформенный пакет Claude Code для ТЕКУЩЕЙ архитектуры. Настоящий бинарь едет
+# именно в нём (@anthropic-ai/claude-code-darwin-arm64 | -darwin-x64), а не в
+# основном пакете. Сборочный раннер GitHub macos-latest — Apple Silicon, поэтому
+# `npm install` кеширует .tgz ТОЛЬКО под arm64: на Intel офлайн-ветка ставила
+# обёртку-пустышку, claude_install_ok её ловил и молча уходил в интернет — то есть
+# «офлайн-издание» на Intel офлайн НЕ работало, и человек этого не знал.
+# Проверяем наличие АРХИВА (не ответа реестра — он кеширован для обеих платформ) и
+# говорим правду ДО того, как потратим минуту на заведомо пустую установку.
+CLAUDE_PLAT_PKG="claude-code-darwin-$(arch_tag)"
+OFFLINE_HAS_ARCH=0
+if [ -n "${HM_VENDOR:-}" ] && [ -d "$HM_VENDOR/npm-cache" ]; then
+  if hm_npm_cache_has_tarball "$HM_VENDOR/npm-cache" "$CLAUDE_PLAT_PKG"; then
+    OFFLINE_HAS_ARCH=1
+  else
+    echo "Офлайн-копия Claude Code в этой сборке собрана только под $(hm_arch_human "$(hm_other_arch)")."
+    echo "Твой Mac — на $(hm_arch_human), поэтому этот компонент нужно скачать из интернета."
+    echo "Это не ошибка: сейчас установлю Claude Code онлайн (нужно рабочее подключение)."
+  fi
+fi
+
+if [ "$OFFLINE_HAS_ARCH" -eq 1 ] && have npm; then
   echo "Claude Code CLI из встроенного npm-кеша (офлайн)..."
   # npm ТРЕБУЕТ записываемый кэш: он пишет туда логи, локи и _cacache/tmp даже в режиме
   # --offline. На macOS vendor лежит на ОБРАЗЕ ТОЛЬКО ДЛЯ ЧТЕНИЯ (/Volumes/...), поэтому
@@ -75,6 +95,9 @@ if [ "$INSTALLED" -eq 0 ]; then
     INSTALLED=1
   else
     echo "Сеть недоступна, очень медленная или установка не дала РАБОТАЮЩИЙ claude — повтори установку этого компонента."
+    if [ "$OFFLINE_HAS_ARCH" -eq 0 ]; then
+      echo "Важно: офлайн-копии под $(hm_arch_human) в этой сборке нет, поэтому без интернета этот компонент не поставить."
+    fi
   fi
 fi
 

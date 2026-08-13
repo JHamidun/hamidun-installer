@@ -11,6 +11,10 @@ VSIX=""
 if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/claude-code-$(arch_tag).vsix" ]; then
   VSIX="$HM_VENDOR/apps/claude-code-$(arch_tag).vsix"
   verify_artifact "$VSIX"
+elif hm_arch_note_missing "${HM_VENDOR:-}/apps" "claude-code-" ".vsix" "Панель Claude Code"; then
+  # Офлайн-копии под эту архитектуру нет — пойдём в Marketplace. Не молчим:
+  # без этой строки человек без интернета видел просто «не подтвердилось».
+  echo "Поставлю панель из интернет-магазина расширений — потребуется подключение."
 fi
 
 OK=0

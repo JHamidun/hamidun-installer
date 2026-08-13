@@ -47,9 +47,34 @@ else
     # (community.jamf.com — codesign output; fullmetalmac.com/team-ids — Microsoft = UBF8T346G9).
     # TODO-verify: сменит Microsoft Team ID -> fail-closed стоп; обновить VSCODE_TEAM_ID.
     VSCODE_TEAM_ID='UBF8T346G9'
+    # Место на системном томе. Root-установка идёт через staging: копия zip +
+    # ditto-распаковка + cp в /Applications — это ~3 размера архива ПОВЕРХ самого
+    # архива. Не хватило места → admin_run падает молча, и человек читал «подпись
+    # не подтверждена», хотя подпись ни при чём. Считаем ДО пароля.
+    ZIP_KB="$(( $(stat -f %z "$ZIP" 2>/dev/null || echo 0) / 1024 ))"
+    FREE_KB="$(df -k / 2>/dev/null | awk 'NR==2{print $4}')"
+    NEED_KB="$(( ZIP_KB * 3 + 512 * 1024 ))"
+    if [ "${ZIP_KB:-0}" -gt 0 ] && [ -n "${FREE_KB:-}" ] && [ "$FREE_KB" -lt "$NEED_KB" ]; then
+      echo "Не хватает места на диске для установки VS Code."
+      echo "  Нужно примерно $(( NEED_KB / 1024 / 1024 )) ГБ свободного места, сейчас свободно $(( FREE_KB / 1024 / 1024 )) ГБ."
+      echo "  Что делать: освободи место (Корзина, «Хранилище» в настройках Mac) и нажми «Повторить»."
+      exit 1
+    fi
     echo "Проверяю подпись и устанавливаю VS Code в /Applications (может потребоваться пароль администратора)..."
     if ! admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH" hm_vscode_install "$ZIP" "$VSCODE_TEAM_ID" "$APP"; then
-      echo "VS Code: подпись/нотаризация не подтверждены или установка не удалась (fail-closed)."; exit 1
+      # Один код возврата — три разные причины, и советы у них РАЗНЫЕ. Раньше все
+      # три сливались в «подпись/нотаризация не подтверждены (fail-closed)», после
+      # которого человек не знал, что делать. Разводим текстом.
+      echo "VS Code установить не удалось. Возможные причины — в порядке частоты:"
+      echo "  1) Окно с паролем администратора закрыли или пароль ввели неверно."
+      echo "     → нажми «Повторить» и введи пароль от своей учётной записи Mac."
+      echo "  2) Mac не смог подтвердить подпись приложения у серверов Apple."
+      echo "     Так бывает при плохом или ограниченном интернете (в том числе из РФ)."
+      echo "     → включи VPN или другую сеть и нажми «Повторить»."
+      echo "  3) Закончилось место на системном диске во время распаковки."
+      echo "     → освободи 3-5 ГБ и нажми «Повторить»."
+      echo "Проверка подписи специально строгая: без подтверждения мы НЕ ставим приложение."
+      exit 1
     fi
     if [ -d "$APP" ]; then
       echo "VS Code установлен."
@@ -114,6 +139,11 @@ fi
 
 resolve_vsix "claude-code-$(arch_tag).vsix"; CLAUDE_VSIX="$VSIX_OUT"
 resolve_vsix "chatgpt-$(arch_tag).vsix";     CODEX_VSIX="$VSIX_OUT"
+# Офлайн-vsix под ЭТУ архитектуру не вшит, а под другую — вшит: скажем прямо, что
+# дальше пойдём в интернет-магазин, иначе без сети шаг просто «не подтвердится».
+if [ -z "$CLAUDE_VSIX" ] && hm_arch_note_missing "${HM_VENDOR:-}/apps" "claude-code-" ".vsix" "Панель Claude Code"; then
+  echo "Поставлю панель из интернет-магазина расширений — потребуется подключение."
+fi
 
 EXT_OK_CLAUDE=0
 EXT_OK_CODEX=0
@@ -130,5 +160,12 @@ if [ "$EXT_OK_CODEX" -ne 1 ]; then
   echo "ПРЕДУПРЕЖДЕНИЕ: Codex (openai.chatgpt) не установился — это опциональная панель. Поставить позже: VS Code -> Extensions -> 'ChatGPT - Codex' -> Install."
 fi
 if [ "$EXT_OK_CLAUDE" -eq 1 ]; then exit 0; fi
-echo "Не установилось расширение Claude Code (anthropic.claude-code). Открой VS Code -> Extensions -> найди по имени -> Install. Claude Code также работает в терминале командой 'claude'."
+# Сам редактор при этом уже стоит — говорим об этом прямо, иначе человек видит
+# красный крест на «VS Code» и думает, что редактора у него нет.
+echo "Не установилось расширение Claude Code (anthropic.claude-code)."
+echo "Редактор VS Code при этом установлен — не хватает только панели внутри него."
+echo "  Что делать: открой VS Code → Extensions (значок кубиков слева) → набери"
+echo "  «Claude Code» → Install. Либо нажми «Повторить» на этом шаге."
+echo "  Claude Code при этом уже работает в терминале командой 'claude' — панель"
+echo "  нужна только для удобства."
 exit 1

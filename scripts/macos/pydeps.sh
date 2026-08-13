@@ -50,6 +50,29 @@ fi
 [ -f "$REQ" ] || { echo "requirements.txt не найден — сначала установите конфиг."; exit 1; }
 
 echo "Использую Python: $PY"
+
+# Вывод pip дублируем в файл, чтобы при провале объяснить причину ЧЕЛОВЕЧЕСКИ.
+# Живой случай (Intel Mac, 07.08.2026): pip не нашёл готовое колесо cryptography под
+# macOS x86_64 (upstream перестал их выпускать с 49.0.0), полез собирать исходники,
+# упёрся в Rust/PyO3 — а скрипт печатал «Проверь сеть и повтори установку». Это ложь
+# в обе стороны: сеть была в порядке, повтор не помогал бы никогда.
+PIPLOG="$(mktemp "${TMPDIR:-/tmp}/hm-pydeps.XXXXXX" 2>/dev/null || echo '')"
+cleanup_piplog() { [ -n "$PIPLOG" ] && rm -f "$PIPLOG" 2>/dev/null; }
+trap cleanup_piplog EXIT
+pip_run() {  # весь вывод — и в лог установки (человеку видно прогресс), и в файл
+  if [ -n "$PIPLOG" ]; then "$@" 2>&1 | tee -a "$PIPLOG"; return "${PIPESTATUS[0]}"; fi
+  "$@" 2>&1
+}
+# Единая точка честного отказа: сначала пытаемся объяснить по сигнатурам из лога,
+# и только если причина не опознана — говорим про сеть (там это уместно).
+pydeps_fail() {
+  echo "Часть библиотек не установилась."
+  if ! hm_explain_build_failure "$PIPLOG" "Python-пакеты"; then
+    echo "  Что делать: проверь интернет и нажми «Повторить» на этом шаге."
+  fi
+  exit 1
+}
+
 WH="${HM_VENDOR:-}/pywheels"
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$WH" ]; then
   echo "Библиотеки из встроенных wheels (офлайн)..."
@@ -57,15 +80,15 @@ if [ -n "${HM_VENDOR:-}" ] && [ -d "$WH" ]; then
   # качаются на сборке best-effort и могли не вшиться) — НЕ жёсткий exit 1, а
   # честный онлайн-фолбэк, как у Chromium-ветки ниже: --find-links оставляем,
   # чтобы вшитые колёса всё равно использовались, сеть докачивает только дыры.
-  if ! "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" -r "$REQ"; then
-    echo "  ВНИМАНИЕ: офлайн-установка из встроенных wheels не удалась (часть колёс под эту архитектуру не вшита) — докачиваю недостающее из PyPI (онлайн)..."
+  if ! pip_run "$PY" -m pip install --user --break-system-packages --no-index --find-links "$WH" -r "$REQ"; then
+    echo "  Встроенных библиотек под Mac на $(hm_arch_human) хватило не на всё — докачиваю недостающее из интернета..."
     "$PY" -m pip install --user --break-system-packages --upgrade pip >/dev/null 2>&1 || true
-    "$PY" -m pip install --user --break-system-packages --find-links "$WH" -r "$REQ" || { echo "Часть библиотек не установилась (офлайн и онлайн). Проверь сеть и повтори установку этого компонента."; exit 1; }
+    pip_run "$PY" -m pip install --user --break-system-packages --find-links "$WH" -r "$REQ" || pydeps_fail
   fi
 else
   "$PY" -m pip install --user --break-system-packages --upgrade pip >/dev/null 2>&1 || true
   echo "Библиотеки из PyPI (онлайн)..."
-  "$PY" -m pip install --user --break-system-packages -r "$REQ" || { echo "Часть библиотек не установилась."; exit 1; }
+  pip_run "$PY" -m pip install --user --break-system-packages -r "$REQ" || pydeps_fail
 fi
 # Arch-специфичный Chromium: вшит только под arm64 (раннер). На Intel папки
 # playwright-browsers-x64 нет → уходим в онлайн-докачку ниже (единственный не-офлайн шаг на x64).
@@ -80,6 +103,14 @@ if [ -n "${HM_VENDOR:-}" ] && [ -d "$PWB" ]; then
     # с карантином блокируется Gatekeeper → браузер не стартует, а скрипт печатал OK.
     # Снимаем карантин рекурсивно (тот же приём, что в git.sh:51 для вшитого git).
     xattr -dr com.apple.quarantine "$HOME/Library/Caches/ms-playwright" 2>/dev/null || true
+    # Вшитый набор может не совпасть с колесом playwright: ревизия Chromium прибита к
+    # версии пакета (1.62 требует chromium-1234), плюс fetch-vendor срезает
+    # chromium_headless_shell, через который идёт ВЕСЬ headless-рендер. Расхождение
+    # раньше вылезало только в рантайме («Executable doesn't exist»).
+    # `playwright install` идемпотентен: подходит вшитое — мгновенный no-op без сети.
+    if ! "$PY" -m playwright install chromium >/dev/null 2>&1; then
+      echo "  ВНИМАНИЕ: вшитые браузеры не совпали с версией playwright, а докачать не вышло (проверь сеть и повтори установку этого компонента)."
+    fi
   else
     echo "  ВНИМАНИЕ: встроенные браузеры Playwright не скопировались — качаю онлайн..."
     if ! "$PY" -m playwright install chromium >/dev/null 2>&1; then

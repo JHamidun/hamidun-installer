@@ -125,7 +125,13 @@ async function init() {
   const wcWhatBtn = $('#btn-wc-what');
   if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
   const whatBtn = $('#btn-what-installs');
-  if (whatBtn) whatBtn.addEventListener('click', showWhatInstalls);
+  if (whatBtn) {
+    // Подпись должна быть верна для КАЖДОГО издания: офлайн-установщик не качает
+    // НИЧЕГО — всё уже внутри файла, который человек скачал. Старое «Что скачается
+    // на мой ПК?» в офлайне обещало несуществующую загрузку.
+    whatBtn.textContent = STATE.edition === 'lite' ? '📦 Что скачается на мой ПК?' : '📦 Что попадёт на мой ПК?';
+    whatBtn.addEventListener('click', showWhatInstalls);
+  }
   // «Что будет дальше?» — встроенный просмотр памятки в окне установщика;
   // внешний браузер — только по явной соседней кнопке (у части людей дефолтный
   // браузер «холодный» и его онбординг пугает сильнее самой памятки).
@@ -393,7 +399,7 @@ function renderCard(c) {
         ${c.name}
         ${recBadge}
         ${c.why ? `<span class="info" tabindex="0" role="button" aria-label="Что это?">?<span class="tip">${c.why || c.desc}</span></span>` : ''}
-        ${c.sizeHint ? `<span class="badge">${c.sizeHint}</span>` : ''}
+        ${sizeBadgeHtml(c)}
         ${c.online ? `<span class="badge online" title="Скачивается онлайн во время установки">онлайн</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
         ${reqNames.length ? `<span class="badge dep">требует: ${reqNames.join(', ')}</span>` : ''}
@@ -850,21 +856,24 @@ function openModal(opts) {
   return ov;
 }
 
-// Task 3 (страх вируса): попап «Что скачается на мой ПК» — реальный список из
-// components.json (имя + описание + примерный размер sizeHint). Служебные (hidden,
-// напр. verify) не показываем. Ничего не выдумываем — только данные конфига.
+// Task 3 (страх вируса): попап «что попадёт на мой ПК» — реальный список из
+// components.json (имя + описание + измеренный размер). Служебные (hidden, напр.
+// verify) не показываем. Ничего не выдумываем — только данные конфига.
+//
+// ПОДПИСЬ ВАЖНЕЕ ЧИСЛА. Заголовок «Что скачается на мой ПК» был верен лишь для
+// лёгкого издания: офлайн-установщик не качает НИЧЕГО — всё уже внутри exe. И сама
+// цифра — это вес дистрибутива, а не место на диске после установки; человек же читает
+// её как «столько займёт». Поэтому и заголовок, и единицу измерения проговариваем
+// словами, а не оставляем на догадку (см. componentSizeText).
 function showWhatInstalls() {
   const lite = STATE.edition === 'lite';
-  const sizes = STATE.remoteSizes || {};
   const rows = [];
+  let unknown = 0;
   (STATE.groups || []).forEach((g) => {
     (g.components || []).forEach((c) => {
       if (!c || c.hidden) return;
-      // Лёгкое издание: для remote-компонентов показываем ТОЧНЫЙ размер докачки из
-      // реестра (рукописный sizeHint тут про офлайн-сборку и врал бы).
-      const sizeText = (lite && sizes[c.id] != null)
-        ? '~' + fmtBytesRu(sizes[c.id]) + ' · скачается'
-        : (c.sizeHint || '');
+      const sizeText = componentSizeText(c);
+      if (!sizeText) unknown++;
       const size = sizeText ? ' <span class="wi-size">' + escapeHtml(sizeText) + '</span>' : '';
       rows.push(
         '<li><div class="wi-name">' + escapeHtml(c.name) + size + '</div>' +
@@ -872,21 +881,37 @@ function showWhatInstalls() {
       );
     });
   });
-  // Лёгкое издание: суммарное превью докачки по ВЫБРАННЫМ компонентам (точные байты).
+  // Итог по ВЫБРАННЫМ компонентам: в lite — сколько скачается, в офлайн — сколько
+  // весит внутри установщика (там же объясняем, почему сам файл установщика меньше
+  // суммы: внутри всё сжато).
   const dlBytes = downloadTotalBytes();
-  const dlLead = dlBytes > 0
-    ? '<p class="wi-lead"><b>Скачается: ~' + escapeHtml(fmtBytesRu(dlBytes)) + '</b> — лёгкая ' +
-      'версия докачивает выбранные компоненты с сервера во время установки (с проверкой целостности).</p>'
-    : '';
+  const bundledBytes = bundledTotalBytes();
+  let totalLead = '';
+  if (dlBytes > 0) {
+    totalLead = '<p class="wi-lead"><b>Скачается: ~' + escapeHtml(fmtBytesRu(dlBytes)) + '</b> — лёгкая ' +
+      'версия докачивает выбранные компоненты с сервера во время установки (с проверкой целостности).</p>';
+  } else if (bundledBytes > 0) {
+    totalLead = '<p class="wi-lead"><b>Внутри установщика: ~' + escapeHtml(fmtBytesRu(bundledBytes)) + '</b> — ' +
+      'выбранные компоненты уже лежат в файле, который ты скачал, и качать их из интернета не нужно. ' +
+      'Сам файл установщика меньше этой суммы: внутри всё сжато.</p>';
+  }
+  const unit = lite
+    ? 'Цифра рядом с пунктом — сколько он весит при загрузке.'
+    : 'Цифра рядом с пунктом — вес самого дистрибутива внутри установщика.';
+  // Пустое место вместо числа объясняем прямо: не знаем — не пишем. Придуманная
+  // цифра в этом окне вреднее отсутствующей.
+  const unknownNote = unknown ? ' Там, где цифры нет, мы её заранее не знаем — и не придумываем.' : '';
   const body =
     '<p class="wi-lead">Ставится только то, что ты выбрал. Основное — офлайн из самого ' +
     'установщика; компоненты с пометкой «онлайн» докачиваются с официальных источников ' +
-    'с проверкой целостности.</p>' + dlLead +
+    'с проверкой целостности.</p>' +
+    '<p class="wi-lead">' + unit + ' После установки программа занимает на диске больше: ' +
+    'установщик распаковывается.' + unknownNote + '</p>' + totalLead +
     '<ul class="wi-list">' + rows.join('') + '</ul>';
   openModal({
     id: 'what-installs',
     emoji: '📦',
-    title: 'Что скачается на мой ПК',
+    title: lite ? 'Что скачается на мой ПК' : 'Что попадёт на мой ПК',
     bodyHtml: body,
     closeLabel: 'Закрыть',
     blocking: false,
@@ -1071,12 +1096,82 @@ function fmtBytesRu(bytes) {
   return String(Math.max(1, Math.round(mb))) + ' МБ';
 }
 
+// РАЗМЕР КОМПОНЕНТА — что именно обещает цифра.
+//
+// Она отвечает на вопрос «сколько весит этот пункт», и ответ зависит от издания:
+//   • lite   — точный размер архива докачки (remote-components.json → bootstrap.remoteSizes);
+//   • офлайн — вес вшитого дистрибутива (components.json sizeBytes[платформа]; считает
+//              его tools/sync-sizes.js по РЕАЛЬНОМУ vendor, руками цифру больше не пишут).
+//
+// Это НЕ место на диске после установки: распакованная программа занимает заметно
+// больше, чем её установщик (git-setup.exe — 62 МБ, установленный Git кратно больше).
+// Поэтому единица измерения подписана словами в попапе, а не оставлена на догадку.
+//
+// ПОЧЕМУ В LITE НЕ ПОКАЗЫВАЕМ ВШИТЫЙ РАЗМЕР: lite везёт лишь малую часть vendor
+// (tools/build-lite.js LITE_KEEP_WIN/LITE_KEEP_MAC — uv + курс), и components.json не
+// знает, какой именно кусок доехал. Показать там «X МБ внутри установщика» значило бы
+// снова угадывать. Нет точного числа для ЭТОГО издания и ЭТОЙ платформы — не показываем
+// ничего: выдуманная цифра в окне «что попадёт на мой ПК» страшнее отсутствующей.
+function componentSizeBytes(c) {
+  if (!c) return 0;
+  if (STATE.edition === 'lite') {
+    const dl = Number((STATE.remoteSizes || {})[c.id]);
+    return dl > 0 ? dl : 0;
+  }
+  const b = c.sizeBytes && Number(c.sizeBytes[STATE.platform]);
+  return b > 0 ? b : 0;
+}
+
+// Короткая форма для бейджа на карточке: число + подсказка при наведении. Развёрнуто
+// единица объясняется в попапе, но карточка — первый экран, и голое «~222 МБ» человек
+// по привычке читает как «столько займёт на диске». Поэтому title говорит прямо.
+function sizeBadgeHtml(c) {
+  const b = componentSizeBytes(c);
+  if (!(b > 0)) return '';
+  const tip = STATE.edition === 'lite'
+    ? 'Столько скачается с сервера во время установки'
+    : 'Вес дистрибутива внутри установщика; на диске после установки будет больше';
+  return '<span class="badge" title="' + escapeHtml(tip) + '">~' + escapeHtml(fmtBytesRu(b)) + '</span>';
+}
+
+// Приписка про то, чего в установщике НЕТ: модель Handy, Chromium для Playwright,
+// Python для Nomad — их тянет сам компонент, и на Windows/macOS это по-разному
+// (браузеры на маке вшиты, на Windows докачиваются). Поэтому строка может быть
+// платформенной: sizeNote = "текст" | { win32: "...", darwin: "..." }.
+function componentSizeNote(c) {
+  const n = c && c.sizeNote;
+  if (!n) return '';
+  if (typeof n === 'string') return n;
+  return (typeof n === 'object' && typeof n[STATE.platform] === 'string') ? n[STATE.platform] : '';
+}
+
+// Развёрнутая форма для попапа: число + ЧТО оно значит + честная приписка о том,
+// что докачивает не установщик, а сам компонент (sizeNote из components.json).
+function componentSizeText(c) {
+  if (!c) return '';
+  const parts = [];
+  const b = componentSizeBytes(c);
+  if (b > 0) parts.push('~' + fmtBytesRu(b) + (STATE.edition === 'lite' ? ' · скачается' : ' · внутри установщика'));
+  const note = componentSizeNote(c);
+  if (note) parts.push(note);
+  return parts.join(' · ');
+}
+
 // Сумма ТОЧНЫХ размеров докачки по ВЫБРАННЫМ remote-компонентам (превью «Скачается:
 // ~X»). Только lite-издание: в офлайн всё вшито — качать нечего, превью не показываем.
 function downloadTotalBytes() {
   if (STATE.edition !== 'lite') return 0;
   const sizes = STATE.remoteSizes || {};
   return selectedIds().reduce((sum, id) => sum + (Number(sizes[id]) || 0), 0);
+}
+
+// Офлайн-издание: сколько байт ВЫБРАННЫЕ компоненты весят внутри самого установщика.
+// Нужно ровно для доверия: человек скачал файл на 1,9 ГБ и хочет увидеть, что цифры
+// внутри с ним сходятся. Считаем только измеренное — компоненты без числа в сумму не
+// попадают (и об этом сказано в попапе), лишь бы не подгонять итог.
+function bundledTotalBytes() {
+  if (STATE.edition === 'lite') return 0;
+  return selectedIds().reduce((sum, id) => sum + componentSizeBytes(STATE.byId[id]), 0);
 }
 
 function refreshDerived() {
@@ -1311,6 +1406,34 @@ function firstBrokenDep(id, badSet) {
   return null;
 }
 
+// ---- ЧЕСТНЫЙ КАСКАД ----
+// Раньше зависимый компонент печатал ровно одну строку: «Пропущено: не установлена
+// зависимость «VS Code»». Формально правда, но человеку она не даёт НИЧЕГО: он видит
+// шесть таких строк подряд и не понимает, что случилось на самом деле, что чинить
+// первым и не сломан ли его компьютер. Причина при этом ИЗВЕСТНА — она лежит в
+// badWhy, куда её кладёт ветка провала (вид ошибки + человеческое объяснение из
+// main). Собираем из этого одно понятное предложение.
+//
+// badWhy: id → { kind: 'net'|'integrity'|'env'|'fail'|'skip', hint?: строка }
+const DEP_WHY_TEXT = {
+  net: 'не удалось скачать — оборвалось соединение',
+  integrity: 'скачанный файл не прошёл проверку подлинности',
+  env: 'не хватило прав администратора',
+  skip: 'его нет в этой сборке — ставить было нечего',
+  fail: 'установка не удалась',
+};
+function depSkipMessage(id, depId, badWhy) {
+  const me = (STATE.byId[id] && STATE.byId[id].name) || id;
+  const dep = (STATE.byId[depId] && STATE.byId[depId].name) || depId;
+  const why = badWhy && badWhy.get ? badWhy.get(depId) : null;
+  const reason = (why && why.hint) || (why && DEP_WHY_TEXT[why.kind]) || DEP_WHY_TEXT.fail;
+  return [
+    `[~] «${me}» пропущен — он работает только вместе с «${dep}», а «${dep}» не установился (${reason}).`,
+    `    Это не отдельная поломка: почини «${dep}» — и «${me}» встанет сам.`,
+    `    Как: нажми «Повторить» на шаге «${dep}» (или общую кнопку повтора внизу).`,
+  ].join('\n');
+}
+
 // Провал ДОКАЧКИ бывает двух РАЗНЫХ природ, а main отдаёт для обеих stage:'fetch':
 //   СЕТЬ         — обрыв/таймаут/зеркало не ответило: лечится ретраем;
 //   ЦЕЛОСТНОСТЬ  — SHA-256 не совпал, распаковка fail-closed, нет валидного SHA в
@@ -1375,6 +1498,12 @@ async function runComponents(ids, env) {
   // ровно тогда, когда компонент реально встал или осознанно пропущен.
   STATE.badEver = STATE.badEver || new Map();
   const badEver = STATE.badEver;
+  // ПОЧЕМУ компонент оказался в bad — нужно зависимым, чтобы объяснить каскад
+  // словами, а не строкой «не установлена зависимость». Кумулятивно, как badEver:
+  // inline-«Повторить» одного шага не должен стирать причину, из-за которой
+  // зависимые были пропущены в прошлом прогоне.
+  STATE.badWhy = STATE.badWhy || new Map();
+  const badWhy = STATE.badWhy;
   let ok = 0;
   for (const id of ids) {
     appendLog(`\n=== ${STATE.byId[id].name} ===`);
@@ -1386,7 +1515,11 @@ async function runComponents(ids, env) {
       bad.add(id);
       badEver.set(id, 'dep');
       runtimeSkipped.add(id);
-      appendLog(`[~] Пропущено: не установлена зависимость «${STATE.byId[broken].name}»`);
+      // Причина каскада наследуется: если зависимого пропустят дальше по цепочке,
+      // он назовёт КОРНЕВУЮ причину, а не «упала зависимость зависимости».
+      badWhy.set(id, badWhy.get(broken) || { kind: 'fail' });
+      setStepLabel(id, `${STATE.byId[id].name} — ждёт «${STATE.byId[broken].name}»`);
+      appendLog(depSkipMessage(id, broken, badWhy));
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
       setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
       continue;
@@ -1458,6 +1591,7 @@ async function runComponents(ids, env) {
       gracefulSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
+      badWhy.set(id, { kind: 'skip' });
       badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       STATE.errorDigest.delete(id);
       appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
@@ -1479,13 +1613,26 @@ async function runComponents(ids, env) {
       setStep(id, (isNet || isEnv) ? 'error-net' : 'error');
       failed.push(id);
       bad.add(id);
+      // Человеческое объяснение из main (res.hint — «нет готовой версии под этот
+      // компьютер», «закончилось место на диске», …). Оно уже напечатано в лог
+      // главным процессом; здесь оно нужно, чтобы зависимые назвали КОРНЕВУЮ
+      // причину, а не абстрактное «упала зависимость».
+      badWhy.set(id, {
+        kind: isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')),
+        hint: (res && res.hint) ? String(res.hint) : '',
+      });
       // Диагностика для бота: id + стадия + текст. Без стадии «упал git» не отличить от
       // «нет интернета», «нет прав» и «подменён файл», а совет человеку в этих случаях
       // РАЗНЫЙ. Текст чистится от ПД в главном процессе (scrubText) перед отправкой.
       STATE.errorDigest.set(id, {
         id,
         stage: isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')),
-        error: String((res && res.error) || ('код ' + (res ? res.code : '?'))),
+        // Опознанный вид причины (hintKind) кладём В ТЕКСТ ошибки: без него бот
+        // видит «код 1» и не может отличить «нет сборки под эту машину» (чинится
+        // только новой сборкой) от «оборвалась сеть» (чинится повтором). Схему
+        // события в main не трогаем — она валидируется по allowlist полей.
+        error: (res && res.hintKind ? '[' + res.hintKind + '] ' : '')
+          + String((res && res.error) || ('код ' + (res ? res.code : '?'))),
       });
       badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')));
       const name = STATE.byId[id].name;
@@ -1505,6 +1652,12 @@ async function runComponents(ids, env) {
         // БЕЗ кнопки «Повторить» (повтор детерминированно даст то же) и без «проверь интернет».
         setStepLabel(id, `${name} — Проверка целостности не пройдена`);
         appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: пришли лог в бота.`);
+      } else if (res && res.hint) {
+        // Причина опознана: на шаге пишем ЕЁ, а не «код 1». Подробное объяснение
+        // («что произошло / что делать») main уже вывел в лог сразу после падения.
+        setStepLabel(id, `${name} — ${res.hint}`);
+        if (res.hintKind !== 'no-prebuilt-binary' && res.hintKind !== 'no-distribution') addStepRetry(id);
+        appendLog(`[!] ${name}: ${res.hint} (подробности выше).`);
       } else {
         appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
       }
@@ -1637,6 +1790,9 @@ async function startInstall() {
   // (retryFailed её НЕ сбрасывает): по ней финиш видит ВЕСЬ остаточный набор провалов,
   // а не только результат последнего (возможно, одношагового inline-)прогона.
   STATE.badEver = new Map();
+  // Причины провалов (для объяснения каскада) живут ровно столько же, сколько badEver:
+  // сбрасываются новой установкой, переживают inline-«Повторить».
+  STATE.badWhy = new Map();
   STATE.errorDigest = new Map();
   // Защёлки телеметрии сбрасываем вместе с остальным состоянием прогона: иначе вторая
   // попытка (человек починил интернет и запустил установку заново) не отчитается ВООБЩЕ —
@@ -2044,17 +2200,45 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   const courseBtn = $('#ns-course');
   if (courseBtn) courseBtn.addEventListener('click', async () => {
     // M2: не молчим на false — папки курса нет (не входил в сборку / снесли).
-    let ok = false;
-    try { ok = await window.installer.launchCourse(); } catch (_) {}
-    if (!ok) {
+    let res = null;
+    try { res = await window.installer.launchCourse(); } catch (_) {}
+    // Совместимость со старым контрактом (голый boolean) — на случай рассинхрона версий.
+    if (res === true) res = { ok: true, how: 'editor' };
+    if (res === false || res == null) res = { ok: false, reason: 'no-dir' };
+
+    const show = (text) => {
       let hint = courseBtn.parentElement.querySelector('.ns-course-err');
       if (!hint) {
         hint = document.createElement('div');
         hint.className = 'ns-course-err';
         courseBtn.parentElement.appendChild(hint);
       }
-      hint.textContent = 'Папка курса не найдена — курс не входил в эту сборку или папку удалили. ' +
-        'Запусти установщик ещё раз с компонентом «Курс», либо спроси бота-помощника.';
+      hint.textContent = text;
+    };
+
+    if (res.ok) {
+      // Папка открылась в проводнике, а не в редакторе: файлы человек видит, но
+      // наставник подхватится только из редактора — говорим об этом прямо, иначе
+      // он напишет «начать» в пустоту и решит, что курс сломан.
+      if (res.how === 'explorer' || res.how === 'finder') {
+        show('Редактор не найден, поэтому открыл папку курса в проводнике: ' + (res.dir || '') +
+             '. Чтобы заработал наставник — открой эту папку в VS Code или Cursor ' +
+             '(File → Open Folder) и напиши «начать» в панели Claude.');
+      }
+      return;
+    }
+    // Три РАЗНЫЕ причины — три разных совета. Раньше на любую печаталось «папка курса
+    // не найдена», и человек с целой папкой шёл переустанавливать курс впустую.
+    if (res.reason === 'no-editor') {
+      show('Курс на месте (' + (res.dir || '') + '), но не нашёлся редактор — ни VS Code, ни Cursor. ' +
+           'Поставь любой из них (можно этим же установщиком), потом открой в нём эту папку ' +
+           'и напиши «начать» в панели Claude.');
+    } else if (res.reason === 'no-mentor') {
+      show('Папка курса есть (' + (res.dir || '') + '), но в ней нет файла CLAUDE.md с наставником — ' +
+           'распаковка прошла не до конца. Запусти установщик ещё раз с компонентом «Курс».');
+    } else {
+      show('Папка курса не найдена — курс не входил в эту сборку или папку удалили. ' +
+           'Запусти установщик ещё раз с компонентом «Курс», либо спроси бота-помощника.');
     }
   });
   const cursorBtn = $('#ns-cursor');

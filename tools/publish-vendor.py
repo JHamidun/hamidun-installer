@@ -53,6 +53,18 @@ COMPONENTS = {
     "claude": {"kind": "single", "src": "npm-cache",             "prefix": "npm-cache",         "name": "Claude Code CLI (npm-cache)"},
     "uv":     {"kind": "single", "src": "apps/uv",               "prefix": "apps/uv",           "name": "uv (Astral)"},
     "mascot": {"kind": "single", "src": "apps/claude-mascot",    "prefix": "apps/claude-mascot","name": "Claude Mascot"},
+    # handy — БЫЛ ПРОПУЩЕН, и это молча ломало lite-издание. Артефакт лежит в vendor
+    # (apps/handy-setup.exe), гейт целостности на него есть (vendor/checksums.json), и
+    # install-скрипт есть (scripts/windows/handy.ps1) — но записи в реестре докачки не
+    # было, поэтому loadRemoteMaps (src/main.js) НЕ считал компонент удалённым, а
+    # build-lite.js кладёт в vendor-lite только uv+курс+checksums. Итог для человека,
+    # выбравшего «Handy» в лёгком издании: handy.ps1 не находит установщик и уходит в
+    # graceful skip (exit 120) — компонент просто не появляется, без объяснения.
+    # ВНИМАНИЕ ПРИ ПУБЛИКАЦИИ: components.json показывает handy на win32 И darwin. Как
+    # только запись win32 попадёт в реестр, lite на macOS начнёт считать handy удалённым
+    # (авто-remote по id) и упрётся в «нет сборки для платформы», если darwin-записи нет.
+    # Значит win32 и darwin публикуются ПАРОЙ (darwin — на маке, из apps/handy-macos-*.dmg).
+    "handy":  {"kind": "single", "src": "apps/handy-setup.exe",  "prefix": "apps",              "name": "Handy (голосовой ввод)"},
     # nomad — составной: дерево + манифест целостности (nomad.ps1 верифицирует его
     # fail-closed перед uv tool install). nomad-src.sha256 генерит fetch-vendor.ps1 —
     # публиковать nomad ТОЛЬКО после свежего fetch:vendor (иначе required-part упадёт).

@@ -724,6 +724,65 @@ ok('main.js: IPC launch-vscode открывает папку ~/HamidunStart (н�
   assert(/ipcMain\.handle\('launch-cursor'/.test(s), 'launch-cursor сохранён (Cursor как опция)');
 });
 
+// (4a) РЕГРЕССИЯ ОТ ЖИВОГО УЧЕНИКА: «я не нахожу файл с промптами».
+// Памятка вторым шагом велит открыть PROMPTS.md в ~/HamidunStart, а config.ps1/config.sh
+// копировали стартовый проект ТОЛЬКО когда папки ещё нет: «папка есть → не перезаписываю».
+// Папка же появляется и помимо них — кнопка «Открыть VS Code» делает mkdirSync ПУСТОЙ
+// папки, чтобы редактор открыл воркспейс, а не безымянное окно (см. тест выше, строка
+// про mkdirSync(dir). Плюс прошлая установка, плюс сам человек. Итог: папка есть, файлов
+// нет, памятка ссылается в пустоту.
+// Инвариант: недостающие файлы ДОКЛАДЫВАЮТСЯ, существующие НЕ трогаются, отсутствие
+// ассетов не проходит молча.
+ok('config.ps1/config.sh: стартовый проект дополняется, а не пропускается, если папка уже есть', () => {
+  for (const rel of [['scripts', 'windows', 'config.ps1'], ['scripts', 'macos', 'config.sh']]) {
+    const f = path.join(ROOT, ...rel);
+    const s = fs.readFileSync(f, 'utf8');
+    const name = rel[rel.length - 1];
+    const at = s.indexOf('HamidunStart');
+    assert(at !== -1, name + ': блок стартового проекта на месте');
+    const blk = s.slice(Math.max(0, at - 1500), at + 3500);
+
+    // Главное: НЕТ раннего выхода «папка есть — ничего не делаю».
+    assert(!/уже есть:.*не перезаписываю/.test(blk),
+      name + ': пропуск целой папки убран (из-за него ученик остался без PROMPTS.md)');
+    // Копирование идёт пофайлово с проверкой существования каждого файла.
+    assert(/добавлено|дополнен/.test(blk),
+      name + ': недостающие файлы докладываются (есть отчёт о добавленных)');
+    // Файл человека не трогаем.
+    assert(/не тронуто|ST_KEPT|\$kept/.test(blk),
+      name + ': существующие файлы сохраняются, а не перезаписываются');
+    // Именно PROMPTS.md проверяется отдельно — на него ссылается памятка.
+    assert(/PROMPTS\.md/.test(blk),
+      name + ': наличие PROMPTS.md проверяется явно (памятка ведёт именно к нему)');
+    // Отсутствие ассетов больше не проходит молча.
+    assert(/Стартовый проект НЕ создан/.test(s),
+      name + ': отсутствие вшитых ассетов сообщается, а не игнорируется');
+  }
+});
+
+// (4b) Сам стартовый проект обязан ехать в сборке и содержать файл, к которому ведёт памятка.
+ok('сборка: assets/starter-project едет в дистрибутив и содержит PROMPTS.md', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const er = (pkg.build && pkg.build.extraResources) || [];
+  const froms = er.map((e) => (typeof e === 'string' ? e : e.from));
+  assert(froms.includes('assets/starter-project'),
+    'assets/starter-project перечислен в extraResources (иначе в собранном .exe его нет)');
+
+  const src = path.join(ROOT, 'assets', 'starter-project');
+  assert(fs.existsSync(path.join(src, 'PROMPTS.md')),
+    'PROMPTS.md лежит в assets/starter-project — памятка ссылается именно на него');
+
+  // Памятка и файл обязаны говорить об одном и том же имени.
+  const memo = path.join(ROOT, 'assets', 'START-HERE.html');
+  if (fs.existsSync(memo)) {
+    const m = fs.readFileSync(memo, 'utf8');
+    if (/PROMPTS\.md/.test(m)) {
+      assert(/HamidunStart/.test(m),
+        'памятка называет папку HamidunStart рядом с PROMPTS.md (иначе человек не найдёт файл)');
+    }
+  }
+});
+
 // main.js: детекция установленного VS Code.
 ok('main.js: detectComponents детектит vscode (Code.exe / Visual Studio Code.app)', () => {
   const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
@@ -3765,14 +3824,35 @@ ok('main.js: PATH с потерянными символами не перепи
       assert(got[5].ok && got[5].found && got[5].data === 'HmV1-' + rnd, '[5] = names[1]: ' + at(5));
       assert(got[6].ok && got[6].found && got[6].data === 'HmV3-' + rnd, '[6] = names[3]: ' + at(6));
       // Скорость: 7 значений одним запуском против 4 поштучных запусков .NET.
-      const t1 = Date.now();
-      for (const n of names) {
-        const r = L.regQueryValueDotNet(REG_KEY, n);
-        assert(r.ok && r.found, 'поштучное чтение ' + n + ': ' + JSON.stringify(r));
-      }
-      const singleMs = Date.now() - t1;
-      assert(batchMs * 1.5 < singleMs,
-        'пачка ощутимо быстрее поштучного: batch(7 знач.)=' + batchMs + 'мс против 4×поштучно=' + singleMs + 'мс');
+      //
+      // ЗАМЕР ПО ЛУЧШЕМУ ИЗ ТРЁХ, а не по одному прогону. Одиночный замер здесь
+      // ловит не разницу подходов, а посторонний всплеск нагрузки: при занятой
+      // машине (параллельные сборки, антивирус, другой тяжёлый процесс) старт
+      // интерпретатора растягивается непредсказуемо, и тест краснел с batch=4797мс
+      // против single=4241мс — то есть «пачка медленнее», чего не может быть по
+      // устройству: один запуск процесса против четырёх. Минимум из нескольких
+      // прогонов отражает стоимость самого подхода: всплеск может замер только
+      // ЗАМЕДЛИТЬ, поэтому лучший результат ближе к истине, а порог 1.5x остаётся
+      // прежним — тест не ослаблен, он лишь перестал измерять шум.
+      const best = (fn, runs) => {
+        let m = Infinity;
+        for (let i = 0; i < runs; i++) {
+          const t = Date.now();
+          fn();
+          m = Math.min(m, Date.now() - t);
+        }
+        return m;
+      };
+      const batchBest = best(() => L.regQueryManyDotNet(reqs), 3);
+      const singleBest = best(() => {
+        for (const n of names) {
+          const r = L.regQueryValueDotNet(REG_KEY, n);
+          assert(r.ok && r.found, 'поштучное чтение ' + n + ': ' + JSON.stringify(r));
+        }
+      }, 3);
+      assert(batchBest * 1.5 < singleBest,
+        'пачка ощутимо быстрее поштучного (лучшее из 3): batch(7 знач.)=' + batchBest +
+        'мс против 4×поштучно=' + singleBest + 'мс; первый замер пачки был ' + batchMs + 'мс');
     } finally {
       for (const n of names) { try { L.regDeleteValueTyped(REG_KEY, n); } catch (e) { /* уборка всегда */ } }
       const after = L.regQueryManyDotNet(names.map((n) => ({ key: REG_KEY, name: n })));
@@ -7941,5 +8021,832 @@ ok('config.json в репозитории без сборочных маркер
     const iSha = s.indexOf("rev-parse");
     const iRm = s.indexOf("fs.rmSync(path.join(dest, '.git')");
     assert(iSha !== -1 && iRm !== -1 && iSha < iRm, 'сначала читаем SHA, потом сносим .git');
+  });
+})();
+
+// ===========================================================================
+// РАЗМЕРЫ КОМПОНЕНТОВ: цифра в окне «что попадёт на мой ПК» ↔ реальный vendor.
+//
+// ЗАЧЕМ. Размер компонента раньше был рукописной строкой components.json (sizeHint),
+// её никто не пересчитывал при обновлении vendor, и она разъехалась: vscode обещал
+// ~110 МБ при 221,6 МиБ, extension ~10 МБ при 85,6 МиБ, claude ~50 МБ при 1,01 ГиБ.
+// Цифру видно ровно там, где мы снимаем страх «а не вирус ли это» — сумма, заниженная
+// вдвое рядом с честным файлом установщика на 1,9 ГБ, страх УСИЛИВАЕТ. Теперь число
+// считает tools/sync-sizes.js по реальному vendor, а этот блок стережёт, чтобы оно не
+// разошлось снова и чтобы в файл нельзя было вписать цифру мимо генератора.
+//
+// ПОРОГ. Сверяем не байты ради байтов, а то, ЧТО УВИДИТ ЧЕЛОВЕК: провал, если
+// изменилась сама надпись (fmtBytesRu округляет до МБ и до 0,1 ГБ) ИЛИ расхождение
+// больше 1% — это уже за пределами тильды «~», которой подписано число. Требовать
+// побайтового равенства смысла нет: генератор и так пишет точное значение, а жёсткое
+// равенство падало бы от любой безобидной пересборки vendor на ту же версию.
+//
+// ЧИСТАЯ МАШИНА. vendor в репозиторий не коммитится, на CI его нет. Тогда сверять
+// не с чем — тест ПРОПУСКАЕТСЯ ЯВНО (⏭), а не зеленеет молча: зелёная галочка на
+// невыполненной проверке — ровно тот способ потерять сторожа, из-за которого этот
+// дефект и дожил до продакшена. Структурные инварианты (первые четыре) работают
+// всегда, включая чистый чекаут.
+//
+// ВРЕМЯ. Обход каталогов на Windows упирается в антивирус: config-pack (7931 файл) —
+// полторы минуты, nomad-src — полминуты. Поэтому файловые компоненты проверяются
+// всегда (мгновенно), а каталожные — под бюджетом времени; что не успели, честно
+// перечисляется в ⏭. Полная сверка без бюджета: HM_SIZES_DEEP=1 node test/run-tests.js
+// ===========================================================================
+(function componentSizeHonesty() {
+  console.log('== Размеры компонентов: цифра в UI сходится с реальным vendor ==');
+  const sync = require(path.join(ROOT, 'tools', 'sync-sizes.js'));
+  // Карта раскладки vendor на ЭТОЙ машине. darwin-числа заполняет тот же скрипт,
+  // запущенный на маке, — угадывать их отсюда нельзя (артефакты другие).
+  const PLATFORM = process.platform === 'darwin' ? 'darwin' : 'win32';
+  const all = [];
+  (components.groups || []).forEach((g) => (g.components || []).forEach((c) => all.push(c)));
+
+  // Форматирование берём ИЗ app.js, а не переписываем: иначе тест сторожил бы свою
+  // копию правил округления, а не ту, что видит человек.
+  function fmtBytesRuFromApp() {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const i = src.indexOf('function fmtBytesRu');
+    assert(i !== -1, 'в app.js пропала fmtBytesRu — некому форматировать число');
+    const open = src.indexOf('{', i);
+    let depth = 0, end = -1;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) { end = k + 1; break; } }
+    }
+    assert(end !== -1, 'не нашёл конец fmtBytesRu');
+    // Тот же приём, что и у остальных renderer-тестов: кусок app.js исполняется в vm,
+    // объявление функции становится свойством контекста.
+    const sandbox = {};
+    require('vm').runInNewContext(src.slice(i, end), sandbox);
+    const fn = sandbox.fmtBytesRu;
+    assert(typeof fn === 'function', 'fmtBytesRu не выполнилась в vm');
+    assert.strictEqual(fn(1024 * 1024), '1 МБ', 'вырезанная fmtBytesRu считает как ожидается');
+    return fn;
+  }
+
+  // ---- Структурные инварианты: работают ВЕЗДЕ, включая чекаут без vendor ----
+
+  ok('размеры: рукописного sizeHint не осталось (цифру нельзя вписать мимо генератора)', () => {
+    const left = all.filter((c) => Object.prototype.hasOwnProperty.call(c, 'sizeHint')).map((c) => c.id);
+    assert.deepStrictEqual(left, [],
+      'sizeHint вернулся у: ' + left.join(', ') + ' — числа ставит только tools/sync-sizes.js');
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    assert(!/\bc\.sizeHint\b/.test(app), 'renderer снова читает sizeHint — поле умерло, читать нечего');
+  });
+
+  ok('размеры: число есть ТОЛЬКО у компонентов с вшитым артефактом (ничего не выдумано)', () => {
+    for (const c of all) {
+      if (!c.sizeBytes) continue;
+      const mapped = !!((sync.VENDOR_PARTS.win32 || {})[c.id] || (sync.VENDOR_PARTS.darwin || {})[c.id]);
+      assert(mapped, 'у «' + c.id + '» есть sizeBytes, но вшитых файлов в карте vendor нет — откуда цифра?');
+      assert(!Object.prototype.hasOwnProperty.call(sync.NO_BUNDLED_PAYLOAD, c.id),
+        '«' + c.id + '» помечен как «своего артефакта нет», но у него стоит число');
+    }
+  });
+
+  ok('размеры: без числа компонент не остаётся немым — есть честная пометка', () => {
+    for (const c of all) {
+      if (c.hidden) continue;                                   // verify в UI не показывается
+      if (c.sizeBytes && Object.keys(c.sizeBytes).length) continue;
+      const n = c.sizeNote;
+      const noteOk = (typeof n === 'string' && n.length > 0)
+        || (n && typeof n === 'object' && Object.keys(n).length > 0);
+      assert(noteOk, 'у «' + c.id + '» нет ни числа, ни пометки: человек увидит пустоту без объяснения');
+    }
+  });
+
+  ok('размеры: sizeBytes — целые положительные байты под известные платформы', () => {
+    const known = new Set(Object.keys(sync.VENDOR_PARTS));
+    for (const c of all) {
+      if (!c.sizeBytes) continue;
+      assert(typeof c.sizeBytes === 'object' && !Array.isArray(c.sizeBytes), '«' + c.id + '»: sizeBytes должен быть объектом по платформам');
+      for (const [p, v] of Object.entries(c.sizeBytes)) {
+        assert(known.has(p), '«' + c.id + '»: неизвестная платформа ' + p);
+        assert(Number.isInteger(v) && v > 0, '«' + c.id + '»/' + p + ': не целое положительное число байт: ' + v);
+      }
+      // Одно число на две ОС физически не бывает верным (vscode: win 221,6 МиБ vs
+      // mac 520,1 МиБ) — платформенный ключ обязателен, «общего» размера нет.
+      assert(!Object.prototype.hasOwnProperty.call(c.sizeBytes, 'all'),
+        '«' + c.id + '»: размер не бывает общим для всех ОС — артефакты разные');
+    }
+  });
+
+  ok('размеры: новый компонент не проскочит без истории про размер', () => {
+    const unknown = all.filter((c) => !c.hidden
+      && !(sync.VENDOR_PARTS.win32 || {})[c.id]
+      && !(sync.VENDOR_PARTS.darwin || {})[c.id]
+      && !Object.prototype.hasOwnProperty.call(sync.NO_BUNDLED_PAYLOAD, c.id)).map((c) => c.id);
+    assert.deepStrictEqual(unknown, [],
+      'не объявлены в tools/sync-sizes.js (ни артефакта, ни причины его отсутствия): ' + unknown.join(', '));
+  });
+
+  ok('окно «что попадёт на мой ПК»: единица измерения названа словами, заголовок честен в офлайне', () => {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    assert(/function componentSizeBytes/.test(app), 'число берётся из sizeBytes/реестра, а не из строки');
+    assert(/внутри установщика/.test(app), 'сказано, что цифра — вес дистрибутива внутри установщика');
+    assert(/занимает на диске больше/.test(app), 'сказано, что это НЕ место на диске после установки');
+    assert(/Что попадёт на мой ПК/.test(app), 'в офлайн-издании заголовок не обещает несуществующую загрузку');
+    assert(/Что скачается на мой ПК/.test(app), 'в lite-издании заголовок по-прежнему про загрузку');
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+    assert(!/Что скачается на мой ПК/.test(html),
+      'статичная подпись кнопки снова обещает загрузку — в офлайне это неправда, подпись ставит app.js по изданию');
+  });
+
+  // ---- Сверка с реальным vendor ----
+
+  // Тот же признак «полный офлайн-vendor рядом», что и у main.js vendorAvailable():
+  // config-pack везёт ТОЛЬКО полная офлайн-раскладка. При ней пропавший файл — это
+  // дрейф (провал), а на lite/чистом чекауте — законное «мерить нечего» (пропуск).
+  const FULL_VENDOR = (() => { try { return fs.existsSync(path.join(sync.VENDOR, 'config-pack')); } catch (e) { return false; } })();
+  const HAS_VENDOR = (() => { try { return sync.vendorPresent(PLATFORM); } catch (e) { return false; } })();
+
+  // Часть считается «дешёвой», если все её файлы — файлы, а не каталоги: statSync по
+  // ним мгновенен, обход каталога на Windows — нет.
+  function partsAreFiles(id) {
+    const parts = (sync.VENDOR_PARTS[PLATFORM] || {})[id] || [];
+    for (const raw of parts) {
+      const spec = (typeof raw === 'string') ? { rel: raw } : raw;
+      const rels = spec.glob ? sync.expandGlob(spec.glob) : [spec.rel];
+      if (!rels.length) return false;
+      for (const rel of rels) {
+        let st;
+        try { st = fs.statSync(path.join(sync.VENDOR, rel)); } catch (e) { return false; }
+        if (st.isDirectory()) return false;
+      }
+    }
+    return true;
+  }
+
+  const cheapIds = [], deepIds = [];
+  for (const c of all) {
+    if (!(sync.VENDOR_PARTS[PLATFORM] || {})[c.id]) continue;
+    (partsAreFiles(c.id) ? cheapIds : deepIds).push(c.id);
+  }
+
+  // Сравнение «глазами человека»: разошлась надпись или расхождение > 1%.
+  function compare(id, stored, measured, fmt) {
+    if (stored === measured) return null;
+    const shown = fmt(stored), real = fmt(measured);
+    const drift = Math.abs(measured - stored) / Math.max(1, measured);
+    if (shown === real && drift <= 0.01) return null;
+    return id + ': в окне «~' + shown + '», на диске «~' + real + '» ('
+      + stored + ' ↔ ' + measured + ' Б, ' + (drift * 100).toFixed(1) + '%)';
+  }
+
+  // perMs — бюджет НА КАЖДЫЙ компонент, а не общий: иначе один медленный каталог
+  // (config-pack ≈ 90 с) съедает весь бюджет и уносит в пропуск даже те, что меряются
+  // за 30 мс (uv, mascot). 0 = без ограничения.
+  function checkLane(ids, perMs) {
+    const bad = [], unchecked = [], timedOut = [];
+    const fmt = fmtBytesRuFromApp();
+    for (const id of ids) {
+      const comp = all.find((c) => c.id === id);
+      const stored = comp && comp.sizeBytes && comp.sizeBytes[PLATFORM];
+      const r = sync.measureComponent(id, PLATFORM, perMs ? Date.now() + perMs : null);
+      if (r.timeout) { timedOut.push(id); continue; }
+      if (r.missing) {
+        // Полный офлайн-vendor и файла нет — это уже дрейф, а не «нечего мерить».
+        if (FULL_VENDOR) bad.push(id + ': в vendor нет ' + r.missing.join(', '));
+        else unchecked.push(id);
+        continue;
+      }
+      if (typeof stored !== 'number') {
+        bad.push(id + ': файлы в vendor есть (' + sync.fmtMiB(r.bytes) + '), а числа в components.json нет');
+        continue;
+      }
+      const problem = compare(id, stored, r.bytes, fmt);
+      if (problem) bad.push(problem);
+    }
+    return { bad, unchecked, timedOut };
+  }
+
+  ok('размеры: файловые компоненты (setup.exe/msi/vsix/zip) сходятся с vendor', () => {
+    if (!HAS_VENDOR) SKIP('vendor не развёрнут (чистая машина / CI) — сверять не с чем');
+    if (!cheapIds.length) SKIP('в этой раскладке vendor нет файловых компонентов');
+    const r = checkLane(cheapIds, 0);
+    assert(!r.bad.length, 'цифра разошлась с vendor:\n    ' + r.bad.join('\n    ')
+      + '\n    Почини одной командой: node tools/sync-sizes.js');
+    if (r.unchecked.length === cheapIds.length) SKIP('ни одного файла нет на месте (lite-раскладка vendor)');
+  });
+
+  ok('размеры: каталожные компоненты (npm-cache, config-pack, nomad-src…) сходятся с vendor', () => {
+    if (!HAS_VENDOR) SKIP('vendor не развёрнут (чистая машина / CI) — сверять не с чем');
+    if (!deepIds.length) SKIP('в этой раскладке vendor нет каталожных компонентов');
+    // Бюджет НА КОМПОНЕНТ: обход каталогов упирается в антивирус (config-pack ≈ 90 с,
+    // nomad-src ≈ 30 с). По умолчанию держим тест быстрым и честно перечисляем, что не
+    // успели; полная сверка без ограничения — HM_SIZES_DEEP=1.
+    const budget = process.env.HM_SIZES_DEEP ? 0 : Number(process.env.HM_SIZES_BUDGET_MS || 8000);
+
+    // ПОРЯДОК ВАЖЕН, И ВОТ ПОЧЕМУ. Бюджет на загруженной машине выбирается не полностью,
+    // часть компонентов уходит в ⏭. Раньше порядок был произвольным (как в каталоге), и
+    // пропускались в том числе claude (1,01 ГиБ), config (196 МиБ) и nomad — ровно те
+    // числа, соврать в которых дороже всего: их видит человек в попапе «что скачается».
+    // Получалось, что обычный прогон молча не проверял главное. Сортируем по УБЫВАНИЮ
+    // заявленного размера: если бюджета не хватит, пропустится мелочь, а не гигабайт.
+    const claimed = (id) => {
+      const c = all.find((x) => x.id === id);
+      return (c && c.sizeBytes && c.sizeBytes[PLATFORM]) || 0;
+    };
+    const ordered = deepIds.slice().sort((a, b) => claimed(b) - claimed(a));
+    const r = checkLane(ordered, budget);
+    // Сначала провал по существу — он важнее любого пропуска по времени.
+    assert(!r.bad.length, 'цифра разошлась с vendor:\n    ' + r.bad.join('\n    ')
+      + '\n    Почини одной командой: node tools/sync-sizes.js');
+    if (r.timedOut.length) {
+      SKIP('не уложились в бюджет ' + budget + ' мс на компонент: ' + r.timedOut.join(', ')
+        + ' — полная сверка: HM_SIZES_DEEP=1 node test/run-tests.js');
+    }
+    if (r.unchecked.length === deepIds.length) SKIP('ни одного каталога нет на месте (lite-раскладка vendor)');
+  });
+})();
+
+// ===========================================================================
+// Предполётные гейты сборки (tools/preflight-build.js + хук beforePack).
+//
+// ЗАЧЕМ ЭТИ ТЕСТЫ. Дыра, которую они стерегут, тихая по своей природе: собрать exe
+// со СТАРЫМ снапшотом конфиг-пака можно было мимо npm-скрипта (npx electron-builder
+// --win), и в артефакте не оставалось никакого следа — ни ошибки, ни записи. Поэтому
+// проверяем ДВЕ вещи: (1) гейт вообще подключён к сборке ТАК, что его нельзя обойти;
+// (2) его логика действительно ловит устаревший/подменённый/непроверяемый снапшот, а
+// не «зеленеет» на любом входе.
+// ===========================================================================
+(function preflightGateTests() {
+  console.log('== Предполётные гейты сборки: свежесть config-pack + потолок makensis ==');
+
+  const pre = require(path.join(ROOT, 'tools', 'preflight-build.js'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+  ok('гейт подключён так, что его нельзя обойти: build.beforePack -> tools/before-pack.js', () => {
+    // Строка в npm-скрипте защищает только того, кто собирает этой командой. Хук
+    // beforePack вызывается самим electron-builder при ЛЮБОМ способе запуска.
+    assert.strictEqual(pkg.build.beforePack, 'tools/before-pack.js',
+      'в package.json build.beforePack должен указывать на tools/before-pack.js');
+    const hookPath = path.join(ROOT, 'tools', 'before-pack.js');
+    assert(fs.existsSync(hookPath), 'файл хука tools/before-pack.js должен существовать');
+    const hook = require(hookPath);
+    assert(typeof hook.default === 'function', 'хук обязан экспортировать функцию (exports.default)');
+  });
+
+  ok('dist/dist:win зовут fetch:config И preflight ДО electron-builder', () => {
+    for (const name of ['dist', 'dist:win']) {
+      const s = String(pkg.scripts[name] || '');
+      assert(/fetch:config/.test(s), name + ': пропал вызов fetch:config');
+      assert(/preflight/.test(s), name + ': пропал вызов preflight');
+      assertOrder(s, 'preflight', 'electron-builder', name + ': preflight обязан идти ДО electron-builder');
+      assertOrder(s, 'fetch:config', 'preflight', name + ': fetch:config обязан идти ДО preflight');
+    }
+    assert(/preflight/.test(String(pkg.scripts['dist:mac'] || '')), 'dist:mac: пропал вызов preflight');
+  });
+
+  // --- логика гейта свежести (чистая функция: ни диска, ни сети) ---
+  const CFG = { configRepoUrl: 'https://github.com/JHamidun/claude-code-config-pack', configRepoBranch: 'main' };
+  const SHA_A = 'a'.repeat(40);
+  const SHA_B = 'b'.repeat(40);
+  const stampOf = (over) => Object.assign({
+    repo: CFG.configRepoUrl, ref: 'main', commit: SHA_A, committedAt: '2026-08-01T00:00:00Z', skills: 200,
+  }, over || {});
+  const ev = (o) => pre.evaluateConfigFreshness(Object.assign({ cfg: CFG }, o));
+
+  ok('свежесть: нет штампа .hamidun-config-pack.json -> СТОП (что в exe — недоказуемо)', () => {
+    const r = ev({ stamp: null });
+    assert.strictEqual(r.level, 'fail', 'отсутствие штампа обязано быть провалом, а не предупреждением');
+    assert(/fetch:config/.test(r.lines.join(' ')), 'в тексте должно быть, чем чинить');
+  });
+
+  ok('свежесть: вшитый коммит == origin/main -> OK', () => {
+    const r = ev({ stamp: stampOf(), remoteHead: { ok: true, sha: SHA_A } });
+    assert.strictEqual(r.level, 'ok', 'совпадение с HEAD — это норма: ' + r.lines.join(' | '));
+  });
+
+  ok('свежесть: origin ушёл вперёд -> СТОП (это и есть «старый снапшот»)', () => {
+    const r = ev({ stamp: stampOf(), remoteHead: { ok: true, sha: SHA_B } });
+    assert.strictEqual(r.level, 'fail', 'расхождение с HEAD обязано валить сборку');
+    assert(/УСТАРЕЛ/.test(r.lines.join(' ')), 'формулировка должна называть проблему словами');
+  });
+
+  ok('свежесть: чужой репозиторий или чужая ветка в штампе -> СТОП', () => {
+    assert.strictEqual(ev({ stamp: stampOf({ repo: 'https://github.com/someone/else' }), remoteHead: { ok: true, sha: SHA_A } }).level,
+      'fail', 'пак из другого репозитория не должен уезжать молча');
+    assert.strictEqual(ev({ stamp: stampOf({ ref: 'v38' }), remoteHead: { ok: true, sha: SHA_A } }).level,
+      'fail', 'вшита не та ветка/тег — провал');
+  });
+
+  ok('свежесть: битый sha в штампе -> СТОП (снапшот не идентифицируется)', () => {
+    assert.strictEqual(ev({ stamp: stampOf({ commit: 'not-a-sha' }), remoteHead: { ok: true, sha: SHA_A } }).level, 'fail');
+  });
+
+  ok('свежесть: пин по sha сверяется с пином, а не с HEAD', () => {
+    const cfg = { configRepoUrl: CFG.configRepoUrl, configRepoRef: SHA_A };
+    const good = pre.evaluateConfigFreshness({ cfg, stamp: stampOf({ ref: SHA_A }), remoteHead: { ok: true, sha: SHA_B } });
+    assert.strictEqual(good.level, 'ok', 'закреплённый по sha пак не обязан догонять HEAD');
+    const bad = pre.evaluateConfigFreshness({ cfg, stamp: stampOf({ commit: SHA_B, ref: SHA_A }), remoteHead: null });
+    assert.strictEqual(bad.level, 'fail', 'пин не совпал со вшитым — провал');
+  });
+
+  ok('свежесть: origin недоступен -> СТОП; с HM_ALLOW_OFFLINE_BUILD=1 -> предупреждение', () => {
+    const off = ev({ stamp: stampOf(), remoteHead: { ok: false, error: 'нет сети' } });
+    assert.strictEqual(off.level, 'fail', 'недоказуемая свежесть по умолчанию = провал');
+    const allowed = ev({ stamp: stampOf(), remoteHead: { ok: false, error: 'нет сети' }, allowOffline: true });
+    assert.strictEqual(allowed.level, 'warn', 'осознанный офлайн-выключатель понижает до предупреждения');
+    assert(/ВНИМАНИЕ/.test(allowed.lines.join(' ')), 'выключатель обязан оставлять след в логе сборки');
+  });
+
+  ok('свежесть: HM_ALLOW_STALE_CONFIG понижает провал, но НЕ прячет его', () => {
+    const soft = ev({ stamp: stampOf(), remoteHead: { ok: true, sha: SHA_B }, allowStale: true });
+    assert.strictEqual(soft.level, 'warn');
+    assert(/ВНИМАНИЕ/.test(soft.lines.join(' ')), 'понижение обязано быть видно в логе');
+    assert(/УСТАРЕЛ/.test(soft.lines.join(' ')), 'сама причина из текста НЕ исчезает');
+  });
+
+  // --- потолок makensis ---
+  ok('размер: фильтр extraResources читается из package.json и реально исключает', () => {
+    const f = pre.winVendorFilter(pkg).filter;
+    assert(f('apps/git-setup.exe'), 'обычный артефакт должен попадать в сборку');
+    assert(f('npm-cache/_cacache/content-v2/sha512/aa/bb/cc'), 'вложенность любой глубины включается');
+    assert(!f('apps/chatgpt.vsix'), 'chatgpt.vsix исключён осознанно (лимит makensis)');
+    assert(!f('playwright-browsers/chromium-1234/chrome.exe'), 'playwright-browsers исключены');
+    assert(!f('playwright-browsers-linux/x/y'), 'playwright-browsers-* исключены');
+  });
+
+  ok('размер: прогноз против потолка 2 ГиБ различает норму, предупреждение и провал', () => {
+    const MIB_ = 1024 * 1024;
+    const small = pre.projectExeSize(1000 * MIB_);
+    assert(!small.over && !small.warn, '1000 МиБ vendor — заведомо норма');
+    // Граница предупреждения: 90% от 2048 МиБ за вычетом оболочки Electron.
+    const nearBytes = Math.ceil((pre.NSIS_LIMIT_BYTES * pre.WARN_RATIO - pre.ELECTRON_BASE_BYTES) / pre.VENDOR_COMPRESSION) + MIB_;
+    const near = pre.projectExeSize(nearBytes);
+    assert(near.warn && !near.over, 'у самой границы обязано быть предупреждение, а не тишина');
+    const over = pre.projectExeSize(3000 * MIB_);
+    assert(over.over, '3000 МиБ vendor обязаны валить гейт');
+    assert(over.headroom < 0, 'отрицательный запас должен быть виден числом');
+  });
+
+  ok('размер: измерение vendor согласовано с фильтром (исключённое не считается)', () => {
+    const m = pre.packedVendorBytes({ pkg });
+    if (!m.exists) SKIP('vendor не развёрнут — мерить нечего');
+    assert(m.bytes > 0, 'что-то в vendor обязано попадать в сборку');
+    assert(!Object.prototype.hasOwnProperty.call(m.perTop, 'playwright-browsers'),
+      'playwright-browsers не должны попадать в зачёт размера сборки');
+    const chatgpt = path.join(ROOT, 'vendor', 'apps', 'chatgpt.vsix');
+    if (fs.existsSync(chatgpt)) {
+      assert(m.excludedBytes >= fs.statSync(chatgpt).size,
+        'исключённый chatgpt.vsix обязан попасть в «исключено фильтром», а не в зачёт');
+    }
+  });
+
+  ok('release-check загружается и знает про законные исключения реестра (uv/course)', () => {
+    const rc = require(path.join(ROOT, 'tools', 'release-check.js'));
+    assert(rc.NO_REGISTRY_OK instanceof Set, 'release-check экспортирует список законных исключений');
+    assert(rc.NO_REGISTRY_OK.has('uv'), 'uv — bundled-only (main.js BUNDLED_ONLY), запись в реестре ему не обязательна');
+    assert(rc.NO_REGISTRY_OK.has('course'), 'курс вшит и в lite (build-lite.js LITE_KEEP_*)');
+    assert(typeof rc.checkRegistry === 'function', 'сверка реестра с components.json экспортируется');
+  });
+})();
+
+
+// ===========================================================================
+// ЧИСТКА ОФЛАЙН-КЕША npm ОТ НАКОПЛЕННЫХ ВЕРСИЙ (tools/prune-npm-cache.js).
+//
+// ЗАЧЕМ ЭТИ ТЕСТЫ. `npm install --cache` ДОБАВЛЯЕТ версии в кеш и никогда не удаляет
+// старые: каждый релиз Claude Code оставлял в vendor/npm-cache предыдущий архив
+// (~80 МиБ) навсегда. К 11.08.2026 накопилось 13 версий (1005 МиБ вместо 84) и
+// прогноз portable-exe ушёл на 112% от потолка 32-битного makensis — офлайн-сборка
+// Windows перестала собираться. Разовая чистка лечит симптом, поэтому стерегутся
+// ДВЕ вещи: (1) шаг чистки реально вызывается из ОБОИХ fetch-скриптов и не может
+// молча пропасть; (2) прунер безопасен — он не трогает packument'ы, вычисляет набор
+// платформ из метаданных (а не из зашитого win32-x64, иначе на маке он вычистил бы
+// ровно то единственное, что там нужно) и ОТКАЗЫВАЕТСЯ чистить повреждённый кеш.
+// ===========================================================================
+(function npmCachePruneTests() {
+  console.log('== Чистка офлайн-кеша npm: накопление версий не возвращается ==');
+
+  const prune = require(path.join(ROOT, 'tools', 'prune-npm-cache.js'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+  ok('чистка вызывается из ОБОИХ fetch-скриптов (иначе накопление вернётся через 5-6 релизов)', () => {
+    const win = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor.ps1'), 'utf8');
+    assert(/prune-npm-cache\.js/.test(win), 'fetch-vendor.ps1: пропал вызов prune-npm-cache.js');
+    assertOrder(win, 'npm install \'@anthropic-ai/claude-code\'', 'prune-npm-cache.js',
+      'fetch-vendor.ps1: чистка обязана идти ПОСЛЕ наполнения кеша');
+    const mac = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8');
+    assert(/prune-npm-cache\.js/.test(mac), 'fetch-vendor-mac.sh: пропал вызов prune-npm-cache.js');
+    // На маке архивы ОБЕИХ darwin-арх кладутся через `npm cache add` ПОСЛЕ npm install —
+    // прунер обязан идти после них, иначе он не увидит, что их надо сохранить.
+    assertOrder(mac, 'npm cache add', 'prune-npm-cache.js',
+      'fetch-vendor-mac.sh: чистка обязана идти ПОСЛЕ докладки платформенных архивов обеих арх');
+    assert(/"prune:cache"/.test(JSON.stringify(pkg.scripts)) || pkg.scripts['prune:cache'],
+      'package.json: нужен скрипт prune:cache — на него ссылаются подсказки preflight');
+  });
+
+  ok('прунер: набор платформ берётся из метаданных, а НЕ зашит на win32-x64', () => {
+    // Зашитый win32-x64 вычистил бы на macOS ровно darwin-arm64/darwin-x64 — то
+    // единственное, ради чего там кеш и нужен. Проверяем на реальном кеше проекта.
+    const cache = prune.readCache(prune.DEFAULT_CACHE);
+    if (!cache.exists) return; // кеша нет (чистое дерево) — проверять нечего
+    const { keep, rootVersion } = prune.resolveKeep(cache, {});
+    assert(rootVersion, 'нужная версия должна вычисляться из dist-tags закешированного packument\'а');
+    const names = Object.keys(keep);
+    for (const plat of ['darwin-arm64', 'darwin-x64', 'win32-x64']) {
+      assert(names.some((n) => n === prune.ROOT_PKG + '-' + plat),
+        'в KEEP обязан быть платформенный пакет ' + plat + ' (иначе прунер небезопасен на этой платформе)');
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'tools', 'prune-npm-cache.js'), 'utf8');
+    assert(!/keep[^\n]*=[^\n]*['"]win32-x64['"]/.test(src), 'платформа не должна быть зашита в KEEP константой');
+  });
+
+  ok('прунер удаляет ТОЛЬКО архивы: packument\'ы (в т.ч. чужих платформ) неприкосновенны', () => {
+    const cache = prune.readCache(prune.DEFAULT_CACHE);
+    if (!cache.exists) return;
+    const plan = prune.planPrune(cache, {});
+    for (const e of plan.removeEntries) {
+      assert(e.tarball, 'под удаление попала НЕ-архивная запись (' + e.key + ') — packument\'ы трогать нельзя');
+    }
+  });
+
+  ok('прунер ОТКАЗЫВАЕТСЯ чистить, если блоба оставляемой версии нет (повреждённый кеш)', () => {
+    // Молча удалить 12 версий и оставить тринадцатую, которой физически нет, — это
+    // отказ офлайн-установки НА МАШИНЕ ПОЛЬЗОВАТЕЛЯ. Лучше не почистить.
+    const cache = prune.readCache(prune.DEFAULT_CACHE);
+    if (!cache.exists) return;
+    const name = prune.ROOT_PKG + '-win32-x64';
+    const versions = Object.keys(cache.tarballs[name] || {});
+    if (!versions.length) return;
+    // Синтетика: подкладываем вторую (несуществующую) версию + ломаем блоб оставляемой.
+    const fake = JSON.parse(JSON.stringify(cache));
+    fake.tarballs = Object.assign({}, cache.tarballs);
+    fake.conRoot = path.join(os.tmpdir(), 'hm-no-such-content-' + Date.now());
+    fake.tarballs[name] = Object.assign({ '0.0.1': [{ key: 'x', integrity: 'sha512-AAAA', size: 1, tarball: { name, version: '0.0.1' } }] }, cache.tarballs[name]);
+    const plan = prune.planPrune(fake, {});
+    assert(plan.blockers.length > 0, 'при недостижимом блобе оставляемой версии прунер обязан ОТКАЗАТЬСЯ, а не чистить');
+  });
+
+  ok('preflight предупреждает о накоплении версий и даёт точную команду чистки', () => {
+    const pre = require(path.join(ROOT, 'tools', 'preflight-build.js'));
+    assert(typeof pre.checkNpmCacheDupes === 'function', 'preflight обязан экспортировать проверку накопления');
+    // Синтетический «грязный» кеш проверяем через duplicateVersions — на реальном
+    // кеше дублей быть не должно, и это отдельное утверждение.
+    const cache = prune.readCache(prune.DEFAULT_CACHE);
+    if (cache.exists) {
+      const dupes = prune.duplicateVersions(cache);
+      assert.strictEqual(dupes.length, 0,
+        'в vendor/npm-cache снова накопились версии (' + dupes.map((d) => d.name + ':' + d.count).join(', ') + ') — почини: npm run prune:cache');
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'tools', 'preflight-build.js'), 'utf8');
+    assert(/npm run prune:cache/.test(src), 'предупреждение обязано называть КОМАНДУ чистки, а не «почини кеш»');
+  });
+})();
+
+
+// ===========================================================================
+// macOS ARCH-ПАРИТЕТ: у каждой поддерживаемой архитектуры есть свой артефакт
+// ИЛИ явно записано, что компонент её не поддерживает.
+// ===========================================================================
+// Живой баг 07.08.2026. Ученик на Intel Mac (x86_64): «Готово 1 · Ошибок 4 ·
+// Пропущено 2». Ни один тест этого не поймал, потому что все проверки спрашивали
+// «файл в сборке есть?», а надо было спрашивать «файл под ЭТУ арх в сборке есть?».
+// Сборочный раннер GitHub macos-latest — Apple Silicon, и всё, что тянется «под
+// текущую платформу» (npm optionalDependencies, pip wheels, playwright), уезжает
+// в vendor только в arm64-варианте. Файлы при этом НА МЕСТЕ — просто не те.
+//
+// Источник правды — mac-arch-support.json (декларация на каждый darwin-компонент).
+// Тест сверяет декларацию с четырьмя независимыми реальностями:
+//   (1) components.json  — ни один darwin-компонент не забыт в декларации;
+//   (2) scripts/macos/*.sh — каждый $(arch_tag)-шаблон в скриптах ОБЪЯВЛЕН;
+//   (3) tools/fetch-vendor-mac.sh — у perArch-артефактов гейт на ОБА арх-файла;
+//   (4) vendor на диске (если развёрнут) — оба файла реально лежат.
+// Декларация без сверки была бы бумажкой; сверка без декларации не отличала бы
+// «универсальный файл» от «забыли вторую арх».
+(function macArchParityTests() {
+  console.log('== macOS arch-паритет: артефакт под каждую арх ИЛИ явное «не поддерживается» ==');
+
+  const ARCH_PATH = path.join(ROOT, 'mac-arch-support.json');
+  const MACDIR = path.join(ROOT, 'scripts', 'macos');
+  const readArch = () => JSON.parse(fs.readFileSync(ARCH_PATH, 'utf8'));
+  const KINDS = ['perArch', 'universal', 'npmPerArch', 'resolvedAtInstall', 'unsupported'];
+
+  ok('mac-arch-support.json: валиден, объявлены обе арх, у каждого компонента известный kind', () => {
+    const A = readArch();
+    assert(Array.isArray(A.arches) && A.arches.indexOf('arm64') !== -1 && A.arches.indexOf('x64') !== -1,
+      'arches обязан перечислять arm64 и x64 — это и есть «поддерживаемые архитектуры»');
+    assert(A.components && typeof A.components === 'object', 'нет секции components');
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      assert(KINDS.indexOf(c.kind) !== -1, id + ': неизвестный kind «' + c.kind + '» (' + KINDS.join('|') + ')');
+      if (c.kind === 'perArch') {
+        assert(Array.isArray(c.artifacts) && c.artifacts.length, id + ': perArch без artifacts');
+        c.artifacts.forEach((t) => assert(t.indexOf('{arch}') !== -1,
+          id + ': шаблон «' + t + '» без {arch} — это не perArch'));
+      }
+      if (c.kind === 'npmPerArch') {
+        assert(Array.isArray(c.npmPackages) && c.npmPackages.length, id + ': npmPerArch без npmPackages');
+        c.npmPackages.forEach((t) => assert(t.indexOf('{arch}') !== -1, id + ': npm-пакет «' + t + '» без {arch}'));
+      }
+      // Самые опасные виды обязаны нести человеческое объяснение — иначе через
+      // полгода никто не вспомнит, почему компонент «универсальный», и Intel-дыра
+      // повторится молча.
+      if (c.kind === 'universal') assert(c.why && c.why.length > 10, id + ': universal без внятного why');
+      if (c.kind === 'resolvedAtInstall') assert(c.risk && c.risk.length > 10,
+        id + ': resolvedAtInstall без описания risk — это самый опасный вид (выглядит универсальным, работает на одной арх)');
+      if (c.kind === 'unsupported') {
+        assert(Array.isArray(c.unsupportedArches) && c.unsupportedArches.length,
+          id + ': unsupported без списка unsupportedArches');
+        assert(c.reason && c.reason.length > 10, id + ': unsupported без человеческой причины (reason)');
+      }
+    });
+  });
+
+  ok('components.json → декларация: НИ ОДИН darwin-компонент не забыт', () => {
+    const A = readArch();
+    const missing = [];
+    components.groups.forEach((g) => g.components.forEach((c) => {
+      const plats = c.platforms;
+      const onMac = !plats || plats.indexOf('darwin') !== -1;
+      if (onMac && !A.components[c.id]) missing.push(c.id);
+    }));
+    assert(!missing.length,
+      'не объявлены в mac-arch-support.json: ' + missing.join(', ')
+      + '\n    Впиши каждый: perArch / universal / npmPerArch / resolvedAtInstall / unsupported.'
+      + '\n    Молчаливый пропуск — ровно то, из-за чего Intel-баг дожил до ученика.');
+  });
+
+  ok('scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json', () => {
+    const A = readArch();
+    // Все объявленные perArch-шаблоны → нормализованная форма по basename.
+    const declared = {};
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      (c.artifacts || []).forEach((t) => {
+        if (t.indexOf('{arch}') !== -1) declared[t.split('/').pop()] = id;
+      });
+      // perArchExtras — арх-специфичные довески у компонента, чей ГЛАВНЫЙ артефакт
+      // универсален (у vscode это оба vsix: панель Claude и панель Codex).
+      (c.perArchExtras || []).forEach((e) => { declared[String(e.template).split('/').pop()] = id; });
+    });
+    // Ищем в скриптах имена файлов, склеенные с $(arch_tag): "uv-macos-$(arch_tag).tar.gz",
+    // "claude-code-$(arch_tag).vsix", "handy-macos-$(arch_tag).dmg", …
+    const RE = /([A-Za-z0-9_.-]*)\$\(arch_tag\)([A-Za-z0-9_.-]*)/g;
+    const unknown = [];
+    fs.readdirSync(MACDIR).filter((f) => f.endsWith('.sh')).forEach((f) => {
+      const src = fs.readFileSync(path.join(MACDIR, f), 'utf8');
+      let m;
+      RE.lastIndex = 0;
+      while ((m = RE.exec(src)) !== null) {
+        const pre = m[1], suf = m[2];
+        // Интересуют только ИМЕНА ФАЙЛОВ (есть расширение), а не каталоги вида
+        // playwright-browsers-$(arch_tag) и не голое $(arch_tag) в сообщениях.
+        if (!/\.[A-Za-z0-9]+$/.test(suf)) continue;
+        const name = pre + '{arch}' + suf;
+        if (!declared[name]) unknown.push(f + ': ' + name);
+      }
+    });
+    assert(!unknown.length,
+      'скрипт берёт арх-специфичный артефакт, которого нет в декларации:\n    ' + unknown.join('\n    ')
+      + '\n    Добавь его в mac-arch-support.json как perArch — иначе никто не проверит,'
+      + '\n    что сборка кладёт ОБА варианта, и на одной из арх компонент молча отвалится.');
+  });
+
+  ok('tools/fetch-vendor-mac.sh: у каждого perArch-артефакта гейт на ОБЕ арх', () => {
+    const A = readArch();
+    const fv = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8');
+    const holes = [];
+    // Гейт полноты = упоминание имени файла в chk_file/FATAL-блоках. Это единственное
+    // место, где отсутствие артефакта становится видимым НА СБОРКЕ, а не у ученика.
+    // Исключение только одно и оно должно быть ЗАПИСАНО: артефакт с честным
+    // онлайн-фолбэком помечается optional + reason. «Забыли» и «сознательно не
+    // гейтим» обязаны выглядеть по-разному — иначе через полгода не отличить.
+    const gateTemplates = (id, c) => {
+      const out = [];
+      if (c.kind === 'perArch') (c.artifacts || []).forEach((t) => out.push({ tpl: t, optional: false, reason: '' }));
+      (c.perArchExtras || []).forEach((e) => out.push({
+        tpl: String(e.template), optional: !!e.optional, reason: String(e.reason || ''),
+      }));
+      return out;
+    };
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      gateTemplates(id, c).forEach((item) => {
+        if (item.optional) {
+          assert(item.reason.length > 20,
+            id + ': артефакт «' + item.tpl + '» помечен optional без внятной причины — '
+            + 'так «сознательно не гейтим» не отличить от «забыли»');
+          return;
+        }
+        A.arches.forEach((arch) => {
+          const name = item.tpl.split('/').pop().replace('{arch}', arch);
+          if (fv.indexOf(name) === -1) holes.push(id + ' → ' + name);
+        });
+      });
+    });
+    assert(!holes.length,
+      'сборка не проверяет наличие арх-варианта:\n    ' + holes.join('\n    ')
+      + '\n    Добавь chk_file на ОБА файла в tools/fetch-vendor-mac.sh.');
+  });
+
+  ok('tools/fetch-vendor-mac.sh: npm-кеш гейтится по АРХИВУ платформенного пакета обеих арх', () => {
+    const A = readArch();
+    const fv = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8');
+    const lib = fs.readFileSync(path.join(MACDIR, '_lib.sh'), 'utf8');
+    assert(/hm_npm_cache_has_tarball\(\)/.test(lib),
+      '_lib.sh: пропала hm_npm_cache_has_tarball — без неё «есть ли бинарь под эту арх» не отличить');
+    // Ключ архива в cacache всегда содержит "/<имя>/-/<имя>-", ключ метаданных — нет.
+    // Проверка по одному лишь имени пакета давала бы ЛОЖНОЕ «есть»: packument чужой
+    // платформы кешируется всегда. Ровно так дыра и пряталась.
+    assert(lib.indexOf('/$2/-/$2-') !== -1,
+      '_lib.sh: hm_npm_cache_has_tarball обязана искать ключ АРХИВА (/<имя>/-/<имя>-), а не имя пакета');
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      if (c.kind !== 'npmPerArch') return;
+      (c.npmPackages || []).forEach((tpl) => {
+        A.arches.forEach((arch) => {
+          const pkg = tpl.replace('{arch}', arch);
+          const bare = pkg.replace(/^@[^/]+\//, '');
+          assert(fv.indexOf(bare) !== -1 || fv.indexOf('claude-code-darwin-$CCA') !== -1,
+            id + ': сборка не кладёт/не проверяет платформенный пакет ' + pkg);
+        });
+      });
+    });
+    assert(/npm cache add/.test(fv),
+      'сборка обязана докладывать платформенные пакеты чужой арх через `npm cache add` — '
+      + '`npm install` на arm64-раннере кеширует .tgz только своей платформы');
+    assert(fv.indexOf('hm_npm_cache_has_tarball "$ROOT/vendor/npm-cache"') !== -1,
+      'в блоке полноты vendor нет проверки архива платформенного пакета — сборка снова сможет '
+      + 'отгрузить «офлайн»-издание, которое на Intel требует интернета');
+  });
+
+  ok('install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча', () => {
+    const lib = fs.readFileSync(path.join(MACDIR, '_lib.sh'), 'utf8');
+    assert(/hm_arch_note_missing\(\)/.test(lib), '_lib.sh: пропала hm_arch_note_missing');
+    assert(/hm_arch_unavailable\(\)/.test(lib), '_lib.sh: пропала hm_arch_unavailable');
+    assert(/hm_explain_build_failure\(\)/.test(lib), '_lib.sh: пропала hm_explain_build_failure');
+    // hm_arch_unavailable ОБЯЗАНА заканчиваться явным `return 0`: иначе её результатом
+    // станет код `[ -n "$2" ] && echo` (=1 при пустом втором аргументе), и вызов голым
+    // statement'ом под `set -e` убьёт установку ровно там, где мы успокаиваем человека.
+    const iUnav = lib.indexOf('hm_arch_unavailable() {');
+    const iEnd = lib.indexOf('\n}', iUnav);
+    assert(iUnav !== -1 && iEnd > iUnav && /return 0/.test(lib.slice(iUnav, iEnd)),
+      'hm_arch_unavailable без явного return 0 — под set -e это тихо убивает установку');
+    // Список «кто обязан объясниться» НЕ хардкодим — выводим из декларации: любой
+    // компонент, у которого арх-специфика есть (perArch / npmPerArch / perArchExtras),
+    // обязан уметь сказать про архитектуру словами. Хардкод устарел бы на первом же
+    // новом компоненте и молча перестал бы сторожить.
+    const A = readArch();
+    const mustExplain = [];
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      const archSpecific = c.kind === 'perArch' || c.kind === 'npmPerArch'
+        || (Array.isArray(c.perArchExtras) && c.perArchExtras.length);
+      if (!archSpecific || !c.script) return;
+      mustExplain.push(c.script);
+    });
+    assert(mustExplain.length >= 4,
+      'из декларации не выведено ни одного арх-специфичного скрипта — проверка выродилась');
+    mustExplain.forEach((rel) => {
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      assert(/hm_arch_note_missing|hm_arch_human|hm_arch_unavailable/.test(src),
+        rel + ': нет ни одного честного сообщения про архитектуру — при отсутствии арх-варианта '
+        + 'человек снова увидит «не подтвердилось» без причины');
+    });
+    // pydeps: главный урок Intel-бага — НЕ врать про сеть, когда дело в отсутствии
+    // готового пакета. Старый текст «Проверь сеть и повтори установку» обязан быть мёртв.
+    const pyd = fs.readFileSync(path.join(MACDIR, 'pydeps.sh'), 'utf8');
+    assert(/hm_explain_build_failure/.test(pyd),
+      'pydeps.sh: провал pip больше не объясняется человеку');
+    assert(pyd.indexOf('офлайн и онлайн). Проверь сеть') === -1,
+      'pydeps.sh: вернулся текст «Проверь сеть» на провал, у которого сеть ни при чём');
+  });
+
+  ok('vendor на диске: у perArch-артефактов лежат ОБА файла', () => {
+    const A = readArch();
+    const vroot = path.join(ROOT, 'vendor');
+    if (!fs.existsSync(vroot)) SKIP('vendor не развёрнут (чистая машина / CI)');
+    const holes = [];
+    let checked = 0;
+    Object.keys(A.components).forEach((id) => {
+      const c = A.components[id];
+      const tpls = (c.kind === 'perArch' ? (c.artifacts || []) : [])
+        .concat((c.perArchExtras || []).map((e) => String(e.template)));
+      tpls.forEach((tpl) => {
+        // Проверяем только те артефакты, где хоть один вариант уже лежит: иначе
+        // lite-раскладка (vendor без тяжёлых файлов) давала бы шум на ровном месте.
+        const paths = A.arches.map((a) => path.join(vroot, tpl.replace('{arch}', a)));
+        const present = paths.filter((p) => { try { return fs.statSync(p).size > 0; } catch (e) { return false; } });
+        if (!present.length) return;
+        checked++;
+        if (present.length !== paths.length) {
+          A.arches.forEach((a, i) => {
+            if (present.indexOf(paths[i]) === -1) holes.push(id + ': нет ' + tpl.replace('{arch}', a));
+          });
+        }
+      });
+    });
+    assert(!holes.length,
+      'в vendor есть вариант под одну арх и нет под другую:\n    ' + holes.join('\n    ')
+      + '\n    Именно так выглядит сборка, которая у половины учеников не встанет.');
+    if (!checked) SKIP('в этой раскладке vendor нет ни одного perArch-артефакта (lite)');
+  });
+})();
+
+// ===========================================================================
+// Человеческий перевод машинного провала (src/failure-explain.js)
+// ===========================================================================
+// У ученика на экране была простыня cargo/PyO3/openssl-sys, по которой он не мог
+// понять НИЧЕГО. Модуль переводит её в «что произошло / что делать». Тест сторожит
+// две вещи: (а) реальные строки из его лога опознаются; (б) причины не путаются —
+// «нет готовой версии» НЕ должно выглядеть как «проверь интернет», иначе человек
+// будет бесконечно жать «Повторить» на том, что повтором не чинится.
+(function failureExplainTests() {
+  console.log('== Человеческий перевод провала установки ==');
+  const FE = require(path.join(ROOT, 'src', 'failure-explain.js'));
+
+  // Дословный хвост лога ученика (Intel Mac, 07.08.2026).
+  const REAL_TAIL = [
+    'config-x86_64-apple-darwin-3.12-abi3.txt',
+    'PYO3_ENVIRONMENT_SIGNATURE="cpython-3.12-64bit"',
+    'PYO3_PYTHON="/Users/user/.cache/uv/builds-v0/.tmp17xznI/bin/python"',
+    'PYTHON_SYS_EXECUTABLE="/Users/user/.cache/uv/builds-v0/.tmp17xznI/bin/python"',
+    '"cargo" "rustc" "--profile" "release" "--message-format" "json-render-diagnostics" "--locked" "--manifest-path"',
+    'error: failed to run custom build command for `openssl-sys v0.9.117`',
+  ];
+
+  ok('реальный лог ученика опознаётся как «нет готовой версии под этот компьютер»', () => {
+    const r = FE.explainScriptFailure(REAL_TAIL);
+    assert(r, 'простыня cargo/PyO3 не опознана — ученик снова увидит «завершено с кодом 1»');
+    assert(r.kind === 'no-prebuilt-binary', 'вид причины: ожидался no-prebuilt-binary, получено ' + r.kind);
+    const text = r.lines.join(' ');
+    assert(/НЕ проблема с интернетом|Повторять установку бесполезно/.test(text),
+      'объяснение обязано снять с человека две ложные версии: «сломал компьютер» и «плохой интернет»');
+    assert(/Что делать/.test(text), 'нет строки «что делать» — объяснение без действия бесполезно');
+  });
+
+  ok('причины не путаются: сборка из исходников ≠ сеть ≠ место ≠ пароль', () => {
+    const cases = [
+      [['error: could not compile `cryptography`', 'note: run with `cargo` for more'], 'no-prebuilt-binary'],
+      [['ERROR: No matching distribution found for cryptography==50.0.0'], 'no-distribution'],
+      [['OSError: [Errno 28] No space left on device'], 'disk-full'],
+      [['execution error: User canceled. (-128)'], 'admin-cancelled'],
+      [['spctl: rejected source=no usable signature'], 'gatekeeper'],
+      [['curl: (6) Could not resolve host: registry.npmjs.org'], 'network'],
+    ];
+    cases.forEach((pair) => {
+      const tail = pair[0], kind = pair[1];
+      const r = FE.explainScriptFailure(tail);
+      assert(r && r.kind === kind,
+        'ожидался ' + kind + ', получено ' + (r ? r.kind : 'null') + ' на: ' + tail.join(' | '));
+    });
+  });
+
+  ok('нет ложных срабатываний на обычном успешном выводе', () => {
+    const calm = [
+      'Проверяю VS Code...',
+      'Ставлю расширение anthropic.claude-code в VS Code...',
+      'OK: Python-зависимости установлены.',
+    ];
+    assert(FE.explainScriptFailure(calm) === null, 'на спокойном логе выдумана причина');
+    assert(FE.explainScriptFailure([]) === null, 'пустой хвост → null');
+    assert(FE.explainScriptFailure(null) === null, 'null → null');
+  });
+
+  ok('порядок правил: компиляция из исходников важнее упоминания сети в том же логе', () => {
+    // pip почти всегда пишет и про сеть (retry/timeout), и про сборку. Если бы
+    // сетевое правило выигрывало, человеку советовали бы чинить интернет при
+    // тупике, который интернетом не лечится.
+    const mixed = [
+      'WARNING: Retrying (Retry(total=4)) after connection broken by ReadTimeoutError',
+      'Building wheel for cryptography (pyproject.toml) ... error',
+      'error: `cargo rustc --profile release` exited with code 101',
+    ];
+    const r = FE.explainScriptFailure(mixed);
+    assert(r && r.kind === 'no-prebuilt-binary',
+      'сетевой шум перебил настоящую причину — получено ' + (r ? r.kind : 'null'));
+  });
+
+  ok('main.js: перевод подключён и его результат доезжает до renderer (res.hint)', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(m.indexOf("require('./failure-explain.js')") !== -1, 'main.js не подключает failure-explain');
+    assert(m.indexOf('failureExplain.explainScriptFailure(outTail)') !== -1,
+      'main.js не вызывает перевод на хвосте вывода компонента');
+    assert(/hint: why\.short/.test(m) && /hintKind: why\.kind/.test(m),
+      'main.js не отдаёт причину renderer-у — шаг снова покажет «код 1»');
+    // Хвост обязан НАКАПЛИВАТЬСЯ: без буфера переводить будет нечего.
+    assertOrder(m, 'const outTail = []', 'failureExplain.explainScriptFailure(outTail)',
+      'буфер хвоста объявлен до использования');
+    assert(m.indexOf('outTail.push(l)') !== -1, 'вывод компонента не пишется в хвост');
+  });
+
+  ok('renderer: каскад называет корневую причину, а не «не установлена зависимость»', () => {
+    const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    assert(/function depSkipMessage\(/.test(a), 'app.js: пропала depSkipMessage');
+    assert(a.indexOf('appendLog(depSkipMessage(id, broken, badWhy))') !== -1,
+      'app.js: ветка dep-skip больше не печатает объяснение каскада');
+    assert(a.indexOf('[~] Пропущено: не установлена зависимость') === -1,
+      'app.js: вернулась старая односложная строка про зависимость');
+    assert(a.indexOf('badWhy.set(id, badWhy.get(broken)') !== -1,
+      'app.js: причина не наследуется по цепочке — на втором уровне каскада человек '
+      + 'снова увидит «упала зависимость зависимости»');
+    assert(a.indexOf('STATE.badWhy = new Map()') !== -1, 'app.js: badWhy не сбрасывается новой установкой');
+    // Причина, которую повтор не чинит, не должна получать кнопку «Повторить»:
+    // это прямое приглашение к бесконечному циклу.
+    assert(a.indexOf("res.hintKind !== 'no-prebuilt-binary'") !== -1,
+      'app.js: «Повторить» предлагается даже там, где повтор бесполезен');
   });
 })();

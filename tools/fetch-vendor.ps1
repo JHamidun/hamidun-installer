@@ -72,6 +72,21 @@ New-Item -ItemType Directory -Force $tmp | Out-Null
 & npm install '@anthropic-ai/claude-code' --prefix $tmp --cache $cache --no-audit --no-fund 2>&1 | Out-Null
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
+# ЧИСТКА КЕША — ОБЯЗАТЕЛЬНЫЙ ШАГ, А НЕ ГИГИЕНА.
+# `npm install --cache` ДОБАВЛЯЕТ версии в кеш и НИКОГДА не удаляет старые. Каждый
+# релиз Claude Code оставляет предыдущий архив (~80 МиБ) навсегда. К 11.08.2026 так
+# накопилось 13 версий = 1005 МиБ вместо 84 МиБ, и прогноз portable-exe ушёл на 112%
+# от потолка 32-битного makensis — офлайн-сборка Windows перестала собираться (падение
+# на mmap посреди упаковки, без внятной ошибки). Без этого шага то же вернётся через
+# 5-6 релизов. Прунер оставляет ровно ту версию, которую резолвит `npm install
+# --offline` (dist-tags.latest закешированного packument'а) + её платформенные пакеты
+# по optionalDependencies, и отказывается чистить, если кеш уже противоречив.
+Write-Host "[vendor] Чистка npm-кеша от устаревших версий..."
+& node (Join-Path $PSScriptRoot 'prune-npm-cache.js') --cache $cache
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "  ! чистка кеша ОТКАЗАЛА (кеш не тронут) — разбери причину выше; размер vendor проверит npm run preflight"
+}
+
 Write-Host "[vendor] Claude Code VSIX (расширение для VSCode/Cursor, офлайн)..."
 $vsix = Join-Path $apps 'claude-code.vsix'
 if (Test-Path $vsix) {
@@ -278,9 +293,21 @@ if ($py) {
     & $py -m pip install --quiet playwright 2>&1 | Out-Null
     $env:PLAYWRIGHT_BROWSERS_PATH = $pw
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
-    # Drop chromium_headless_shell (~254 MB): it is a SEPARATE headless-only
-    # chromium build, redundant with the full chromium above (which also runs
-    # headless). Windows `portable` target embeds the whole payload as ONE .7z,
+    # Drop chromium_headless_shell (~254 MB) to stay under the NSIS 2 GiB limit.
+    #
+    # ВНИМАНИЕ, прежняя формулировка «redundant with the full chromium (which also
+    # runs headless)» НЕВЕРНА: начиная с Playwright 1.49 `chromium.launch()` в
+    # headless-режиме запускает именно chrome-headless-shell.exe, а не chrome.exe.
+    # Без этой папки ВЕСЬ headless-рендер пака (cards-creator, export-png/pdf/pptx,
+    # kp-deck-factory, manus-slides, screenshot-test, a11y-audit) падает с
+    # «Executable doesn't exist at ...chromium_headless_shell-XXXX».
+    # Плюс ревизия прибита к версии колеса (playwright 1.62 -> chromium-1234), а
+    # здесь могла остаться старая. Поэтому scripts/*/pydeps.* ПОСЛЕ офлайн-копии
+    # всегда делает `playwright install chromium`: совпало — мгновенный no-op,
+    # не совпало — докачивает недостающее. Если вернёшь shell в вендор, офлайн-
+    # установка станет полностью автономной и докачка станет no-op.
+    #
+    # Windows `portable` target embeds the whole payload as ONE .7z,
     # and 32-bit makensis can't mmap a >2 GiB archive — keeping the shell pushes
     # the exe over that hard limit (build aborts with "failed creating mmap").
     # Removing it keeps the offline installer under 2 GiB. Nothing offline uses

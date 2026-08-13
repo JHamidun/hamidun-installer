@@ -337,13 +337,53 @@ $starterSrc = ''
 if ($env:HM_ASSETS) { $cand = Join-Path $env:HM_ASSETS 'starter-project'; if (Test-Path $cand) { $starterSrc = $cand } }
 if ($starterSrc) {
     $starterDst = Join-Path $env:USERPROFILE 'HamidunStart'
-    if (Test-Path $starterDst) {
-        Write-Host "Стартовый проект уже есть: $starterDst — не перезаписываю."
-    } else {
-        Write-Host "Копирую стартовый проект в $starterDst..."
-        try { Copy-Item -Recurse -Force $starterSrc $starterDst -ErrorAction Stop; Write-Host "Стартовый проект создан: $starterDst" }
-        catch { Write-Host "Стартовый проект не скопировался: $($_.Exception.Message)" }
+    # ДОКЛАДЫВАЕМ НЕДОСТАЮЩЕЕ, а не пропускаем папку целиком.
+    # Раньше здесь было «папка есть → не перезаписываю», и человек оставался БЕЗ файлов:
+    # ~/HamidunStart появляется не только отсюда — её создаёт пустой кнопка «Открыть
+    # VS Code» (main.js: mkdirSync перед запуском редактора, чтобы он открыл воркспейс,
+    # а не безымянное окно), её могла оставить прошлая установка, её мог создать сам
+    # человек. Дальше памятка говорит «открой PROMPTS.md» — а его там нет, и ученик
+    # пишет «извини, я не нахожу файл».
+    # Правило: существующие файлы НЕ трогаем (в них могла быть работа человека),
+    # отсутствующие — кладём. Перезапись остаётся невозможной, пропажа — тоже.
+    if (-not (Test-Path $starterDst)) {
+        try { New-Item -ItemType Directory -Force -Path $starterDst -ErrorAction Stop | Out-Null }
+        catch { Write-Host "Стартовый проект: не удалось создать $starterDst — $($_.Exception.Message)" }
     }
+    if (Test-Path $starterDst) {
+        $added = 0; $kept = 0; $failed = 0
+        try {
+            Get-ChildItem -LiteralPath $starterSrc -Force -Recurse -File -ErrorAction Stop | ForEach-Object {
+                $rel = $_.FullName.Substring($starterSrc.Length).TrimStart('\', '/')
+                $dstFile = Join-Path $starterDst $rel
+                if (Test-Path -LiteralPath $dstFile) { $kept++; return }
+                $dstDir = Split-Path $dstFile -Parent
+                try {
+                    if ($dstDir -and -not (Test-Path -LiteralPath $dstDir)) {
+                        New-Item -ItemType Directory -Force -Path $dstDir -ErrorAction Stop | Out-Null
+                    }
+                    Copy-Item -LiteralPath $_.FullName -Destination $dstFile -ErrorAction Stop
+                    $added++
+                } catch { $failed++ }
+            }
+        } catch { Write-Host "Стартовый проект: не удалось перечислить файлы — $($_.Exception.Message)" }
+
+        if ($added -gt 0 -and $kept -eq 0) { Write-Host "Стартовый проект создан: $starterDst (файлов: $added)" }
+        elseif ($added -gt 0)              { Write-Host "Стартовый проект дополнен: $starterDst (добавлено: $added, твоё не тронуто: $kept)" }
+        elseif ($kept -gt 0)               { Write-Host "Стартовый проект уже полный: $starterDst — ничего не менял." }
+        if ($failed -gt 0) { Write-Host "  ВНИМАНИЕ: не удалось скопировать файлов: $failed" }
+
+        # Памятка прямым текстом велит открыть PROMPTS.md — проверяем именно его.
+        if (-not (Test-Path -LiteralPath (Join-Path $starterDst 'PROMPTS.md'))) {
+            Write-Host "  ВНИМАНИЕ: PROMPTS.md в $starterDst не появился."
+            Write-Host "  Возьми его вручную: $starterSrc"
+        }
+    }
+} else {
+    # Раньше отсутствие ассетов проходило совершенно молча: блок просто не выполнялся,
+    # и никто — ни человек, ни лог — не узнавал, что стартового проекта не будет.
+    Write-Host "Стартовый проект НЕ создан: не найдены вшитые ассеты (HM_ASSETS не задан или в нём нет starter-project)."
+    Write-Host "  Памятка ссылается на PROMPTS.md из этой папки — без неё первый шаг не выполнить."
 }
 
 # Честная проверка: конфиг реально развернулся?
@@ -363,6 +403,43 @@ if ($installFailed) {
 }
 
 if ($dstPresent) {
+    # --- РАНТАЙМ: то, что живёт НЕ в файлах -----------------------------------------------
+    # Разложить файлы — ещё не «конфиг работает». Три вещи существуют только как состояние
+    # машины, и копирование их не создаёт:
+    #   • бинарь браузера Playwright (пакет python ставит pydeps, БРАУЗЕР — нет);
+    #     на него завязаны 42 скилла: карточки, экспорт PNG/PDF/PPTX, деки, скриншот-тесты;
+    #   • регистрация маркетплейсов плагинов (объявлено 29 плагинов, но свежая машина
+    #     не знает, откуда их брать — claude plugin list пуст);
+    #   • node_modules для скилла dev-browser (иначе его server.sh делает npm install в бою).
+    # Именно это ученики и «донастраивали сами». Лечение (scripts/setup_runtime.py) уже
+    # ехало в паке и вызывалось из install.sh/install.ps1 — но ТЕМ маршрутом ставят с
+    # GitHub, а через установщик раскладку делает ЭТОТ скрипт, и здесь вызова не было.
+    # Идемпотентно: повторный прогон занимает секунды и ничего не меняет.
+    $runtimeScript = Join-Path $dst 'scripts\setup_runtime.py'
+    if (Test-Path -LiteralPath $runtimeScript) {
+        $pyRt = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $pyRt) { $pyRt = Get-Command python3 -ErrorAction SilentlyContinue }
+        if ($pyRt) {
+            Write-Host ""
+            Write-Host "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
+            try {
+                & $pyRt.Path $runtimeScript
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "  Рантайм доехал НЕ полностью — часть скиллов упадёт при первом запуске."
+                    Write-Host "  Что именно: python `"$runtimeScript`" --check"
+                    Write-Host "  Доделать:   python `"$runtimeScript`""
+                }
+            } catch {
+                Write-Host "  Рантайм довести не удалось: $($_.Exception.Message)"
+                Write-Host "  Доделать вручную: python `"$runtimeScript`""
+            }
+            $global:LASTEXITCODE = 0
+        } else {
+            Write-Host "Python не найден — рантайм не доведён (браузер Playwright и плагины)."
+            Write-Host "  После установки Python запусти: python `"$runtimeScript`""
+        }
+    }
+
     # #19: маркер ЗАВЕРШЁННОСТИ — детекция config в main.js считает «установлено» по
     # нему, а не по наличию одной папки skills. Иначе оборванная установка (частичный
     # ~/.claude/skills) выглядела завершённой, авто-снимала галку, и повторный запуск

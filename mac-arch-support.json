@@ -1,0 +1,153 @@
+{
+  "_purpose": "ДЕКЛАРАЦИЯ поддержки архитектур Mac. Один вопрос на каждый darwin-компонент: что он кладёт на диск на Apple Silicon и что — на Intel. Читает test/run-tests.js (секция «macOS arch-паритет»). Живой баг 07.08.2026: ученик на Intel Mac получил «Готово 1 · Ошибок 4 · Пропущено 2», потому что часть содержимого vendor собирается «под платформу сборочного раннера», а раннер GitHub macos-latest — Apple Silicon. Ни один тест этого не ловил: файлы-то в сборке БЫЛИ, просто не под ту арх.",
+  "_remoteRegistryNote": "В remote-components.json суффикса архитектуры у darwin-записей НЕТ — и это ПРАВИЛЬНО, менять не надо. Одна запись = один zip на компонент, а ОБА арх-варианта лежат ВНУТРИ него (git-darwin.zip несёт и git-macos-arm64.tar.gz, и git-macos-x64.tar.gz; extension-darwin.zip — оба .vsix). Выбор делает install-скрипт по $(arch_tag) уже после распаковки. Отсутствие суффикса в имени артефакта — не признак того, что арх не учтена; проверять надо СОДЕРЖИМОЕ, чем и занимается эта декларация.",
+  "_howToUse": "Добавил darwin-компонент или новый арх-специфичный артефакт — впиши сюда. Тест падает, если: (а) компонент не объявлен; (б) объявлен perArch, но в tools/fetch-vendor-mac.sh нет гейта на ОБА арх-файла; (в) install-скрипт берёт артефакт через $(arch_tag), а здесь этот шаблон не объявлен; (г) объявлен unsupported без человеческого текста в скрипте.",
+  "_kinds": {
+    "perArch": "Артефакты РАЗНЫЕ под arm64 и x64. Поле artifacts — шаблоны имён с {arch}. Скрипт обязан выбирать по $(arch_tag), сборка — гейтить ОБА файла.",
+    "universal": "Один файл на обе арх (universal2 / чистый текст / pure python). Поле artifacts — точные имена. Указывай, ПОЧЕМУ он universal (поле why), иначе через год никто не вспомнит.",
+    "npmPerArch": "Арх-специфика внутри npm-кеша: платформенные пакеты npm. Поле npmPackages — шаблоны с {arch}.",
+    "resolvedAtInstall": "Ничего арх-специфичного в сборке нет — менеджер пакетов резолвит зависимости на машине пользователя. САМЫЙ ОПАСНЫЙ вид: компонент выглядит универсальным, а по факту может не работать на одной из арх. Требует поля risk.",
+    "unsupported": "Компонент не поддерживает эту арх и НЕ должен пытаться. Скрипт обязан сказать это человеческим текстом (hm_arch_unavailable) и уйти в exit 120, а не падать."
+  },
+  "arches": [
+    "arm64",
+    "x64"
+  ],
+  "components": {
+    "git": {
+      "kind": "perArch",
+      "artifacts": [
+        "apps/git-macos-{arch}.tar.gz"
+      ],
+      "script": "scripts/macos/git.sh",
+      "note": "Единственный тяжёлый компонент с честной парой архивов — и единственный, который встал у ученика на Intel."
+    },
+    "uv": {
+      "kind": "perArch",
+      "artifacts": [
+        "apps/uv-macos-{arch}.tar.gz"
+      ],
+      "script": "scripts/macos/uv.sh"
+    },
+    "extension": {
+      "kind": "perArch",
+      "artifacts": [
+        "apps/claude-code-{arch}.vsix"
+      ],
+      "script": "scripts/macos/extension.sh",
+      "note": "На Intel компонент работоспособен: x64-vsix в сборке есть. У ученика он был пропущен каскадом от VS Code, а не из-за архитектуры."
+    },
+    "handy": {
+      "kind": "perArch",
+      "artifacts": [
+        "apps/handy-macos-{arch}.dmg"
+      ],
+      "script": "scripts/macos/handy.sh",
+      "note": "Upstream не выпускает universal — в релизе два отдельных dmg."
+    },
+    "claude": {
+      "kind": "npmPerArch",
+      "npmPackages": [
+        "@anthropic-ai/claude-code-darwin-{arch}"
+      ],
+      "script": "scripts/macos/claude.sh",
+      "note": "Настоящий бинарь едет платформенным optionalDependency. npm install на arm64-раннере кладёт в кеш .tgz ТОЛЬКО своей платформы — на Intel офлайн-установка давала обёртку-пустышку и молча уходила в интернет. Закрыто: tools/fetch-vendor-mac.sh докладывает оба архива через npm cache add + гейт."
+    },
+    "node": {
+      "kind": "universal",
+      "artifacts": [
+        "apps/node.pkg"
+      ],
+      "why": "Официальный .pkg с nodejs.org — universal2 (оба слайса в одном файле)."
+    },
+    "vscode": {
+      "kind": "universal",
+      "artifacts": [
+        "apps/vscode.zip"
+      ],
+      "why": "Источник — update.code.visualstudio.com/latest/darwin-universal/stable.",
+      "perArchExtras": [
+        {
+          "template": "apps/claude-code-{arch}.vsix",
+          "note": "Панель Claude ставится и из vscode.sh, и из extension.sh — один и тот же арх-специфичный vsix."
+        },
+        {
+          "template": "apps/chatgpt-{arch}.vsix",
+          "optional": true,
+          "reason": "Панель Codex объявлена необязательной: при отсутствии офлайн-vsix vscode.sh ставит её из магазина расширений и НЕ красит компонент (см. блок EXT_OK_CODEX). Поэтому гейта полноты на неё нет намеренно."
+        }
+      ],
+      "script": "scripts/macos/vscode.sh"
+    },
+    "cursor": {
+      "kind": "universal",
+      "artifacts": [
+        "apps/cursor.dmg"
+      ],
+      "why": "API-запрос platform=darwin-universal."
+    },
+    "pydeps": {
+      "kind": "resolvedAtInstall",
+      "artifacts": [
+        "apps/python.pkg"
+      ],
+      "why": "Сам Python — universal2 (python.org macos11.pkg).",
+      "risk": "Колёса (vendor/pywheels) качаются под платформу раннера = arm64. На Intel офлайн-ветка не проходит, а онлайн-фолбэк упирается в то, что у части пакетов колёс под macOS x86_64 больше НЕТ (cryptography с 49.0.0), и pip лезет собирать Rust. Скрипт обязан объяснить это человеку (hm_explain_build_failure), а не писать «проверь сеть».",
+      "script": "scripts/macos/pydeps.sh"
+    },
+    "nomad": {
+      "kind": "resolvedAtInstall",
+      "artifacts": [],
+      "why": "В сборку едут чистые исходники (nomad-src), арх-специфики в архиве нет.",
+      "risk": "uv резолвит зависимости с PyPI на машине пользователя и НЕ читает uv.lock. На Intel это упирается в отсутствие колёс cryptography под macOS x86_64 → сборка Rust через PyO3 → cargo → openssl-sys → падение. Владение: агент Nomad (пины транзитивных зависимостей), НЕ установщик.",
+      "ownedBy": "nomad-agent",
+      "script": "scripts/macos/nomad.sh"
+    },
+    "mascot": {
+      "kind": "universal",
+      "artifacts": [
+        "apps/claude-mascot"
+      ],
+      "why": "Главный бинарь .app — настоящий universal (FAT: x86_64 + arm64), сборка гейтит это через lipo -archs.",
+      "ownedBy": "mascot"
+    },
+    "config": {
+      "kind": "universal",
+      "artifacts": [
+        "config-pack"
+      ],
+      "why": "Конфиг-пак: текст, скиллы, команды — арх-нейтрален."
+    },
+    "course": {
+      "kind": "universal",
+      "artifacts": [
+        "course/vibecoding-course.zip"
+      ],
+      "why": "Курс-симулятор: markdown и скиллы, арх-нейтрален."
+    },
+    "bridge": {
+      "kind": "resolvedAtInstall",
+      "artifacts": [],
+      "why": "Ставится поверх Python из pydeps, своих бинарей не везёт.",
+      "risk": "Наследует арх-проблемы pydeps: без него framework-Python 3.12/3.13 нет и мост не поднимется.",
+      "script": "scripts/macos/bridge.sh"
+    },
+    "claude-desktop": {
+      "kind": "universal",
+      "artifacts": [],
+      "why": "Качается онлайн по URL с явным /darwin/universal/dmg/ — один образ на обе арх.",
+      "script": "scripts/macos/claude-desktop.sh"
+    },
+    "chatgpt-desktop": {
+      "kind": "universal",
+      "artifacts": [],
+      "why": "Официальный ChatGPT.dmg от OpenAI — universal, один файл на обе арх.",
+      "script": "scripts/macos/chatgpt-desktop.sh"
+    },
+    "verify": {
+      "kind": "universal",
+      "artifacts": [],
+      "why": "Служебная проверка — ничего не устанавливает."
+    }
+  }
+}

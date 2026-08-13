@@ -340,17 +340,45 @@ fi
 
 # --- стартовый проект из вшитых ассетов (идемпотентно: существующий НЕ перезаписываем) ---
 if [ -n "${HM_ASSETS:-}" ] && [ -d "$HM_ASSETS/starter-project" ]; then
+  STARTER_SRC="$HM_ASSETS/starter-project"
   STARTER_DST="$HOME/HamidunStart"
-  if [ -e "$STARTER_DST" ]; then
-    echo "Стартовый проект уже есть: $STARTER_DST — не перезаписываю."
-  else
-    echo "Копирую стартовый проект в $STARTER_DST..."
-    if cp -R "$HM_ASSETS/starter-project" "$STARTER_DST" 2>/dev/null; then
-      echo "Стартовый проект создан: $STARTER_DST"
-    else
-      echo "Стартовый проект не скопировался — пропускаю."
+  # ДОКЛАДЫВАЕМ НЕДОСТАЮЩЕЕ, а не пропускаем папку целиком (зеркало config.ps1).
+  # Раньше было «папка есть → не перезаписываю», и человек оставался БЕЗ файлов:
+  # ~/HamidunStart появляется не только отсюда — её создаёт пустой кнопка «Открыть
+  # VS Code» (main.js делает mkdir перед запуском редактора), могла оставить прошлая
+  # установка, мог создать сам человек. Дальше памятка говорит «открой PROMPTS.md» —
+  # а его там нет, и ученик пишет «извини, я не нахожу файл».
+  # Существующие файлы НЕ трогаем (в них могла быть работа человека), отсутствующие кладём.
+  [ -d "$STARTER_DST" ] || mkdir -p "$STARTER_DST" 2>/dev/null
+  if [ -d "$STARTER_DST" ]; then
+    ST_ADDED=0; ST_KEPT=0; ST_FAILED=0
+    while IFS= read -r f; do
+      rel="${f#$STARTER_SRC/}"
+      dst="$STARTER_DST/$rel"
+      if [ -e "$dst" ]; then ST_KEPT=$((ST_KEPT + 1)); continue; fi
+      mkdir -p "$(dirname "$dst")" 2>/dev/null
+      if cp -p "$f" "$dst" 2>/dev/null; then ST_ADDED=$((ST_ADDED + 1)); else ST_FAILED=$((ST_FAILED + 1)); fi
+    done <<EOF
+$(find "$STARTER_SRC" -type f 2>/dev/null)
+EOF
+    if [ "$ST_ADDED" -gt 0 ] && [ "$ST_KEPT" -eq 0 ]; then
+      echo "Стартовый проект создан: $STARTER_DST (файлов: $ST_ADDED)"
+    elif [ "$ST_ADDED" -gt 0 ]; then
+      echo "Стартовый проект дополнен: $STARTER_DST (добавлено: $ST_ADDED, твоё не тронуто: $ST_KEPT)"
+    elif [ "$ST_KEPT" -gt 0 ]; then
+      echo "Стартовый проект уже полный: $STARTER_DST — ничего не менял."
+    fi
+    [ "$ST_FAILED" -gt 0 ] && echo "  ВНИМАНИЕ: не удалось скопировать файлов: $ST_FAILED"
+    # Памятка прямым текстом велит открыть PROMPTS.md — проверяем именно его.
+    if [ ! -e "$STARTER_DST/PROMPTS.md" ]; then
+      echo "  ВНИМАНИЕ: PROMPTS.md в $STARTER_DST не появился."
+      echo "  Возьми его вручную: $STARTER_SRC"
     fi
   fi
+else
+  # Раньше отсутствие ассетов проходило совершенно молча.
+  echo "Стартовый проект НЕ создан: не найдены вшитые ассеты (HM_ASSETS не задан или в нём нет starter-project)."
+  echo "  Памятка ссылается на PROMPTS.md из этой папки — без неё первый шаг не выполнить."
 fi
 
 # --- честная проверка развёртывания (зеркало config.ps1) ---
@@ -370,6 +398,33 @@ if [ "$RC" -ne 0 ]; then
 fi
 
 if [ "$DEPLOYED" -eq 1 ]; then
+  # --- РАНТАЙМ: то, что живёт НЕ в файлах (зеркало config.ps1) ---------------------------
+  # Разложить файлы — ещё не «конфиг работает». Три вещи существуют только как состояние
+  # машины, и копирование их не создаёт: бинарь браузера Playwright (пакет python ставит
+  # pydeps, БРАУЗЕР — нет; на него завязаны 42 скилла), регистрация маркетплейсов плагинов
+  # (объявлено 29, но свежая машина не знает, откуда их брать) и node_modules скилла
+  # dev-browser. Именно это ученики и «донастраивали сами».
+  # Лечение уже ехало в паке и вызывалось из install.sh — но ТЕМ маршрутом ставят с
+  # GitHub, а через установщик раскладку делает ЭТОТ скрипт, и здесь вызова не было.
+  RUNTIME_SCRIPT="$CLAUDE_HOME/scripts/setup_runtime.py"
+  if [ -f "$RUNTIME_SCRIPT" ]; then
+    PY_RT=""
+    command -v python3 >/dev/null 2>&1 && PY_RT=python3
+    [ -z "$PY_RT" ] && command -v python >/dev/null 2>&1 && PY_RT=python
+    if [ -n "$PY_RT" ]; then
+      echo ""
+      echo "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
+      if ! "$PY_RT" "$RUNTIME_SCRIPT"; then
+        echo "  Рантайм доехал НЕ полностью — часть скиллов упадёт при первом запуске."
+        echo "  Что именно: $PY_RT \"$RUNTIME_SCRIPT\" --check"
+        echo "  Доделать:   $PY_RT \"$RUNTIME_SCRIPT\""
+      fi
+    else
+      echo "Python не найден — рантайм не доведён (браузер Playwright и плагины)."
+      echo "  После установки Python запусти: python3 \"$RUNTIME_SCRIPT\""
+    fi
+  fi
+
   # #19: маркер завершённости (зеркало config.ps1) — детекция в main.js смотрит на него,
   # а не на одну папку skills, чтобы оборванная установка не выглядела завершённой.
   : > "$CLAUDE_HOME/.hamidun-config-complete" 2>/dev/null || true

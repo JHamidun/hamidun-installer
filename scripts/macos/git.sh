@@ -70,6 +70,10 @@ EOF
   else
     echo "Встроенный пакет Git не распаковался — перехожу к Apple Command Line Tools."
   fi
+elif hm_arch_note_missing "${HM_VENDOR:-}/apps" "git-macos-" ".tar.gz" "Встроенный Git"; then
+  # Пакет под другую арх лежит, под нашу — нет. Скажем прямо и пойдём через Apple:
+  # молчаливый переход выглядит как «установщик почему-то полез в системные окна».
+  echo "Поэтому Git поставлю через системные Command Line Tools от Apple — это дольше."
 fi
 
 echo "Запускаю установку Command Line Tools (включает Git)..."

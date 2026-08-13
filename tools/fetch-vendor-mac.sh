@@ -70,10 +70,62 @@ echo "[vendor-mac] VS Code (рекомендуемый редактор, darwin-
 # Редирект на актуальный .zip с 'Visual Studio Code.app' внутри; curl -L следует за ним.
 dl "https://update.code.visualstudio.com/latest/darwin-universal/stable" "$APPS/vscode.zip"
 
-echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g)..."
+echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g, ОБА arch)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
+# ГЛАВНОЕ: настоящий бинарь Claude Code едет НЕ в основном пакете, а в платформенном
+# optionalDependency (@anthropic-ai/claude-code-darwin-arm64 | -darwin-x64). `npm install`
+# качает optionalDependency ТОЛЬКО под платформу раннера, а раннер macos-latest — Apple
+# Silicon. В кеш при этом попадает ОТВЕТ РЕЕСТРА про x64-пакет (метаданные), но НЕ его
+# .tgz — и офлайн-установка на Intel молча ставила обёртку-пустышку, после чего claude.sh
+# уходил в интернет. То есть «офлайн-издание» на Intel офлайн не работало.
+# `npm cache add` кладёт в кеш САМ АРХИВ и НЕ проверяет os/cpu — это единственный способ
+# получить пакет чужой платформы на этом раннере.
+CC_VER="$("$PY" -c "
+import json, sys
+try:
+    print(json.load(open('$TMP/node_modules/@anthropic-ai/claude-code/package.json'))['version'])
+except Exception:
+    print('')
+" 2>/dev/null)"
+if [ -n "$CC_VER" ]; then
+  echo "  версия Claude Code: $CC_VER — докладываю платформенные пакеты обеих арх"
+  for CCA in arm64 x64; do
+    if npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER" --cache "$CACHE" >/dev/null 2>&1; then
+      echo "    ok claude-code-darwin-$CCA@$CC_VER"
+    else
+      echo "    ! claude-code-darwin-$CCA@$CC_VER не лёг в кеш — на этой арх офлайн-установка Claude Code работать НЕ будет"
+    fi
+  done
+else
+  echo "  ! не удалось определить версию claude-code — платформенные пакеты в кеш не добавлены"
+fi
 rm -rf "$TMP"
+
+# ЧИСТКА КЕША — ОБЯЗАТЕЛЬНЫЙ ШАГ, А НЕ ГИГИЕНА.
+# `npm install --cache` и `npm cache add` ДОБАВЛЯЮТ версии и НИКОГДА не удаляют старые:
+# каждый релиз Claude Code оставляет предыдущие архивы навсегда (на маке их ДВА — обе
+# арх). На Windows это уже уронило офлайн-сборку (13 версий = 1005 МиБ вместо 84,
+# прогноз exe 112% от потолка makensis). Прунер оставляет версию, которую резолвит
+# `npm install --offline` (dist-tags.latest), и ОБЕ darwin-арх по optionalDependencies —
+# набор платформ он берёт из метаданных, а не из констант, поэтому здесь чистится
+# ровно то же, что и на Windows, но с сохранением darwin-arm64 И darwin-x64.
+# ВАЖНО: прунер идёт ПОСЛЕ `npm cache add` обеих арх — иначе он не увидит, что их надо
+# сохранить, а до проверки наличия архивов ниже, чтобы она проверяла уже итоговый кеш.
+echo "[vendor-mac] Чистка npm-кеша от устаревших версий..."
+node "$(dirname "$0")/prune-npm-cache.js" --cache "$CACHE" \
+  || echo "  ! чистка кеша ОТКАЗАЛА (кеш не тронут) — разбери причину выше"
+
+# Проверка ФАКТА, а не намерения: в cacache должен лежать АРХИВ (ключ содержит
+# "/<имя>/-/<имя>-"), а не только ответ реестра. hm_npm_cache_has_tarball — та же
+# функция, которой claude.sh на установке решает, идти ли офлайн-путём.
+for CCA in arm64 x64; do
+  if hm_npm_cache_has_tarball "$CACHE" "claude-code-darwin-$CCA"; then
+    echo "  npm-cache: архив claude-code-darwin-$CCA на месте"
+  else
+    echo "  ! npm-cache: АРХИВА claude-code-darwin-$CCA НЕТ — Claude Code на Mac с этой арх потребует интернет"
+  fi
+done
 
 echo "[vendor-mac] Claude Code VSIX (расширение для VSCode/Cursor, офлайн — ОБА arch)..."
 # Расширение платформо-специфичное (нативные бинари внутри): latest/vspackage БЕЗ
@@ -494,7 +546,20 @@ chk_file "$APPS/git-macos-arm64.tar.gz" "apps/git-macos-arm64.tar.gz (вшиты
 chk_file "$APPS/git-macos-x64.tar.gz"   "apps/git-macos-x64.tar.gz (Intel — иначе CLT-диалог)"
 chk_file "$APPS/uv-macos-arm64.tar.gz"  "apps/uv-macos-arm64.tar.gz (вшитый uv — офлайн, без фолбэка)"
 chk_file "$APPS/uv-macos-x64.tar.gz"    "apps/uv-macos-x64.tar.gz (вшитый uv — офлайн, без фолбэка)"
+# Handy: онлайн-фолбэка у компонента НЕТ — без dmg под нужную арх handy.sh уходит в
+# exit 120. Раньше отсутствие ассета в релизе печаталось одной строкой посреди лога
+# сборки и в итоговую сводку не попадало: релиз уезжал, а у половины Mac'ов компонента
+# просто не было. Теперь это видно в WARNING «неполный vendor».
+chk_file "$APPS/handy-macos-arm64.dmg"  "apps/handy-macos-arm64.dmg (Handy — офлайн, без фолбэка)"
+chk_file "$APPS/handy-macos-x64.dmg"    "apps/handy-macos-x64.dmg (Intel — Handy без него не поставится)"
 chk_dir "$ROOT/vendor/npm-cache"   "npm-cache/ (нет файлов)"
+# Паритет арх В КЕШЕ npm: без архива платформенного пакета офлайн-установка Claude
+# Code на этой арх невозможна (см. блок выше). Это ровно та дыра, из-за которой
+# «офлайн-издание» на Intel требовало интернета, и никто об этом не знал.
+for CCA in arm64 x64; do
+  hm_npm_cache_has_tarball "$ROOT/vendor/npm-cache" "claude-code-darwin-$CCA" \
+    || add_missing "npm-cache: нет архива @anthropic-ai/claude-code-darwin-$CCA — офлайн-установка Claude Code на Mac $CCA не сработает (уйдёт в онлайн)"
+done
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
 # Honest-репорт Intel-паритета wheels (best-effort скачивание x86_64 выше — НЕ гейт,

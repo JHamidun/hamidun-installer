@@ -532,7 +532,9 @@ ipcMain.handle('bootstrap', () => {
     // Превью МБ докачки: componentId → ТОЧНЫЙ sizeBytes архива из вшитого реестра
     // remote-components.json — ровно для тех компонентов, которые ЭТО издание реально
     // докачивает (loadRemoteMaps: явный remote-флаг ИЛИ lite-авто-remote, кроме
-    // bundled-only). Рукописный sizeHint для суммирования НЕ используется (врёт).
+    // bundled-only). Вес вшитых компонентов сюда НЕ мешаем: он живёт в components.json
+    // (sizeBytes[платформа], считает tools/sync-sizes.js по реальному vendor) — две
+    // копии одного факта неминуемо разъезжаются, как разъехался бывший sizeHint.
     remoteSizes: remoteSizesForRenderer(),
     logPath: LOG_PATH,
     freeGB,
@@ -712,6 +714,12 @@ const COMPONENT_VENDOR_ARTIFACT = {
   // онлайн-фолбэк `playwright install chromium`). Мёртвый ключ вводил в заблуждение.
   pydeps: 'apps/python-setup.exe',
   extension: 'apps/claude-code.vsix',
+  // handy: тот же vendor-first приоритет, что у остальных. Ключ нужен ровно с того
+  // момента, как handy появится в реестре докачки (tools/publish-vendor.py): без него
+  // издание с ВШИТЫМ apps/handy-setup.exe, но без маркера offlineEdition, полезло бы
+  // в сеть за тем, что уже лежит рядом. Путь — та же vendor-раскладка, что читает
+  // scripts/windows/handy.ps1 ($HM_VENDOR\apps\handy-setup.exe).
+  handy: 'apps/handy-setup.exe',
 };
 
 // Дедлайн скачивания = f(sizeBytes): консервативные ~300 КБ/с (медленный РФ-канал)
@@ -852,6 +860,11 @@ function buildInstallEnv(rendererEnv) {
   Object.assign(out, NONINTERACTIVE_ENV);
   return out;
 }
+
+// Человеческий перевод машинного провала установки (cargo/PyO3/pip/Gatekeeper/…)
+// в объяснение для ученика. Вынесен в модуль — его напрямую гоняет test/run-tests.js
+// (main.js целиком в тесте не поднять: это Electron-точка входа).
+const failureExplain = require('./failure-explain.js');
 
 // Run one component script, streaming output back to the renderer.
 //
@@ -1216,10 +1229,18 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // фильтруются из UI-лога. Как источник целей удаления они НЕ используются:
     // квитанция — маркер {id, version, installedAt}, а цели удаления вычисляет
     // доверенный код по зашитому аллоулисту (src/uninstall-targets.js).
+    // Кольцевой буфер последних строк вывода — по нему при НЕуспехе строится
+    // человеческое объяснение (failureExplain). Держим хвост, а не весь вывод:
+    // pip/npm/cargo выдают десятки тысяч строк, а сигнатура причины всегда рядом
+    // с концом. 400 строк с запасом перекрывают финальный блок ошибки.
+    const TAIL_MAX = 400;
+    const outTail = [];
     const emitLine = (l) => {
       if (!l.length) return;
       const ri = receipts.parseReceiptLine(l);
       if (ri) { logLine(l); return; }
+      outTail.push(l);
+      if (outTail.length > TAIL_MAX) outTail.shift();
       send(l);
       logLine(l);
     };
@@ -1321,6 +1342,20 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         resolve({ id, ok: false, code, stage: 'fetch',
           error: 'докачка не удалась (' + fetchFellBack + '), а системный установщик компонента недоступен' });
         return;
+      }
+      // ПРОВАЛ → переводим машинный вывод на человеческий ЗДЕСЬ, пока хвост под рукой.
+      // Объяснение печатаем в лог/UI сразу (человек читает его на месте, а не ищет
+      // причину в простыне из cargo/pip) и отдаём renderer'у в res.hint — он ставит
+      // короткую подпись на шаге и кладёт вид причины в отчёт боту.
+      if (!okRun && !skipped) {
+        const why = failureExplain.explainScriptFailure(outTail);
+        if (why) {
+          const head = '[почему] ' + why.short + ':';
+          send(head); logLine(head);
+          why.lines.forEach((l) => { const m = '  ' + l; send(m); logLine(m); });
+          resolve({ id, ok: false, code, skipped: false, hint: why.short, hintKind: why.kind, hintLines: why.lines });
+          return;
+        }
       }
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
@@ -1804,6 +1839,25 @@ function launchVsCodeOn(dir, { create = true } = {}) {
       ]);
       // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
       if (codeExe) { return winLaunchDeElevated(codeExe, dir); }
+      // ЗАПАСНОЙ РЕДАКТОР — CURSOR. Установщик предлагает оба редактора на выбор, и
+      // человек вправе снять VS Code, оставив Cursor. Раньше здесь искался ТОЛЬКО
+      // Code.exe, и у такого человека кнопка «Открыть курс-симулятор» молча ничего не
+      // делала, а подсказка врала про «папка курса не найдена» — папка была на месте,
+      // не было редактора. Именно так это и выглядело у ученика первой группы:
+      // «кнопка есть, но не приводит ни к чему».
+      const cursorExe = firstExisting([
+        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe'),
+        path.join(winPF(), 'cursor', 'Cursor.exe')
+      ]);
+      if (cursorExe) { return winLaunchDeElevated(cursorExe, dir); }
+      // Редактора нет вовсе — открываем папку в проводнике. Это не «как задумано», но
+      // человек хотя бы видит файлы курса и понимает, куда идти, вместо пустого клика.
+      try {
+        const r = spawnSync('explorer.exe', [dir], { stdio: 'ignore', timeout: 10000 });
+        // explorer.exe возвращает 1 даже при успешном открытии — код игнорируем осознанно.
+        if (r) return 'explorer';
+      } catch (e) { /* ниже вернём false */ }
+      return false;
     } else if (IS_MAC) {
       // open -a "Visual Studio Code" "<папка>" — открывает папку в IDE. `open` запускает
       // цель от имени пользователя (macOS не эскалирует integrity как Windows).
@@ -1815,7 +1869,15 @@ function launchVsCodeOn(dir, { create = true } = {}) {
       // управление быстро (хендофф в LaunchServices), main-поток блокируется кратко.
       const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir],
         { stdio: 'ignore', timeout: 15000 });
-      return r.status === 0;
+      if (r.status === 0) return true;
+      // Тот же запасной путь, что и на Windows: человек мог выбрать Cursor вместо
+      // VS Code — тогда открываем в нём, а если редактора нет вовсе, показываем папку
+      // в Finder. Пустой клик — худший из возможных исходов.
+      const rc = spawnSync('/usr/bin/open', ['-a', 'Cursor', dir],
+        { stdio: 'ignore', timeout: 15000 });
+      if (rc.status === 0) return true;
+      const rf = spawnSync('/usr/bin/open', [dir], { stdio: 'ignore', timeout: 10000 });
+      return rf.status === 0 ? 'finder' : false;
     }
   } catch (e) { /* ignore */ }
   return false;
@@ -1838,11 +1900,22 @@ ipcMain.handle('launch-course', () => {
   // наставника (course.ps1:87). Открываем ЕЁ, а не родителя, иначе «начать»
   // подхватит ванильный Claude без наставника (B2). CLAUDE.md — финальный признак.
   const dir = path.join(target, 'vibecoding-course');
+  // РАЗЛИЧАЕМ ПРИЧИНЫ ОТКАЗА. Раньше все три случая возвращали одинаковый false, и
+  // интерфейс на любой из них печатал «Папка курса не найдена — курс не входил в эту
+  // сборку». Для человека, у которого папка есть, а редактора нет, это прямая
+  // дезинформация: он идёт переустанавливать курс, которого и так на месте.
+  // Возвращаем строку-причину; renderer печатает под неё свой текст.
   try {
-    if (!fs.statSync(dir).isDirectory()) return false;
-    if (!fs.existsSync(path.join(dir, 'CLAUDE.md'))) return false;
-  } catch (e) { return false; }
-  return launchVsCodeOn(dir, { create: false });
+    if (!fs.statSync(dir).isDirectory()) return { ok: false, reason: 'no-dir', dir };
+    if (!fs.existsSync(path.join(dir, 'CLAUDE.md'))) return { ok: false, reason: 'no-mentor', dir };
+  } catch (e) { return { ok: false, reason: 'no-dir', dir }; }
+
+  const r = launchVsCodeOn(dir, { create: false });
+  if (r === true) return { ok: true, how: 'editor', dir };
+  // Папка открыта в проводнике/Finder — это успех с оговоркой: файлы человек видит,
+  // но наставник не подхватится, пока он не откроет папку редактором.
+  if (r === 'explorer' || r === 'finder') return { ok: true, how: r, dir };
+  return { ok: false, reason: 'no-editor', dir };
 });
 
 // ---- «Войти в Claude» — открыть терминал с командой claude -----------

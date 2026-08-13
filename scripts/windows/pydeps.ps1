@@ -174,6 +174,18 @@ if ($pwb -and (Test-Path $pwb)) {
     $dst = Join-Path $env:LOCALAPPDATA 'ms-playwright'
     New-Item -ItemType Directory -Force $dst | Out-Null
     Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue
+    # Вшитый набор может не совпасть с колесом playwright: ревизия Chromium прибита
+    # к версии пакета (1.62 требует chromium-1234), и fetch-vendor вдобавок срезает
+    # chromium_headless_shell — а headless-запуск (весь рендер-конвейер) идёт именно
+    # через него. Раньше расхождение всплывало только в рантайме: «Executable doesn't
+    # exist ... chrome-headless-shell.exe». `playwright install` идемпотентен: если
+    # вшитое подходит — мгновенный no-op без сети, иначе докачивает недостающее.
+    Write-Host "Сверяю ревизии браузеров с версией playwright..."
+    & $py -m playwright install chromium
+    if ($LASTEXITCODE -ne 0) {
+        $pwWarn = $true
+        Write-Host "  ВНИМАНИЕ: вшитые браузеры не совпали с версией playwright, а докачать не вышло (проверь сеть и повтори установку этого компонента)."
+    }
 } else {
     # Онлайн-докачка браузеров (~150 МБ, самый хрупкий по сети шаг). Раньше вывод глотался
     # Out-Null, а код возврата не проверялся — сбой давал ложный OK, и браузерные скиллы
