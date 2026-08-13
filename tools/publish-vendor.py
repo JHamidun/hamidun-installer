@@ -127,6 +127,15 @@ COMPONENTS_DARWIN = {
                                            ("nomad-src.sha256", "nomad-src.sha256")],
                "name": "Nomad (source + integrity manifest)"},
     "config": {"kind": "single", "src": "config-pack",     "prefix": "config-pack",       "name": "Claude config pack (v38)"},
+    # handy: пара к win32-записи. Записи здесь не было вовсе — при том что win-карта
+    # прямо предписывает публиковать обе платформы ПАРОЙ, а components.json показывает
+    # handy и на darwin. Итог: release-check держал блокер, а в lite-издании на маке
+    # компонент был недостижим — не вшит и качать неоткуда.
+    # Обе арх ОБЯЗАТЕЛЬНЫ как группа (True): universal-сборки Handy не даёт, онлайн-
+    # фолбэка у компонента нет. Публиковать половину — значит завести запись в реестре,
+    # которая для второй архитектуры молча не сработает; лучше честный отказ публикации.
+    "handy":  {"kind": "staged", "parts": [("apps/handy-macos-*.dmg", "apps/", True)],
+               "name": "Handy (голосовой ввод, arm64+x64)"},
     # pydeps: как в win32 — установщик Python + колёса + requirements.txt ВНУТРИ архива
     # (в lite config-pack не вшит, а pydeps.sh читает список пакетов через HM_VENDOR).
     "pydeps": {"kind": "staged", "parts": [("apps/python.pkg",               "apps/python.pkg"),

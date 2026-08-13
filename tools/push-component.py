@@ -251,6 +251,14 @@ def s3_upload(creds, prefix, key, data: bytes):
     # можно было только пересчитав mirrors в remote-components.json. Регион для
     # S3-совместимых хранилищ — не секрет и не влияет на маршрутизацию при явном
     # endpoint_url, поэтому битое значение чиним, а не роняем публикацию.
+    # Endpoint чистим по той же причине: следом за регионом всплыл
+    # ValueError('Invalid endpoint') — в секрете лежало значение, которое boto3 не
+    # принимает. Оба раза симптом одинаков: одна строка [warn] в логе и молча
+    # потерянное второе зеркало, а не падение публикации.
+    endpoint = (endpoint or "").strip().strip('"').strip("'").strip().rstrip('/')
+    if endpoint and not endpoint.startswith(("http://", "https://")):
+        endpoint = "https://" + endpoint
+
     region = (region or "").strip().strip('"').strip("'").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]*", region or ""):
         host = (endpoint or "").split("//")[-1].split("/")[0]
