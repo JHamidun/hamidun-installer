@@ -415,6 +415,27 @@
         "claude-code-x64.vsix": "1ecc3ddc4e688071118dc400a5572f103c3a1b648299629c47269118ea159432"
       },
       "platform": "darwin"
+    },
+    {
+      "remoteId": "handy",
+      "name": "Handy (голосовой ввод)",
+      "sizeBytes": 20927084,
+      "sha256": "37ae352af9db6871efa8bae1969d8f2565b75b266d668e93734259c003b034da",
+      "mirrors": [
+        {
+          "host": "regru",
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/handy-win32-37ae352af9db6871efa8bae1969d8f2565b75b266d668e93734259c003b034da.zip"
+        },
+        {
+          "host": "yandex",
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/handy-win32-37ae352af9db6871efa8bae1969d8f2565b75b266d668e93734259c003b034da.zip"
+        }
+      ],
+      "installRelPath": "scripts/windows/handy.ps1",
+      "gatedFiles": {
+        "handy-setup.exe": "49099af1462b815a3bb7959d96959f5559b0025334c47bb8ed65337c7351d489"
+      },
+      "platform": "win32"
     }
   ]
 }
