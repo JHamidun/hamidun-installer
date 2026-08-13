@@ -6931,27 +6931,40 @@ if (process.platform === 'win32') {
     // Дескриптор мог протухнуть — обязан быть сброс, иначе журнал умрёт молча.
     assert(/logFd = null/.test(s), 'при ошибке дескриптор сбрасывается для переоткрытия');
 
-    // Поведенчески: та же нагрузка обязана укладываться на порядок быстрее.
-    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-log-'));
-    try {
-      const N = 4000;
-      const LINE = '[2026-07-27T12:00:00.000Z] [pydeps] Collecting package==1.0.0\n';
-      const p1 = path.join(d, 'a.log');
-      const p2 = path.join(d, 'b.log');
-      let t = Date.now();
-      for (let k = 0; k < N; k++) fs.appendFileSync(p1, LINE);
-      const msOld = Date.now() - t;
-      const fd = fs.openSync(p2, 'a');
-      t = Date.now();
-      for (let k = 0; k < N; k++) fs.writeSync(fd, LINE);
-      const msNew = Date.now() - t;
-      fs.closeSync(fd);
-      assert(fs.readFileSync(p1, 'utf8') === fs.readFileSync(p2, 'utf8'), 'содержимое идентично');
-      assert(msNew * 3 < msOld,
-        'открытый дескриптор быстрее втрое и более: было ' + msOld + ' мс, стало ' + msNew + ' мс');
-    } finally {
-      fs.rmSync(d, { recursive: true, force: true });
-    }
+    // Поведенчески: гоняем САМУ функцию в песочнице с подменённым fs и считаем
+    // системные вызовы. Раньше здесь стоял замер времени с порогом «втрое быстрее» —
+    // он ловил ту же регрессию косвенно и зависел от диска раннера: на CI-агенте
+    // Windows отношение вышло 2.2 (720 мс против 331 мс), тест покраснел, хотя код
+    // не менялся. Число открытий файла от скорости машины не зависит вообще.
+    const calls = { open: 0, write: 0, close: 0 };
+    const fakeFs = {
+      mkdirSync: () => {},
+      openSync: () => { calls.open++; return 7; },
+      writeSync: () => { calls.write++; },
+      closeSync: () => { calls.close++; },
+    };
+    const lc = {
+      fs: fakeFs, logDirReady: false, logFd: null,
+      LOG_DIR: 'd', LOG_PATH: 'p', Date: Date, console: console,
+    };
+    vm.createContext(lc);
+    vm.runInContext(body + '\n}\n; this.__log = logToFile;', lc);
+
+    const N = 4000;
+    for (let k = 0; k < N; k++) lc.__log('pydeps', 'Collecting package==1.0.' + k);
+    assert(calls.write === N, 'записано строк: ' + calls.write + ' из ' + N);
+    assert(calls.open === 1,
+      'на ' + N + ' строк файл открыт ' + calls.open + ' раз, а должен один');
+
+    // Дескриптор протух (файл убрали/переименовали) — следующая строка обязана
+    // открыть заново, иначе журнал умрёт молча до конца установки.
+    let boom = true;
+    fakeFs.writeSync = () => { if (boom) { boom = false; throw new Error('EBADF'); } calls.write++; };
+    lc.__log('pydeps', 'строка на протухшем дескрипторе');
+    assert(calls.close === 1, 'протухший дескриптор закрыт перед сбросом');
+    lc.__log('pydeps', 'строка после сброса');
+    assert(calls.open === 2, 'после сбоя дескриптор переоткрыт, открытий: ' + calls.open);
+    assert(calls.write === N + 1, 'строка после сброса всё-таки записана');
   });
 })();
 

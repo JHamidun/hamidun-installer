@@ -35,6 +35,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -241,6 +242,21 @@ def s3_upload(creds, prefix, key, data: bytes):
     region = creds.get(f"{prefix}_REGION") or creds.get(f"{prefix}_S3_REGION") or "ru-1"
     if not (endpoint and access and secret and bucket):
         return None
+
+    # Регион чистим и проверяем ПЕРЕД клиентом. Прецедент: в секрете GitHub
+    # YCLOUD_S3_REGION лежало значение, которое boto3 отверг
+    # (InvalidRegionError: doesn't match a supported format) — и второе зеркало
+    # молча отваливалось на КАЖДОЙ публикации darwin-компонентов. В логе была
+    # одна строка [warn], реестр получал одно зеркало вместо двух, и заметить это
+    # можно было только пересчитав mirrors в remote-components.json. Регион для
+    # S3-совместимых хранилищ — не секрет и не влияет на маршрутизацию при явном
+    # endpoint_url, поэтому битое значение чиним, а не роняем публикацию.
+    region = (region or "").strip().strip('"').strip("'").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-]*", region or ""):
+        host = (endpoint or "").split("//")[-1].split("/")[0]
+        fallback = "ru-central1" if "yandexcloud" in host else "ru-1"
+        print(f"  [warn] регион {prefix}_REGION непригоден для boto3 — беру {fallback}")
+        region = fallback
 
     client = boto3.client(
         "s3",
