@@ -643,8 +643,21 @@ function Invoke-HmDeElevated {
         # Реального зависания это не удлиняет: планировщик сам прибьёт задачу на 10-й минуте
         # (AllowHardTerminate=true), Last Result станет ненулевым и цикл выйдет раньше дедлайна.
         $deadline = (Get-Date).AddSeconds(630)
+        # Пока ждём — раз в минуту печатаем, что живы. Без этого шаг «vscode» молчит
+        # до 10 минут на КАЖДОМ расширении, и сторож молчания в main.js начинает
+        # пугать пользователя: «шаг не выдаёт вывод 30/40/50 мин, возможно установщик
+        # завис». У человека это выглядит как намертво вставшая установка, хотя идёт
+        # обычная распаковка vsix под антивирусом. Живой отсчёт снимает и панику,
+        # и ложные срабатывания сторожа.
+        $waitStart = Get-Date
+        $nextTick = $waitStart.AddSeconds(60)
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 400
+            if ((Get-Date) -ge $nextTick) {
+                $el = [int]((Get-Date) - $waitStart).TotalMinutes
+                Write-Host "  …устанавливается, прошло $el мин (лимит 10 мин, это нормально на медленной машине)"
+                $nextTick = (Get-Date).AddSeconds(60)
+            }
             $csv = & $schtasks '/Query' '/TN' $tag '/HRESULT' '/FO' 'CSV' '/NH' '/V' 2>$null | Out-String
             $line = ($csv -split "`r?`n" | Where-Object { $_ -match '"' } | Select-Object -First 1)
             if (-not $line) { continue }

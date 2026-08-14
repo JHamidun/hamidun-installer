@@ -3099,6 +3099,29 @@ ok('P0-1 (scripts): nomad.sh/ps1 — vendor-only skip → exit 120 (не 0); к�
   assert(!/\.hamidun-nomad/.test(nps), 'nomad.ps1: НЕТ упоминаний .hamidun-nomad (маркеры не пишутся)');
 });
 
+ok('долгие шаги не выглядят зависшими: де-элевированная установка печатает отсчёт, сторож не обвиняет MSI', () => {
+  const de = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), 'utf8');
+  // Ожидание задачи планировщика длится до 10 минут на КАЖДОЕ расширение. Без вывода
+  // шаг «vscode» молчит, сторож молчания в main.js начинает писать «не выдаёт вывод
+  // 30/40/50 мин», и у человека это выглядит намертво вставшей установкой — ровно так
+  // и случилось у студента. Отсчёт обязан идти изнутри цикла ожидания.
+  const i = de.indexOf('$deadline = (Get-Date).AddSeconds(630)');
+  assert(i > 0, 'цикл ожидания задачи найден');
+  const loop = de.slice(i, de.indexOf('if ($null -eq $lastResult)', i));
+  assert(/Write-Host[^\r\n]*прошло/.test(loop), 'внутри ожидания печатается прошедшее время');
+  assert(/nextTick/.test(loop), 'отсчёт идёт по таймеру, а не на каждой итерации (иначе спам 2,5 строки в секунду)');
+
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const j = main.indexOf('не выдаёт вывод');
+  assert(j > 0, 'сообщение сторожа найдено');
+  const msg = main.slice(j, j + 700);
+  // Старый текст уверенно назначал причиной ожидание другой установки Windows (MSI).
+  // На шаге vscode там Inno Setup и расширения — объяснение уводило в сторону.
+  assert(!/системный установщик ждёт другую установку/.test(msg),
+    'сторож больше не назначает единственную причину');
+  assert(/НЕ остановлена|продолжается/.test(msg), 'сказано, что установка продолжается');
+});
+
 ok('nomad.sh: на Intel-маке cryptography ограничена версией с колесом — через -c, а не надеждой на uv.lock', () => {
   const nsh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
   // Upstream убрал колёса под macOS x86_64 с 49.0.0 — без пина установка уходит
