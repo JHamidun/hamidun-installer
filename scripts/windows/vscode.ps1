@@ -220,6 +220,20 @@ try {
         exit 1
     }
 
+    # Запущенный VS Code — самый частый повод для долгой установки расширений: code.cmd
+    # отдаёт команду РАБОТАЮЩЕМУ экземпляру через IPC, а тот отвечает не сразу (или не
+    # отвечает вовсе, если занят). Ждать приходится до лимита задачи — по 10 минут на
+    # расширение, и со стороны это выглядит зависшей установкой. Убивать чужой редактор
+    # с несохранёнными файлами нельзя, поэтому честно предупреждаем: закрыть VS Code
+    # сейчас — самый быстрый способ.
+    if (-not $DRY) {
+        $running = @(Get-Process -Name 'Code' -ErrorAction SilentlyContinue)
+        if ($running.Count -gt 0) {
+            Write-Host "ВНИМАНИЕ: VS Code сейчас ОТКРЫТ. Расширения будут ставиться дольше обычного (до 10 минут каждое)."
+            Write-Host "  Хочешь быстрее — закрой окно VS Code и не трогай установщик: он продолжит сам."
+        }
+    }
+
     $claudeVsix = Get-Vsix 'claude-code.vsix'
     $codexVsix  = Get-Vsix 'chatgpt.vsix'
     $okClaude = Install-ExtSafe $codeCli 'anthropic.claude-code' $claudeVsix
