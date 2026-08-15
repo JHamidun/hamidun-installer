@@ -48,7 +48,11 @@ if (viaNpx.length) {
 // Значение имеет другое: ведёт ли путь в файл, который ПРИЕДЕТ ВМЕСТЕ С ПАКОМ. Ссылка
 // на ~/.brain/brain_mcp.py или на .venv в личном каталоге автора не разрешится ни у
 // кого, кроме него, — такой сервер молча не поднимется.
-const HARDCODED = /Users[\\/]+hamid|C:\\Vibecode|\/Users\/hamid/i;
+// Проверяем по ФОРМЕ пути, а не по чьему-то имени: абсолютный путь в чей-то домашний
+// каталог у другого человека не существует. Слеши экранированы обеими формами —
+// строка приходит из JSON.stringify, где каждый бэкслеш удвоен, и паттерн вида
+// `C:\\Vibecode` не совпал бы никогда: он ждёт один бэкслеш там, где стоят два.
+const HARDCODED = /^[A-Za-z]:[\\/]+(Users|Vibecode)[\\/]|^\/(Users|home)\//i;
 for (const [name, cfg] of Object.entries(mcp)) {
   const blob = JSON.stringify(cfg);
   // Пути, которые программа СОЗДАЁТ сама (профиль браузера, каталог вывода), проверять
@@ -64,7 +68,8 @@ for (const [name, cfg] of Object.entries(mcp)) {
   const outside = args.filter((a) => /\$\{HOME\}[\\/](?!\.claude)/i.test(a));
 
   let line = null;
-  if (HARDCODED.test(blob)) line = `MCP «${name}»: жёстко прописан путь машины автора — ${blob.slice(0, 80)}`;
+  const hard = args.find((a) => HARDCODED.test(a));
+  if (hard) line = `MCP «${name}»: жёстко прописан путь конкретной машины — ${hard.slice(0, 70)}`;
   else if (missing.length) line = `MCP «${name}»: файла нет в паке — ${missing[0]}`;
   else if (outside.length) line = `MCP «${name}»: ссылается вне пака (${outside[0].slice(0, 60)}) — у ученика этого не будет`;
   if (!line) continue;

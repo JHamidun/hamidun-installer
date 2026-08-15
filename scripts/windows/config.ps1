@@ -417,9 +417,36 @@ if ($dstPresent) {
     # Идемпотентно: повторный прогон занимает секунды и ничего не меняет.
     $runtimeScript = Join-Path $dst 'scripts\setup_runtime.py'
     if (Test-Path -LiteralPath $runtimeScript) {
-        $pyRt = Get-Command python -ErrorAction SilentlyContinue
-        if (-not $pyRt) { $pyRt = Get-Command python3 -ErrorAction SilentlyContinue }
-        if ($pyRt) {
+        # Ищем python ПО АБСОЛЮТНЫМ ПУТЯМ, а не только через Get-Command. Наш PATH здесь
+        # урезан по соображениям безопасности (только HKLM + админ-каталоги), а python
+        # ставится в профиль пользователя — Get-Command его не видит, и весь рантайм
+        # молча пропускался: ни браузера Playwright, ни маркетплейсов плагинов.
+        # Заодно пропускаем Store-заглушку из WindowsApps: она пишет в stderr и роняет шаг.
+        $pyPath = $null
+        foreach ($name in 'python', 'python3') {
+            $c = Get-Command $name -ErrorAction SilentlyContinue
+            if ($c -and $c.Source -notmatch 'WindowsApps') { $pyPath = $c.Source; break }
+        }
+        if (-not $pyPath) {
+            foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+                             "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+                             "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+                             "$env:ProgramFiles\Python313\python.exe",
+                             "$env:ProgramFiles\Python312\python.exe")) {
+                if (Test-Path -LiteralPath $p) { $pyPath = $p; break }
+            }
+        }
+        # claude ставится через npm в профиль пользователя и по той же причине не виден.
+        # setup_runtime ищет его через PATH, поэтому кладём каталог в PATH ПРОЦЕССА —
+        # без этого регистрация маркетплейсов пропускается с бодрым «плагины подтянутся
+        # при первом запуске», хотя сами они не подтягиваются.
+        foreach ($cand in @("$env:APPDATA\npm", "$env:USERPROFILE\.local\bin")) {
+            if ((Test-Path -LiteralPath $cand) -and ($env:Path.Split(';') -notcontains $cand)) {
+                $env:Path = $env:Path.TrimEnd(';') + ';' + $cand
+            }
+        }
+        if ($pyPath) {
+            $pyRt = [pscustomobject]@{ Path = $pyPath }
             Write-Host ""
             Write-Host "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
             try {

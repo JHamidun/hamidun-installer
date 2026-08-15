@@ -30,27 +30,62 @@ function Update-Path {
 # Штатный MSI обычно прописывает PATH сам, но не всегда: при установке поверх, при
 # «только для меня» или при переполненном PATH запись не появляется. Мы идём под
 # админом, поэтому проверяем реальный HKLM и дописываем недостающее сами.
+# Работаем через реестр НАПРЯМУЮ, как Add-ToUserPath в claude.ps1, и по той же причине:
+# [Environment]::Get/SetEnvironmentVariable разворачивает %VAR% в литералы и записывает
+# значение типом REG_SZ. Для системного PATH это тихая порча на всю машину: записи вроде
+# %JAVA_HOME%\bin либо застывают текущим значением, либо — если переменная в нашем
+# elevated-процессе не определена — остаются мёртвым текстом, который уже никогда не
+# развернётся. Читаем сырое значение, пишем ExpandString, тип сохраняем.
 function Add-HmMachinePath([string]$Dir) {
     if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return $false }
-    $cur = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $has = @($cur -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq $Dir.TrimEnd('\') }
-    if ($has) { return $false }
-    $new = if ($cur -and $cur.TrimEnd(';')) { $cur.TrimEnd(';') + ';' + $Dir } else { $Dir }
-    # Системный PATH ограничен: за 2047 символов запись молча теряется, а вместе с ней
-    # может уехать и чужой софт. Лучше честно сказать, чем испортить окружение.
-    if ($new.Length -ge 2047) {
-        Write-Host "  ВНИМАНИЕ: системный PATH переполнен ($($new.Length) символов) — не дописываю $Dir."
-        Write-Host "  Добавь его вручную: Параметры -> Система -> О системе -> Дополнительные параметры системы -> Переменные среды."
+    $envKeyPath = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($envKeyPath, $true)
+    if (-not $key) {
+        Write-Host "  Не удалось открыть системные переменные среды — $Dir не дописан."
         return $false
     }
     try {
-        [Environment]::SetEnvironmentVariable('Path', $new, 'Machine')
-        Write-Host "  В системный PATH добавлено: $Dir (новые окна терминала увидят сразу)"
-        return $true
+        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        # Сверяемся по РАЗВЁРНУТОЙ копии: каталог может уже стоять как %ProgramFiles%\nodejs,
+        # и по сырой строке мы бы его не увидели и записали дубль.
+        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
+        $already = @($expanded -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq $Dir.TrimEnd('\') }
+        if ($already) { return $false }
+
+        $new = ($raw.TrimEnd(';') + ';' + $Dir).TrimStart(';')
+        # Предел реестра для REG_EXPAND_SZ — 32767 символов, но длинный PATH ломает старые
+        # программы, читающие его в фиксированный буфер. 4095 — граница, за которой лучше
+        # честно сказать человеку, чем молча раздувать общесистемное окружение.
+        if ($new.Length -ge 4095) {
+            Write-Host "  ВНИМАНИЕ: системный PATH уже $($new.Length) символов — не дописываю $Dir."
+            Write-Host "  Добавь его вручную: Параметры -> Система -> О системе -> Дополнительные параметры системы -> Переменные среды."
+            return $false
+        }
+        $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
     } catch {
         Write-Host "  Не удалось дописать $Dir в системный PATH ($($_.Exception.Message))."
         return $false
-    }
+    } finally { $key.Close() }
+
+    # Прямая запись в реестр, в отличие от вызова .NET, никого не уведомляет: без
+    # рассылки WM_SETTINGCHANGE уже открытый проводник и его дочерние окна терминала
+    # продолжат жить со старым PATH, и обещание «новые окна увидят сразу» было бы ложью.
+    try {
+        if (-not ('HmEnvBroadcast' -as [type])) {
+            Add-Type -Namespace Hm -Name EnvBroadcast -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam,
+    string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@ -ErrorAction SilentlyContinue
+        }
+        $res = [UIntPtr]::Zero
+        # HWND_BROADCAST=0xffff, WM_SETTINGCHANGE=0x1A, SMTO_ABORTIFHUNG=0x0002
+        [void][Hm.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero,
+            'Environment', 0x0002, 5000, [ref]$res)
+    } catch { /* уведомление не критично: новые процессы прочитают реестр сами */ }
+
+    Write-Host "  В системный PATH добавлено: $Dir (новые окна терминала увидят сразу)"
+    return $true
 }
 
 $DRY = [bool]$env:HM_DRY_RUN
