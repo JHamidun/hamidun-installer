@@ -396,6 +396,24 @@ function main(argv) {
     console.log(JSON.stringify(rep, null, 2));
   } else {
     printPreflight(rep);
+    // Связность пака — отдельным блоком и НЕ блокирует сборку. Свежесть пака гейт уже
+    // проверяет, но «пак свежий» и «пак работает» — разные вещи: на машине ученика
+    // конфиг разложился успешно, а плагины были включены без маркетплейса, MCP не
+    // поднялись, правила ссылались на отсутствующие скрипты. Печатаем, чтобы это
+    // видели ДО выкладки, а не по скриншоту от человека через неделю.
+    try {
+      const out = execFileSync(process.execPath, [path.join(__dirname, 'audit-pack.js')],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const verdict = (out.split('\n').find((l) => l.includes('ВЕРДИКТ')) || '').trim();
+      if (verdict) console.log('[preflight] связность пака: ' + verdict);
+    } catch (e) {
+      // audit-pack выходит кодом 1 при проблемах — это не повод рушить сборку,
+      // но показать надо обязательно.
+      const out = (e.stdout || '') + (e.stderr || '');
+      for (const line of out.split('\n').filter((l) => /СТОП|ВЕРДИКТ/.test(l))) {
+        console.log('[preflight] ' + line.trim());
+      }
+    }
   }
   return rep.level === 'fail' ? 1 : 0;
 }

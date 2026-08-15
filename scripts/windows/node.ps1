@@ -23,9 +23,46 @@ function Update-Path {
     $env:Path = ($parts | Where-Object { $_ }) -join ';'
 }
 
+# Update-Path меняет PATH ТОЛЬКО внутри этого процесса. Этого хватает, чтобы мы сами
+# нашли node, — и ровно поэтому шаг рапортовал «OK: node v22», когда в системном PATH
+# записи не было вовсе: у человека в новом терминале node не находился, npx не работал,
+# а вместе с ним молча не поднимался НИ ОДИН MCP-сервер (их почти все запускает npx).
+# Штатный MSI обычно прописывает PATH сам, но не всегда: при установке поверх, при
+# «только для меня» или при переполненном PATH запись не появляется. Мы идём под
+# админом, поэтому проверяем реальный HKLM и дописываем недостающее сами.
+function Add-HmMachinePath([string]$Dir) {
+    if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return $false }
+    $cur = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $has = @($cur -split ';') | Where-Object { $_ -and $_.TrimEnd('\') -ieq $Dir.TrimEnd('\') }
+    if ($has) { return $false }
+    $new = if ($cur -and $cur.TrimEnd(';')) { $cur.TrimEnd(';') + ';' + $Dir } else { $Dir }
+    # Системный PATH ограничен: за 2047 символов запись молча теряется, а вместе с ней
+    # может уехать и чужой софт. Лучше честно сказать, чем испортить окружение.
+    if ($new.Length -ge 2047) {
+        Write-Host "  ВНИМАНИЕ: системный PATH переполнен ($($new.Length) символов) — не дописываю $Dir."
+        Write-Host "  Добавь его вручную: Параметры -> Система -> О системе -> Дополнительные параметры системы -> Переменные среды."
+        return $false
+    }
+    try {
+        [Environment]::SetEnvironmentVariable('Path', $new, 'Machine')
+        Write-Host "  В системный PATH добавлено: $Dir (новые окна терминала увидят сразу)"
+        return $true
+    } catch {
+        Write-Host "  Не удалось дописать $Dir в системный PATH ($($_.Exception.Message))."
+        return $false
+    }
+}
+
 $DRY = [bool]$env:HM_DRY_RUN
 Write-Host "Проверяю Node.js..."
-if (Get-Command node -ErrorAction SilentlyContinue) { Write-Host "Node.js уже установлен: $(node --version)"; if ($DRY) { Write-Host "[dry-run] Node.js уже установлен — без изменений."; exit 0 } else { exit 0 } }
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    Write-Host "Node.js уже установлен: $(node --version)"
+    if ($DRY) { Write-Host "[dry-run] Node.js уже установлен — без изменений."; exit 0 }
+    # Даже когда Node на месте, системная запись PATH может отсутствовать: мы видим node
+    # через свой процессный PATH, а пользователь в новом терминале — нет. Чиним молча.
+    if ($env:ProgramFiles) { [void](Add-HmMachinePath (Join-Path $env:ProgramFiles 'nodejs')) }
+    exit 0
+}
 
 $local = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'apps\node-lts.msi' } else { '' }
 if ($local -and (Test-Path $local)) {
@@ -85,5 +122,17 @@ if ($local -and (Test-Path $local)) {
 
 if ($DRY) { Write-Host "[dry-run] Node.js: офлайн-ветка выбрана, без изменений."; exit 0 }
 Update-Path
-if (Get-Command node -ErrorAction SilentlyContinue) { Write-Host "OK: node $(node --version), npm $(npm --version)"; exit 0 }
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    # Сначала системный PATH, потом рапорт: раньше здесь был «OK: node v22» при пустой
+    # записи в HKLM — успех по процессному PATH, которого пользователь никогда не увидит.
+    if ($env:ProgramFiles) { [void](Add-HmMachinePath (Join-Path $env:ProgramFiles 'nodejs')) }
+    $inMachine = @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') |
+        Where-Object { $_ -and $_.TrimEnd('\') -ilike '*\nodejs' }
+    if (-not $inMachine) {
+        Write-Host "ВНИМАНИЕ: node.exe есть, но каталог не попал в системный PATH — в новом терминале команда node может не найтись."
+        Write-Host "  Из-за этого не запустятся npx и MCP-серверы. Добавь каталог Node в PATH вручную и перезапусти терминал."
+    }
+    Write-Host "OK: node $(node --version), npm $(npm --version)"
+    exit 0
+}
 Write-Host "Node.js не обнаружен после установки."; exit 1

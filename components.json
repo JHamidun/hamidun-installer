@@ -113,7 +113,8 @@
           "default": true,
           "requires": [
             "git",
-            "node"
+            "node",
+            "claude"
           ],
           "needsAdmin": false,
           "sizeBytes": {
