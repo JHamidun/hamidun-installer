@@ -138,22 +138,36 @@ jobs:
       # подменён» всплывает уже у пользователя, при докачке. Здесь мак под рукой.
       # Шаг падает ТОЛЬКО на блокерах (предупреждения дают код 0), поэтому сборку
       # он не роняет на ровном месте.
+      # Размеры darwin можно померить ТОЛЬКО здесь: sync-sizes берёт платформу у системы
+      # и намеренно отказывается писать чужие байты без --force. Пока этого шага не было,
+      # каждое обновление пака ломало маковую сборку: release-check ниже видел, что цифра
+      # «что скачается» разошлась с реальным vendor, и валил прогон блокером — при том что
+      # починка занимает одну команду и доступна ровно на этом раннере.
+      - name: Sync darwin component sizes (мерить можно только на маке)
+        run: npm run sizes
+
       - name: Release-check (darwin) — сверка gatedFiles и размеров на своей ОС
         run: node tools/release-check.js --platform darwin
 
       # Реестр с darwin-записями обязан вернуться в репо: он вшивается в КАЖДУЮ следующую
       # сборку (extraResources remote-components.json). Если ветка защищена и push невозможен —
       # реестр всё равно уезжает artifact'ом, и об этом кричит лог.
+      # if: always() — потому что публикация в S3 УЖЕ произошла шагом выше. Если этот шаг
+      # пропустить из-за падения release-check, архивы окажутся выложены, а реестр,
+      # который на них указывает, останется только на раннере: S3 и репозиторий разъедутся,
+      # и это худшее из состояний. Ровно так и вышло в прогоне 31978380151. Когда публикация
+      # не состоялась, коммитить нечего — шаг сам это и напечатает.
       - name: Commit updated remote-components.json back to branch
+        if: always()
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- remote-components.json; then
-            echo "remote-components.json не изменился — коммитить нечего."
+          if git diff --quiet -- remote-components.json components.json; then
+            echo "реестр и размеры не изменились — коммитить нечего."
           else
-            git add remote-components.json
-            git commit -m "chore(registry): darwin remote components (mac-lite run ${{ github.run_number }})"
+            git add remote-components.json components.json
+            git commit -m "chore(registry): darwin remote components + sizes (mac-lite run ${{ github.run_number }})"
             if git push origin "HEAD:${{ github.ref_name }}"; then
               echo "реестр запушен в ветку ${{ github.ref_name }}."
             else
