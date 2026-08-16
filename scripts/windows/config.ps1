@@ -449,6 +449,13 @@ if ($dstPresent) {
             $pyRt = [pscustomobject]@{ Path = $pyPath }
             Write-Host ""
             Write-Host "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
+            # Вывод скрипта мы ПЕРЕНАПРАВЛЯЕМ, а он печатает значки ✔ ✓ ✗. На русской
+            # Windows кодировка перенаправленного вывода — cp1251, где их нет, и первый
+            # же значок валит процесс UnicodeEncodeError: доводка обрывается на первом
+            # шаге, а выглядит это как «плагины сами не поставились». Сам скрипт с этим
+            # уже справляется, но пак у человека может быть старее установщика.
+            $env:PYTHONIOENCODING = 'utf-8'
+            $env:PYTHONUTF8 = '1'
             try {
                 & $pyRt.Path $runtimeScript
                 if ($LASTEXITCODE -ne 0) {

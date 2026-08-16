@@ -450,7 +450,10 @@ if [ "$DEPLOYED" -eq 1 ]; then
     if [ -n "$PY_RT" ]; then
       echo ""
       echo "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
-      if ! "$PY_RT" "$RUNTIME_SCRIPT"; then
+      # Зеркало config.ps1: скрипт печатает значки ✔ ✓ ✗, а вывод перенаправлен. На маке
+      # локаль обычно UTF-8, но под launchd её может не быть вовсе (LANG не задан) —
+      # тогда Python берёт ASCII и валится на первом же значке, обрывая доводку.
+      if ! PYTHONIOENCODING=utf-8 PYTHONUTF8=1 "$PY_RT" "$RUNTIME_SCRIPT"; then
         echo "  Рантайм доехал НЕ полностью — часть скиллов упадёт при первом запуске."
         echo "  Что именно: $PY_RT \"$RUNTIME_SCRIPT\" --check"
         echo "  Доделать:   $PY_RT \"$RUNTIME_SCRIPT\""
