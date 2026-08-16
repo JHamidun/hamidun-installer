@@ -71,7 +71,7 @@ COMPONENTS = {
     "nomad":  {"kind": "staged", "parts": [("nomad-src", "nomad-src"),
                                            ("nomad-src.sha256", "nomad-src.sha256")],
                "name": "Nomad (source + integrity manifest)"},
-    "config": {"kind": "single", "src": "config-pack",           "prefix": "config-pack",       "name": "Claude config pack (v38)"},
+    "config": {"kind": "single", "src": "config-pack",           "prefix": "config-pack",       "name": "Claude config pack"},
     # playwright-browsers НЕ публикуем: компонента с таким id нет в components.json, а
     # loadRemoteMaps (main.js) выводит remote строго по id компонентов — запись реестра была
     # недостижима, install-скрипта scripts/windows/playwright-browsers.ps1 не существует.
@@ -126,7 +126,7 @@ COMPONENTS_DARWIN = {
     "nomad":  {"kind": "staged", "parts": [("nomad-src", "nomad-src"),
                                            ("nomad-src.sha256", "nomad-src.sha256")],
                "name": "Nomad (source + integrity manifest)"},
-    "config": {"kind": "single", "src": "config-pack",     "prefix": "config-pack",       "name": "Claude config pack (v38)"},
+    "config": {"kind": "single", "src": "config-pack",     "prefix": "config-pack",       "name": "Claude config pack"},
     # handy: пара к win32-записи. Записи здесь не было вовсе — при том что win-карта
     # прямо предписывает публиковать обе платформы ПАРОЙ, а components.json показывает
     # handy и на darwin. Итог: release-check держал блокер, а в lite-издании на маке

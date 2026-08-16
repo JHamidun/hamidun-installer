@@ -271,7 +271,12 @@ function main() {
     const cfg = JSON.parse(cfgBak.toString('utf8'));
     cfg.edition = 'lite';
     cfg.offlineEdition = false;
-    cfg.configRepoBranch = 'v38'; // фолбэк-clone config.ps1/config.sh берёт v38, если докачка config упала
+    // Фолбэк-клон, если докачка компонента config не удалась. Здесь стояло 'v38' —
+    // ветки с таким именем в репозитории НЕТ (git ls-remote показывает только main и
+    // feat/sdat-skill), то есть запасной путь гарантированно падал: клон по имени
+    // несуществующей ветки не делается вовсе. Отказ докачки означал бы отказ установки
+    // конфига целиком, хотя запасной путь для того и заведён. Берём main.
+    cfg.configRepoBranch = 'main';
     fs.writeFileSync(CFG, JSON.stringify(cfg, null, 2) + '\n');
 
     // 2. package.json: extraResources vendor→vendor-lite; отдельное имя lite-артефакта
