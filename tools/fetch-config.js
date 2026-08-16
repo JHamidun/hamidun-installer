@@ -52,8 +52,16 @@ try {
 // Slim: drop .git history so it doesn't bloat the installer.
 fs.rmSync(path.join(dest, '.git'), { recursive: true, force: true });
 
+// Скилл = каталог с SKILL.md, а не любая запись в skills/. Простой readdirSync().length
+// считал заодно CATALOG.md и README.md, лежащие рядом, и давал 287 вместо 285. Цифра
+// попадает в штамп версии и оттуда в анонс релиза — прошлый анонс уже врал по той же
+// причине, поэтому считаем ровно то, что называем.
 const skills = path.join(dest, '.claude', 'skills');
-const n = fs.existsSync(skills) ? fs.readdirSync(skills).length : 0;
+const n = fs.existsSync(skills)
+  ? fs.readdirSync(skills, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(skills, e.name, 'SKILL.md')))
+      .length
+  : 0;
 
 // Штамп версии едет ВНУТРЬ пака: по нему потом видно, что именно установлено у
 // ученика, и воспроизводится ровно эта сборка (HM_CONFIG_REF=<sha>).
