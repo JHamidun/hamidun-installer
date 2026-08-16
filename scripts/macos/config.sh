@@ -2,6 +2,17 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
+# Под GUI/Electron PATH урезан до /usr/bin:/bin:/usr/sbin:/sbin (launchd не читает
+# /etc/paths.d и профили шеллов), и до сих пор это был ЕДИНСТВЕННЫЙ рабочий скрипт
+# без такой строки — node.sh/claude.sh/verify.sh её уже имеют. Без неё процесс не
+# видит ни node/npx (/usr/local/bin — туда кладёт node.pkg), ни claude (~/.local/bin —
+# туда кладёт claude.sh), ни brew-инструменты. Критично для setup_runtime.py ниже:
+# он ищет npx и claude через shutil.which, то есть по PATH ИМЕННО ЭТОГО процесса, —
+# и с урезанным PATH молча пропускал регистрацию маркетплейсов плагинов («плагины
+# подтянутся при первом запуске» — а сами не подтягиваются) и браузер Playwright.
+# Ровно та болезнь, что ловили на Windows: плагины включены, но не установлены.
+export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+
 # === РЕДИЗАЙН: config НИКОГДА не стирает и не переносит ~/.claude ===
 # Пользовательские данные ОСТАЮТСЯ НА МЕСТЕ. Мы лишь раскладываем НАШУ базу ПОВЕРХ
 # существующего ~/.claude копированием (merge), НИКОГДА не делая mv всего дерева. Два режима:
@@ -408,9 +419,34 @@ if [ "$DEPLOYED" -eq 1 ]; then
   # GitHub, а через установщик раскладку делает ЭТОТ скрипт, и здесь вызова не было.
   RUNTIME_SCRIPT="$CLAUDE_HOME/scripts/setup_runtime.py"
   if [ -f "$RUNTIME_SCRIPT" ]; then
+    # Ищем python и ПО PATH, и ПО АБСОЛЮТНЫМ ПУТЯМ (зеркало блока python в config.ps1).
+    # Здесь две ловушки, из-за которых голый `command -v python3` даёт не то:
+    # 1) /usr/bin/python3 на маке БЕЗ Command Line Tools — не интерпретатор, а шим,
+    #    который при запуске открывает системный GUI-диалог «установить инструменты
+    #    разработчика» и не возвращается (аналог Store-заглушки WindowsApps на Windows).
+    #    Берём его ТОЛЬКО когда CLT реально стоят (xcode-select -p) — тогда это обычный
+    #    рабочий python. Тот же гвард уже используют pydeps.sh и git-детект выше.
+    # 2) python из компонента «Python-пакеты» живёт в /Library/Frameworks — его bin
+    #    НЕ попадает в PATH этого процесса никогда (профиль-апдейтер python.org пишет
+    #    только в ~/.zprofile будущих терминалов), поэтому его ищем по абсолютным путям.
     PY_RT=""
-    command -v python3 >/dev/null 2>&1 && PY_RT=python3
-    [ -z "$PY_RT" ] && command -v python >/dev/null 2>&1 && PY_RT=python
+    P3="$(command -v python3 2>/dev/null || true)"
+    if [ -n "$P3" ] && { [ "$P3" != "/usr/bin/python3" ] || xcode-select -p >/dev/null 2>&1; }; then
+      PY_RT="$P3"
+    fi
+    if [ -z "$PY_RT" ]; then
+      for _p in /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+                /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+                /Library/Frameworks/Python.framework/Versions/3.11/bin/python3; do
+        [ -x "$_p" ] && { PY_RT="$_p"; break; }
+      done
+    fi
+    if [ -z "$PY_RT" ]; then
+      # Последний шанс — голый `python` (pyenv и т.п.); системного /usr/bin/python
+      # на современных macOS нет, но гвард оставляем по той же логике, что выше.
+      P2="$(command -v python 2>/dev/null || true)"
+      [ -n "$P2" ] && [ "$P2" != "/usr/bin/python" ] && PY_RT="$P2"
+    fi
     if [ -n "$PY_RT" ]; then
       echo ""
       echo "Довожу рантайм: браузер Playwright, маркетплейсы плагинов, node_modules..."
@@ -420,8 +456,11 @@ if [ "$DEPLOYED" -eq 1 ]; then
         echo "  Доделать:   $PY_RT \"$RUNTIME_SCRIPT\""
       fi
     else
-      echo "Python не найден — рантайм не доведён (браузер Playwright и плагины)."
-      echo "  После установки Python запусти: python3 \"$RUNTIME_SCRIPT\""
+      # На ПЕРВОЙ чистой установке это штатная ситуация: python ставит компонент
+      # «Python-пакеты», а он идёт в очереди ПОСЛЕ конфига (pydeps requires config).
+      echo "Python не найден — рантайм пока не доведён (браузер Playwright и плагины)."
+      echo "  Python ставится следующим компонентом («Python-пакеты»); после него запусти:"
+      echo "  python3 \"$RUNTIME_SCRIPT\""
     fi
   fi
 

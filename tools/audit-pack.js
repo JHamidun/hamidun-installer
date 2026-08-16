@@ -36,7 +36,17 @@ function readJson(p) {
 const settings = readJson(path.join(C, 'settings.json')) || {};
 const mcp = settings.mcpServers || {};
 const active = Object.entries(mcp).filter(([, c]) => c && !c.disabled);
-const viaNpx = active.filter(([, c]) => /^npx/i.test(c.command || ''));
+// npx распознаём по ИМЕНИ файла, а не по началу строки: под Windows команда часто
+// записана как npx.cmd/npx.exe, а в чужих конфигах — абсолютным путём до npx. Голое
+// /^npx/ эти формы не видит, и счётчик «N из M через npx» молча занижается — а это
+// ровно та метрика, ради которой аудит и писался (npx без Node в PATH не поднимется).
+// Заодно уходит обратная ошибка: /^npx/ цеплял бы любую команду, просто начинающуюся
+// с этих букв (npx-foo).
+const isNpx = (cmd) => {
+  const base = String(cmd || '').trim().replace(/^"(.*)"$/, '$1').split(/[\\/]/).pop();
+  return /^npx(\.(cmd|exe|bat|ps1))?$/i.test(base || '');
+};
+const viaNpx = active.filter(([, c]) => isNpx(c.command));
 
 ok.push(`MCP объявлено ${Object.keys(mcp).length}, активных ${active.length}`);
 if (viaNpx.length) {
@@ -53,13 +63,20 @@ if (viaNpx.length) {
 // строка приходит из JSON.stringify, где каждый бэкслеш удвоен, и паттерн вида
 // `C:\\Vibecode` не совпал бы никогда: он ждёт один бэкслеш там, где стоят два.
 const HARDCODED = /^[A-Za-z]:[\\/]+(Users|Vibecode)[\\/]|^\/(Users|home)\//i;
+// Пути, которые программа СОЗДАЁТ сама (профиль браузера, каталог вывода), проверять
+// на существование бессмысленно: их и не должно быть до первого запуска. У таких флагов
+// две равноправные записи — «--флаг значение» (два токена) и «--флаг=значение» (один
+// токен). Раньше распознавалась только первая, и inline-форма уезжала в проверку
+// существования: честный конфиг получал ложный СТОП за каталог, который появится лишь
+// при первом запуске.
+const CREATED_FLAGS = 'user-data-dir|output|out|profile|storage|cache|data-dir';
+const CREATED_PAIR = new RegExp('^--(' + CREATED_FLAGS + ')$', 'i');
+const CREATED_INLINE = new RegExp('^--(' + CREATED_FLAGS + ')=', 'i');
 for (const [name, cfg] of Object.entries(mcp)) {
   const blob = JSON.stringify(cfg);
-  // Пути, которые программа СОЗДАЁТ сама (профиль браузера, каталог вывода), проверять
-  // на существование бессмысленно: их и не должно быть до первого запуска.
   const rawArgs = [cfg.command, ...(cfg.args || [])].filter((x) => typeof x === 'string');
-  const CREATED_BY_FLAG = /^--(user-data-dir|output|out|profile|storage|cache|data-dir)$/i;
-  const args = rawArgs.filter((a, i) => !(i > 0 && CREATED_BY_FLAG.test(rawArgs[i - 1])));
+  const args = rawArgs.filter((a, i) =>
+    !CREATED_INLINE.test(a) && !(i > 0 && CREATED_PAIR.test(rawArgs[i - 1])));
   // Путь внутрь ~/.claude/... проверяем по паку: он и разворачивается в ~/.claude.
   const local = args
     .filter((a) => /\$\{HOME\}[\\/]\.claude[\\/]/i.test(a))
@@ -141,6 +158,55 @@ if (fs.existsSync(hooksDoc)) {
       missing.slice(0, 4).join(', '));
   }
 }
+
+/* ---------- 4б. Хуки и statusLine: подключены ли файлы, которых нет ---------- */
+
+// Зеркало проверки выше: там — хуки, описанные в правилах, но не подключённые; здесь —
+// подключённые в settings.json, но отсутствующие на диске. Это СТОП, а не заметка:
+// битый PreToolUse-хук срабатывает на КАЖДОМ вызове Bash, битый statusLine — на каждой
+// отрисовке строки. То есть исчезновение одного файла ломает ученику всю работу, а не
+// одну функцию — и до этой проверки ломало её молча.
+const hookCmds = [];
+for (const [event, entries] of Object.entries(settings.hooks || {})) {
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    for (const h of Array.isArray(entry && entry.hooks) ? entry.hooks : []) {
+      if (h && typeof h.command === 'string') hookCmds.push(['hooks.' + event, h.command]);
+    }
+  }
+}
+if (settings.statusLine && typeof settings.statusLine.command === 'string') {
+  hookCmds.push(['statusLine', settings.statusLine.command]);
+}
+
+let hookFiles = 0;
+let hookBad = false;
+for (const [where, command] of hookCmds) {
+  // Команда — строка шелла, а не массив аргументов, поэтому режем её на токены сами.
+  // Кавычки в приоритете: путь с пробелами не должен развалиться на куски.
+  const tokens = [...command.matchAll(/"([^"]+)"|'([^']+)'|(\S+)/g)].map((m) => m[1] || m[2] || m[3]);
+  for (const t of tokens) {
+    if (HARDCODED.test(t)) {
+      problems.push(`${where}: жёстко прописан путь конкретной машины — ${t.slice(0, 70)}`);
+      hookBad = true;
+      continue;
+    }
+    const inPack = t.match(/^\$\{HOME\}[\\/]\.claude[\\/](.+)$/i);
+    if (inPack) {
+      hookFiles++;
+      const rel = inPack[1].replace(/\//g, path.sep);
+      if (!fs.existsSync(path.join(C, rel))) {
+        problems.push(`${where}: файла нет в паке — ${rel}`);
+        hookBad = true;
+      }
+      continue;
+    }
+    if (/^\$\{HOME\}[\\/](?!\.claude)/i.test(t)) {
+      problems.push(`${where}: ссылается вне пака (${t.slice(0, 60)}) — у ученика этого не будет`);
+      hookBad = true;
+    }
+  }
+}
+if (hookFiles && !hookBad) ok.push(`хуки и statusLine: файлы на месте (${hookFiles})`);
 
 /* ---------- 5. Счётчики в CLAUDE.md против диска ---------- */
 
