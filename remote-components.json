@@ -187,16 +187,16 @@
     {
       "remoteId": "config",
       "name": "Claude config pack",
-      "sizeBytes": 128347883,
-      "sha256": "488d88501e032a7bf85cdad5ae1c4532e331474347fa93e93fc701ccc39987a8",
+      "sizeBytes": 128938481,
+      "sha256": "dab137791a9c38dc6e0ff5d2454e2ff4f674c12c5da8756ed5053460f47994a3",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-win32-488d88501e032a7bf85cdad5ae1c4532e331474347fa93e93fc701ccc39987a8.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-win32-dab137791a9c38dc6e0ff5d2454e2ff4f674c12c5da8756ed5053460f47994a3.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-win32-488d88501e032a7bf85cdad5ae1c4532e331474347fa93e93fc701ccc39987a8.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-win32-dab137791a9c38dc6e0ff5d2454e2ff4f674c12c5da8756ed5053460f47994a3.zip"
         }
       ],
       "installRelPath": "scripts/windows/config.ps1",
