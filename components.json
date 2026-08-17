@@ -14,7 +14,8 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 65388144
+            "win32": 65388144,
+            "darwin": 63387151
           }
         },
         {
@@ -27,7 +28,8 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 32874496
+            "win32": 32874496,
+            "darwin": 92775015
           }
         },
         {
@@ -41,7 +43,8 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 232347808
+            "win32": 232347808,
+            "darwin": 555685401
           }
         },
         {
@@ -54,7 +57,8 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 199597544
+            "win32": 199597544,
+            "darwin": 441615875
           }
         },
         {
@@ -70,7 +74,8 @@
           "needsAdmin": false,
           "sizeNote": "это npm-кеш целиком; на диск встанет одна сборка — заметно меньше",
           "sizeBytes": {
-            "win32": 106751972
+            "win32": 106751972,
+            "darwin": 141751611
           }
         },
         {
@@ -85,7 +90,8 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 89803239
+            "win32": 89803239,
+            "darwin": 96998768
           }
         },
         {
@@ -118,7 +124,8 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 228510097
+            "win32": 228510097,
+            "darwin": 228510097
           }
         },
         {
@@ -137,7 +144,8 @@
             "darwin": "браузер для автоматизации уже внутри"
           },
           "sizeBytes": {
-            "win32": 203912202
+            "win32": 203912202,
+            "darwin": 797321929
           }
         }
       ]
@@ -179,7 +187,8 @@
           "needsAdmin": false,
           "sizeNote": "+ Python и библиотеки докачиваются из интернета (нужен доступ к сети)",
           "sizeBytes": {
-            "win32": 115133655
+            "win32": 115133655,
+            "darwin": 173468667
           }
         }
       ]
@@ -203,7 +212,8 @@
             "darwin"
           ],
           "sizeBytes": {
-            "win32": 76364288
+            "win32": 76364288,
+            "darwin": 20848713
           }
         }
       ]
@@ -243,7 +253,8 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 109096960
+            "win32": 109096960,
+            "darwin": 212146900
           }
         }
       ]
@@ -311,7 +322,8 @@
             }
           ],
           "sizeBytes": {
-            "win32": 20946752
+            "win32": 20946752,
+            "darwin": 21423161
           }
         }
       ]
