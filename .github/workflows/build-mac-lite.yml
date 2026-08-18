@@ -19,6 +19,16 @@ name: Build macOS LITE (.dmg, streaming)
 
 on:
   workflow_dispatch:
+    inputs:
+      config_ref:
+        description: >-
+          Коммит пака, на котором закрепить сборку (полная sha). Пусто = взять main.
+          Нужен, когда пак правят параллельно: без закрепления гейт config-fresh
+          браковал снапшот на КАЖДОМ прогоне — пока идёт сборка, в main приезжает
+          новый коммит, и «вшито X, а origin/main = Y» повторяется бесконечно.
+          Релиз режется от известной точки, а не от движущейся ветки.
+        required: false
+        default: ''
   # Запуск до мержа в main: workflow_dispatch доступен только для файлов дефолтной
   # ветки, поэтому обкатываем сборку пушем во временную ветку mac-lite/*.
   push:
@@ -39,7 +49,12 @@ jobs:
       - name: Install deps
         run: npm install --no-audit --no-fund
 
-      - name: Fetch latest config (bundle into installer)
+      # HM_CONFIG_REF читают И fetch-config, И гейт config-fresh в preflight, И
+      # release-check — одной переменной закрепляется вся цепочка. Пусто = прежнее
+      # поведение (main).
+      - name: Fetch config (bundle into installer)
+        env:
+          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: npm run fetch:config
 
       # Полный mac-vendor нужен ДАЖЕ для лёгкой сборки: из него публикуются darwin-архивы
@@ -147,6 +162,8 @@ jobs:
         run: npm run sizes
 
       - name: Release-check (darwin) — сверка gatedFiles и размеров на своей ОС
+        env:
+          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: node tools/release-check.js --platform darwin
 
       # Реестр с darwin-записями обязан вернуться в репо: он вшивается в КАЖДУЮ следующую
