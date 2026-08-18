@@ -20,6 +20,14 @@ on:
 jobs:
   build-mac:
     runs-on: macos-latest
+    # Переменная стоит на джобе, а не на отдельных шагах. Прошлый заход
+    # закрепил только fetch:config и release-check — и полная сборка Mac
+    # упала на гейте config-fresh, потому что до beforePack переменная не
+    # доезжала: штамп говорил «24b54b6», а гейт всё ещё сверялся с «main».
+    # Пин, действующий на части цепочки, хуже отсутствующего: он выглядит
+    # как закрепление, а ведёт себя как его отсутствие.
+    env:
+      HM_CONFIG_REF: ${{ inputs.config_ref }}
     permissions:
       contents: write   # публикация dmg в Release (не artifact — квота)
     steps:
@@ -35,8 +43,6 @@ jobs:
       # Одна переменная закрепляет всю цепочку: fetch-config, гейт config-fresh
       # в preflight и release-check читают её же.
       - name: Fetch config (bundle into installer)
-        env:
-          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: npm run fetch:config
 
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)

@@ -37,6 +37,14 @@ on:
 jobs:
   build-mac-lite:
     runs-on: macos-latest
+    # Переменная стоит на джобе, а не на отдельных шагах. Прошлый заход
+    # закрепил только fetch:config и release-check — и полная сборка Mac
+    # упала на гейте config-fresh, потому что до beforePack переменная не
+    # доезжала: штамп говорил «24b54b6», а гейт всё ещё сверялся с «main».
+    # Пин, действующий на части цепочки, хуже отсутствующего: он выглядит
+    # как закрепление, а ведёт себя как его отсутствие.
+    env:
+      HM_CONFIG_REF: ${{ inputs.config_ref }}
     permissions:
       contents: write   # коммит обновлённого remote-components.json обратно в ветку
     steps:
@@ -53,8 +61,6 @@ jobs:
       # release-check — одной переменной закрепляется вся цепочка. Пусто = прежнее
       # поведение (main).
       - name: Fetch config (bundle into installer)
-        env:
-          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: npm run fetch:config
 
       # Полный mac-vendor нужен ДАЖЕ для лёгкой сборки: из него публикуются darwin-архивы
@@ -162,8 +168,6 @@ jobs:
         run: npm run sizes
 
       - name: Release-check (darwin) — сверка gatedFiles и размеров на своей ОС
-        env:
-          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: node tools/release-check.js --platform darwin
 
       # Реестр с darwin-записями обязан вернуться в репо: он вшивается в КАЖДУЮ следующую
