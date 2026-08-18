@@ -334,16 +334,16 @@
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 138266211,
-      "sha256": "d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e",
+      "sizeBytes": 138266216,
+      "sha256": "e7e141bca5cec6b7a7429c46137f5be6352f4d852af150bfb9bf8dcce6e1a6a7",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-e7e141bca5cec6b7a7429c46137f5be6352f4d852af150bfb9bf8dcce6e1a6a7.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-darwin-d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-darwin-e7e141bca5cec6b7a7429c46137f5be6352f4d852af150bfb9bf8dcce6e1a6a7.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -396,16 +396,16 @@
     {
       "remoteId": "config",
       "name": "Claude config pack",
-      "sizeBytes": 129076534,
-      "sha256": "9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9",
+      "sizeBytes": 129076532,
+      "sha256": "889fc0afa2022b2c1b9889468470cc207d19e844d34092432016a4062c21ca8d",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-darwin-9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-darwin-889fc0afa2022b2c1b9889468470cc207d19e844d34092432016a4062c21ca8d.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-darwin-9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-darwin-889fc0afa2022b2c1b9889468470cc207d19e844d34092432016a4062c21ca8d.zip"
         }
       ],
       "installRelPath": "scripts/macos/config.sh",
