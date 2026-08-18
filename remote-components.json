@@ -334,16 +334,16 @@
     {
       "remoteId": "claude",
       "name": "Claude Code CLI (npm-cache)",
-      "sizeBytes": 138266631,
-      "sha256": "15a3f0167780e471a3d55b0b3b45627db05dea37ca3a4251dc62e343a51f07c6",
+      "sizeBytes": 138266211,
+      "sha256": "d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-15a3f0167780e471a3d55b0b3b45627db05dea37ca3a4251dc62e343a51f07c6.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/claude-darwin-d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-darwin-15a3f0167780e471a3d55b0b3b45627db05dea37ca3a4251dc62e343a51f07c6.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/claude-darwin-d1315b81ddf38b9ee34e94265362b76df561adf5f4698a265942e202dc92808e.zip"
         }
       ],
       "installRelPath": "scripts/macos/claude.sh",
@@ -396,16 +396,16 @@
     {
       "remoteId": "config",
       "name": "Claude config pack",
-      "sizeBytes": 128938481,
-      "sha256": "f16983d438cd78fa7a0cc32576c1b8ff85ed488e0e4c147a88786bde0cae0a8a",
+      "sizeBytes": 129076534,
+      "sha256": "9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-darwin-f16983d438cd78fa7a0cc32576c1b8ff85ed488e0e4c147a88786bde0cae0a8a.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/config-darwin-9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-darwin-f16983d438cd78fa7a0cc32576c1b8ff85ed488e0e4c147a88786bde0cae0a8a.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/config-darwin-9e21a9a6604f0d9ab4b2cae35802635b495f6211a7beb3d058f546bad1283ce9.zip"
         }
       ],
       "installRelPath": "scripts/macos/config.sh",
@@ -415,16 +415,16 @@
     {
       "remoteId": "pydeps",
       "name": "Python + wheels (pydeps, macOS)",
-      "sizeBytes": 213625084,
-      "sha256": "4efbd40422d0ae2bd45f704152b9b0e76ab68a7b5c30b695548cfdd216bcb5b4",
+      "sizeBytes": 213695369,
+      "sha256": "8622fc123c2d43679c486ad22fca48b7bcefd305a38e74a0072f305c2c5bb1fb",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-4efbd40422d0ae2bd45f704152b9b0e76ab68a7b5c30b695548cfdd216bcb5b4.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/pydeps-darwin-8622fc123c2d43679c486ad22fca48b7bcefd305a38e74a0072f305c2c5bb1fb.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-darwin-4efbd40422d0ae2bd45f704152b9b0e76ab68a7b5c30b695548cfdd216bcb5b4.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/pydeps-darwin-8622fc123c2d43679c486ad22fca48b7bcefd305a38e74a0072f305c2c5bb1fb.zip"
         }
       ],
       "installRelPath": "scripts/macos/pydeps.sh",
@@ -436,23 +436,23 @@
     {
       "remoteId": "extension",
       "name": "VS Code extensions (Claude Code + шрифт, macOS)",
-      "sizeBytes": 188372024,
-      "sha256": "a50508b3738f9e03fffab1d3e6896aa55c26a750e4c9e46b436f53f4e086911d",
+      "sizeBytes": 190449897,
+      "sha256": "3cd177c974b3e642582c3736c52d5c718af12632d30d31fad4e96064e7f34fbb",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-darwin-a50508b3738f9e03fffab1d3e6896aa55c26a750e4c9e46b436f53f4e086911d.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/extension-darwin-3cd177c974b3e642582c3736c52d5c718af12632d30d31fad4e96064e7f34fbb.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-darwin-a50508b3738f9e03fffab1d3e6896aa55c26a750e4c9e46b436f53f4e086911d.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/extension-darwin-3cd177c974b3e642582c3736c52d5c718af12632d30d31fad4e96064e7f34fbb.zip"
         }
       ],
       "installRelPath": "scripts/macos/extension.sh",
       "gatedFiles": {
         "JetBrainsMono-Regular.ttf": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f",
-        "claude-code-arm64.vsix": "615e5918f999ee8bcbeaed2b9ee7f3c8e1ac6c9aedf416d710d051541ec64b72",
-        "claude-code-x64.vsix": "e3e24f53ea903d3fa9206f281c554754aedaddb0427e2640c9c86d916f1e1f96"
+        "claude-code-arm64.vsix": "e1ec667b51f46b1ea41acd3aa1bd85747a30b0cc4248c95d9fe9e229e4077085",
+        "claude-code-x64.vsix": "a3d6676d4909afeb8af110fa9c1dd74ab556a3964c5de34a81e1f57038569aed"
       },
       "platform": "darwin"
     },
