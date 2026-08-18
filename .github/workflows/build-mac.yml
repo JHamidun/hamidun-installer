@@ -6,6 +6,16 @@ name: Build macOS (.dmg)
 
 on:
   workflow_dispatch:
+    inputs:
+      config_ref:
+        description: >-
+          Коммит пака, на котором закрепить сборку (полная sha). Пусто = взять main.
+          Пока пак правят параллельно, «свежий main» на момент старта успевает
+          устареть к моменту гейта — и сборка либо отбраковывается, либо увозит
+          не тот срез. Здесь это не теория: dmg от 01:20 увёз коммит, в котором
+          имя боевого сервера ещё оставалось в описании навыка озвучки.
+        required: false
+        default: ''
 
 jobs:
   build-mac:
@@ -22,7 +32,11 @@ jobs:
       - name: Install deps
         run: npm install --no-audit --no-fund
 
-      - name: Fetch latest config (bundle into installer)
+      # Одна переменная закрепляет всю цепочку: fetch-config, гейт config-fresh
+      # в preflight и release-check читают её же.
+      - name: Fetch config (bundle into installer)
+        env:
+          HM_CONFIG_REF: ${{ inputs.config_ref }}
         run: npm run fetch:config
 
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
