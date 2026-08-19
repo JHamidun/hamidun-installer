@@ -10,7 +10,7 @@
     "start": "electron .",
     "fetch:config": "node tools/fetch-config.js",
     "fetch:vendor": "powershell -ExecutionPolicy Bypass -NoProfile -File tools/fetch-vendor.ps1",
-    "assert:clean": "node -e \"const p=require('./package.json');const r=(p.build.win.extraResources||[]).find(x=>x.to==='vendor');const dirty=!r||r.from!=='vendor'||/Lite/.test(p.build.win.artifactName||'')||/Lite/.test((p.build.portable||{}).artifactName||'');if(dirty)throw new Error('package.json ostalsya mutirovannym posle dist:win:lite (from=vendor-lite / artifactName ...-Lite) — vosstanovi: git checkout package.json config.json && rm -rf vendor-lite');console.log('[assert:clean] package.json chistyy — sobirayu OFFLINE izdanie iz vendor/.')\"",
+    "assert:clean": "node tools/assert-clean.js",
     "preflight": "node tools/preflight-build.js",
     "prune:cache": "node tools/prune-npm-cache.js",
     "release:check": "node tools/release-check.js",

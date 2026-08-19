@@ -36,6 +36,7 @@ mac-workflow. Ручная заливка Windows опасна ровно одн
 import argparse
 import io
 import os
+import subprocess
 import sys
 import urllib.request
 
@@ -146,6 +147,31 @@ def main():
     if args.dry_run:
         print('\n[dry-run] ничего не залито.')
         return
+
+    # Релиз-гейт ПЕРЕД заливкой, а не по памяти человека.
+    #
+    # release-check автоматически вызывался ровно в одном месте — маковом воркфлоу, и
+    # только с --platform darwin. Для Windows он запускался, если запускающий вспомнит:
+    # Windows-сборка собирается локально, CI для неё нет. То есть у половины релиза гейт
+    # был не гейтом, а привычкой. Привычка держится ровно до первого спешного вечера.
+    #
+    # Ставим его туда, где он перестаёт быть необязательным: публикация И ЕСТЬ релиз.
+    # HM_SKIP_RELEASE_CHECK=1 оставлен осознанным выключателем и печатается в лог —
+    # молчаливого обхода тут быть не должно.
+    if os.environ.get('HM_SKIP_RELEASE_CHECK') == '1':
+        print('\nВНИМАНИЕ: HM_SKIP_RELEASE_CHECK=1 — релиз-гейт пропущен осознанно.')
+    else:
+        print('\nПрогоняю релиз-гейт перед заливкой…')
+        rc = subprocess.run(
+            ['node', os.path.join(REPO, 'tools', 'release-check.js'), '--platform', 'win32'],
+            cwd=REPO,
+        ).returncode
+        if rc != 0:
+            raise SystemExit(
+                '\nПубликация ОСТАНОВЛЕНА: release-check дал NO-GO (причины выше).\n'
+                'Почини и повтори. Если решение осознанное — HM_SKIP_RELEASE_CHECK=1, '
+                'но тогда это будет видно в логе.')
+        print('Гейт пройден — заливаю.\n')
 
     print('')
     failures = []

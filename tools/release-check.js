@@ -328,13 +328,38 @@ async function main(argv) {
   const network = !args.includes('--offline');
   const deep = args.includes('--deep');
   const json = args.includes('--json');
+  // Значение --platform раньше принималось любое. `--platform` без значения давало
+  // platforms=[undefined], `--platform --deep` — ['--deep'], опечатка «wind32» проходила
+  // как есть. Дальше по такой «платформе» тихо схлопывались проверки реестра и живость
+  // зеркал: циклы фильтруют по e.platform и просто не находят ни одной записи. Вердикт
+  // при этом печатался обычный, будто прогон был полным. Опечатка в флаге не должна
+  // превращать проверку в ничто — она должна её останавливать.
+  const KNOWN = ['win32', 'darwin'];
   const pi = args.indexOf('--platform');
-  const platforms = pi !== -1 ? [args[pi + 1]] : ['win32', 'darwin'];
+  let platforms = KNOWN.slice();
+  if (pi !== -1) {
+    const v = args[pi + 1];
+    if (!v || v.startsWith('--') || !KNOWN.includes(v)) {
+      console.error(`release-check: --platform требует значение из ${KNOWN.join(' | ')}, `
+        + `получено «${v === undefined ? '(пусто)' : v}».`);
+      console.error('Прогон остановлен: с неизвестной платформой молча отключаются проверки');
+      console.error('реестра и живость зеркал, а вердикт при этом выглядит полноценным.');
+      return 1;
+    }
+    platforms = [v];
+  }
 
   console.log('== release-check: ' + platforms.join(' + ') + (network ? ' (с сетью)' : ' (офлайн)') + ' ==\n');
 
   const chk = checkVendor(deep);
+  // Размеры сверяются по одной платформе — той, чей vendor лежит на этой машине.
+  // Про вторую честно говорим, что не смотрели, вместо молчания.
   checkSizes(platforms.includes('win32') ? 'win32' : platforms[0]);
+  const sizeSkipped = platforms.filter((p) => p !== (platforms.includes('win32') ? 'win32' : platforms[0]));
+  if (sizeSkipped.length) {
+    warn('размеры', `цифры ${sizeSkipped.join(', ')} НЕ сверены: vendor на диске принадлежит `
+      + `${platforms.includes('win32') ? 'win32' : platforms[0]}. Прогони release-check на той ОС.`);
+  }
   checkConfigPack(network);
   const reg = checkRegistry(platforms, chk);
   checkSize();

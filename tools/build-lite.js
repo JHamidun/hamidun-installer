@@ -294,6 +294,15 @@ function main() {
       + '(.github/workflows) или выстави HM_LITE_FORCE_CROSS=1, если знаешь, что делаешь.');
   }
   console.log(`[build-lite] цель: ${target} (${t.platform}); артефакт: ${t.artifactFile}`);
+  // Выключатель, о котором в логе не сказано ни строки, через неделю никто не помнит.
+  // А цена у него не косметическая: кросс-сборка dmg на не-macOS даёт артефакт без
+  // подписи и нотаризации — у получателя он открывается как «повреждён». Раз уж мы
+  // пропускаем проверку, это должно быть написано ровно там, где потом будут читать.
+  if (t.hostPlatform && process.platform !== t.hostPlatform) {
+    console.log(`[build-lite] ВНИМАНИЕ: HM_LITE_FORCE_CROSS=1 — проверка хоста снята осознанно.`);
+    console.log(`             Собираем ${target} на ${process.platform} вместо ${t.hostPlatform}:`);
+    console.log('             подпись и нотаризация не выполнятся, артефакт НЕ раздавать.');
+  }
 
   const cfgBak = fs.readFileSync(CFG);
   const pkgBak = fs.readFileSync(PKG);

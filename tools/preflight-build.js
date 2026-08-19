@@ -243,6 +243,30 @@ function readConfigPackStamp(vendorDir) {
 
 function isSha(s) { return /^[0-9a-f]{40}$/i.test(String(s || '')); }
 
+/**
+ * Факты о паке с ДИСКА — то, чего гейту не хватало: он верил штампу на слово.
+ *
+ * Считаем скиллы ровно тем же правилом, что и tools/fetch-config.js при записи штампа
+ * (каталог внутри .claude/skills, в котором лежит SKILL.md), иначе сравнивать было бы
+ * нечего: разные определения дали бы вечное расхождение на ровном месте.
+ *
+ * Ошибки чтения не выдумываем в цифру: не смогли посчитать — возвращаем null, и ядро
+ * тогда просто не сравнивает. Гейт, который падает из-за собственной неудачи чтения,
+ * учит обходить себя переменной.
+ */
+function readPackStats(vendorDir) {
+  const base = path.join(vendorDir || VENDOR, 'config-pack');
+  const claude = path.join(base, '.claude');
+  const out = { hasClaude: fs.existsSync(claude), skills: null };
+  const skillsDir = path.join(claude, 'skills');
+  try {
+    out.skills = fs.readdirSync(skillsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(skillsDir, e.name, 'SKILL.md')))
+      .length;
+  } catch (e) { out.skills = null; }
+  return out;
+}
+
 // ЧИСТОЕ ЯДРО ГЕЙТА (ни диска, ни сети) — ровно его и проверяют тесты.
 //   cfg        — содержимое config.json (нужны configRepoUrl / configRepoRef|Branch)
 //   stamp      — содержимое vendor/config-pack/.hamidun-config-pack.json (или null)
@@ -266,7 +290,26 @@ function evaluateConfigFreshness(input) {
     lines.push('либо положен туда руками. Что именно уедет в exe — недоказуемо. Почини: npm run fetch:config');
     return { id: 'config-fresh', level: soften('fail'), lines, wantRef, wantUrl };
   }
-  lines.push(`вшито: ${stamp.repo}#${stamp.ref} @ ${String(stamp.commit || '').slice(0, 12)} (${stamp.committedAt || '—'}), скиллов: ${stamp.skills}`);
+  // Штамп описывает пак, но САМ ПАК гейт до сих пор не видел. Из-за этого «вшито …,
+  // скиллов: 287» печаталось и над пустым каталогом: достаточно было, чтобы уцелел
+  // один json-файл. Строка выглядела доказательством, а доказывала только своё
+  // существование. Поэтому теперь рядом со штампом идёт факт с диска (packStats),
+  // и расхождение — отказ, а не примечание.
+  const st = input.packStats || null;
+  const disk = st && typeof st.skills === 'number' ? `${st.skills} (на диске)` : 'не считано';
+  lines.push(`вшито: ${stamp.repo}#${stamp.ref} @ ${String(stamp.commit || '').slice(0, 12)} (${stamp.committedAt || '—'}), скиллов: ${stamp.skills} по штампу, ${disk}`);
+
+  if (st && st.hasClaude === false) {
+    lines.push('в vendor/config-pack НЕТ каталога .claude — штамп описывает пак, которого на диске нет.');
+    lines.push('Так бывает, когда клон оборвался на середине: json уцелел, содержимое — нет.');
+    lines.push('Почини: npm run fetch:config');
+    return { id: 'config-fresh', level: soften('fail'), lines, wantRef, wantUrl };
+  }
+  if (st && typeof st.skills === 'number' && typeof stamp.skills === 'number' && st.skills !== stamp.skills) {
+    lines.push(`скиллов по штампу ${stamp.skills}, на диске ${st.skills} — содержимое пака разошлось со штампом.`);
+    lines.push('Почини: npm run fetch:config');
+    return { id: 'config-fresh', level: soften('fail'), lines, wantRef, wantUrl };
+  }
 
   if (!isSha(stamp.commit)) {
     lines.push('в штампе нет валидного sha коммита — снапшот не идентифицируется. Почини: npm run fetch:config');
@@ -336,6 +379,7 @@ function checkConfigFresh(opts) {
   if (st.ok && !isSha(wantRef) && opts.network !== false) remoteHead = gitLsRemote(wantUrl, wantRef);
   return evaluateConfigFreshness({
     cfg, stamp: st.ok ? st.stamp : null, remoteHead, envRef,
+    packStats: readPackStats(opts.vendorDir),
     allowStale: process.env.HM_ALLOW_STALE_CONFIG === '1',
     allowOffline: process.env.HM_ALLOW_OFFLINE_BUILD === '1',
   });
