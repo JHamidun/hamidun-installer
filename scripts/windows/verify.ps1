@@ -130,11 +130,84 @@ if (-not (Test-Selected 'claude')) {
 if (-not (Test-Selected 'config')) {
     Write-Host "CHECK skip Конфиг"
 } else {
+    # Признак «конфиг на месте» должен быть НЕ СЛАБЕЕ, чем факт успешной установки.
+    # Раньше здесь стояло «settings.json ИЛИ skills» — дизъюнкция, которая зеленела на
+    # ПОЛОВИНЕ разложенного дерева: config.ps1 копирует каталоги по одному, и установка,
+    # оборвавшаяся после skills, давала «CHECK ok Конфиг». Человек видел галочку в
+    # финальном чек-листе там, где конфига фактически не было.
+    #
+    # Теперь два независимых свидетеля:
+    #   • квитанция установщика (~/.hamidun-setup/installed.json, пишет recordInstall
+    #     ТОЛЬКО при успехе) — она и есть авторитетный ответ «доехало ли»;
+    #   • содержимое: settings.json И skills — оба, а не любое из.
+    # Расхождение между ними — само по себе диагноз, и его надо назвать вслух, а не
+    # сглаживать в галочку.
     $claudeHome = Join-Path $env:USERPROFILE '.claude'
-    if ((Test-Path (Join-Path $claudeHome 'settings.json')) -or (Test-Path (Join-Path $claudeHome 'skills'))) {
+    $hasSettings = Test-Path (Join-Path $claudeHome 'settings.json')
+    $hasSkills   = Test-Path (Join-Path $claudeHome 'skills')
+    $receipt = Join-Path $env:USERPROFILE '.hamidun-setup\installed.json'
+    $recorded = $false
+    if (Test-Path $receipt) {
+        try {
+            $m = Get-Content -LiteralPath $receipt -Raw -Encoding UTF8 | ConvertFrom-Json
+            $recorded = $null -ne $m.components.config
+        } catch { $recorded = $false }
+    }
+    if ($hasSettings -and $hasSkills -and $recorded) {
         Write-Host "CHECK ok Конфиг"
+    } elseif ($hasSettings -or $hasSkills) {
+        $miss = @()
+        if (-not $hasSettings) { $miss += 'settings.json' }
+        if (-not $hasSkills)   { $miss += 'skills' }
+        if (-not $recorded)    { $miss += 'запись об успешной установке' }
+        Write-Host ("  конфиг разложен НЕ полностью, отсутствует: " + ($miss -join ', '))
+        Write-Host "CHECK fail Конфиг"
     } else {
         Write-Host "CHECK fail Конфиг"
+    }
+}
+
+# --- Python-пакеты (pydeps доехал?) ---
+# Раньше этого блока не было вовсе, и весь класс молчаливых провалов pydeps —
+# не поставившийся Playwright, недокачанные колёса, отвалившийся pip — не всплывал
+# НИГДЕ: ни в чек-листе, ни в логе. Человек видел зелёный экран и узнавал о поломке
+# позже, когда падал первый скилл, работающий с браузером.
+#
+# Проверяем ровно то, от чего зависят навыки, а не факт запуска pip: импортируется ли
+# playwright и лежит ли распакованный Chromium в кэше. Диагностика, не блокировка.
+if (-not (Test-Selected 'pydeps')) {
+    Write-Host "CHECK skip Python-пакеты"
+} else {
+    $pyExe = $null
+    foreach ($c in @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'))) {
+        if (Test-Path $c) { $pyExe = $c; break }
+    }
+    if (-not $pyExe) {
+        $cmd = Get-Command python -ErrorAction SilentlyContinue
+        # Заглушка Microsoft Store (WindowsApps) не является Python: она открывает магазин.
+        if ($cmd -and $cmd.Source -and ($cmd.Source -notlike '*\WindowsApps\*')) { $pyExe = $cmd.Source }
+    }
+    if (-not $pyExe) {
+        Write-Host "  Python не найден — библиотеки ставить было некуда"
+        Write-Host "CHECK fail Python-пакеты"
+    } else {
+        & $pyExe -c "import playwright" 2>$null
+        $impOk = ($LASTEXITCODE -eq 0)
+        $cache = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+        $browserOk = $false
+        if (Test-Path $cache) {
+            $browserOk = [bool](Get-ChildItem -LiteralPath $cache -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'chromium*' } | Select-Object -First 1)
+        }
+        if ($impOk -and $browserOk) {
+            Write-Host "CHECK ok Python-пакеты"
+        } else {
+            if (-not $impOk)     { Write-Host "  библиотека playwright не импортируется — часть навыков не заработает" }
+            if (-not $browserOk) { Write-Host "  браузер Playwright не распакован ($cache) — скриншоты, экспорт и деки не заработают" }
+            Write-Host "CHECK fail Python-пакеты"
+        }
     }
 }
 

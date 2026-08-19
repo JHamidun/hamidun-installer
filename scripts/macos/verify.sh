@@ -72,10 +72,52 @@ fi
 if ! is_selected config; then
   echo "CHECK skip Конфиг"
 else
-  if [ -f "$HOME/.claude/settings.json" ] || [ -d "$HOME/.claude/skills" ]; then
+  # Зеркало verify.ps1: дизъюнкция зеленела на половине разложенного дерева.
+  # Свидетелей теперь двое — содержимое (оба маркера) и квитанция установщика,
+  # которая пишется ТОЛЬКО при успехе.
+  HAS_SETTINGS=0; [ -f "$HOME/.claude/settings.json" ] && HAS_SETTINGS=1
+  HAS_SKILLS=0;   [ -d "$HOME/.claude/skills" ] && HAS_SKILLS=1
+  RECORDED=0
+  RECEIPT="$HOME/.hamidun-setup/installed.json"
+  if [ -f "$RECEIPT" ] && grep -q '"config"' "$RECEIPT" 2>/dev/null; then RECORDED=1; fi
+  if [ "$HAS_SETTINGS" = "1" ] && [ "$HAS_SKILLS" = "1" ] && [ "$RECORDED" = "1" ]; then
     echo "CHECK ok Конфиг"
   else
+    if [ "$HAS_SETTINGS" = "1" ] || [ "$HAS_SKILLS" = "1" ]; then
+      MISS=""
+      [ "$HAS_SETTINGS" = "1" ] || MISS="$MISS settings.json"
+      [ "$HAS_SKILLS" = "1" ]   || MISS="$MISS skills"
+      [ "$RECORDED" = "1" ]     || MISS="$MISS запись-об-успешной-установке"
+      echo "  конфиг разложен НЕ полностью, отсутствует:$MISS"
+    fi
     echo "CHECK fail Конфиг"
+  fi
+fi
+
+# --- Python-пакеты (pydeps доехал?) ---
+# Зеркало verify.ps1. Весь класс молчаливых провалов pydeps раньше не всплывал нигде —
+# на macOS вдобавок сам pydeps печатал «OK» поверх собственного предупреждения.
+if ! is_selected pydeps; then
+  echo "CHECK skip Python-пакеты"
+else
+  PYV=""
+  for c in "$HOME/.hamidun-setup/python/bin/python3" /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/bin/python3; do
+    [ -x "$c" ] && { PYV="$c"; break; }
+  done
+  if [ -z "$PYV" ]; then
+    echo "  Python не найден — библиотеки ставить было некуда"
+    echo "CHECK fail Python-пакеты"
+  else
+    IMP_OK=0; "$PYV" -c "import playwright" >/dev/null 2>&1 && IMP_OK=1
+    BROWSER_OK=0
+    if ls -d "$HOME/Library/Caches/ms-playwright/chromium"* >/dev/null 2>&1; then BROWSER_OK=1; fi
+    if [ "$IMP_OK" = "1" ] && [ "$BROWSER_OK" = "1" ]; then
+      echo "CHECK ok Python-пакеты"
+    else
+      [ "$IMP_OK" = "1" ]     || echo "  библиотека playwright не импортируется — часть навыков не заработает"
+      [ "$BROWSER_OK" = "1" ] || echo "  браузер Playwright не распакован — скриншоты, экспорт и деки не заработают"
+      echo "CHECK fail Python-пакеты"
+    fi
   fi
 fi
 
