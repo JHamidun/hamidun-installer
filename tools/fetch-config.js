@@ -21,7 +21,27 @@ const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
 const url = cfg.configRepoUrl || 'https://github.com/JHamidun/claude-code-config-pack';
 // Приоритет: переменная окружения сборки > config.json > ветка по умолчанию.
 // HM_CONFIG_REF позволяет собрать релиз от КОНКРЕТНОГО коммита/тега, не трогая config.json.
-const ref = process.env.HM_CONFIG_REF || cfg.configRepoRef || cfg.configRepoBranch || 'main';
+const refRaw = process.env.HM_CONFIG_REF || cfg.configRepoRef || cfg.configRepoBranch || 'main';
+
+// Значение ref уходит в shell-строку git clone. Раньше оно подставлялось как есть, и это
+// было терпимо, пока источником служил config.json из репозитория. Сейчас источник другой:
+// у обоих mac-воркфлоу появился вход config_ref типа workflow_dispatch — свободное
+// текстовое поле, которое заполняет человек в форме на GitHub. Свободный текст в
+// shell-строке — это инъекция, и неважно, что запустить сборку может только тот, у кого
+// есть доступ на запись: гейт, который держится на добросовестности запускающего, гейтом
+// не является.
+//
+// Пропускаем ровно то, чем бывает git-ref: латиница, цифры, точка, дефис, подчёркивание,
+// слэш. Ведущий дефис запрещён отдельно — иначе значение будет прочитано git'ом как флаг.
+const REF_OK = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,254}$/;
+if (!REF_OK.test(refRaw)) {
+  console.error(`[fetch-config] недопустимый ref «${refRaw}».`);
+  console.error('  Допустимы только буквы, цифры, «.», «_», «-», «/»; не более 255 символов,');
+  console.error('  и первый символ не может быть дефисом. Это защита от подстановки команд:');
+  console.error('  значение уезжает в командную строку git.');
+  process.exit(1);
+}
+const ref = refRaw;
 const dest = path.join(ROOT, 'vendor', 'config-pack');
 
 console.log(`[fetch-config] ${url}#${ref} -> ${dest}`);
@@ -31,12 +51,12 @@ fs.mkdirSync(path.dirname(dest), { recursive: true });
 // --depth 1 -b <ref> работает для ветки и тега, но НЕ для произвольного SHA.
 // Поэтому: пробуем быстрый путь, при неудаче — полный clone + checkout по SHA.
 try {
-  execSync(`git clone --depth 1 -b ${ref} ${url} "${dest}"`, { stdio: 'inherit' });
+  execSync(`git clone --depth 1 -b "${ref}" "${url}" "${dest}"`, { stdio: 'inherit' });
 } catch (e) {
   console.log(`[fetch-config] ref «${ref}» не ветка и не тег — полный clone + checkout`);
   fs.rmSync(dest, { recursive: true, force: true });
-  execSync(`git clone ${url} "${dest}"`, { stdio: 'inherit' });
-  execSync(`git -C "${dest}" checkout --detach ${ref}`, { stdio: 'inherit' });
+  execSync(`git clone "${url}" "${dest}"`, { stdio: 'inherit' });
+  execSync(`git -C "${dest}" checkout --detach "${ref}"`, { stdio: 'inherit' });
 }
 
 // Фактический коммит фиксируем ДО удаления .git — иначе спросить будет уже не у кого.

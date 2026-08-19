@@ -204,6 +204,7 @@ function checkRegistry(platforms, chk) {
   // ТОЛЬКО по записям своей ОС; чужие честно помечаем как непроверенные.
   const manifest = (chk && chk.files) || {};
   let gatedChecked = 0;
+  const gatedMissing = [];
   const gatedSkippedPlat = new Set();
   for (const e of (reg.components || [])) {
     if (!platforms.includes(e.platform || 'win32')) continue;
@@ -214,7 +215,12 @@ function checkRegistry(platforms, chk) {
     }
     for (const [name, sha] of Object.entries(e.gatedFiles)) {
       const local = manifest[name];
-      if (!local) continue;
+      // Раньше здесь стоял голый continue. Но мы уже отфильтровали записи ЧУЖИХ
+      // платформ выше — значит имя из gatedFiles обязано быть в манифесте этой ОС.
+      // Его отсутствие означает, что опубликованный компонент стережёт файл, которого
+      // в локальном vendor нет: либо vendor неполон, либо запись от другой сборки.
+      // Молчаливый пропуск превращал это в «сверено 0 файлов» без единого слова.
+      if (!local) { gatedMissing.push(`${name} (${e.remoteId}/${e.platform})`); continue; }
       gatedChecked++;
       if (String(local.sha256).toLowerCase() !== String(sha).toLowerCase()) {
         fail(S, `РАССИНХРОН: файл ${name} в опубликованном «${e.remoteId}/${e.platform}» = ${String(sha).slice(0, 12)}…, а во вшитом checksums.json = ${String(local.sha256).slice(0, 12)}… — у КАЖДОГО lite-пользователя компонент упадёт с «файл подменён» ПОСЛЕ честной загрузки. Перепубликуй: python tools/publish-vendor.py --platform ${e.platform} --only ${e.remoteId}`);
@@ -222,6 +228,11 @@ function checkRegistry(platforms, chk) {
     }
   }
   if (gatedChecked) okLine(S, `gatedFiles сверены с вшитым checksums.json (${process.platform}): ${gatedChecked} файл(ов)`);
+  if (gatedMissing.length) {
+    fail(S, `в манифесте vendor НЕТ файлов, которые стерегут опубликованные записи своей платформы: `
+      + `${gatedMissing.slice(0, 6).join(', ')}${gatedMissing.length > 6 ? ` и ещё ${gatedMissing.length - 6}` : ''}. `
+      + `Либо vendor неполон (npm run fetch:vendor), либо запись опубликована из другой сборки (перепубликуй компонент).`);
+  }
   if (gatedSkippedPlat.size) warn(S, `gatedFiles записей ${[...gatedSkippedPlat].join(', ')} НЕ сверены: на диске манифест ${process.platform}. Прогони release-check на той ОС — иначе рассинхрон «файл подменён» вылезет только у пользователя.`);
 
   // 4f. схема записей (то же, что стерегут юнит-тесты — но здесь это часть вердикта).
@@ -242,14 +253,33 @@ function checkRegistry(platforms, chk) {
 async function checkMirrors(reg, platforms) {
   const S = 'зеркала';
   const jobs = [];
+  // Считаем пригодные зеркала ПОКОМПОНЕНТНО. Раньше непригодный url давал warn и
+  // continue — и компонент, у которого НИ ОДНО зеркало не годится, просто не попадал
+  // в проверку: ни одной задачи, ни одного блокера, вердикт GO. То есть чем хуже
+  // запись, тем тише она проходила: одно мёртвое зеркало из двух — предупреждение,
+  // два мёртвых из двух — тишина. Схема (4f) это не ловит: там проверяется, что
+  // массив mirrors НЕ ПУСТ, а не что в нём есть хоть один рабочий адрес.
+  const usable = new Map();
   for (const e of (reg.components || [])) {
     if (!platforms.includes(e.platform || 'win32')) continue;
+    const key = e.remoteId + '/' + (e.platform || '—');
+    if (!usable.has(key)) usable.set(key, 0);
     for (const m of (e.mirrors || [])) {
-      if (!m || !remoteFetch.isFetchableUrl(m.url)) { warn(S, `у «${e.remoteId}/${e.platform}» зеркало ${m && m.host} с непригодным url — remote-fetch его не возьмёт.`); continue; }
+      if (!m || !remoteFetch.isFetchableUrl(m.url)) { warn(S, `у «${key}» зеркало ${m && m.host} с непригодным url — remote-fetch его не возьмёт.`); continue; }
+      usable.set(key, usable.get(key) + 1);
       jobs.push({ e, m });
     }
   }
-  if (!jobs.length) { warn(S, 'нечего проверять: подходящих зеркал в реестре нет.'); return; }
+  for (const [key, n] of usable) {
+    if (!n) fail(S, `«${key}»: НИ ОДНОГО пригодного адреса зеркала — remote-fetch не возьмёт ни один, в lite компонент недостижим. Перезалей: python tools/publish-vendor.py --only ${key.split('/')[0]}`);
+  }
+  // Пустой список задач — это не «нечего проверять», а «проверка не состоялась».
+  // Вердикт, выданный без единой сетевой пробы, не должен выглядеть как проверенный.
+  if (!jobs.length) {
+    if (usable.size) fail(S, 'ни одной пробы не выполнено, хотя записи в реестре есть — живость зеркал НЕ проверена.');
+    else warn(S, `в реестре нет записей под ${platforms.join(', ')} — проверять нечего.`);
+    return;
+  }
   const byEntry = new Map();
   const BATCH = 8;
   for (let i = 0; i < jobs.length; i += BATCH) {
