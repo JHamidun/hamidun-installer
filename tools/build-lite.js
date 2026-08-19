@@ -163,10 +163,19 @@ function assertRegistryMatchesChecksums(platform) {
   const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
   let checked = 0;
   let entries = 0;
+  const ungated = [];
   for (const e of (reg.components || [])) {
     if (!e || !e.remoteId || e.platform !== platform) continue;
     entries++;
     const gated = e.gatedFiles;
+    // ПУСТОЙ объект — это не «проверено», это «проверять нечем». Так шли две самые
+    // тяжёлые и важные записи: «claude» (npm-кеш, ~1 ГБ) и «config» (весь конфиг-пак).
+    // gatedFiles собирается из vendor/checksums.json, а туда попадают только отдельные
+    // ФАЙЛЫ (apps/*, курс, nomad) — у компонентов-КАТАЛОГОВ представителя там нет, и
+    // цикл ниже honestly не сверял ничего. Снаружи это выглядело как «всё сошлось».
+    if (gated && typeof gated === 'object' && !Object.keys(gated).length) {
+      ungated.push(e.remoteId);
+    }
     if (!gated || typeof gated !== 'object') {
       throw new Error(
         `реестр докачки: у «${e.remoteId}» нет поля gatedFiles — запись опубликована старой версией ` +
@@ -189,6 +198,35 @@ function assertRegistryMatchesChecksums(platform) {
       checked++;
     }
   }
+  // Свежесть конфиг-пака. В lite пак НЕ вшит — он едет компонентом «config», и его
+  // байты стережёт sha архива в реестре. Но идентичность не стережёт НИЧТО: у «config»
+  // gatedFiles пуст, а гейт config-fresh для lite-издания не применяется вовсе
+  // (preflight сам себя обнуляет: «проверять нечего для этого издания»). То есть lite
+  // мог уехать, указывая на конфиг-архив произвольного возраста, и ни один гейт на пути
+  // этого бы не заметил. Здесь мы сверяем штамп пака, из которого СЕЙЧАС собирается
+  // сборка, с тем, на чём её закрепили.
+  const stampPath = path.join(ROOT, 'vendor', 'config-pack', '.hamidun-config-pack.json');
+  if (!fs.existsSync(stampPath)) {
+    throw new Error(
+      'нет vendor/config-pack/.hamidun-config-pack.json — какой пак опубликован компонентом ' +
+      '«config», недоказуемо. Почини: npm run fetch:config'
+    );
+  }
+  const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'));
+  const wantRef = process.env.HM_CONFIG_REF || '';
+  if (/^[0-9a-f]{7,40}$/i.test(wantRef) && String(stamp.commit || '').toLowerCase().indexOf(wantRef.toLowerCase()) !== 0) {
+    throw new Error(
+      `сборка закреплена на ${wantRef.slice(0, 12)}, а в vendor лежит пак ${String(stamp.commit).slice(0, 12)} — ` +
+      'компонент «config» опубликован не из того снапшота. Почини: npm run fetch:config (с тем же HM_CONFIG_REF)'
+    );
+  }
+  console.log(`[build-lite] конфиг-пак: ${String(stamp.commit).slice(0, 12)} (${stamp.committedAt || '—'}), скиллов: ${stamp.skills}`);
+  if (ungated.length) {
+    console.log(`[build-lite] ВНИМАНИЕ: записи без gatedFiles (сверять с манифестом нечем): ${ungated.join(', ')}.`);
+    console.log('            Целостность их архивов стережёт только sha в реестре — этого хватает против порчи,');
+    console.log('            но НЕ против устаревшей публикации. Для «config» возраст проверен штампом выше.');
+  }
+
   // Ни одной записи своей платформы = lite-сборка, которой НЕЧЕГО качать: все тяжёлые
   // компоненты у пользователя уйдут в «нет сборки для платформы». Ловим до сборки.
   if (!entries) {

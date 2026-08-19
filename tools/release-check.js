@@ -345,6 +345,7 @@ async function main(argv) {
   const warns = results.filter((r) => r.level === 'warn');
   if (json) {
     console.log(JSON.stringify({ verdict: fails.length ? 'NO-GO' : 'GO', results }, null, 2));
+
     return fails.length ? 1 : 0;
   }
   const TAG = { ok: '  OK ', warn: 'WARN ', fail: 'СТОП ' };
@@ -364,6 +365,23 @@ async function main(argv) {
   if (warns.length) {
     console.log('Предупреждения (сломается не сегодня, а на следующем обновлении):');
     warns.forEach((w, i) => console.log(`  ${i + 1}. [${w.section}] ${w.msg.split('\n')[0]}`));
+  }
+
+  // Аварийные выключатели должны быть видны ИМЕННО ЗДЕСЬ. Строка «гейт понижен
+  // осознанно» печаталась в теле секции, а в вердикт попадала только ПЕРВАЯ строка
+  // сообщения — безобидная «вшито: … @ 24b54b6». Человек, читающий один вердикт (а
+  // читают именно его), видел «GO, 2 предупреждения» и не узнавал, что блокер снят
+  // рукой. Выключатель, незаметный в итоге, отменяет смысл гейта: следующий, кто
+  // выставит переменную «на разок», оставит её навсегда, и не заметит никто.
+  const overrides = [
+    ['HM_ALLOW_STALE_CONFIG', 'гейт свежести пака понижен до предупреждения'],
+    ['HM_ALLOW_OFFLINE_BUILD', 'сверка с origin отключена'],
+    ['HM_ALLOW_OVERSIZE', 'потолок makensis не блокирует'],
+  ].filter(([k]) => process.env[k]);
+  if (overrides.length) {
+    console.log('');
+    console.log('ВЕРДИКТ ПОЛУЧЕН С ВКЛЮЧЁННЫМИ ВЫКЛЮЧАТЕЛЯМИ — он слабее, чем выглядит:');
+    overrides.forEach(([k, why]) => console.log('  • ' + k + '=' + process.env[k] + ' — ' + why));
   }
   return fails.length ? 1 : 0;
 }
