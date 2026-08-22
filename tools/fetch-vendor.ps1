@@ -337,7 +337,10 @@ if (Test-Path $mascotSrc) {
 # деанон/секрет-паттерны гейтуем. FATAL — только если паттерн остаётся в коде, НУЖНОМ
 # для установки (py/toml пакетных директорий + pyproject.toml + README/LICENSE);
 # остальное чистим сами с логом — билд не падает по мелочи.
-$NOMAD_LEAK_RE = '95\.179\.242\.167|transform-ai\.online|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+# Юридическое имя из сертификата Apple и Team ID добавлены после того, как ученик
+# увидел это имя у себя. Один поимённо удаляемый файл (см. 1b) проблему не закрывает:
+# то же имя приезжает в любой новый документ про подпись или в лог сборки.
+$NOMAD_LEAK_RE = '95\.179\.242\.167|transform-ai\.online|[Jj]emal[ _-]*[Mm]ohamed[ _-]*[Ll]emine|3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
 
 function Test-NomadSrcCritical {
   # $Rel = путь ОТНОСИТЕЛЬНО корня nomad-src, разделители '/'. Код, нужный `uv tool install`:
@@ -362,6 +365,14 @@ function Invoke-NomadSrcSanitize {
   foreach ($rel in @('.superpowers', 'docs\plans', 'docs\superpowers', 'deploy')) {
     $p = Join-Path $Src $rel
     if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')/" }
+  }
+  # 1b) Поимённые внутренние документы, которые под глобы ниже не подпадают.
+  #     MAC_SIGNING.md — руководство по подписи релиза: несёт юридическое имя владельца
+  #     из сертификата Developer ID и Apple Team ID. Покупателю оно не нужно вовсе, а
+  #     ехало каждому внутри exe. Именно это имя ученик и увидел у себя на машине.
+  foreach ($rel in @('apps\desktop\MAC_SIGNING.md')) {
+    $p = Join-Path $Src $rel
+    if (Test-Path $p) { Remove-Item -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')" }
   }
   # 2) Внутренние *report*-отчёты: top-level (PHASE1_*_REPORT.md), docs\, scripts\.
   #    Продуктовые файлы, матчащие глоб (agent/lsp/reporter.py, шаблоны skills/bug-report.md

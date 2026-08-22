@@ -377,7 +377,10 @@ fi
 # вырезаем, деанон/секрет-паттерны гейтуем. FATAL — только если паттерн остаётся
 # в коде, НУЖНОМ для установки (py/toml пакетных директорий + pyproject.toml);
 # остальное чистим сами с логом — билд не падает по мелочи.
-NOMAD_LEAK_RE='95\.179\.242\.167|transform-ai\.online|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+# Юридическое имя из сертификата Apple и Team ID добавлены после того, как ученик
+# увидел это имя у себя. Поимённое удаление файла (1b) проблему не закрывает: то же
+# имя приезжает в любой новый документ про подпись или в лог сборки.
+NOMAD_LEAK_RE='95\.179\.242\.167|transform-ai\.online|[Jj]emal[ _-]*[Mm]ohamed[ _-]*[Ll]emine|3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
 nomad_src_is_critical() {
   # $1 = путь ОТНОСИТЕЛЬНО корня nomad-src. Код, нужный `uv tool install`:
   # pyproject.toml + *.py/*.toml пакетных дир (pyproject [tool.setuptools.packages.find]
@@ -401,6 +404,13 @@ nomad_src_sanitize() {
   # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
   for rel in .superpowers docs/plans docs/superpowers deploy; do
     if [ -e "$S/$rel" ]; then rm -rf "$S/$rel"; echo "    - удалил $rel/"; fi
+  done
+  # 1b) Поимённые внутренние документы, не подпадающие под глобы ниже.
+  #     MAC_SIGNING.md — руководство по подписи релиза: несёт юридическое имя владельца
+  #     из сертификата Developer ID и Apple Team ID. Покупателю не нужно, а ехало
+  #     каждому внутри сборки. Именно это имя ученик и увидел у себя на машине.
+  for rel in apps/desktop/MAC_SIGNING.md; do
+    if [ -e "$S/$rel" ]; then rm -f "$S/$rel"; echo "    - удалил $rel"; fi
   done
   # 2) Внутренние *report*-отчёты: top-level (PHASE1_*_REPORT.md), docs/, scripts/.
   #    Продуктовые файлы, матчащие глоб (agent/lsp/reporter.py, шаблоны skills/
