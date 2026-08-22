@@ -2071,11 +2071,41 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
 
   // Чеклист из verify-скрипта ("CHECK ok/fail/skip <ярлык>").
   const checks = STATE.checks || [];
+  // Ярлык проверки → id компонента.
+  //
+  // Нужен, чтобы отличить «не выбирал» от «выбрал, но не встала зависимость».
+  // Различить их по самому чеклисту нельзя: verify печатает для обоих случаев
+  // одинаковый «skip» — dep-пропущенные осознанно вычищаются из HM_SELECTED
+  // перед его запуском, чтобы он не рисовал красный крест по тому, что
+  // корректно не ставили (см. подготовку runEnv выше).
+  //
+  // Из-за этого экран противоречил сам себе двумя соседними строками:
+  // «Расширение (не выбрано)», а строкой ниже — «Пропущено (не встала
+  // зависимость): Расширение Claude Code». Человек на записи ровно на этом
+  // блоке и усомнился, стоит ли жать «Повторить неустановленное».
+  //
+  // Карта дословная и короткая (проверок пять). Разъедется ярлык — вернётся
+  // сегодняшнее поведение, а не ошибка: неизвестный ярлык просто не найдётся.
+  const CHECK_LABEL_TO_ID = {
+    'Git': 'git',
+    'Node': 'node',
+    'Claude CLI': 'claude',
+    'Конфиг': 'config',
+    'Расширение': 'extension',
+  };
+  const depSkippedIds = new Set(depSkipped);
   const checkLi = (c) => {
     const st = c.status || (c.ok ? 'ok' : 'fail');
-    // skip = компонент не выбирали: рисуем нейтрально (серым), НЕ как провал.
+    // skip = компонент не ставили: рисуем нейтрально (серым), НЕ как провал.
     if (st === 'skip') {
-      return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(c.label)} <span style="font-size:11px">(не выбрано)</span></span></li>`;
+      // Ярлык может нести уточнение в скобках («Claude CLI (установлен, запуск
+      // не проверен)») — для сопоставления берём часть до первой скобки.
+      const base = String(c.label || '').split(' (')[0].trim();
+      const cid = CHECK_LABEL_TO_ID[base];
+      const why = cid && depSkippedIds.has(cid)
+        ? 'не ставили: не встала зависимость'
+        : 'не выбрано';
+      return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(c.label)} <span style="font-size:11px">(${why})</span></span></li>`;
     }
     return `<li class="${st === 'ok' ? 'ok' : 'fail'}"><span class="mark">${st === 'ok' ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`;
   };
