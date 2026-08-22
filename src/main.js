@@ -1129,6 +1129,26 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
   childEnv.HM_NOMAD_SRC = vendorPick('nomad-src');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
+  // Секрет подписи маяка завершения курса — ТОЛЬКО из вшитого config.json, тем же
+  // паттерном, что HM_VENDOR. Через renderer его пускать нельзя: renderer работает
+  // под medium integrity, и скомпрометированный renderer подставил бы свой секрет
+  // (install-env.js:12-16 запрещает это для всего класса URL/путей/ключей).
+  // Пусто — курс поставится, маяк просто уйдёт без подписи (мягкий режим сервера).
+  //
+  // МЁРТВЫЙ МАЯК (починено 20.08.2026). Адрес маяка лежал в config.json
+  // (course.beaconUrl) с самого начала, install-скрипты курса умеют его
+  // разложить, подпись на сервере работает — но в childEnv переменную никто не
+  // клал, поэтому `if ($env:HM_COURSE_BEACON_URL)` в course.ps1/course.sh был
+  // ложным ВСЕГДА, блок completion_beacon в .course/config.yaml не появлялся, и
+  // за всю историю не пришло НИ ОДНОГО сигнала «дошёл до конца курса».
+  // Источник — тот же вшитый config.json, что и у секрета: через renderer такие
+  // ключи не пускаем (install-env.js:12-16 — renderer работает под medium
+  // integrity и подставил бы свой адрес элевейтед-скрипту).
+  // Пустой beaconUrl по-прежнему означает «маяк выключен» — поведение сборки без
+  // адреса не меняется.
+  const courseCfg = readJson('config.json', {}).course || {};
+  childEnv.HM_COURSE_BEACON_URL = String(courseCfg.beaconUrl || '').trim();
+  childEnv.HM_COURSE_BEACON_SECRET = courseCfg.beaconSecret || '';
   // HM_REMOTE_CACHE ставим ТОЛЬКО из проверенного пути (или не ставим вовсе).
   if (remoteCache) childEnv.HM_REMOTE_CACHE = remoteCache;
   // Dry-run авторитетно доезжает до скрипта ДО spawn (даже если пришёл из process.env,
@@ -1355,13 +1375,39 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // короткую подпись на шаге и кладёт вид причины в отчёт боту.
       if (!okRun && !skipped) {
         const why = failureExplain.explainScriptFailure(outTail);
+        // ВЫЖИМКА строится ВСЕГДА, опознана причина или нет. До 20.08.2026 её не
+        // было вовсе: если ни одно правило словаря не совпало, хвост выбрасывался,
+        // и наружу уходил голый код возврата. В базе это дало 44 падения из 46,
+        // записанных как «код 1» — по такой записи нельзя ни помочь человеку, ни
+        // починить установщик. Теперь в отчёт всегда едут код, ЭТАП и последние
+        // строки вывода; полный хвост остаётся в журнале на машине человека.
+        const sum = failureExplain.summarizeFailure(outTail, { code, maxChars: 280, maxLines: 6 });
         if (why) {
           const head = '[почему] ' + why.short + ':';
           send(head); logLine(head);
           why.lines.forEach((l) => { const m = '  ' + l; send(m); logLine(m); });
-          resolve({ id, ok: false, code, skipped: false, hint: why.short, hintKind: why.kind, hintLines: why.lines });
-          return;
         }
+        // Блок «что именно упало» в журнал/UI: этап + отобранные строки. Человеку он
+        // показывает, на каком шаге всё встало, а поддержке — куда смотреть, даже
+        // когда причина словарём не опознана.
+        if (sum.phase || sum.lines.length) {
+          const h = '[что именно упало] шаг «' + id + '», код ' + code +
+            (sum.phase ? ', этап: ' + sum.phase : '');
+          send(h); logLine(h);
+          sum.lines.forEach((l) => { const m = '  ' + l; send(m); logLine(m); });
+        }
+        resolve({
+          id, ok: false, code, skipped: false,
+          hint: why ? why.short : '',
+          hintKind: why ? why.kind : '',
+          hintLines: why ? why.lines : undefined,
+          // error едет в отчёт (там его чистит scrubText и режет приёмник),
+          // phase — в подпись шага. Сами строки вывода renderer'у отдельно НЕ шлём:
+          // они уже ушли в его лог через send() выше, дубль был бы мёртвым полем.
+          error: sum.oneLine,
+          phase: sum.phase,
+        });
+        return;
       }
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
@@ -1890,6 +1936,64 @@ function launchVsCodeOn(dir, { create = true } = {}) {
 }
 
 ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart')));
+
+// Приём ключа Nomad ПОСЛЕ установки.
+//
+// До этого ключ попадал в config.yaml единственным путём: env HM_NOMAD_CLOUD_KEY на
+// момент запуска nomad.ps1/nomad.sh. А человек заводит ключ в кабинете уже ПОСЛЕ
+// установки — финиш сам его туда и посылает («получи ключ и вставь его»). Вставить
+// было некуда: поля нет, а `nmd model` — интерактивная консоль, про которую на экране
+// ни слова. На видео тестировщик дошёл до выданного nmd_-ключа и встал.
+//
+// Пишем ровно тот же управляемый блок и теми же тремя регулярками, что и nomad.ps1:275
+// — иначе повторный прогон установщика получит два блока model: и YAML-парсер возьмёт
+// последний.
+function nomadConfigPath() {
+  const hh = process.env.HERMES_HOME ||
+    (process.platform === 'win32'
+      ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
+      : path.join(os.homedir(), '.hermes'));
+  return path.join(hh, 'config.yaml');
+}
+
+ipcMain.handle('nomad-set-key', (_e, key) => {
+  try {
+    const raw = String(key == null ? '' : key).trim();
+    if (!raw) return { ok: false, reason: 'empty' };
+    // Ключ уходит в YAML в двойных кавычках — кавычки и переводы строк сломали бы файл.
+    const keySan = raw.replace(/["\r\n]/g, '');
+    // Не «валидируем» формат строго: у кабинета он может смениться, а ложный отказ
+    // хуже, чем попытка. Ловим только явный промах — вставили не то поле целиком.
+    if (keySan.length < 8 || /\s/.test(keySan)) return { ok: false, reason: 'malformed' };
+
+    const cfg = readJson('config.json', {});
+    const cloud = (cfg.nomad && cfg.nomad.cloud) || {};
+    const url = String(cloud.baseUrl || 'https://cp.nomadnet.ai/v1').replace(/["\r\n]/g, '');
+    // Ключ в config.json называется defaultModel (не model) — зеркалит nomad.ps1:284.
+    const model = String(cloud.defaultModel || 'claude-opus-4-6').replace(/["\r\n]/g, '');
+
+    const cfgY = nomadConfigPath();
+    fs.mkdirSync(path.dirname(cfgY), { recursive: true });
+    let text = '';
+    try { text = fs.readFileSync(cfgY, 'utf8'); } catch (e) { /* файла ещё нет — создадим */ }
+    text = text.replace(/^# >>> nomad-cloud[\s\S]*?# <<< nomad-cloud <<<\r?\n?/m, '');
+    text = text.replace(/^model:[ \t]*\r?\n(?:(?:[ \t].*\r?\n)|(?:[ \t]*\r?\n))*/m, '');
+    const nl = process.platform === 'win32' ? '\r\n' : '\n';
+    const block =
+      '# >>> nomad-cloud (managed by installer -- do not edit inside markers) >>>' + nl +
+      'model:' + nl +
+      '  provider: "custom"' + nl +
+      '  base_url: "' + url + '"' + nl +
+      '  api_key: "' + keySan + '"' + nl +
+      '  default: "' + model + '"' + nl +
+      '# <<< nomad-cloud <<<' + nl;
+    // Без BOM: BOM ломает YAML-парсер (тот же вывод, что в nomad.ps1:311).
+    fs.writeFileSync(cfgY, block + text, { encoding: 'utf8' });
+    return { ok: true, path: cfgY, model };
+  } catch (e) {
+    return { ok: false, reason: 'io', message: String((e && e.message) || e) };
+  }
+});
 
 // Explicit «open the course-simulator» — NOT auto-opened; the finish screen
 // offers it as a labelled choice. Opens the course folder in VS Code so Claude

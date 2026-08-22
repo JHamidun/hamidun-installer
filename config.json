@@ -1,4 +1,5 @@
 {
+  "offlineEdition": true,
   "configRepoUrl": "https://github.com/JHamidun/claude-code-config-pack",
   "configRepoBranch": "main",
   "nomad": {
@@ -6,7 +7,7 @@
     "repoUrl": "",
     "packageName": "nomad-agent",
     "cloud": {
-      "_comment": "The friend's local Nomad routes LLM traffic through the owner's cloud control-plane (OpenAI-compatible) — no VPN, no personal model key required — OR the friend uses any neural net by its own API key via `nmd model`. baseUrl is written into HERMES_HOME/config.yaml as a custom provider only when the friend pastes their OWN cabinet key (HM_NOMAD_CLOUD_KEY). The owner's key is NEVER embedded. defaultModel MUST be a model id that cp.nomadnet.ai/v1/models actually serves — confirm and adjust.",
+      "_comment": "The friend's local Nomad routes LLM traffic through the owner's cloud control-plane (OpenAI-compatible) — no VPN, no personal model key required — OR the friend uses any neural net by its own API key via `nmd model`. baseUrl is written into HERMES_HOME/config.yaml as a custom provider only when the friend supplies their OWN cabinet key — either as HM_NOMAD_CLOUD_KEY at install time, or by pasting it into the «Ключ из кабинета» field on the finish screen (ipc nomad-set-key), which writes the identical managed block. The owner's key is NEVER embedded. defaultModel MUST be a model id that cp.nomadnet.ai/v1/models actually serves — confirm and adjust.",
       "baseUrl": "https://cp.nomadnet.ai/v1",
       "defaultModel": "claude-opus-4-6",
       "registerUrl": "https://cp.nomadnet.ai/cabinet/register",

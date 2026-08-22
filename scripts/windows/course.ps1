@@ -42,7 +42,12 @@ $courseDir = Join-Path $target 'vibecoding-course'
 if ($DRY) {
     Write-Host "  [dry-run] WOULD: распаковать $zip -> $target (курс окажется в $courseDir)"
     if ($env:HM_COURSE_GLOBAL -eq '1') { Write-Host "  [dry-run] WOULD: глобально поставить навыки наставника в ~/.claude" }
-    if ($env:HM_COURSE_BEACON_URL) { Write-Host "  [dry-run] WOULD: включить маяк завершения -> $($env:HM_COURSE_BEACON_URL)" }
+    if ($env:HM_COURSE_BEACON_URL) {
+        # Сам секрет не печатаем НИКОГДА — только факт «есть/нет»: журнал установки
+        # человек присылает в поддержку целиком.
+        $sigNote = if ($env:HM_COURSE_BEACON_SECRET) { 'с подписью' } else { 'БЕЗ подписи' }
+        Write-Host "  [dry-run] WOULD: включить маяк завершения ($sigNote) -> $($env:HM_COURSE_BEACON_URL)"
+    }
     Write-Host "  [dry-run] WOULD: создать ярлык на рабочем столе"
     exit 0
 }
@@ -92,12 +97,25 @@ Write-Host "Курс распакован: $courseDir"
 Write-Host "HM-RECEIPT path $courseDir"
 
 # --- маяк завершения (опционально, если задан URL) ---
+# Вместе с адресом кладём общий секрет подписи (HM_COURSE_BEACON_SECRET): без него
+# академия принимает маяк как недоказанный, а в строгом режиме откажет вовсе —
+# подписью закрыт штамп «прошёл курс» на ЧУЖОЙ лид по чужому e-mail.
+# Секрет тут именно общий и лежит в файле у ученика — это осознанный уровень:
+# планка поднимается с «знаю адрес» до «распаковал установщик», защиты от
+# владельца машины он не даёт и не должен (ротация — заменой CC_BEACON_SECRET
+# на сервере и пересборкой установщика).
 if ($env:HM_COURSE_BEACON_URL) {
     $cfgYaml = Join-Path $courseDir '.course\config.yaml'
     if (Test-Path $cfgYaml) {
         try {
-            $u = $env:HM_COURSE_BEACON_URL
-            $block = "completion_beacon:`n  enabled: true`n  url: `"$u`""
+            # YAML-строка в двойных кавычках: экранируем \ и " — иначе секрет с
+            # кавычкой порвал бы файл конфига курса.
+            $u = $env:HM_COURSE_BEACON_URL.Replace('\', '\\').Replace('"', '\"')
+            $s = ''
+            if ($env:HM_COURSE_BEACON_SECRET) {
+                $s = $env:HM_COURSE_BEACON_SECRET.Replace('\', '\\').Replace('"', '\"')
+            }
+            $block = "completion_beacon:`n  enabled: true`n  url: `"$u`"`n  secret: `"$s`""
             # PS 5.1: Get-Content -Raw без -Encoding читает UTF-8-без-BOM как ANSI и
             # превращает кириллицу (названия ролей) в мохибейк — читаем явно как UTF-8.
             $raw = [System.IO.File]::ReadAllText($cfgYaml, (New-Object System.Text.UTF8Encoding($false)))
@@ -107,7 +125,11 @@ if ($env:HM_COURSE_BEACON_URL) {
                 $raw = $raw.TrimEnd() + "`n`n" + $block + "`n"
             }
             [System.IO.File]::WriteAllText($cfgYaml, $raw, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "Маяк завершения включён."
+            if ($s) {
+                Write-Host "Маяк завершения включён (с подписью)."
+            } else {
+                Write-Host "Маяк завершения включён, но БЕЗ подписи: секрет в сборку не попал — академия отметит сигнал как недоказанный."
+            }
         } catch { Write-Host "Маяк включить не удалось (не критично): $($_.Exception.Message)" }
     }
 }
@@ -197,5 +219,9 @@ if (-not $claudeSeen) {
     Write-Host "ВНИМАНИЕ: команда claude не найдена — ярлык курса заработает после установки Claude Code (перезапусти установщик с включённым компонентом Claude Code)."
 }
 
-Write-Host "OK: курс-симулятор установлен. Открой ярлык «$shortcutName» (или папку $courseDir) и напиши агенту «поехали»."
+# Слово ОДНО и то же везде: в курсе лежит настоящая команда .claude/commands/начать.md,
+# её же называет финальный экран установщика. Пока здесь стояло «поехали», человек
+# слышал три разных слова из трёх мест (экран — «начать», скрипт — «поехали»,
+# README курса — «/начать»), и любое из них выглядело как единственно верное.
+Write-Host "OK: курс-симулятор установлен. Открой ярлык «$shortcutName» (или папку $courseDir) и напиши агенту «начать»."
 exit 0

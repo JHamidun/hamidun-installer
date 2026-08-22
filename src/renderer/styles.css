@@ -364,6 +364,20 @@ h1 {
 .ns-course-steps li { margin-bottom: 3px; }
 .ns-course button { align-self: flex-start; }
 .ns-course-err { font-size: 12px; color: #d9534f; line-height: 1.4; margin-top: 2px; }
+
+/* Приём ключа Nomad прямо на финишном экране (человек получает ключ в кабинете
+   уже ПОСЛЕ установки — до этого вставлять его было некуда). */
+.ns-key { margin-top: 10px; }
+.ns-key-lbl { display: block; font-size: 12px; color: var(--muted, #6b7280); margin-bottom: 4px; }
+.ns-key-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ns-key-input {
+  flex: 1 1 190px; min-width: 0; font-size: 12.5px; padding: 5px 8px;
+  border: 1px solid var(--border, #d1d5db); border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.ns-key-msg { font-size: 12px; line-height: 1.4; margin-top: 5px; }
+.ns-key-msg.good { color: #1f8b4c; }
+.ns-key-msg.bad { color: #d9534f; }
 /* Спойлер «Ещё инструменты» — второстепенные кнопки прячем от новичка */
 .ns-more { margin: 2px 0 10px; }
 .ns-more > summary { cursor: pointer; font-size: 12.5px; color: var(--text-muted); font-weight: 600; list-style: none; padding: 5px 0; -webkit-user-select: none; user-select: none; }

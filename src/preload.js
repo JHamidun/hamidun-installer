@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('installer', {
   launchCursor: () => ipcRenderer.invoke('launch-cursor'),
   launchVsCode: () => ipcRenderer.invoke('launch-vscode'),
   launchCourse: () => ipcRenderer.invoke('launch-course'),
+  nomadSetKey: (key) => ipcRenderer.invoke('nomad-set-key', key),
   openClaudeTerminal: () => ipcRenderer.invoke('open-claude-terminal'),
   detectUserWarning: () => ipcRenderer.invoke('detect-user-warning'),
   saveCredentials: (obj) => ipcRenderer.invoke('save-credentials', obj),

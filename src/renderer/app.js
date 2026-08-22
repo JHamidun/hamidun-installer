@@ -1353,7 +1353,7 @@ function stopStepClock() {
 // Общий прогресс прогона в ПРОЦЕНТАХ. Проценты настоящие — доля пройденных
 // компонентов от выбранных; внутри шага скрипты прогресс не сообщают, поэтому там
 // идут секунды (startStepClock), а выдуманную полосу мы не рисуем.
-function setRunProgress(done, total, currentName) {
+function setRunProgress(done, total, currentName, bad) {
   const box = document.getElementById('run-progress');
   const fill = document.getElementById('run-progress-fill');
   const label = document.getElementById('run-progress-label');
@@ -1361,9 +1361,18 @@ function setRunProgress(done, total, currentName) {
   box.classList.remove('hidden');
   const pct = window.HMFinishLink.runProgressPct(done, total);
   fill.style.width = pct + '%';
-  label.textContent = currentName
-    ? `${pct}% · ${done} из ${total} · сейчас: ${currentName}`
+  // «100% · 15 из 15» при двух упавших компонентах — так было, и человек читал это
+  // как «всё установилось». В числитель шло ЧИСЛО ОБРАБОТАННЫХ (ok + упавшие +
+  // пропущенные), то есть полоса заполнялась одинаково при успехе и при провале.
+  // Живой пример: у ученика внизу стояло «Готово: 12 · Ошибок: 2 · Пропущено: 1»,
+  // а полоса сверху рапортовала 100% и 15 из 15 — две строки на одном экране
+  // противоречили друг другу, и верили верхней.
+  const failedN = Number(bad) || 0;
+  fill.classList.toggle('warn', failedN > 0);
+  const base = failedN > 0
+    ? `${pct}% пройдено · установлено ${total - failedN} из ${total} · с ошибкой ${failedN}`
     : `${pct}% · ${done} из ${total}`;
+  label.textContent = currentName ? `${base} · сейчас: ${currentName}` : base;
 }
 
 function setStep(id, status) {
@@ -1521,7 +1530,7 @@ async function runComponents(ids, env) {
       setStepLabel(id, `${STATE.byId[id].name} — ждёт «${STATE.byId[broken].name}»`);
       appendLog(depSkipMessage(id, broken, badWhy));
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
+      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length);
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
@@ -1529,7 +1538,7 @@ async function runComponents(ids, env) {
     setStep(id, 'running');
     startStepClock(id, (STATE.byId[id] && STATE.byId[id].name) || id);
     setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length,
-      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id);
+      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id, failed.length);
     // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
     // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
     // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
@@ -1656,14 +1665,27 @@ async function runComponents(ids, env) {
         // Причина опознана: на шаге пишем ЕЁ, а не «код 1». Подробное объяснение
         // («что произошло / что делать») main уже вывел в лог сразу после падения.
         setStepLabel(id, `${name} — ${res.hint}`);
-        if (res.hintKind !== 'no-prebuilt-binary' && res.hintKind !== 'no-distribution') addStepRetry(id);
+        // Причины, которые повтор НЕ чинит: кнопка «Повторить» на них — приглашение
+        // к бесконечному циклу. Провал сверки подлинности из той же породы: он
+        // детерминирован (тот же файл, тот же эталон), чинится только новой сборкой.
+        if (res.hintKind !== 'no-prebuilt-binary' && res.hintKind !== 'no-distribution'
+          && res.hintKind !== 'artifact-integrity') addStepRetry(id);
         appendLog(`[!] ${name}: ${res.hint} (подробности выше).`);
       } else {
-        appendLog(`[!] ${name}: завершено с кодом ${res ? res.code : '?'}${res && res.error ? ' — ' + res.error : ''}`);
+        // Причина не опознана словарём — но голый код возврата человеку не говорит
+        // НИЧЕГО: ни что случилось, ни что делать. main теперь всегда присылает этап
+        // (последний заголовок шага из вывода скрипта), и подпись строится по нему.
+        const ph = (res && res.phase) ? String(res.phase).replace(/\s*\([^)]*\)\s*$/, '').trim() : '';
+        const phShort = ph.length > 46 ? ph.slice(0, 45).trim() + '…' : ph;
+        setStepLabel(id, phShort ? `${name} — не удалось: ${phShort}` : `${name} — не удалось`);
+        addStepRetry(id);
+        appendLog(`[!] ${name}: не удалось${ph ? ' на этапе «' + ph + '»' : ''}`
+          + '. Что именно не получилось — в строках выше. Попробуй «Повторить»; '
+          + 'если снова не выйдет — пришли журнал установки в бота поддержки.');
       }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '');
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length);
   }
   off && off();
   STATE.runActive = false;
@@ -1980,9 +2002,35 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   const integrityHint = integrityFailed.length
     ? `<div class="ns-fail-hint">Не прошли проверку подлинности: <b>${integrityFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Повтор не поможет — нажми «Показать лог для поддержки» и пришли файл в ${botH}.</div>`
     : '';
+  // Названная причина по КАЖДОМУ упавшему компоненту. Без неё финиш говорил только
+  // «не установилось: VS Code» — то есть ровно столько же, сколько «код 1»: человек
+  // не знает, мешает ли антивирус, нет ли интернета или дело в его редакторе сборки.
+  // Тексты — из нашего словаря причин (failure-explain.js), имена — из components.json;
+  // и то и другое наши, поэтому подставляются как есть. Сетевые провалы и провалы
+  // подлинности здесь НЕ повторяем: у них свои строки выше.
+  const whyMap = (STATE.badWhy && STATE.badWhy.get) ? STATE.badWhy : null;
+  const whyLines = whyMap
+    ? failed.map((i) => {
+      const w = whyMap.get(i);
+      if (!w || !w.hint || w.kind === 'net' || w.kind === 'integrity') return '';
+      return '<b>' + STATE.byId[i].name + '</b> — ' + w.hint;
+    }).filter(Boolean)
+    : [];
+  const whyHint = whyLines.length
+    ? `<div class="ns-fail-hint">Что случилось: ${whyLines.join('; ')}. Подробнее — в логе для поддержки.</div>`
+    : '';
+  // Редактор — не рядовой компонент: ПЕРВЫЙ шаг инструкции целиком про него, и главная
+  // кнопка экрана открывает именно его. Пока это не учитывалось, экран при упавшем
+  // VS Code продолжал говорить «Открой VS Code — синяя кнопка ниже» и предлагал
+  // активную кнопку, которая ничего не открывала. Человек жал и не понимал, почему
+  // «ничего не происходит», а причина — редактора на диске нет.
+  const editorMissing = failed.includes('vscode');
+  const editorMissingName = editorMissing
+    ? ((STATE.byId['vscode'] && STATE.byId['vscode'].name) || 'VS Code')
+    : '';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${netHint}${integrityHint}
+         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${whyHint}${netHint}${integrityHint}
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
@@ -2076,8 +2124,22 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   const cloud = (STATE.config && STATE.config.nomad && STATE.config.nomad.cloud) || {};
   const claudeUrl = links.claude || 'https://claude.ai/login';
   const nomadText = nomadInstalled
-    ? 'Без VPN и без зарубежной карты, оплата в рублях. Агент Nomad уже установлен: зарегистрируйся в кабинете, получи ключ и вставь его — Claude заработает через облако Nomad.'
+    ? 'Без VPN и без зарубежной карты, оплата в рублях. Агент Nomad уже установлен: зарегистрируйся в кабинете, получи ключ и вставь его в поле ниже — Claude заработает через облако Nomad.'
     : 'Без VPN и без зарубежной карты, оплата в рублях. Агент Nomad не установлен — можно доустановить: запусти установщик ещё раз и отметь компонент Nomad. Зарегистрироваться в кабинете и получить ключ можно уже сейчас.';
+  // Поле ввода ключа показываем, только если Nomad реально встал: вписывать ключ в
+  // конфиг несуществующего агента — обещание, которое не сработает. Раньше поля не
+  // было вовсе, и фраза «получи ключ и вставь его» вела человека в тупик: ключ на
+  // руках, вставлять некуда (nmd model — консоль, о ней на экране ни слова).
+  const nomadKeyBox = nomadInstalled
+    ? `<div class="ns-key">
+         <label class="ns-key-lbl" for="ns-nomad-key">Ключ из кабинета (начинается с <code>nmd_</code>):</label>
+         <div class="ns-key-row">
+           <input type="text" id="ns-nomad-key" class="ns-key-input" spellcheck="false" autocomplete="off" placeholder="nmd_..." />
+           <button type="button" id="ns-nomad-save" class="ns-access-btn primary">Сохранить ключ</button>
+         </div>
+         <div class="ns-key-msg" id="ns-nomad-msg"></div>
+       </div>`
+    : '';
   const nomadCard = cloud.registerUrl
     ? `<div class="ns-access-card ns-access-card--hl">
          <div class="ns-access-h">🇷🇺 Из России — через Nomad</div>
@@ -2086,6 +2148,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
            <button type="button" class="ns-access-btn primary" data-ext="${cloud.registerUrl}">Регистрация в кабинете</button>
            ${cloud.keysUrl ? `<button type="button" class="ns-access-btn" data-ext="${cloud.keysUrl}">Получить ключ</button>` : ''}
          </div>
+         ${nomadKeyBox}
        </div>`
     : '';
   const accessHtml = `
@@ -2119,7 +2182,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
          <div class="ns-course-h">🎓 Хочешь учиться по шагам? Включи курс-симулятор</div>
          <div class="ns-course-t">Отдельный режим: ИИ-наставник ведёт тебя за руку по миссиям на ТВОём проекте. Не знаешь, с чего начать — начни отсюда, это самый простой первый час. Есть своя задача — иди по шагам 1–2 выше, курс никуда не денется. Сам по себе не открывается — включаешь так:</div>
          <ol class="ns-course-steps">
-           <li>Нажми «Открыть курс-симулятор» ниже — папка курса откроется в VS Code.</li>
+           <li>Нажми «Открыть курс-симулятор» ниже — папка курса (<code>HamidunCourse</code>) откроется в VS Code. Это <b>не та же</b> папка, что стартовый проект <code>HamidunStart</code> из шага 1 — они лежат рядом и называются похоже.</li>
            <li>В панели Claude (значок <b>✳</b>) напиши <b>«начать»</b> — наставник поздоровается и поведёт по первой миссии.</li>
          </ol>
          <button type="button" id="ns-course" class="btn-sm">🎓 Открыть курс-симулятор</button>
@@ -2130,7 +2193,8 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   ns.innerHTML = `
     <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
-      <li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в VS Code: закрыл окно — просто открой VS Code снова (ярлык на рабочем столе / в меню Пуск).</li>
+      ${editorMissing ? `<li><b>Сначала доустанови редактор</b> — ${editorMissingName} не установился, а первый шаг делается именно в нём. Нажми <b>«Повторить неустановленное»</b> ниже. Не помогло — закрой установщик, запусти его правым кликом → <b>«Запуск от имени администратора»</b>, и отметь только этот компонент.</li>`
+      : `<li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в VS Code: закрыл окно — просто открой VS Code снова (ярлык на рабочем столе / в меню Пуск).</li>`}
       <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». Claude Code — это <b>чат</b>: ты пишешь задачу текстом, он делает. При первом запросе он попросит подключить нейросеть — как (своя подписка Claude или Nomad для РФ), смотри в блоке ниже.</li>
       ${step3}
     </ol>
@@ -2140,7 +2204,9 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     ${failHtml}
     ${gracefulSkipHtml}
     <div class="ns-actions">
-      <button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>
+      ${editorMissing
+        ? `<button type="button" id="ns-vscode" class="btn-sm ns-main" disabled title="${editorMissingName} не установился — сначала доустанови его кнопкой «Повторить неустановленное»">▶ Открыть VS Code — сначала доустанови редактор</button>`
+        : `<button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>`}
       ${videoBtn}
       ${(failed.length || checkFailed) ? logBtn : ''}
     </div>
@@ -2197,6 +2263,43 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
         'либо спроси бота-помощника.';
     }
   });
+  // Сохранение ключа Nomad. Ответ показываем ВСЕГДА — молчащая кнопка на этом экране
+  // уже один раз стоила тестировщику минуты растерянности (кнопка «Открыть VS Code»
+  // при отсутствующем редакторе не давала никакого отклика).
+  const nomadSaveBtn = $('#ns-nomad-save');
+  const nomadKeyEl = $('#ns-nomad-key');
+  const nomadMsgEl = $('#ns-nomad-msg');
+  if (nomadSaveBtn && nomadKeyEl && nomadMsgEl) {
+    const setMsg = (text, kind) => {
+      nomadMsgEl.textContent = text;
+      nomadMsgEl.className = 'ns-key-msg' + (kind ? ' ' + kind : '');
+    };
+    const save = async () => {
+      const key = nomadKeyEl.value.trim();
+      if (!key) { setMsg('Сначала вставь ключ из кабинета.', 'bad'); return; }
+      nomadSaveBtn.disabled = true;
+      setMsg('Сохраняю…', '');
+      let res = null;
+      try { res = await window.installer.nomadSetKey(key); } catch (e) { res = { ok: false, reason: 'io' }; }
+      nomadSaveBtn.disabled = false;
+      if (res && res.ok) {
+        // Ключ на экран не возвращаем и в поле не оставляем.
+        nomadKeyEl.value = '';
+        setMsg('Готово: ключ записан, Nomad подключён к облаку (модель ' + (res.model || 'по умолчанию') +
+               '). Теперь пиши запросы в панели Claude.', 'good');
+      } else if (res && res.reason === 'malformed') {
+        setMsg('Это не похоже на ключ: в нём пробелы или он слишком короткий. Скопируй строку целиком из кабинета.', 'bad');
+      } else if (res && res.reason === 'empty') {
+        setMsg('Поле пустое — вставь ключ из кабинета.', 'bad');
+      } else {
+        setMsg('Не удалось записать ключ' + (res && res.message ? ' (' + res.message + ')' : '') +
+               '. Покажи эту строку боту-помощнику.', 'bad');
+      }
+    };
+    nomadSaveBtn.addEventListener('click', save);
+    nomadKeyEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); });
+  }
+
   const courseBtn = $('#ns-course');
   if (courseBtn) courseBtn.addEventListener('click', async () => {
     // M2: не молчим на false — папки курса нет (не входил в сборку / снесли).

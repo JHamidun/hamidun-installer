@@ -28,7 +28,11 @@ COURSE_DIR="$TARGET/vibecoding-course"   # zip содержит верхнюю �
 if [ -n "$DRY" ]; then
   echo "  [dry-run] WOULD: распаковать $ZIP -> $TARGET (курс окажется в $COURSE_DIR)"
   [ "$HM_COURSE_GLOBAL" = "1" ] && echo "  [dry-run] WOULD: глобально поставить навыки наставника в ~/.claude"
-  [ -n "$HM_COURSE_BEACON_URL" ] && echo "  [dry-run] WOULD: включить маяк завершения -> $HM_COURSE_BEACON_URL"
+  if [ -n "$HM_COURSE_BEACON_URL" ]; then
+    # Значение секрета в журнал не уходит — только «есть/нет».
+    if [ -n "${HM_COURSE_BEACON_SECRET:-}" ]; then hm_sig="с подписью"; else hm_sig="БЕЗ подписи"; fi
+    echo "  [dry-run] WOULD: включить маяк завершения ($hm_sig) -> $HM_COURSE_BEACON_URL"
+  fi
   echo "  [dry-run] WOULD: создать ярлык запуска на рабочем столе"
   exit 0
 fi
@@ -103,10 +107,20 @@ echo "HM-RECEIPT path $COURSE_DIR"
 if [ -n "$HM_COURSE_BEACON_URL" ]; then
   CFG="$COURSE_DIR/.course/config.yaml"
   if [ -f "$CFG" ]; then
-    if HM_URL="$HM_COURSE_BEACON_URL" /usr/bin/perl -e '
+    # Рядом с адресом кладём общий секрет подписи (HM_COURSE_BEACON_SECRET):
+    # без него академия примет маяк как недоказанный, а в строгом режиме
+    # откажет. Подписью закрыт штамп «прошёл курс» на ЧУЖОЙ лид по чужому
+    # e-mail. Секрет общий и лежит у ученика в файле — планка поднимается с
+    # «знаю адрес» до «распаковал установщик»; от владельца машины он не
+    # защищает и не должен.
+    if HM_URL="$HM_COURSE_BEACON_URL" HM_SEC="${HM_COURSE_BEACON_SECRET:-}" /usr/bin/perl -e '
       my $p = $ARGV[0];
       open(my $in, "<", $p) or exit 1; local $/; my $t = <$in>; close $in;
-      my $block = "completion_beacon:\n  enabled: true\n  url: \"$ENV{HM_URL}\"";
+      # YAML-строка в двойных кавычках: экранируем \ и " — секрет с кавычкой
+      # иначе порвал бы конфиг курса.
+      my $u = $ENV{HM_URL}; $u =~ s/\\/\\\\/g; $u =~ s/"/\\"/g;
+      my $s = defined $ENV{HM_SEC} ? $ENV{HM_SEC} : ""; $s =~ s/\\/\\\\/g; $s =~ s/"/\\"/g;
+      my $block = "completion_beacon:\n  enabled: true\n  url: \"$u\"\n  secret: \"$s\"";
       if ($t =~ /^completion_beacon:/m) {
         $t =~ s/^completion_beacon:.*?(?=^\S|\z)/$block\n\n/ms;
       } else {
@@ -114,7 +128,12 @@ if [ -n "$HM_COURSE_BEACON_URL" ]; then
       }
       open(my $out, ">", $p) or exit 1; print $out $t; close $out or exit 1;
     ' "$CFG" 2>/dev/null; then
-      echo "Маяк завершения включён."
+      # Сам секрет не печатаем НИКОГДА — только факт «есть/нет».
+      if [ -n "${HM_COURSE_BEACON_SECRET:-}" ]; then
+        echo "Маяк завершения включён (с подписью)."
+      else
+        echo "Маяк завершения включён, но БЕЗ подписи: секрет в сборку не попал — академия отметит сигнал как недоказанный."
+      fi
     else
       echo "Маяк включить не удалось (не критично)."
     fi
@@ -176,8 +195,8 @@ LAUNCHER="$HOME/Desktop/$SHORTCUT.command"
   echo 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
   echo "cd \"$COURSE_DIR\" || exit 1"
   echo '[ -x "$HOME/.local/bin/claude" ] && exec "$HOME/.local/bin/claude"'
-  echo 'command -v claude >/dev/null 2>&1 && exec claude || { echo "Открой эту папку в Claude Code и напиши: поехали"; open .; }'
+  echo 'command -v claude >/dev/null 2>&1 && exec claude || { echo "Открой эту папку в Claude Code и напиши: начать"; open .; }'
 } > "$LAUNCHER" 2>/dev/null && chmod +x "$LAUNCHER" 2>/dev/null && { echo "Ярлык создан: $LAUNCHER"; echo "HM-RECEIPT path $LAUNCHER"; } || echo "Ярлык не создался (не критично)."
 
-echo "OK: курс-симулятор установлен. Открой ярлык «$SHORTCUT» (или папку $COURSE_DIR) и напиши агенту «поехали»."
+echo "OK: курс-симулятор установлен. Открой ярлык «$SHORTCUT» (или папку $COURSE_DIR) и напиши агенту «начать»."
 exit 0
