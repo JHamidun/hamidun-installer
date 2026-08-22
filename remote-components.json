@@ -144,21 +144,21 @@
     {
       "remoteId": "mascot",
       "name": "Claude Mascot",
-      "sizeBytes": 101212049,
-      "sha256": "c6a3e2e766f00f1dab2f04bf96a8405724274a48fa61677d07d08c9dbec56e9a",
+      "sizeBytes": 282889318,
+      "sha256": "1d8e6b410bf0bab425f32ed5a984028fe02831865a487337a6be5c7fd4774020",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/mascot-win32-c6a3e2e766f00f1dab2f04bf96a8405724274a48fa61677d07d08c9dbec56e9a.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/mascot-win32-1d8e6b410bf0bab425f32ed5a984028fe02831865a487337a6be5c7fd4774020.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/mascot-win32-c6a3e2e766f00f1dab2f04bf96a8405724274a48fa61677d07d08c9dbec56e9a.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/mascot-win32-1d8e6b410bf0bab425f32ed5a984028fe02831865a487337a6be5c7fd4774020.zip"
         }
       ],
       "installRelPath": "scripts/windows/mascot.ps1",
       "gatedFiles": {
-        "claude-mascot.exe": "0e32b632d9641c7e90435eaf0800c618eb1b1749a5b87ad4fbb28be22d9e84d4"
+        "claude-mascot.exe": "4f1f6119ea2534d82486aabc445a333df77e812d8423e8bb16946440a58a664d"
       },
       "platform": "win32"
     },
