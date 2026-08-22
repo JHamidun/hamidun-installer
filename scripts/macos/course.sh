@@ -195,7 +195,13 @@ LAUNCHER="$HOME/Desktop/$SHORTCUT.command"
   echo 'export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
   echo "cd \"$COURSE_DIR\" || exit 1"
   echo '[ -x "$HOME/.local/bin/claude" ] && exec "$HOME/.local/bin/claude"'
-  echo 'command -v claude >/dev/null 2>&1 && exec claude || { echo "Открой эту папку в Claude Code и напиши: начать"; open .; }'
+  echo 'command -v claude >/dev/null 2>&1 && exec claude'
+  # Курс лежит в двух форматах — CLAUDE.md и AGENTS.md, — поэтому Codex читает его
+  # так же, как Claude Code. Пока ярлык знал только claude, ученик с одним лишь
+  # Codex получал «команда не найдена» и упирался в тупик на ровном месте.
+  echo '[ -x "$HOME/.local/bin/codex" ] && exec "$HOME/.local/bin/codex"'
+  echo 'command -v codex >/dev/null 2>&1 && exec codex'
+  echo 'echo "Ни Claude Code, ни Codex не найдены. Запусти установщик ещё раз и включи Claude Code — либо открой эту папку в своём агенте и напиши: начать"; open .'
 } > "$LAUNCHER" 2>/dev/null && chmod +x "$LAUNCHER" 2>/dev/null && { echo "Ярлык создан: $LAUNCHER"; echo "HM-RECEIPT path $LAUNCHER"; } || echo "Ярлык не создался (не критично)."
 
 echo "OK: курс-симулятор установлен. Открой ярлык «$SHORTCUT» (или папку $COURSE_DIR) и напиши агенту «начать»."

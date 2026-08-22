@@ -198,8 +198,43 @@ try {
     $lnkPath = Join-Path $desktop ($shortcutName + '.lnk')
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($lnkPath)
-    $sc.TargetPath = "$env:SystemRoot\System32\cmd.exe"
-    $sc.Arguments = '/k cd /d "' + $courseDir + '" && (claude || echo Claude Code не найден — запусти установщик ещё раз и включи компонент Claude Code.)'
+    # Логика запуска вынесена в .cmd рядом с курсом, а не втиснута в аргументы ярлыка.
+    #
+    # Внутри cmd связка `claude || codex` означает НЕ то, что читается: `||`
+    # срабатывает на любой ненулевой код, поэтому упавший или прерванный Ctrl+C
+    # Claude Code молча поднимал бы Codex вместо сообщения о сбое. Развилка «есть ли
+    # такая команда» и развилка «чем закончил агент» — разные вопросы, и в одну
+    # строку cmd их без ловушек не свести.
+    #
+    # Codex здесь не «на всякий случай»: курс лежит и в CLAUDE.md, и в AGENTS.md,
+    # то есть читается обоими агентами одинаково. Пока ярлык знал только claude,
+    # ученик с одним лишь Codex утыкался в «команда не найдена».
+    $launcherPath = Join-Path $courseDir 'Запустить курс.cmd'
+    $launcherBody = @(
+        '@echo off',
+        'chcp 65001 >nul',
+        'cd /d "%~dp0"',
+        'where claude >nul 2>&1',
+        'if %errorlevel%==0 (',
+        '  claude',
+        '  goto :eof',
+        ')',
+        'where codex >nul 2>&1',
+        'if %errorlevel%==0 (',
+        '  codex',
+        '  goto :eof',
+        ')',
+        'echo Ни Claude Code, ни Codex не найдены.',
+        'echo Запусти установщик ещё раз и включи компонент Claude Code,',
+        'echo либо открой эту папку в своём агенте и напиши: начать',
+        'pause'
+    ) -join "`r`n"
+    # BOM не пишем: cmd.exe его не понимает и спотыкается на первой строке.
+    [IO.File]::WriteAllText($launcherPath, $launcherBody + "`r`n", (New-Object Text.UTF8Encoding $false))
+    # Целью ярлыка ставим сам .cmd, а не `cmd.exe /c "<путь>"`: у /c своё правило
+    # обработки кавычек, когда строка начинается с кавычки, и путь с пробелами
+    # (а он с пробелами — «Запустить курс.cmd») там разъезжается.
+    $sc.TargetPath = $launcherPath
     $sc.WorkingDirectory = $courseDir
     $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,13"
     $sc.Description = 'Открыть курс-симулятор вайбкодинга в Claude Code'
