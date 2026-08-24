@@ -397,7 +397,19 @@ ok('remote-fetch: .zip и распаковка ВНУТРИ cacheDir; fr.path=un
   const s = fs.readFileSync(path.join(ROOT, 'src', 'remote-fetch.js'), 'utf8');
   assert(/archivePath = path\.join\(cacheDir, entry\.remoteId \+ '\.zip'\)/.test(s), '<remoteId>.zip внутри cacheDir');
   assert(/unpackDir = path\.join\(cacheDir, 'unpacked-'/.test(s), 'распаковка внутри cacheDir');
-  assert(/return \{ ok: true, path: unpackDir/.test(s), 'fr.path = unpackDir (HM_REMOTE_CACHE указывает внутрь Admins-only каталога)');
+  // fr.path — путь, отданный freshUnpack. С 20.08.2026 это НЕ всегда unpackDir: если
+  // публикацию (rename) держит антивирус, распаковка отдаётся под именем staging, а не
+  // проваливает компонент. Инвариант от этого не меняется и проверяется ЖЁСТЧЕ, чем
+  // раньше: freshUnpack физически не умеет вернуть путь ВНЕ cacheDir — оба возможных
+  // значения (finalDir, staging) собраны из cacheDir.
+  assert(/return \{ ok: true, path: u\.path \|\| unpackDir/.test(s),
+    'fr.path = путь распаковки от freshUnpack (HM_REMOTE_CACHE указывает внутрь Admins-only каталога)');
+  const fu = s.slice(s.indexOf('function freshUnpack('), s.indexOf('// ---- основной вход'));
+  assert(fu.length > 0, 'нашли freshUnpack');
+  assert(/const staging = path\.join\(cacheDir, 'unpacking-'/.test(fu), 'staging внутри cacheDir');
+  const returned = (fu.match(/\bpath:\s*([A-Za-z_$][\w$]*)/g) || []).map((x) => x.split(':')[1].trim());
+  assert(returned.length >= 2 && returned.every((p) => p === 'finalDir' || p === 'staging'),
+    'freshUnpack отдаёт путь ВНЕ cacheDir: ' + returned.join(', '));
 });
 
 // Функц. (win32): пред-существующий небезопасный каталог → REJECT (не reuse, не «чиним»
@@ -2206,7 +2218,16 @@ function runCfgSh(home, clone, extraEnv) {
   const env = Object.assign({}, process.env, { HOME: home, HM_BUNDLED_CONFIG: clone });
   delete env.HM_DRY_RUN; delete env.HM_KEEP_SKILLS; delete env.HM_ALL_PACK_SKILLS; delete env.HM_ADDITIVE;
   Object.assign(env, extraEnv || {});
-  return spawnSync('bash', [script], { encoding: 'utf8', timeout: 60000, env });
+  // 360с вместо 60с — та же болезнь, что у runNomadSh (см. комментарий там): под нагрузкой
+  // машины Git Bash форкает ~1-2с/процесс, config.sh (бэкап cp -R, прунинг-циклы) не
+  // укладывался в 60с → bash убит на середине, status=null, ассерты падали «null !== 0»
+  // при рабочем скрипте. Таймаут — сторож от зависания, не перф-гейт.
+  const r = spawnSync('bash', [script], { encoding: 'utf8', timeout: 360000, env });
+  if (r.status === null) {
+    r.stderr = (r.stderr || '') +
+      '\n[TIMEOUT] bash убит по таймауту 360с (signal=' + r.signal + ') — зависание скрипта или перегруз машины; это НЕ вердикт config.sh.';
+  }
+  return r;
 }
 function runCfgPs1(home, clone, extraEnv) {
   const script = path.join(ROOT, 'scripts', 'windows', 'config.ps1');
@@ -3353,15 +3374,32 @@ function sealNomadVendor(base) {
     'py=$(hm_sha256 "' + vsrc + '/pyproject.toml") || exit 1;' +
     '[ -n "$tree" ] && [ -n "$man" ] && [ -n "$py" ] || exit 1;' +
     'printf \'{\\n"nomad-src.sha256": { "sha256": "%s", "bytes": 0 },\\n"pyproject.toml": { "sha256": "%s", "bytes": 0 }\\n}\\n\' "$man" "$py" > "' + vendor + '/checksums.json"';
-  const r = spawnSync('bash', ['-c', seal], { encoding: 'utf8', timeout: 30000 });
+  // 120с, не 30с: hm_tree_sha256 + hm_sha256 — это ~15-25 форков, под нагрузкой машины
+  // (~1-2с на форк, см. runNomadSh) 30с истекали, а провал seal тихо превращал тест в
+  // «(shasum/seal недоступен — пропуск)» — ЛОЖНО-зелёный путь, который ничего не сторожит.
+  const r = spawnSync('bash', ['-c', seal], { encoding: 'utf8', timeout: 120000 });
   return r.status === 0 && fs.existsSync(vendor + '/checksums.json') && fs.existsSync(vendor + '/nomad-src.sha256');
 }
 
 function runNomadSh(home, script, extraEnv) {
-  return spawnSync('bash', [script], {
-    encoding: 'utf8', timeout: 60000,
+  // Таймаут — сторож от ЗАВИСАНИЯ, не перф-гейт. Git Bash на Windows форкает медленно
+  // (под нагрузкой машины ~1-2с на КАЖДЫЙ процесс: замер 20.08 — 10× /bin/true = 16с при
+  // CPU 100%), а nomad.sh с фейками порождает ~200 процессов → честный зелёный прогон
+  // занимает ~2 мин. Прежние 60с убивали bash на середине (status=null → «null !== 0»)
+  // при ПОЛНОСТЬЮ рабочем скрипте — ровно как ETIMEDOUT у reg-тестов. 6 мин по-прежнему
+  // ловит настоящее зависание (чтение stdin, бесконечный цикл), не роняя прогон под
+  // нагрузкой. Прецедент больших таймаутов в наборе: runCfgPs1 = 180с.
+  const r = spawnSync('bash', [script], {
+    encoding: 'utf8', timeout: 360000,
     env: Object.assign({}, process.env, { HOME: home, HM_NOMAD_SRC: '', HM_DRY_RUN: '' }, extraEnv || {})
   });
+  // status=null = bash убит (таймаут/сигнал) — говорим это ПРЯМО, иначе ассерты печатают
+  // криптичное «null !== 0» без причины, и диагноз стоит часа раскопок.
+  if (r.status === null) {
+    r.stderr = (r.stderr || '') +
+      '\n[TIMEOUT] bash убит по таймауту 360с (signal=' + r.signal + ') — зависание скрипта или перегруз машины; это НЕ вердикт nomad.sh.';
+  }
+  return r;
 }
 
 if (bashAvailable()) {
@@ -8882,7 +8920,11 @@ ok('config.json в репозитории без сборочных маркер
     assert(m.indexOf("require('./failure-explain.js')") !== -1, 'main.js не подключает failure-explain');
     assert(m.indexOf('failureExplain.explainScriptFailure(outTail)') !== -1,
       'main.js не вызывает перевод на хвосте вывода компонента');
-    assert(/hint: why\.short/.test(m) && /hintKind: why\.kind/.test(m),
+    // С 20.08.2026 resolve в ветке провала ОДИН на все случаи, поэтому причина
+    // отдаётся условно: опознана — hint/hintKind, нет — пустые строки (а вывод
+    // скрипта всё равно уезжает в error/phase, см. блок «Причина падения доезжает
+    // до отчёта» ниже). Гейт прежний по смыслу: renderer обязан получать причину.
+    assert(/hint: why \? why\.short : ''/.test(m) && /hintKind: why \? why\.kind : ''/.test(m),
       'main.js не отдаёт причину renderer-у — шаг снова покажет «код 1»');
     // Хвост обязан НАКАПЛИВАТЬСЯ: без буфера переводить будет нечего.
     assertOrder(m, 'const outTail = []', 'failureExplain.explainScriptFailure(outTail)',
@@ -8905,5 +8947,183 @@ ok('config.json в репозитории без сборочных маркер
     // это прямое приглашение к бесконечному циклу.
     assert(a.indexOf("res.hintKind !== 'no-prebuilt-binary'") !== -1,
       'app.js: «Повторить» предлагается даже там, где повтор бесполезен');
+  });
+})();
+
+// ===========================================================================
+// Причина падения доезжает до отчёта (summarizeFailure + публикация распаковки)
+// ===========================================================================
+// Разбор боевой базы 20.08.2026: из 46 упавших установок 44 записаны как «код 1»
+// и больше ничем. По такой записи нельзя ни помочь человеку, ни починить
+// установщик: не видно ни этапа, ни того, что сказал скрипт. При этом скрипты
+// говорят — vscode.ps1 прямо перед exit 1 печатает «Не установились расширения: …».
+// Терялось это в двух местах: хвост вывода использовался ТОЛЬКО для словаря
+// причин (не совпало — выброшен), а resolve отдавал наружу один код возврата.
+// Здесь сторожим оба конца: выжимку и то, что она реально уезжает в отчёт.
+(function failureSummaryTests() {
+  console.log('== Причина падения доезжает до отчёта ==');
+  const FE = require(path.join(ROOT, 'src', 'failure-explain.js'));
+  const UIDT = require(path.join(ROOT, 'src', 'uid-telemetry.js'));
+
+  // Дословный хвост боевого случая: VS Code (23 из 46 падений — этот компонент).
+  const VSCODE_TAIL = [
+    'Проверяю VS Code...',
+    'VS Code уже установлен (User Setup).',
+    'Ставлю расширение anthropic.claude-code в VS Code (от имени пользователя, без прав администратора)...',
+    '  anthropic.claude-code: не подтвердилось.',
+    'Не установились расширения: Claude Code (anthropic.claude-code). Открой VS Code -> Extensions -> найди их по имени -> Install.',
+  ];
+
+  ok('выжимка: вместо «код 1» — код, ЭТАП и последние строки вывода', () => {
+    const s = FE.summarizeFailure(VSCODE_TAIL, { code: 1 });
+    assert(/Ставлю расширение/.test(s.phase), 'этап не опознан: ' + s.phase);
+    assert(/Не установились расширения/.test(s.oneLine), 'вывод скрипта не доехал: ' + s.oneLine);
+    assert(/^код 1 /.test(s.oneLine), 'код возврата обязан остаться: ' + s.oneLine);
+    assert(s.oneLine.length <= 280, 'выжимка длиннее лимита отчёта: ' + s.oneLine.length);
+  });
+
+  ok('выжимка предпочитает строки ПРО ПРОВАЛ, а не последние строки уборки', () => {
+    const tail = VSCODE_TAIL.concat(['Убираю временные копии vsix...', 'Готово.']);
+    const s = FE.summarizeFailure(tail, { code: 1 });
+    assert(/Не установились расширения/.test(s.oneLine),
+      'причину вытеснил вывод уборки — в отчёте снова нечего читать: ' + s.oneLine);
+  });
+
+  ok('немой скрипт: честный «код 1» и НИКАКОЙ выдуманной причины', () => {
+    assert(FE.summarizeFailure([], { code: 1 }).oneLine === 'код 1', 'на пустом хвосте выдумано лишнее');
+    assert(FE.explainScriptFailure([]) === null, 'на пустом хвосте выдумана причина');
+  });
+
+  ok('новые причины опознаются: занятый файл (антивирус) и «редактор без панели»', () => {
+    const locked = FE.explainScriptFailure([
+      "EPERM: operation not permitted, rename 'C:\\ProgramData\\HmDeElev-ab\\w\\unpacking-cd' -> '...'",
+    ]);
+    assert(locked && locked.kind === 'file-locked', 'EPERM не опознан: ' + (locked && locked.kind));
+    assert(/антивирус/i.test(locked.lines.join(' ')), 'человеку не названа самая частая причина');
+    const ext = FE.explainScriptFailure(VSCODE_TAIL);
+    assert(ext && ext.kind === 'editor-extension', 'провал расширений не опознан: ' + (ext && ext.kind));
+    assert(/Extensions/.test(ext.lines.join(' ')), 'нет действия «поставить руками»');
+    // Вентиль целостности вшитых артефактов (_verify.ps1 → «БЕЗОПАСНОСТЬ: …») тоже
+    // отдаёт exit 1 и раньше был неотличим от всех прочих «код 1».
+    const integ = FE.explainScriptFailure([
+      "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 для 'vscode-setup.exe' — файл подменён/повреждён. Установка остановлена.",
+    ]);
+    assert(integ && integ.kind === 'artifact-integrity', 'провал сверки не опознан: ' + (integ && integ.kind));
+    assert(/повтор даст тот же результат/i.test(integ.lines.join(' ')), 'человеку не сказано, что повтор бесполезен');
+  });
+
+  ok('девять причин не путаются между собой', () => {
+    const cases = [
+      [["БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 для 'vscode-setup.exe'"], 'artifact-integrity'],
+      [['Не установились расширения: Claude Code (anthropic.claude-code).'], 'editor-extension'],
+      [["EPERM: operation not permitted, rename '...' -> '...'"], 'file-locked'],
+      [['error: failed to run custom build command for `openssl-sys v0.9.117`'], 'no-prebuilt-binary'],
+      [['ERROR: No matching distribution found for cryptography==50.0.0'], 'no-distribution'],
+      [['OSError: [Errno 28] No space left on device'], 'disk-full'],
+      [['execution error: User canceled. (-128)'], 'admin-cancelled'],
+      [['spctl: rejected source=no usable signature'], 'gatekeeper'],
+      [['curl: (6) Could not resolve host: registry.npmjs.org'], 'network'],
+    ];
+    cases.forEach((pair) => {
+      const r = FE.explainScriptFailure(pair[0]);
+      assert(r && r.kind === pair[1],
+        'ожидался ' + pair[1] + ', получено ' + (r ? r.kind : 'null') + ' на: ' + pair[0].join(' | '));
+    });
+  });
+
+  ok('в отчёт не уезжают ПД: имя, домашний каталог, почта, имя машины', () => {
+    const tail = [
+      'Ставлю библиотеки из PyPI (онлайн)...',
+      "ERROR: Permission denied: 'C:\\Users\\Мария Соколова\\AppData\\Roaming\\Python' (host STENDBOX-K7QW1Z, mail masha@yandex.ru)",
+    ];
+    const raw = FE.summarizeFailure(tail, { code: 1 }).oneLine;
+    const sent = UIDT.scrubText(raw, { home: 'C:\\Users\\Мария Соколова', user: 'Мария Соколова', host: 'STENDBOX-K7QW1Z' });
+    assert(!/Соколова/i.test(sent), 'утекло имя пользователя: ' + sent);
+    assert(!/STENDBOX-K7QW1Z/i.test(sent), 'утекло имя машины: ' + sent);
+    assert(!/yandex\.ru/i.test(sent), 'утекла почта: ' + sent);
+    assert(/Permission denied/.test(sent), 'вместе с ПД вычищена сама причина: ' + sent);
+  });
+
+  ok('чистка не калечит диагностику: машина, названная словом из наших логов', () => {
+    const t = UIDT.scrubText('CLI VS Code (code.cmd) не найден', { home: 'C:\\Users\\i', user: 'i', host: 'code' });
+    assert(t === 'CLI VS Code (code.cmd) не найден', 'имя машины «code» съело диагностику: ' + t);
+  });
+
+  ok('main.js: выжимка строится ВСЕГДА и уезжает в res.error/res.phase', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(/failureExplain\.summarizeFailure\(outTail/.test(m),
+      'main.js не строит выжимку — в отчёте снова будет голый код возврата');
+    // Ветка провала = от «if (!okRun && !skipped)» до комментария перед ОБЩИМ
+    // resolve (успех/skip). Общий resolve в срез не попадает намеренно.
+    const from = m.indexOf('if (!okRun && !skipped) {');
+    const to = m.indexOf('// Skip — не провал', from);
+    const blk = (from >= 0 && to > from) ? m.slice(from, to) : '';
+    assert(blk.length > 0, 'нашли ветку провала в run-component');
+    assert(/error: sum\.oneLine/.test(blk) && /phase: sum\.phase/.test(blk),
+      'main.js не отдаёт renderer-у выжимку (error/phase)');
+    assert(/что именно упало/.test(blk), 'в журнал не печатается блок «что именно упало»');
+    // В ветке провала обязан быть РОВНО ОДИН resolve: раньше опознанная причина
+    // выходила своим resolve и уносила падение без вывода скрипта.
+    const resolves = (blk.match(/resolve\(\{/g) || []).length;
+    assert(resolves === 1,
+      'в ветке провала resolve не один (' + resolves + ') — часть падений опять уедет без вывода');
+  });
+
+  ok('renderer: «завершено с кодом N» больше не единственное, что видит человек', () => {
+    const a = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    assert(a.indexOf('завершено с кодом') === -1, 'app.js: вернулась строка «завершено с кодом N»');
+    assert(/не удалось: \$\{phShort\}/.test(a), 'app.js: подпись шага не называет этап');
+    assert(/hintKind \? '\[' \+ res\.hintKind \+ '\] ' : ''/.test(a),
+      'app.js: вид причины больше не кладётся в текст ошибки для отчёта');
+  });
+
+  // Публикация распаковки: занятый антивирусом каталог больше не роняет компонент.
+  ok('распаковка: rename повторяется на «занято» и не роняет компонент насовсем', () => {
+    const RF = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pub-'));
+    const src = path.join(dir, 'src');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'hello.txt'), 'привет');
+    const zip = path.join(dir, 'p.zip');
+    const mk = require('child_process').spawnSync(
+      process.platform === 'win32' ? 'powershell' : '/usr/bin/ditto',
+      process.platform === 'win32'
+        ? ['-NoProfile', '-Command', "Compress-Archive -Path '" + src + "\\*' -DestinationPath '" + zip + "' -Force"]
+        : ['-c', '-k', '--sequesterRsrc', src, zip],
+      { stdio: 'ignore' });
+    if (mk.status !== 0) {
+      SKIP('не собрался тестовый zip');
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      return;
+    }
+    const finalDir = path.join(dir, 'unpacked-test');
+    const real = fs.renameSync;
+    const slept = [];
+    try {
+      // Антивирус держит каталог два раза подряд, потом отпускает.
+      let n = 0;
+      fs.renameSync = function (a, b) {
+        if (n++ < 2) { const e = new Error('EPERM: operation not permitted, rename'); e.code = 'EPERM'; throw e; }
+        return real.call(fs, a, b);
+      };
+      const r1 = RF.freshUnpack(zip, finalDir, dir, { sleep: (ms) => slept.push(ms) });
+      assert(r1.ok, 'повтор публикации не сработал: ' + r1.error);
+      assert(r1.path === finalDir, 'после успешного повтора путь обязан быть finalDir: ' + r1.path);
+      assert(slept.length === 2, 'между попытками не было пауз: ' + JSON.stringify(slept));
+      // Держит всегда → работаем прямо из распакованного каталога, компонент жив.
+      fs.renameSync = function () { const e = new Error('EPERM: operation not permitted, rename'); e.code = 'EPERM'; throw e; };
+      const r2 = RF.freshUnpack(zip, finalDir, dir, { sleep: () => {} });
+      assert(r2.ok, 'вечно занятая публикация опять роняет компонент: ' + r2.error);
+      assert(r2.published === false && r2.path.indexOf(dir) === 0 && /unpacking-/.test(r2.path),
+        'фолбэк отдал путь вне кэша или не тот: ' + r2.path);
+      assert(fs.existsSync(path.join(r2.path, 'hello.txt')), 'в отданном каталоге нет содержимого');
+      // Не «занято» — повторять бессмысленно, провал должен быть честным.
+      fs.renameSync = function () { const e = new Error('ENOENT: no such file'); e.code = 'ENOENT'; throw e; };
+      const r3 = RF.freshUnpack(zip, finalDir, dir, { sleep: () => { throw new Error('пауза на неповторяемой ошибке'); } });
+      assert(!r3.ok && /атомарная публикация/.test(r3.error), 'неповторяемая ошибка замаскирована: ' + JSON.stringify(r3));
+    } finally {
+      fs.renameSync = real;
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
   });
 })();

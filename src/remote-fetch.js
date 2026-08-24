@@ -817,24 +817,73 @@ function removeOldUnpacked(cacheDir) {
   return { ok: true };
 }
 
+// Ошибки, за которыми стоит НЕ «нельзя», а «прямо сейчас занято»: Windows отдаёт их,
+// когда файл внутри каталога держит открытым другой процесс. У нас это почти всегда
+// антивирус: он открывает на проверку каждый только что распакованный файл, а каталог
+// с открытым внутри файлом переименовать нельзя. Через секунду-другую он отпускает.
+function isBusyFsError(e) {
+  const c = String((e && e.code) || '');
+  return c === 'EPERM' || c === 'EACCES' || c === 'EBUSY' || c === 'ENOTEMPTY';
+}
+// Паузы между попытками публикации (мс). Первая попытка — без паузы.
+const PUBLISH_BACKOFF_MS = [0, 150, 400, 900, 1800];
+// Синхронная пауза без холостого цикла: freshUnpack вызывается из синхронного
+// участка (fetchRemote await'ит его как обычное значение), setTimeout здесь не к чему
+// привязать. Atomics.wait просто усыпляет поток на нужное время.
+function sleepSync(ms) {
+  if (!(ms > 0)) return;
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch (e) { const t = Date.now() + ms; while (Date.now() < t) { /* фолбэк, если SAB запрещён */ } }
+}
+
 // Свежая распаковка (FIX-C): fail-closed чистка старых unpacked-* → распаковка в
-// НОВЫЙ случайный staging → атомарная публикация (rename) в finalDir ТОЛЬКО при
-// полном успехе. Ошибка на любом шаге → { ok:false } (ничего не публикуем).
-function freshUnpack(zipPath, finalDir, cacheDir) {
+// НОВЫЙ случайный staging → публикация (rename) в finalDir ТОЛЬКО при полном успехе.
+// Ошибка распаковки/освобождения цели → { ok:false } (ничего не публикуем).
+//
+// ПРО ПУБЛИКАЦИЮ (правка 20.08.2026). Раньше единственный fs.renameSync без ретрая
+// был жёстким провалом всего компонента: у учеников это ловилось как
+//   EPERM: operation not permitted, rename '…\unpacking-…' -> '…\unpacked-…'
+// на шаге VS Code. Причина не в правах: каталог только что распакован НАМИ в нашем же
+// защищённом кэше — его на секунду держит антивирус. Поэтому:
+//   1) rename повторяется с нарастающими паузами (до ~3.2 с суммарно);
+//   2) если и после этого занято — работаем ПРЯМО ИЗ staging и возвращаем его путь.
+// Второй пункт ничего не ослабляет: staging — тот же самый ребёнок того же Admins-only
+// кэша с теми же правами, содержимое уже проверено по SHA-256, и распаковка полная
+// (иначе мы бы сюда не дошли). Атомарность публикации нужна была ради «никогда не
+// отдать половину» — а мы отдаём готовый каталог целиком, просто под другим именем.
+// → { ok:true, path, published } | { ok:false, error }
+function freshUnpack(zipPath, finalDir, cacheDir, opts) {
+  const o = opts || {};
+  const sleep = o.sleep || sleepSync;                       // тест подменяет паузы
+  const backoff = o.backoffMs || PUBLISH_BACKOFF_MS;
   const rm = removeOldUnpacked(cacheDir);
   if (!rm.ok) return { ok: false, error: rm.error };
   const staging = path.join(cacheDir, 'unpacking-' + crypto.randomBytes(9).toString('hex'));
   const u = unpackZip(zipPath, staging);
   if (!u.ok) { try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ } return { ok: false, error: u.error }; }
-  try {
-    if (safeLstat(finalDir)) { try { fs.rmSync(finalDir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
-    if (safeLstat(finalDir)) { try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ } return { ok: false, error: 'целевой каталог распаковки не освобождён: ' + finalDir }; }
-    fs.renameSync(staging, finalDir);
-  } catch (e) {
-    try { fs.rmSync(staging, { recursive: true, force: true }); } catch (x) { /* ignore */ }
-    return { ok: false, error: 'атомарная публикация распаковки не удалась: ' + String(e.message || e) };
+  if (safeLstat(finalDir)) { try { fs.rmSync(finalDir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  if (safeLstat(finalDir)) { try { fs.rmSync(staging, { recursive: true, force: true }); } catch (e) { /* ignore */ } return { ok: false, error: 'целевой каталог распаковки не освобождён: ' + finalDir }; }
+  let lastErr = null;
+  for (let i = 0; i < backoff.length; i++) {
+    if (backoff[i]) sleep(backoff[i]);
+    try {
+      fs.renameSync(staging, finalDir);
+      return { ok: true, path: finalDir, published: true, attempts: i + 1 };
+    } catch (e) {
+      lastErr = e;
+      if (!isBusyFsError(e)) break;                          // не «занято» — повтор не поможет
+    }
   }
-  return { ok: true };
+  // Занято до конца — но распакованное на месте и полное: используем его как есть.
+  if (isBusyFsError(lastErr) && safeLstat(staging)) {
+    return {
+      ok: true, path: staging, published: false, attempts: backoff.length,
+      note: 'публикация распаковки занята (' + String((lastErr && lastErr.code) || '') +
+        ') — работаю из рабочего каталога распаковки без переименования',
+    };
+  }
+  try { fs.rmSync(staging, { recursive: true, force: true }); } catch (x) { /* ignore */ }
+  return { ok: false, error: 'атомарная публикация распаковки не удалась: ' + String((lastErr && lastErr.message) || lastErr) };
 }
 
 // ---- основной вход --------------------------------------------------
@@ -891,8 +940,9 @@ async function fetchRemote(opts) {
     if (got === expectedSha) {
       const u = freshUnpack(archivePath, unpackDir, cacheDir);
       if (!u.ok) return { ok: false, error: 'кэш валиден, но распаковка не удалась: ' + u.error };
+      if (u.note) log('  ' + u.note);
       log('Уже в кэше (SHA-256 совпал) — пропускаю скачивание: ' + entry.remoteId);
-      return { ok: true, path: unpackDir, cached: true, sha256: expectedSha, bytes: expectedSize };
+      return { ok: true, path: u.path || unpackDir, cached: true, sha256: expectedSha, bytes: expectedSize };
     }
     try { fs.unlinkSync(archivePath); } catch (e) { /* ignore */ }
   } else if (safeLstat(archivePath)) {
@@ -955,9 +1005,10 @@ async function fetchRemote(opts) {
     }
     const u = freshUnpack(archivePath, unpackDir, cacheDir);
     if (!u.ok) { lastErr = 'распаковка: ' + u.error; log('  ! ' + lastErr); return { ok: false, error: 'распаковка не удалась (fail-closed): ' + u.error }; }
+    if (u.note) log('  ' + u.note);
 
     log('Готово: ' + entry.remoteId + ' — ' + fmtMB(dr.bytes) + ', целостность подтверждена (SHA-256).');
-    return { ok: true, path: unpackDir, bytes: dr.bytes, sha256: dr.sha, mirror: url };
+    return { ok: true, path: u.path || unpackDir, bytes: dr.bytes, sha256: dr.sha, mirror: url };
   }
 
   return { ok: false, error: 'все зеркала не сработали: ' + lastErr };
