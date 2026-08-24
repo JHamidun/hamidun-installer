@@ -106,6 +106,10 @@ jobs:
         env:
           APPLE_CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
           APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          # Идентификатор подписи несёт ЮРИДИЧЕСКОЕ ИМЯ владельца. Открытым текстом
+          # в публичном репозитории ему не место, поэтому он приходит секретом —
+          # GitHub заодно маскирует его в логах сборки.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -e
           APP="release/mac-universal/Hamidun Setup.app"
@@ -148,7 +152,7 @@ jobs:
             [ "$attempt" = 5 ] && { echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; }
           done
           echo "=== подпись dmg Developer ID ==="
-          codesign --force --timestamp --sign "Developer ID Application: Jemal Mohamed Lemine (3VN93XA9DY)" --keychain "$KC" "$OUT"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KC" "$OUT"
           codesign --verify --verbose "$OUT"
           ls -la "$OUT"
 
