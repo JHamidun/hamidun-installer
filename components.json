@@ -125,7 +125,7 @@
           "needsAdmin": false,
           "sizeBytes": {
             "win32": 233358780,
-            "darwin": 229341950
+            "darwin": 233358780
           }
         },
         {
@@ -167,7 +167,7 @@
           "needsAdmin": false,
           "sizeBytes": {
             "win32": 340706,
-            "darwin": 278204
+            "darwin": 340706
           }
         }
       ]
