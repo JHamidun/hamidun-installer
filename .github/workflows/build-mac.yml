@@ -17,6 +17,13 @@ on:
         required: false
         default: ''
 
+# Очередь БЕЗ отмены. Отменять релизную сборку на середине нельзя: она заливает
+# объекты в S3 и коммитит реестр обратно в ветку — прерывание оставит половину.
+# Но и параллельно двум таким идти незачем: они гонятся за одни и те же ключи.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   build-mac:
     runs-on: macos-latest
@@ -36,6 +43,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install deps
         run: npm install --no-audit --no-fund

@@ -23,8 +23,65 @@ on:
   pull_request:
     branches: ['main']
 
+# Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
+# бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Что вообще затронуто. Отдельная джоба на ubuntu (в десять раз дешевле macOS)
+  # существует ради одного: не поднимать дорогие раннеры, когда правились только
+  # документы и бэклог. За август таких push-ей набралось заметно.
+  #
+  # ВАЖНО про защиту ветки: пропущенная джоба считается ОЖИДАЮЩЕЙ и блокирует PR
+  # навсегда, если сделать её обязательной проверкой. Поэтому обязательной
+  # назначается джоба `gate` внизу — она идёт ВСЕГДА и принимает пропуск как успех.
+  changes:
+    name: Что затронуто
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}" --depth=200 || git fetch --no-tags origin "${{ github.base_ref }}"
+            FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          else
+            BEFORE="${{ github.event.before }}"
+            # Первый push в ветку и force-push дают несуществующий или нулевой BEFORE.
+            # Тогда честнее считать, что затронуто всё, чем молча пропустить тесты.
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              FILES=$(git ls-files)
+            else
+              FILES=$(git diff --name-only "$BEFORE" HEAD)
+            fi
+          fi
+          echo "Затронуто файлов: $(echo \"$FILES\" | grep -c . || true)"
+          # Список НЕ-кода задан белым списком, а не чёрным: незнакомое расширение
+          # должно считаться кодом и запускать тесты. Пропуск по ошибке дороже
+          # лишнего прогона.
+          CODE=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              *.md|docs/*|.beads/*|LICENSE|*.webp|*.png|*.jpg|*.svg) ;;
+              *) CODE=true; echo "  код: $f"; break ;;
+            esac
+          done <<< "$FILES"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Тесты нужны: $CODE"
   unit-tests-windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: npm test (Windows — .ps1 + bash-скрипты)
     runs-on: windows-latest
     timeout-minutes: 15
@@ -34,12 +91,36 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      # Вывод пишется в файл и уезжает артефактом (шаг ниже). Причина: падение
+      # 33200117231 не оставило улик — логи упавших джоб пришли ПУСТЫМИ, шаги через
+      # API не отдались, и восстановить причину по следам было нечем. Перезапуск без
+      # единой правки дал зелёное. На плавающий гейт перестают смотреть, поэтому
+      # каждое падение обязано оставлять улику.
+      #
+      # PIPESTATUS[0], а не $? — иначе код возврата придёт от tee, и красное станет
+      # зелёным. Ровно эта подмена уже случалась дважды в ручных прогонах.
       - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee test-output.log
+          code=${PIPESTATUS[0]}
+          echo "=== npm test exit=$code ===" | tee -a test-output.log
+          exit $code
+
+      - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-windows
+          path: test-output.log
+          retention-days: 14
+          if-no-files-found: warn
 
       # Размеры компонентов в окне установщика обязаны сходиться с тем, что реально
       # лежит в vendor. На раннере vendor не развёрнут, поэтому здесь сверять нечего —
@@ -51,6 +132,8 @@ jobs:
         run: npm run sizes:check
 
   unit-tests-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: npm test (macOS — .sh скрипты нативно)
     runs-on: macos-latest
     timeout-minutes: 15
@@ -60,12 +143,29 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      # См. тот же блок в windows-джобе: улика обязательна, PIPESTATUS[0] обязателен.
       - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee test-output.log
+          code=${PIPESTATUS[0]}
+          echo "=== npm test exit=$code ===" | tee -a test-output.log
+          exit $code
+
+      - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-macos
+          path: test-output.log
+          retention-days: 14
+          if-no-files-found: warn
 
       # Размеры компонентов в окне установщика обязаны сходиться с тем, что реально
       # лежит в vendor. На раннере vendor не развёрнут, поэтому здесь сверять нечего —
@@ -75,3 +175,33 @@ jobs:
       # Реальная сверка происходит локально после fetch:vendor и в юнит-тестах выше.
       - name: Проверка размеров компонентов (генератор жив и не врёт)
         run: npm run sizes:check
+
+  # ЕДИНСТВЕННАЯ обязательная проверка для защиты ветки.
+  #
+  # Идёт всегда (if: always()), поэтому «пропущено» никогда не превращается в
+  # «ожидает» и не запирает PR. Падает только если тестовая джоба реально упала;
+  # пропуск по отсутствию кодовых изменений считается успехом осознанно.
+  gate:
+    name: Гейт юнит-тестов
+    if: always()
+    needs: [changes, unit-tests-windows, unit-tests-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - shell: bash
+        run: |
+          W="${{ needs.unit-tests-windows.result }}"
+          M="${{ needs.unit-tests-macos.result }}"
+          C="${{ needs.changes.result }}"
+          echo "changes=$C  windows=$W  macos=$M"
+          if [ "$C" != "success" ]; then
+            echo "::error::Определение затронутого не отработало — не могу утверждать, что тесты не нужны."
+            exit 1
+          fi
+          for r in "$W" "$M"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::Юнит-тесты не прошли (windows=$W macos=$M)"; exit 1 ;;
+            esac
+          done
+          echo "Гейт пройден."

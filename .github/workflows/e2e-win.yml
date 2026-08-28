@@ -34,6 +34,12 @@ on:
   push:
     branches: ['e2e/**']
 
+# Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
+# бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   e2e:
     name: Windows (lite) — netfail / ok / preserve / rerun / uninstall
@@ -45,6 +51,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
@@ -196,6 +203,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
@@ -240,6 +248,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
@@ -312,6 +321,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
