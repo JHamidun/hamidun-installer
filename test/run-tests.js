@@ -3288,6 +3288,44 @@ ok('components.json: компонент nomad — позиционировани
   assert(!/hermes/i.test(comp.name + comp.desc + comp.why), 'нет «Hermes» в описании (переименовано в Nomad)');
 });
 
+ok('каждый локальный require в src/ разрешается (модуль не потерян при коммите)', () => {
+  // Ловит КЛАСС, а не случай. 28.08.2026: src/uid-telemetry.js уехал в коммит с
+  // require('./uid-fallback'), а сам uid-fallback.js остался неотслеженным. Падения
+  // не было — вызов стоит внутри catch, который всё глотает, — поэтому вся ветка
+  // восстановления метки была мертва во ВСЕХ сборках молча. По замеру в самом
+  // комментарии это метка у 27% установок на Windows и 5% на macOS.
+  //
+  // Ни один тест этого не поймал: файл лежал на диске у автора, и локально всё
+  // работало. Проверять надо разрешимость require по тому, что РЕАЛЬНО в дереве.
+  const srcDir = path.join(ROOT, 'src');
+  const files = [];
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isFile() && e.name.endsWith('.js')) files.push(full);
+    }
+  })(srcDir);
+  assert(files.length > 3, 'в src/ должны быть js-файлы — иначе тест ничего не проверяет');
+
+  const missing = [];
+  for (const f of files) {
+    const code = fs.readFileSync(f, 'utf8');
+    const re = new RegExp('require\\(\\s*[\'"](\\.[^\'"]+)[\'"]\\s*\\)', 'g');
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      const spec = m[1];
+      const base = path.resolve(path.dirname(f), spec);
+      const ok = ['', '.js', '.json', '/index.js'].some((ext) => {
+        try { return fs.statSync(base + ext).isFile(); } catch (e) { return false; }
+      });
+      if (!ok) missing.push(path.relative(ROOT, f).split('\\').join('/') + ' -> ' + spec);
+    }
+  }
+  assert.deepStrictEqual(missing, [],
+    'require указывает на файл, которого нет в дереве: ' + missing.join('; '));
+});
+
 ok('git-гигиена: vendor/nomad-src (приватный код агента) НЕ закоммичен и покрыт .gitignore', () => {
   const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
   assert(/vendor\/\*|vendor\//.test(gi), '.gitignore покрывает vendor/');
