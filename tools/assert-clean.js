@@ -16,6 +16,19 @@
  *
  * Сюда же переехал текст: в JSON-строке он был без кириллицы (экранирование), и
  * человек читал транслит в момент, когда у него что-то сломалось.
+ *
+ * ПОЧЕМУ ПРОВЕРЯЕМ ОБЕ ПЛАТФОРМЫ СРАЗУ. Проверка отвечает на вопрос «дерево чистое?»,
+ * а не «чистое для той сборки, которую я сейчас запускаю». Windows-остаток обязан
+ * валить и маковый прогон тоже: собирают эти два издания с одного и того же дерева,
+ * и мутацию, оставленную одним, унесёт в релиз другое. Поэтому здесь нет ни одного
+ * ветвления по process.platform.
+ *
+ * ЧТО ИМЕННО МУТИРУЕТ mutatePackage() в tools/build-lite.js (и что, значит, надо
+ * проверять): win — extraResources.from и пару имён win/portable; mac — пару имён
+ * mac/dmg и, если правило вообще есть, mac.extraResources.from. У каждой платформы
+ * пара «общее правило + target-specific», причём target-specific ПЕРЕБИВАЕТ общее,
+ * поэтому build-lite.js правит обе половины — и проверять надо обе, иначе застрявшее
+ * имя …-Lite обнаружится только на выкладке.
  */
 const fs = require('fs');
 const path = require('path');
@@ -32,9 +45,25 @@ if (!res) {
 } else if (res.from !== 'vendor') {
   problems.push(`package.json: extraResources.from = «${res.from}» вместо «vendor» — осталось от lite-сборки`);
 }
+// macOS: правила extraResources → vendor у build.mac НЕТ и быть не должно. vendor в .app
+// не вшивается (нотаризация спотыкается о неподписанные Mach-O внутри .whl и .tar.gz) —
+// он едет сиблингом рядом с .app на томе dmg, том собирает hdiutil в build-mac.yml.
+// Поэтому ОТСУТСТВИЕ правила здесь ошибкой не считается, в отличие от win выше. А вот
+// правило, показывающее на vendor-lite, — верный признак недовосстановленной lite-сборки:
+// mutatePackage() переводит на vendor-lite всё, что найдёт в mac.extraResources, на случай
+// если vendor туда однажды всё-таки пропишут.
+for (const r of ((pkg.build && pkg.build.mac && pkg.build.mac.extraResources) || [])) {
+  if (r && r.from === 'vendor-lite') {
+    problems.push(`package.json: build.mac.extraResources.from = «vendor-lite» (to: «${r.to}») — `
+      + 'осталось от lite-сборки; офлайн-dmg уехал бы с лёгким vendor вместо полного');
+  }
+}
+
 for (const [where, name] of [
   ['build.win.artifactName', (pkg.build && pkg.build.win && pkg.build.win.artifactName) || ''],
   ['build.portable.artifactName', (pkg.build && pkg.build.portable && pkg.build.portable.artifactName) || ''],
+  ['build.mac.artifactName', (pkg.build && pkg.build.mac && pkg.build.mac.artifactName) || ''],
+  ['build.dmg.artifactName', (pkg.build && pkg.build.dmg && pkg.build.dmg.artifactName) || ''],
 ]) {
   if (/Lite/.test(name)) problems.push(`package.json: ${where} = «${name}» — имя lite-артефакта осталось`);
 }
@@ -57,4 +86,5 @@ if (problems.length) {
   console.error('\nВосстановить: git checkout package.json config.json && rm -rf vendor-lite');
   process.exit(1);
 }
-console.log('[assert:clean] package.json и config.json чистые — собираю ОФЛАЙН-издание из vendor/.');
+console.log('[assert:clean] package.json и config.json чистые (win + mac) — собираю ОФЛАЙН-издание '
+  + 'из полного vendor/, без докачки.');

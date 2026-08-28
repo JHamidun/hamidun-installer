@@ -17,7 +17,7 @@
     "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run preflight && electron-builder",
     "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run preflight && electron-builder --win",
     "dist:win:lite": "node tools/build-lite.js",
-    "dist:mac": "npm run fetch:config && npm run preflight -- --platform darwin && electron-builder --mac",
+    "dist:mac": "npm run assert:clean && npm run fetch:config && npm run preflight -- --platform darwin && electron-builder --mac",
     "dist:mac:lite": "node tools/build-lite.js --mac",
     "postinstall": "electron-builder install-app-deps",
     "sizes": "node tools/sync-sizes.js",

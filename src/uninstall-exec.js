@@ -26,6 +26,38 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// Синхронная пауза. Модуль сквозь весь файл синхронный (он крутится в main-процессе
+// до закрытия окна), поэтому await сюда не вставить, а setTimeout не сработает.
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch (e) { /* SharedArrayBuffer недоступен — просто не ждём */ }
+}
+
+// Возврат каталога из карантина. Раньше это был ОДИН fs.renameSync без повторов — и
+// в этом была асимметрия, стоившая чужих папок: ЗАХВАТ в карантин делает пять попыток,
+// а ВОЗВРАТ не делал ни одной. На Windows rename на только что созданном дереве
+// транзиентно падает с EPERM/EACCES/EBUSY, пока Defender или индексатор Search держат
+// хендл на свежих файлах, — и чужой каталог оставался лежать под именем
+// «.hm-quar.<hex>». Опаснее всего это в ветке «маркера нет»: там мы как раз и
+// установили, что каталог НЕ наш.
+//
+// Ретраим только транзиентное. ENOENT (цель исчезла) и EXDEV (разные тома — так не
+// бывает, карантин в том же родителе) повторять бессмысленно: это не «занято», а
+// «иначе не будет».
+const RENAME_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY', 'EEXIST']);
+function renameWithRetry(from, to, attempts, delayMs) {
+  const n = attempts || 5;
+  for (let i = 0; i < n; i++) {
+    try { fs.renameSync(from, to); return true; }
+    catch (e) {
+      const code = e && e.code;
+      if (!RENAME_TRANSIENT.has(code) || i === n - 1) return false;
+      sleepSync((delayMs || 150) * (i + 1)); // линейный backoff: 150/300/450/600 мс
+    }
+  }
+  return false;
+}
+
 function isCaseInsensitive(platform) { return platform === 'win32' || platform === 'darwin'; }
 function normKey(p, platform) {
   const n = path.resolve(String(p));
@@ -229,7 +261,7 @@ function removeDirTree(p, opts, dry) {
   // уехал в .hm-quar.<hex>, а повторный запуск видит ENOENT → 'absent' → рапортует
   // ложный успех и осиротевший карантин остаётся навсегда. Если и возврат не удался —
   // путь карантина попадает в сообщение (и в install.log), мусор не невидим.
-  const restore = () => { try { fs.renameSync(quarantine, g.norm); return true; } catch (e) { return false; } };
+  const restore = () => renameWithRetry(quarantine, g.norm);
   try {
     // rmSync не следует по симлинкам внутрь (удаляет саму ссылку) — содержимое чужих целей цело.
     // maxRetries/retryDelay — против транзиентных EPERM/EBUSY на Windows (процесс ещё
@@ -316,7 +348,7 @@ function removeDirTreeGated(p, opts, markerName, dry) {
   }
   if (!quarantine) return res('failed', 'ЗАЩИТА: не удалось захватить цель в карантин');
 
-  const restore = () => { try { fs.renameSync(quarantine, g.norm); return true; } catch (e) { return false; } };
+  const restore = () => renameWithRetry(quarantine, g.norm);
 
   // 4. No-follow проверка маркера на ЗАХВАЧЕННОМ каталоге.
   let qst = null;
@@ -574,5 +606,7 @@ module.exports = {
   removeFileGated, removeDirTreeGated, anyOwnerMarker,
   allowedRcFiles, computeUserPathWithout,
   classifyLaunchctlPrint, launchctlRemoveError,
-  verifyPostconditions
+  verifyPostconditions,
+  renameWithRetry // экспортируется РАДИ ТЕСТА: без него ретрай возврата из карантина
+                  // проверяется только «повезло/не повезло» на живой ФС, то есть никак
 };

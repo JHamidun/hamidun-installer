@@ -378,6 +378,39 @@ function renderGroups() {
   });
 }
 
+// Компонент, которому для РАБОТЫ нужен адрес сервиса из config.json. Объявляется в
+// components.json полем `needsConfig` — путь через точку («bridge.enrollEndpoint»), а
+// текст предупреждения — соседним `needsConfigNote`.
+//
+// ЗАЧЕМ. AI-мост требует прав администратора, ставит прокси, PAC и автозапуск — а
+// enrollEndpoint в config.json пуст, и без адреса сервера мост встаёт и простаивает.
+// Человек отдавал права, видел зелёную галочку и не получал ничего. Скрывать карточку
+// целиком (как `hidden` у verify) — нельзя: (1) на ней же живут «уже установлено» и
+// «Удалить», и мост исчез бы у тех, кто его уже поставил; (2) агент умеет работать и
+// без enroll — по SSH-доступу, вписанному в его конфиг вручную. Поэтому карточка
+// остаётся, но говорит правду. Заполнил адрес в config.json — бейдж и подпись пропали
+// сами, править код не нужно.
+function configValueByPath(pathStr) {
+  return String(pathStr || '').split('.').reduce(
+    (obj, key) => (obj && typeof obj === 'object' ? obj[key] : undefined),
+    STATE.config || {}
+  );
+}
+
+function componentUnconfigured(c) {
+  if (!c || !c.needsConfig) return false;
+  const v = configValueByPath(c.needsConfig);
+  if (Array.isArray(v)) return v.length === 0;
+  return String(v == null ? '' : v).trim() === '';
+}
+
+// Текст предупреждения. Фолбэк на случай, если `needsConfigNote` забыли: молчать
+// нельзя — именно молчание и было дефектом.
+function unconfiguredNoteText(c) {
+  return (c && c.needsConfigNote) ||
+    'Адрес сервиса для этого компонента в сборке не заполнен — он установится, но работать не начнёт.';
+}
+
 function renderCard(c) {
   const checked = STATE.selected[c.id];
   const det = (STATE.detected && STATE.detected[c.id]) || null;
@@ -392,6 +425,16 @@ function renderCard(c) {
     : '';
   const updBadge = updateAvail ? `<span class="badge upd">обновление доступно</span>` : '';
   const recBadge = c.recommended ? `<span class="badge rec">рекомендуется</span>` : '';
+  // Сервис для компонента в этой сборке не прописан — говорим об этом на самой карточке,
+  // до выбора, а не в логе после того, как человек отдал права администратора.
+  // Стили инлайновые (жёлтый, как у бейджа «админ») — новых классов в styles.css не заводим.
+  const unconf = componentUnconfigured(c);
+  const unconfBadge = unconf
+    ? `<span class="badge" style="color:var(--h-yellow);border-color:rgba(245,213,71,.3)">не настроен</span>`
+    : '';
+  const unconfNote = unconf
+    ? `<div class="card-desc" style="margin-top:4px;color:var(--h-yellow)">⚠ ${escapeHtml(unconfiguredNoteText(c))}</div>`
+    : '';
   el.innerHTML = `
     <div class="checkbox">${CHECK_SVG}</div>
     <div class="card-body">
@@ -402,11 +445,13 @@ function renderCard(c) {
         ${sizeBadgeHtml(c)}
         ${c.online ? `<span class="badge online" title="Скачивается онлайн во время установки">онлайн</span>` : ''}
         ${c.needsAdmin ? `<span class="badge admin">админ</span>` : ''}
+        ${unconfBadge}
         ${reqNames.length ? `<span class="badge dep">требует: ${reqNames.join(', ')}</span>` : ''}
         ${okBadge}
         ${updBadge}
       </div>
       <div class="card-desc">${c.desc}</div>
+      ${unconfNote}
       ${checked ? renderComponentOptions(c) : ''}
       ${installed ? renderInstalledActions(c) : ''}
     </div>`;
@@ -875,9 +920,15 @@ function showWhatInstalls() {
       const sizeText = componentSizeText(c);
       if (!sizeText) unknown++;
       const size = sizeText ? ' <span class="wi-size">' + escapeHtml(sizeText) + '</span>' : '';
+      // То же предупреждение, что и на карточке: в этом окне человек читает описание
+      // компонента отдельно от карточки, и обещание «стабильный адрес» без оговорки
+      // здесь было бы ровно таким же молчанием.
+      const unconf = componentUnconfigured(c)
+        ? '<div class="wi-desc" style="color:var(--h-yellow)">⚠ ' + escapeHtml(unconfiguredNoteText(c)) + '</div>'
+        : '';
       rows.push(
         '<li><div class="wi-name">' + escapeHtml(c.name) + size + '</div>' +
-        '<div class="wi-desc">' + escapeHtml(c.desc || '') + '</div></li>'
+        '<div class="wi-desc">' + escapeHtml(c.desc || '') + '</div>' + unconf + '</li>'
       );
     });
   });

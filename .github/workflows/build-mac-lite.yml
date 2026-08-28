@@ -311,7 +311,11 @@ jobs:
           ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
           cp -R "$APP" "$ST/"
           cp -R "$LV" "$ST/vendor"
-          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          # Обязательна, а не «если получится» — см. тот же блок в build-mac.yml.
+          HMTXT="assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+          [ -f "$HMTXT" ] || { echo "::error::нет файла инструкции: $HMTXT"; ls -la assets/mac/; exit 1; }
+          cp "$HMTXT" "$ST/"
+          [ -s "$ST/$(basename "$HMTXT")" ] || { echo "::error::инструкция не легла в стейджинг"; exit 1; }
           ln -s /Applications "$ST/Applications"
           OUT="release/Hamidun-Setup-Mac-Lite.dmg"; rm -f "$OUT"
           echo "=== hdiutil create (том сам под размер контента) ==="

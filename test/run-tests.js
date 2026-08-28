@@ -3574,6 +3574,166 @@ ok('P0-3 (функц.): маркер-symlink НЕ считается валид�
   } finally { dropDir(home); }
 });
 
+console.log('== Возврат из карантина: транзиентный EPERM больше не стоит чужой папки ==');
+
+// Дефект: захват цели в карантин делал 5 попыток, а ВОЗВРАТ — одну. На Windows rename
+// свежесозданного дерева транзиентно падает с EPERM/EBUSY, пока Defender или индексатор
+// держат хендл, — и чужой каталог оставался под именем «.hm-quar.<hex>». Опаснее всего
+// это в ветке «маркера нет»: там уже установлено, что каталог НЕ наш.
+//
+// Именно этот тест и «плавал» в CI: падал без причины, зелёнел на перезапуске.
+
+ok('renameWithRetry: переживает транзиентный EPERM, сдаётся на постоянном, не ретраит бессмысленное', () => {
+  const real = fs.renameSync;
+  const calls = [];
+  const stub = (failTimes, code) => {
+    let n = 0;
+    fs.renameSync = () => {
+      calls.push(code);
+      if (n++ < failTimes) { const e = new Error('stub'); e.code = code; throw e; }
+    };
+  };
+  try {
+    // (1) две транзиентные осечки, затем успех → каталог вернулся.
+    calls.length = 0; stub(2, 'EPERM');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 5, 1), true, 'EPERM ×2 → всё равно вернули');
+    assert.strictEqual(calls.length, 3, 'ровно 3 попытки (2 провала + успех), а не больше');
+
+    // (2) отрицательный контроль: если бы ретраев не было, (1) прошёл бы и на сломанной
+    // реализации. Одной попытки НЕ хватает — значит ретраи и правда работают.
+    calls.length = 0; stub(2, 'EPERM');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 1, 1), false, 'одна попытка при 2 осечках → провал');
+
+    // (3) постоянная занятость → честный false, а не вечный цикл.
+    calls.length = 0; stub(99, 'EBUSY');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 4, 1), false, 'постоянный EBUSY → сдаёмся');
+    assert.strictEqual(calls.length, 4, 'ровно столько попыток, сколько заказано');
+
+    // (4) ENOENT ретраить бессмысленно — цели просто нет. Одна попытка, не четыре.
+    calls.length = 0; stub(99, 'ENOENT');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 4, 1), false, 'ENOENT → false');
+    assert.strictEqual(calls.length, 1, 'ENOENT не ретраится (это не «занято», а «нечего возвращать»)');
+  } finally { fs.renameSync = real; }
+});
+
+ok('removeDirTreeGated: чужой каталог возвращается на место, даже если первый rename занят', () => {
+  const home = mkHomeDir();
+  const real = fs.renameSync;
+  try {
+    const opts = { home, platform: process.platform };
+    const parent = path.join(home, 'AppData', 'Local');
+    const foreign = path.join(parent, 'nomad-src');
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(foreign, 'notes.txt'), 'чужое');
+
+    // Первый возврат из карантина «занят» — ровно то, что делает антивирус.
+    // Захват в карантин при этом должен пройти, поэтому подменяем ТОЛЬКО обратный ход.
+    let blocked = 0;
+    fs.renameSync = (from, to) => {
+      if (String(from).indexOf('.hm-quar.') !== -1 && blocked < 1) {
+        blocked++; const e = new Error('stub'); e.code = 'EPERM'; throw e;
+      }
+      return real(from, to);
+    };
+
+    const r = uxMod.removeDirTreeGated(foreign, opts, '.hamidun-nomad');
+    assert.strictEqual(blocked, 1, 'подлог сработал (иначе тест ничего не проверил)');
+    assert.strictEqual(r.status, 'kept', 'без маркера → kept: ' + JSON.stringify(r));
+    assert(fs.existsSync(path.join(foreign, 'notes.txt')), 'чужой файл на месте, каталог вернулся');
+    const leftovers = fs.readdirSync(parent).filter((n) => n.indexOf('.hm-quar.') === 0);
+    assert.deepStrictEqual(leftovers, [], 'карантинных остатков нет');
+  } finally { fs.renameSync = real; dropDir(home); }
+});
+
+console.log('== needsConfig: компонент, которому нечего слушаться, помечен ДО выбора ==');
+
+// Дефект был такой: мост требует прав администратора, ставит прокси, PAC и автозапуск —
+// а адрес enroll-сервиса в config.json пуст, и мост встаёт и простаивает. Человек отдавал
+// права и получал зелёную галочку ни за что. Починка объявлена ДАННЫМИ: components.json →
+// needsConfig = путь в config.json, needsConfigNote = текст.
+//
+// Проверять это регуляркой «есть ли в app.js слово needsConfig» бессмысленно: опечатка в
+// пути («bridge.enrolEndpoint») такую проверку проходит и молча гасит предупреждение
+// НАВСЕГДА — ровно тот класс тихого отказа, из-за которого задача и завелась. Поэтому две
+// функции вынимаются из app.js и исполняются по-настоящему, а путь сверяется с config.json.
+
+const NC_CFG = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+
+// Достаёт componentUnconfigured из renderer/app.js и запускает его в изолированном
+// контексте с подменённым STATE.config.
+function ncLoadFn(configObj) {
+  const vm = require('vm');
+  const src = EG_APP();
+  const grab = (name) => {
+    const m = new RegExp('\\nfunction ' + name + '\\s*\\([\\s\\S]*?\\n\\}').exec(src);
+    assert(m, 'в src/renderer/app.js нет функции ' + name);
+    return m[0];
+  };
+  const sandbox = { STATE: { config: configObj } };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    grab('configValueByPath') + grab('componentUnconfigured') +
+    '\nthis.__unconf = componentUnconfigured;',
+    sandbox
+  );
+  return sandbox.__unconf;
+}
+
+ok('componentUnconfigured: пусто → «не настроен», заполнено → молчит, чужие компоненты не трогает', () => {
+  const unconf = ncLoadFn({ bridge: { enrollEndpoint: '' }, x: { list: [] } });
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), true,
+    'пустая строка в config → компонент помечен');
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'x.list' }), true,
+    'пустой массив тоже считается незаполненным');
+  assert.strictEqual(unconf({ id: 'git' }), false,
+    'компонент без needsConfig НИКОГДА не помечается');
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'нет.такого.пути' }), true,
+    'несуществующий путь → fail-closed (лучше лишнее предупреждение, чем тихое обещание)');
+
+  // Отрицательный контроль: заполненный адрес обязан гасить пометку. Без этой половины
+  // тест проходил бы и на функции, которая всегда возвращает true.
+  const filled = ncLoadFn({ bridge: { enrollEndpoint: 'https://enroll.example/api' } });
+  assert.strictEqual(filled({ id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), false,
+    'адрес вписан → пометка и предупреждение исчезают сами, править код не нужно');
+  assert.strictEqual(ncLoadFn({ bridge: { enrollEndpoint: '   ' } })(
+    { id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), true, 'одни пробелы — не адрес');
+});
+
+ok('needsConfig в components.json указывает на РЕАЛЬНЫЙ ключ config.json (опечатка = тихо погашенное предупреждение)', () => {
+  const cfg = NC_CFG();
+  const withNC = [];
+  (components.groups || []).forEach((g) => (g.components || []).forEach((c) => {
+    if (c.needsConfig) withNC.push(c);
+  }));
+  assert(withNC.length > 0, 'хотя бы один компонент с needsConfig (иначе механизм мёртв)');
+
+  withNC.forEach((c) => {
+    let node = cfg;
+    c.needsConfig.split('.').forEach((seg, i, all) => {
+      assert(node && typeof node === 'object' && Object.prototype.hasOwnProperty.call(node, seg),
+        c.id + ': needsConfig="' + c.needsConfig + '" — в config.json нет ключа "' +
+        all.slice(0, i + 1).join('.') + '"');
+      node = node[seg];
+    });
+    // Текст обязателен. В app.js есть фолбэк, но он на случай забывчивости в разработке —
+    // в раздаваемой сборке человек должен читать про КОНКРЕТНЫЙ компонент.
+    assert(typeof c.needsConfigNote === 'string' && c.needsConfigNote.trim().length > 30,
+      c.id + ': needsConfig без внятного needsConfigNote');
+  });
+});
+
+ok('предупреждение показано в ОБОИХ местах: карточка и окно «что установится»', () => {
+  const s = EG_APP();
+  const inCard = /function renderCard[\s\S]*?\n\}/.exec(s);
+  const inWhat = /function showWhatInstalls[\s\S]*?\n\}/.exec(s);
+  assert(inCard && /componentUnconfigured\(/.test(inCard[0]), 'renderCard не спрашивает componentUnconfigured');
+  assert(inWhat && /componentUnconfigured\(/.test(inWhat[0]),
+    'showWhatInstalls не спрашивает — а там человек читает описание отдельно от карточки');
+  // Текст предупреждения — через escapeHtml: он приходит из components.json, то есть из
+  // данных, и втыкать его в innerHTML сырым нельзя.
+  assert(/escapeHtml\(unconfiguredNoteText\(c\)\)/.test(s), 'текст предупреждения не экранируется');
+});
+
 console.log('== Codex round-4: reg/launchctl/debris — ошибка ≠ absent ==');
 
 // P1: launchctl — print-ошибка → failed; подтверждённое отсутствие → loaded:false.

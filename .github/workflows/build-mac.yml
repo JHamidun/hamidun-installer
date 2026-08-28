@@ -1,8 +1,13 @@
 name: Build macOS (.dmg)
 
-# Собирает Mac-версию установщика на облачном macOS-раннере GitHub.
+# Собирает Mac-версию установщика — ПОЛНОЕ ОФЛАЙН-издание (весь vendor едет на томе dmg) —
+# на облачном macOS-раннере GitHub. Лёгкая (стриминговая) редакция — в build-mac-lite.yml.
 # Запуск: вкладка Actions -> "Build macOS (.dmg)" -> Run workflow.
-# Артефакт (.dmg) появится в результатах запуска (Artifacts). Без подписи (v1).
+#
+# Подпись и нотаризация ЕСТЬ: .app подписывает Developer ID и нотаризует electron-builder
+# (шаг «Build .dmg»), финальный том собирает и подписывает шаг «Assemble final dmg».
+# Готовый .dmg (~2.7 ГБ) в ассет GitHub Release не влезает (лимит 2 GiB) — он уезжает
+# в Reg.ru S3, а Release создаётся УКАЗАТЕЛЕМ на S3-ссылку с sha256.
 
 on:
   workflow_dispatch:
@@ -36,6 +41,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # Тот же гейт, что стоит первым в `npm run dist` / `dist:win` / `dist:mac`. Здесь он
+      # нужен отдельным шагом, потому что сборка ниже зовёт electron-builder НАПРЯМУЮ, мимо
+      # npm-скрипта, — а хука beforePack у этой проверки нет (в отличие от preflight).
+      # Ловит она случай, когда мутацию от lite-сборки закоммитили: build-lite.js возвращает
+      # package.json и config.json в finally, но до finally процесс доживает не всегда —
+      # жёсткое убийство, падение машины, — а бывает, что и сам возврат не проходит
+      # (EPERM, файл держит антивирус: build-lite это печатает и выходит ненулевым, но
+      # дерево остаётся грязным). Опаснее половина с config.json: застрявшее edition:'lite' МОЛЧА
+      # выключает предполётные гейты (preflight решает «для этого издания проверять нечего»),
+      # и офлайн-dmg уехал бы без проверки свежести конфиг-пака, а по логу выглядел бы нормально.
+      # Проверка на секунду и без зависимостей — поэтому стоит ДО npm install и до фетчей.
+      - name: Assert clean tree (собираем офлайн-издание, а не остатки lite)
+        run: npm run assert:clean
 
       - name: Install deps
         run: npm install --no-audit --no-fund
@@ -136,7 +155,15 @@ jobs:
           ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
           cp -R "$APP" "$ST/"
           cp -R vendor "$ST/vendor"
-          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          # Инструкция — обязательна, а не «если получится». Именно её читает человек,
+          # у которого Gatekeeper написал «повреждено», и без неё он остаётся с кирпичом.
+          # Прежнее `2>/dev/null || true` глотало ровно тот случай, ради которого файл и
+          # существует: имя кириллическое, и любая осечка с кодировкой или переименование
+          # молча выпускали образ БЕЗ инструкции — в логе при этом всё зелёное.
+          HMTXT="assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+          [ -f "$HMTXT" ] || { echo "::error::нет файла инструкции: $HMTXT"; ls -la assets/mac/; exit 1; }
+          cp "$HMTXT" "$ST/"
+          [ -s "$ST/$(basename "$HMTXT")" ] || { echo "::error::инструкция не легла в стейджинг"; exit 1; }
           ln -s /Applications "$ST/Applications"
           OUT="release/Hamidun-Setup-Mac.dmg"; rm -f "$OUT"
           echo "=== hdiutil create (том сам под размер контента) ==="

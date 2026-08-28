@@ -1,12 +1,38 @@
 # Модель угроз — установщик (remote-компоненты)
 
 > Честный разбор: что закрыто, что **осознанно принято** как остаточный риск и
-> почему, и каков путь будущего усиления. Обновлено: round-4 (2026-07-16).
+> почему, и каков путь будущего усиления.
+>
+> Сверено с кодом: 2026-08-29. Предыдущая редакция стояла на round-4 (2026-07-16)
+> и врала в обе стороны: держала открытыми два дефекта, закрытых практически сразу
+> после её написания, и не знала о P0-фиксах кругов 6 и 7 — вплоть до того, что
+> таблица «Что закрыто» описывала конструкцию, которую код помечает как
+> неиспользуемую. Здесь каждое утверждение подтверждено файлом и функцией — чтобы
+> следующая сверка была дешёвой.
 
-Установщик несёт тонкую офлайн-базу (`vendor/`), а крупные рантаймы (`uv`, …) НЕ
-вшиты — они докачиваются из облака (Reg.ru S3, позже + Cloudflare R2) по требованию
-(модель Ninite). Установщик работает с **повышенными правами** (Windows:
-`requireAdministrator`) и запускает бинари, которые сам скачал/распаковал.
+Установщик несёт тонкую офлайн-базу (`vendor/`), а тяжёлые компоненты в
+lite-издании НЕ вшиты: `claude` (≈1 ГБ на Windows), `vscode`, `cursor`, `node`,
+`git`, `config`, `pydeps`, `extension`, `mascot`, `nomad`, `handy` докачиваются
+из облака (Reg.ru S3, позже + Cloudflare R2) по требованию — модель Ninite.
+Полный список и размеры — `remote-components.json`.
+
+**`uv` — единственный ТЯЖЁЛЫЙ компонент, намеренно выведенный из этой модели.** Он вшит в оба
+издания, включая lite, и не докачивается ниоткуда: `src/main.js` держит его в
+`BUNDLED_ONLY` (`loadRemoteMaps`), в `components.json` у него нет ни `remote`, ни
+`remoteId`, `tools/build-lite.js` кладёт его в `LITE_KEEP_WIN`/`LITE_KEEP_MAC`.
+Причина записана в самом коде: «uv (P1-A, security-sensitive, мал)»
+(`tools/build-lite.js`), она же в `tools/release-check.js` — «BUNDLED_ONLY в
+src/main.js: едет внутри lite-издания (мал, security-sensitive)». В реестре
+докачки запись `uv` есть (только `win32`), но это **спящий фолбэк**: `BUNDLED_ONLY`
+её не берёт, и именно поэтому `release-check.js` держит `uv` в `NO_REGISTRY_OK` —
+иначе проверка требовала бы от него ещё и darwin-сборку.
+Соответственно и `scripts/windows/uv.ps1` / `scripts/macos/uv.sh` качать ничего не
+умеют — единственный источник бинаря там `$HM_VENDOR/apps/uv` с fail-closed
+проверкой SHA-256; нет vendor → graceful skip (exit 120), а не фолбэк в сеть.
+
+Установщик работает с **повышенными правами** (Windows: `requireAdministrator`,
+`package.json` → `build.win`; цель сборки — `portable`) и запускает бинари,
+которые сам скачал/распаковал.
 
 ---
 
@@ -24,7 +50,15 @@
   докачке.** Атакующий, подменивший объект в облаке или байты в транзите, не
   подберёт sha — установка блокируется.
 
-Всё остальное ниже — **defense-in-depth ПОВЕРХ** пиннинга, а не замена ему.
+**Второй гейт, для вшитого:** всё, что едет внутри установщика (`vendor/apps/*`,
+курс), проверяется против `vendor/checksums.json` через `Confirm-HmArtifact`
+(`scripts/windows/_verify.ps1`, зеркало — `verify_artifact` в
+`scripts/macos/_lib.sh`): нет `HM_VENDOR` → стоп, нет манифеста → стоп, нет
+записи для имени → стоп, не сошёлся sha или размер → стоп. Поэтому в lite
+`checksums.json` вшивается всегда: без него не пройдёт ни один вшитый артефакт.
+Два гейта ортогональны — один про сеть, другой про содержимое дистрибутива.
+
+Всё остальное ниже — **defense-in-depth ПОВЕРХ** обоих, а не замена им.
 
 ---
 
@@ -33,18 +67,32 @@
 | Защита | Как |
 |---|---|
 | **sha256-пиннинг** | Обязателен, безусловен, потоково по held-fd (главный гейт, см. выше). |
+| **checksums.json для вшитого** | `Confirm-HmArtifact` / `verify_artifact` — fail-closed на каждом шаге (нет манифеста, нет записи, не сошёлся хеш или размер). |
 | **HELD-FD, без переоткрытия по имени** | Скачивание в один удерживаемый `O_EXCL`-дескриптор; sha считается потоково по мере записи в тот же fd. Окно подмены «проверил→запустил» по имени закрыто. |
 | **Целостность записи (round-3 #9)** | `fs.writeSync` пишется в цикле по возвращаемому счётчику (короткая запись дозаписывается), хешируются только реально записанные байты, перед публикацией `fstat().size === записано === ожидаемо`. Обрезанный файл с «совпавшим» sha невозможен. |
 | **Анти-SSRF** | Только HTTPS (без http-downgrade); хост не должен резолвиться в приватный/loopback/link-local/CGNAT-адрес; canonical IPv4/IPv6 (mapped, NAT64 `64:ff9b::/96` и local-use `64:ff9b:1::/48`); пиннинг всего DNS-снапшота (анти-rebinding, dual-stack). |
 | **Дедлайны/скорость (round-3 #8)** | Абсолютный дедлайн тикает с самого начала (до DNS/connect); контроль минимальной скорости; редиректы разруливаются герметично — тело редиректа рвётся (`res.destroy`), вся цепочка запросов глушится, колбэк срабатывает ровно один раз (нет утечки старого redirect-сокета). |
-| **ADMIN-OWNED STAGING (Windows, best-effort)** | Кэш/распаковка/запуск в `%ProgramData%\HamidunSetup\cache\<id>` с DACL **только** SYSTEM + Administrators (`/inheritance:r`, владелец=Administrators, без user-SID). ACL применяется И **проверяется** (SID-based, локаль-независимо) для **каждого** сегмента пути (top → `cache` → leaf, round-3 #2). Не смогли защитить/проверить → компонент не ставится. Сужает остаточное TOCTOU-окно процесса **того же** пользователя (medium integrity). |
-| **RUN-FROM-PROTECTED** | Install-скрипт запускает бинарь ИЗ защищённого кэша; user-writable копию под elevated-токеном не исполняет (`uv.ps1`/`uv.sh`). |
-| **Абсолютные системные пути (round-3 #6)** | `powershell/icacls/taskkill/cmd/reg/msiexec` — по абсолютным путям из **валидированного** System32 (root/System32 — не reparse, `kernel32.dll` — обычный файл; не из `%SystemRoot%` env, который можно подменить). Не нашли → fail-closed, **без** fallback в короткое имя (иначе PATH-резолв под elevated воскрешает hijack). |
+| **ADMIN-OWNED STAGING (Windows), P0 круг 6** | Кэш докачки — **свежий random-leaf каталог** под `%ProgramData%`, рождённый АТОМАРНО одной операцией `[IO.Directory]::CreateDirectory($dir,$sd)` с owner=Administrators + DACL {SYSTEM, Administrators}, protection on, без user-SID (`New-HmSecureStagingDir` в `_deelev.ps1`, вызов — `winMakeSecureDir` в `main.js`). `remote-fetch.js` только **проверяет** (`ensureCacheSecure` → `verifyDirSecureWin`, SID-based, локаль-независимо) и никогда не «чинит» post-hoc; не прошёл проверку → компонент не ставится. Переиспользуется ТОЛЬКО каталог, рождённый этим же процессом, и только если он всё ещё защищён. |
+| **Почему не create-then-icacls** | `fs.mkdirSync` + последующий `icacls` ЗАПРЕЩЁН: между созданием (каталог наследует ACL `ProgramData`, где Users writable) и applying ACL остаётся окно, в котором medium-малварь пред-создаёт или удерживает `<remoteId>.zip` и подменяет его до распаковки. Именно этим и была плоха прежняя предсказуемая схема `%ProgramData%\HamidunSetup\cache\<id>` — `main.js` помечает её «НЕ ИСПОЛЬЗУЕТСЯ (P0 Codex круг 6)». |
+| **FRESH EXTRACTION fail-closed** | Старые `unpacked-*` удаляются; не удалились → стоп (в старом каталоге не продолжаем). Распаковка в новый случайный каталог, публикация атомарным rename только при полном успехе. |
+| **RUN-FROM-PROTECTED** | Install-скрипт запускает бинарь из защищённого источника — из sha-проверенного admin-owned staging (докачка) либо из вшитого vendor после `Confirm-HmArtifact` (`uv.ps1`/`uv.sh`); user-writable копию под elevated-токеном не исполняет. В `uv.ps1`/`uv.sh` легаси-фолбэк на `HM_REMOTE_CACHE` убран полностью — он позволял запустить непроверенный uv из унаследованного окружения. |
+| **Абсолютные системные пути (round-3 #6)** | `powershell/icacls/taskkill/cmd/reg/msiexec` — по абсолютным путям из **валидированного** System32 (`winSystemRoot` в `remote-fetch.js`: root и System32 — не reparse, `kernel32.dll` — обычный файл; не из `%SystemRoot%` env, который можно подменить). Не нашли → fail-closed, **без** fallback в короткое имя. |
 | **Строгий env install-скриптов (round-3 #4)** | Elevated PowerShell получает env из allowlist: PATH только из admin-owned каталогов (System32 + стандартные Program Files install-таргеты + vendor), без пользовательского PATH; `PSModulePath`/`ComSpec` — валидированные системные; renderer-env не может переопределить резолвинг бинарей. Убирает подмену `git/node/npm/winget/msiexec` по PATH. |
-| **Junction-guard (round-3 #7, best-effort)** | Перед копированием в user-controlled `%LOCALAPPDATA%\Programs\uv`: reparse-point родителя → отказ; reparse-point leaf → снимаем ссылку (`.Delete()`, не рекурсивное удаление цели) и создаём заново. |
-| **Renderer не управляет чувствительным** | `HM_REMOTE_CACHE` безусловно вырезается из renderer-env и вычисляется только в main из проверенного sha-каталога; докачка+verify+распаковка+запуск идут одной атомарной операцией в main (renderer не вклинивается). |
+| **Junction-guard (best-effort)** | Перед копированием в user-controlled `%LOCALAPPDATA%\Programs\uv`: reparse-point родителя → отказ; reparse-point leaf → снимаем ссылку (`.Delete()`, не рекурсивное удаление цели) и создаём заново. Сам вшитый `uv.exe` тоже отвергается, если он reparse-point. |
+| **Renderer не управляет чувствительным** | `HM_REMOTE_CACHE` безусловно вырезается из renderer-env (и из унаследованного `process.env` на POSIX) и вычисляется только в main из проверенного sha-каталога; докачка+verify+распаковка+запуск идут одной атомарной операцией в main. |
+| **Де-элевация запуска per-user бинарей** | `Invoke-HmDeElevated` (`_deelev.ps1`): одноразовая задача планировщика с проверкой integrity родителя, чистыми PATH/PSModulePath, уборкой осиротевших задач. Вызывают ПЯТЬ компонентов: `bridge`, `claude`, `extension`, `handy`, `vscode` (сплошная проверка по вызовам `Invoke-HmDeElevated` в `scripts/windows/`). `cursor`, `git`, `node`, `claude-desktop` запускаются элевейтед из admin-owned secure-cache и закрыты не де-элевацией, а гейтом подписи `Test-HmTrustedSigner` — строкой выше. Расширилось далеко за пределы editor-CLI, каким было в round-4. |
+| **Гейт подписи для онлайн-фолбэков (Windows)** | `Test-HmTrustedSigner` (`_deelev.ps1`): мало `Status='Valid'` — WinVerifyTrust строит цепочку пользовательским chain-engine и принял бы корень, который medium-малварь положила в `HKCU\...\SystemCertificates\Root` без UAC. Требуется корень в `LocalMachine\Root` + EKU Code Signing. Онлайн-установщики `git`/`node`/`cursor`/`python` качаются в admin-owned secure-cache и проходят этот гейт fail-closed **до** запуска. |
+| **Пин издателя desktop-приложений** | `claude-desktop.ps1`: цепочка к машинному корню + точное `O=` в Subject + пин отпечатка leaf. `chatgpt-desktop.ps1`: тот же гейт по `O=` для `winget.exe` плюс якорение ПОЛНОГО имени пакета App Installer (не подстрока) с пином `PublisherId 8wekyb3d8bbwe`, без `Get-Command`-фолбэка. У онлайн-фолбэков `git`/`node`/`cursor` пин издателя опционален намеренно: точные RDN этих издателей на реальных артефактах не подтверждены, а слепой пин ломал бы легитимную установку — обязательная половина (цепочка к машинному корню) закрывает privesc сама. |
+| **macOS: `admin_run` принимает argv, не строку** | `scripts/macos/_lib.sh`: `shell_quote_arg` (пер-аргументное POSIX-квотирование, bash-3.2-safe) → `admin_build_cmd` → экранирование для строкового литерала AppleScript. Имя `.app` или путь из DMG с кавычками, точкой с запятой, `$(...)` или обратными кавычками инъецировать root-команду не может. Покрыто тестами (`test/run-tests.js`, round-trip «нехорошего» аргумента байт-в-байт). |
+| **macOS: чистое окружение root-шелла** | `admin_run` зовёт osascript через `env -i PATH=... HOME=...`. Закрывает весь класс env-hijack разом: `BASH_FUNC_*` (функция старше PATH-поиска), `ENV`/`BASH_ENV`, `SHELLOPTS=xtrace` + `PS4='$(payload)'`, `DYLD_INSERT_LIBRARIES` — всё это исполнилось бы как root ещё до строки PATH и до codesign. |
+| **macOS: verify+install под ОДНИМ `admin_run`** | Раньше подпись проверял medium-процесс снаружи, а `cp`/`installer` шёл root'ом внутри: пока открыт пароль-промпт, same-user успевал detach mount и подсунуть чужой `.app`. Теперь копия в root-owned staging (0700) → `codesign --verify -R` с точным Team ID → `spctl --assess` → и только потом `cp` в `/Applications`. Инструменты абсолютные, нет или не исполняемы → fail-closed. |
+| **macOS: `mascot.sh` fail-closed** | Прежний `if command -v codesign/spctl` был fail-OPEN — отсутствие инструмента в PATH молча пропускало проверку. Теперь `CODESIGN='/usr/bin/codesign'`, `SPCTL='/usr/sbin/spctl'`, требование `-x`, `spctl` вызывается ВСЕГДА, любой non-zero → стоп. |
+| **Nomad: VENDOR-ONLY, ветка клонирования удалена (P0 круг 7)** | `nomad.ps1`/`nomad.sh` ставят только из вшитого `HM_NOMAD_SRC`; `config.json` держит `repoUrl` пустым и обязан держать его пустым. Ушла TOCTOU-P0: подмена чужого `pyproject.toml` между `Test-Path` и клоном → исполнение чужого build-backend под админом. |
+| **Config: онлайн-фолбэк без repo-hooks** | `config.ps1`/`config.sh`: пред-существующий `~/.hamidun-setup/config-repo` НЕ переиспользуется — удаляется и клонируется заново, с командными `-c core.fsmonitor=false`, `-c core.hooksPath=NUL` (на macOS `/dev/null`), `-c core.symlinks=false` (командные `-c` перебивают repo-local config) плюс пустой `credential.helper` и запрет интерактива. |
+| **Детекция не исполняет user-writable под elevated** | `winSafeToExec` (`main.js`): путь канонизируется (`fs.realpathSync.native` — иначе junction из admin-корня в user-каталог, как штатно делает nvm-windows, увёл бы `CreateProcess` в подменённый бинарь), затем требуется admin-owned корень или admin-owned владелец файла; не удалось канонизировать → fail-closed. Версия не пробивается, компонент детектится по существованию. Спавн — с доверенным `detectSpawnEnv()`; `python -c` дополнительно с `-E` и cwd в System32 (иначе `PYTHONPATH`/`PYTHONSTARTUP` из `HKCU\Environment` или модуль по cwd импортировались бы под админом ещё до единого клика). |
 
 ### POSIX (macOS/Linux)
+
 `uv`-флоу **неэлевейтед end-to-end**: пользователь копирует в `~/.local/bin` и
 запускает под своим токеном — эскалации нет. Каталог 700 + проверка владельца
 **best-effort**. Полная изоляция от процессов **того же** пользователя без root на
@@ -55,7 +103,8 @@ POSIX недостижима (нет integrity levels) — это докумен
 ## Что ПРИНЯТО как остаточный риск (осознанно, владельцем)
 
 **Модель доставки: portable-exe с `requireAdministrator`, распаковываемый в `%TEMP%`
-и запускаемый оттуда.**
+и запускаемый оттуда.** Проверено на 2026-08-29: `package.json` → `build.win.target`
+всё ещё `portable`, `requestedExecutionLevel: requireAdministrator`, NSIS-цели нет.
 
 Electron-portable распаковывает свой код (`app.asar`, нативные модули, ресурсы) во
 временный каталог под `%TEMP%` (`%LOCALAPPDATA%\Temp`), который **writable для
@@ -64,8 +113,7 @@ Electron-portable распаковывает свой код (`app.asar`, нат
 
 - **open-handle-race / hard-link** на распакованные файлы в `%TEMP%` между
   распаковкой и запуском (Codex #1/#2/#3);
-- **elevated-launch** вспомогательных бинарей (cursor/terminal) из
-  user-writable путей (Codex #5).
+- **elevated-launch** вспомогательных бинарей из user-writable путей (Codex #5).
 
 **Почему принято:**
 
@@ -82,43 +130,64 @@ Electron-portable распаковывает свой код (`app.asar`, нат
    докачки.
 
 Правки логики докачки/запуска (round-1…3) остаточный вектор **не** трогают — они
-и не могут его закрыть в рамках portable-%TEMP% модели.
+и не могут его закрыть в рамках portable-`%TEMP%` модели.
 
-### Дополнение round-4 (holistic sweep, 2026-07-16)
+### Семейство «elevated-exec из user-writable» — состояние на 2026-08-29
 
-Сплошной аудит подтвердил: та же семья «elevated-exec из user-writable» шире, чем
-cursor/terminal. Тот же класс (требует уже присутствующей малвари **того же**
-пользователя — LPE), тот же приём закрытия (installed-сборка, см. ниже):
+Сплошной аудит round-4 показал, что эта семья шире, чем cursor/terminal. С тех пор
+бо́льшая часть списка закрыта точечно — не сменой формата доставки, а гейтами.
+Здесь честный статус по каждому пункту, чтобы никто не чинил починенное.
 
-- **Детект компонентов** резолвит `git/node/python -c/uv` из user-путей (+HKCU PATH)
-  под elevated-токеном.
-- **Bridge / Mascot / Nomad / Pydeps** запускают per-user `python/uv/exe` под elevated
-  (эти этапы per-user — элевация им не нужна).
-- **Онлайн-fallback** `git/node/cursor` качает в `%TEMP%` и запускает без пина подписи
-  (bundled-путь пиннится sha; онлайн-fallback — нет).
-- **config online-fallback** переиспользует user `~/.hamidun-setup/config-repo` →
-  `git fetch/reset` может исполнить `.git/hooks` под elevated.
-- **`irm|iex` / `npm -g`** под elevated с CurrentUser-proxy / `.npmrc`.
+| Пункт round-4 | Статус | Чем закрыто / что осталось |
+|---|---|---|
+| Детект резолвит `git/node/python -c/uv` из user-путей (+HKCU PATH) под elevated | **закрыто** | `winSafeToExec` + `detectSpawnEnv` + `python -E` с cwd в System32. Резолв по user-путям остался, но **исполнения** под elevated из них больше нет. |
+| Онлайн-fallback `git/node/cursor` качает в `%TEMP%` и запускает без пина подписи | **закрыто** | Secure-cache (`New-HmSecureStagingDir -Elevated $true`) + `Test-HmTrustedSigner` (цепочка к `LocalMachine\Root` + EKU) fail-closed до запуска. На macOS — `codesign -R` с точным Team ID + `spctl` на root-owned staged копии под одним `admin_run`. |
+| `config` online-fallback переиспользует user `config-repo` → `.git/hooks` под elevated | **закрыто** | Всегда свежий clone + `core.hooksPath=NUL`/`/dev/null`, `core.fsmonitor=false`, `core.symlinks=false`. |
+| Bridge запускает per-user `python` под elevated | **закрыто** | `bridge.ps1` гонит `pip install`, import-check и selftest через `Invoke-HmDeElevated`. |
+| Mascot запускает per-user exe под elevated | **закрыто** | Запуск идёт через `explorer.exe` (штатная де-элевация). |
+| **Pydeps** запускает per-user `python` под elevated | **ОТКРЫТО** | `pydeps.ps1` зовёт `& $py -m pip install --user …` напрямую. Вектор у́же, чем в round-4 (elevated PATH — строгий admin-owned allowlist), но явный фолбэк на `%LOCALAPPDATA%\Programs\Python\PythonNNN\python.exe` — user-writable путь без admin-owned гейта. |
+| **Nomad** запускает per-user `uv` под elevated | **ОТКРЫТО** | `nomad.ps1`: `& $uv python install 3.12`, `& $uv tool install …`. Сам `uv` при этом sha-проверен при установке, но копия в `%LOCALAPPDATA%\Programs\uv` — user-writable. |
+| **`irm \| iex` / `npm -g`** под elevated с CurrentUser-proxy / `.npmrc` | **ОТКРЫТО** | `claude.ps1`: `Invoke-RestMethod "https://claude.ai/install.ps1" \| Invoke-Expression`, при провале — `npm install -g @anthropic-ai/claude-code`. Доверие здесь = TLS + подлинность домена, гейта подписи нет по построению (это скрипт, а не подписанный бинарь). Де-элевирован только **проверочный запуск** `claude --version`, не установка. |
+| macOS `admin_run` собирает root-команду строкой (инъекция через имя `.app`) | **закрыто** | argv + `shell_quote_arg` + `env -i`; тесты в `test/run-tests.js`. Сам `_lib.sh` помечает это словами «THREAT-MODEL round-4: shell-инъекция через `admin_run` закрыта» — то есть пункт устарел в тот же день, когда был записан. |
+| `mascot.sh` fail-open на `command -v codesign/spctl` | **закрыто** | Абсолютные пути + `require -x` + `spctl` всегда. |
 
-**Принято по той же причине** (§ выше): реальные угрозы (CDN/MITM/повреждение)
-закрыты sha-пиннингом; остаток требует уже-присутствующей малвари того же юзера,
-которая эскалируется через **любой** elevated-процесс; структурное закрытие =
-installed-сборка, а не правка логики. Аудитория — новички на своих **чистых**
-машинах, одноразовая установка → практический риск низкий.
+Три оставшихся открытыми пункта — **того же класса**: требуют уже присутствующей
+малвари того же пользователя (LPE), которая эскалируется через любой
+elevated-процесс. Структурное закрытие — installed-сборка (см. ниже). Аудитория —
+новички на своих **чистых** машинах, одноразовая установка → практический риск
+низкий. Точечно их можно закрыть де-элевацией (`Invoke-HmDeElevated` уже есть и
+применён к пяти компонентам) — это дешевле, чем смена формата доставки, и стоит
+сделать до широкой раздачи.
 
-**Код-уровневые пункты (НЕ про модель доставки — чинить отдельно, до широкой раздачи):**
-- **macOS `admin_run`** собирает root-команду строкой и не экранирует одинарную
-  кавычку → инъекция через имя `.app` / путь из DMG. Онлайн-DMG без пина подписи
-  (`cursor.sh`) делает это достижимее. → передавать argv (не строку), `quoted form of`,
-  `codesign`/`spctl`/Team-ID пин на DMG.
-- **`mascot.sh`** — тот же fail-open `if command -v codesign/spctl` (как было в
-  desktop-скриптах до round-4-фикса).
+---
 
-**Что уже усилено к round-4 (реальные фиксы):** wipe `~/.claude` устранён навсегда
-(config-safety — это был РЕАЛЬНЫЙ инцидент, не LPE); де-элевация editor-CLI
-(scheduled-task с medium-gate) + secure-cache с атомарным owner=Administrators;
-desktop-подпись — chain-to-machine-root + exact Subject-O + Team-ID/PublisherId пин
-(анти-малварь при установке Claude/ChatGPT Desktop).
+## Исходящие каналы (новая поверхность, в round-4 не описанная)
+
+Установщик разговаривает наружу по трём каналам. Это не про эскалацию привилегий,
+но это граница доверия, и её надо держать в модели.
+
+- **Телеметрия установки** → `config.json` → `telemetry.url`
+  (`https://academy.hamidun.com/api/lead`), opt-out чекбоксом на экране выбора.
+  Тело: событие, платформа, издание, списки ok/failed/skipped, тексты ошибок,
+  длительность, `uid`. Пустой url = телеметрия выключена; отправляет только main,
+  таймаут 5 с, ошибки глотаются.
+- **`uid`** — идентификатор в Telegram, если человек пришёл по персональной ссылке
+  бота. Резолвится в `src/uid-telemetry.js` из `HM_UID`, файла рядом с exe или
+  суффикса `--u<uid>` в имени скачанного файла; санитайзится под `^[A-Za-z0-9_-]{1,32}$`
+  и отбрасывается целиком при несовпадении.
+- **Тексты ошибок чистятся от ПД** перед отправкой (`scrubText`): e-mail, IP,
+  доменные SID `S-1-5-21-*`, пары `DOMAIN\учётка`, имя машины, домашние каталоги
+  любых пользователей (включая профили с пробелом в имени), имя пользователя
+  отдельным словом. Вход режется до 2000 символов до применения регулярок —
+  иначе e-mail-регулярка ведёт себя квадратично на длинной строке.
+- **Маяк завершения курса** → `config.json` → `course.beaconUrl`
+  (`https://academy.hamidun.com/api/course-completion`). **`beaconSecret` пуст, и
+  ничто его не заполняет** — маяк уходит НЕПОДПИСАННЫМ во всех сборках, академия
+  помечает его как недоказанный. Это не регресс, так было всегда; см. развёрнутый
+  комментарий в `config.json`.
+- **Nomad control-plane** → `cp.nomadnet.ai` (`baseUrl`/`registerUrl`/`keysUrl`).
+  Ключ владельца НИКОГДА не вшивается; в конфиг агента пишется только ключ, который
+  пользователь дал сам (`HM_NOMAD_CLOUD_KEY` или поле на финальном экране).
 
 ---
 
@@ -130,14 +199,39 @@ desktop-подпись — chain-to-machine-root + exact Subject-O + Team-ID/Pub
    устанавливается в `%ProgramFiles%` / `%ProgramData%` (admin-owned, DACL
    SYSTEM+Administrators), а не распаковывается в `%TEMP%`. Тогда код, который
    elevated-процесс читает и запускает, физически недостижим для записи обычным
-   процессом пользователя — open-handle-race/hard-link/elevated-launch-из-%TEMP%
+   процессом пользователя — open-handle-race/hard-link/elevated-launch-из-`%TEMP%`
    исчезают структурно.
 2. **EV code-signing** exe/инсталлятора (SmartScreen-репутация с первого запуска +
    подлинность издателя) — снимает предупреждения и повышает планку MITM/подмены
-   дистрибутива до подделки подписи.
+   дистрибутива до подделки подписи. На macOS половина этого уже сделана:
+   `package.json` → `build.mac` несёт `hardenedRuntime: true`, entitlements и
+   `notarize: true`.
 3. (Опционально) запуск дочерних бинарей только по абсолютным путям из
    admin-owned install-каталога.
 
 До перехода на installed+EV-сборку остаток **осознанно принят** и задокументирован
 здесь. `remote-fetch.js` в комментарии модели угроз явно помечает admin-cache как
-defense-in-depth поверх sha-пиннинга (главного гейта), а на POSIX — как best-effort.
+defense-in-depth поверх sha-пиннинга (главного гейта), а на POSIX — как best-effort;
+`scripts/windows/claude-desktop.ps1` ссылается сюда за тем же.
+
+---
+
+## Требует проверки
+
+Пункты, которые не удалось подтвердить чтением кода. Не удалены намеренно: модель
+угроз, из которой тихо вычистили неудобное, хуже устаревшей.
+
+- **`build.portable.unpackDirName: true`** (`package.json`). Флаг задаёт имя
+  каталога распаковки в `%TEMP%`; обоснования выбора нет ни в одном комментарии
+  репозитория. Если он делает имя **предсказуемым**, это напрямую упрощает
+  пред-создание и удержание файлов в `%TEMP%` — то есть усиливает ровно тот
+  вектор, который принят как остаточный. Проверить по поведению
+  electron-builder на реальной сборке и либо обосновать, либо снять.
+- **`remote-fetch.js`, шапка модуля** повторяет ту же неверную вводную, что была
+  здесь: «крупные рантаймы (uv, ffmpeg, браузеры…) НЕ вшиты». `uv` вшит (см.
+  выше), `ffmpeg` в реестре докачки отсутствует вовсе. Правка — вне зоны этого
+  документа, но расхождение надо снять, иначе оно воспроизведёт ошибку заново.
+Отдельно, чтобы не искали несуществующую проблему: пользовательский текст `uv` в
+`components.json` («Вшит в установщик — ставится офлайн, интернет не нужен»,
+«ставится офлайн с проверкой SHA-256») всё это время говорил правду. Расходилась с
+кодом именно модель угроз, а не продуктовое описание.
