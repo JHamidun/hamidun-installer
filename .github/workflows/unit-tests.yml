@@ -96,8 +96,31 @@ jobs:
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      # Вывод пишется в файл и уезжает артефактом (шаг ниже). Причина: падение
+      # 33200117231 не оставило улик — логи упавших джоб пришли ПУСТЫМИ, шаги через
+      # API не отдались, и восстановить причину по следам было нечем. Перезапуск без
+      # единой правки дал зелёное. На плавающий гейт перестают смотреть, поэтому
+      # каждое падение обязано оставлять улику.
+      #
+      # PIPESTATUS[0], а не $? — иначе код возврата придёт от tee, и красное станет
+      # зелёным. Ровно эта подмена уже случалась дважды в ручных прогонах.
       - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee test-output.log
+          code=${PIPESTATUS[0]}
+          echo "=== npm test exit=$code ===" | tee -a test-output.log
+          exit $code
+
+      - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-windows
+          path: test-output.log
+          retention-days: 14
+          if-no-files-found: warn
 
       # Размеры компонентов в окне установщика обязаны сходиться с тем, что реально
       # лежит в vendor. На раннере vendor не развёрнут, поэтому здесь сверять нечего —
@@ -125,8 +148,24 @@ jobs:
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      # См. тот же блок в windows-джобе: улика обязательна, PIPESTATUS[0] обязателен.
       - name: Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт (без continue-on-error)
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee test-output.log
+          code=${PIPESTATUS[0]}
+          echo "=== npm test exit=$code ===" | tee -a test-output.log
+          exit $code
+
+      - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-macos
+          path: test-output.log
+          retention-days: 14
+          if-no-files-found: warn
 
       # Размеры компонентов в окне установщика обязаны сходиться с тем, что реально
       # лежит в vendor. На раннере vendor не развёрнут, поэтому здесь сверять нечего —
