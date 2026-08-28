@@ -187,8 +187,29 @@ jobs:
             [ "$attempt" = 5 ] && { echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; }
           done
           echo "=== подпись dmg Developer ID ==="
+          # Пустой секрет ловим ЗДЕСЬ, а не по симптомам. Идентификатор приехал из
+          # секрета (в нём юридическое имя владельца, в публичном репозитории ему не
+          # место) — а секрет можно переименовать, отозвать или просто не завести в
+          # форке. `codesign --sign ""` при этом не обязан падать: он может уйти в
+          # ad-hoc подпись, и следующая же строка `--verify` её ПРИМЕТ. Тогда сборка
+          # зелёная, dmg «подписан», а у человека Gatekeeper всё равно ругается.
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::пуст секрет APPLE_SIGNING_IDENTITY — подписывать нечем."
+            echo "Заведи его в Settings → Secrets (значение: строка Developer ID Application из вывода"
+            echo "security find-identity -v -p codesigning). Собирать НЕподписанный dmg молча не будем."
+            exit 1
+          fi
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KC" "$OUT"
           codesign --verify --verbose "$OUT"
+          # --verify говорит «подпись цела», но НЕ говорит «подписано Developer ID»:
+          # ad-hoc подпись он тоже считает целой. Спрашиваем, КТО подписал, и требуем
+          # именно Developer ID Application.
+          AUTH=$(codesign -dvv "$OUT" 2>&1 | grep -E '^Authority=' | head -1 || true)
+          echo "подписант: ${AUTH:-(не определён)}"
+          case "$AUTH" in
+            *"Developer ID Application"*) echo "OK: dmg подписан Developer ID." ;;
+            *) echo "::error::dmg подписан НЕ Developer ID (${AUTH:-подписант не определён}) — у человека это даст «повреждено»."; exit 1 ;;
+          esac
           ls -la "$OUT"
 
       # Universal dmg ~2.7 ГБ > 2 GiB — лимит ассета GitHub Release (HTTP 422). Заливаем

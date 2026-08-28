@@ -9113,6 +9113,103 @@ ok('config.json в репозитории без сборочных маркер
       'сетевой шум перебил настоящую причину — получено ' + (r ? r.kind : 'null'));
   });
 
+  ok('sync-sizes: чужую платформу пишем ТОЛЬКО для переносимых артефактов', () => {
+    const ss = require(path.join(ROOT, 'tools', 'sync-sizes.js'));
+    assert(ss.PLATFORM_INDEPENDENT instanceof Set, 'список переносимых артефактов не экспортирован');
+    assert(ss.PLATFORM_INDEPENDENT.has('course'),
+      'курс обязан быть переносимым: это закоммиченный zip, один и тот же на всех ОС');
+
+    // Живой случай 29.08.2026: `--platform darwin --force` на Windows переписал ТРИ
+    // чужих числа виндовыми байтами (claude 135→103 МиБ, nomad 165→110, mascot
+    // 202→279) — все правдоподобны, ни одно не верно. Код возврата при этом 0.
+    //
+    // Первая редакция защиты сравнивала ПУТИ и пропустила ровно эти три: у claude и
+    // nomad пути как раз ОДИНАКОВЫЕ (npm-cache/, nomad-src/), содержимое туда кладёт
+    // fetch-vendor — своё для каждой ОС. То есть совпадение путей здесь признак
+    // опасности, а не безопасности. Тест закрепляет именно это, чтобы «упрощение до
+    // сравнения путей» не вернулось.
+    ['claude', 'nomad', 'mascot', 'config'].forEach((id) => {
+      assert(!ss.PLATFORM_INDEPENDENT.has(id),
+        id + ' объявлен переносимым, хотя его артефакт свой у каждой ОС');
+      assert.deepStrictEqual(ss.VENDOR_PARTS.win32[id], ss.VENDOR_PARTS.darwin[id],
+        id + ': пути платформ разошлись — значит пример «одинаковый путь ≠ одинаковый ' +
+        'файл» перестал быть примером, и комментарий в sync-sizes.js надо переписать');
+    });
+
+    // Обратная сторона: переносимым можно звать только то, что лежит В РЕПОЗИТОРИИ.
+    ss.PLATFORM_INDEPENDENT.forEach((id) => {
+      const parts = ss.VENDOR_PARTS.win32[id] || [];
+      assert(parts.some((p) => typeof p === 'string' && p.indexOf('course/') === 0),
+        id + ': объявлен переносимым, но его артефакт кладёт fetch-vendor, а не репозиторий');
+    });
+  });
+
+  ok('WebView2: правило ловит СВОЙ случай и не крадёт чужие падения скрепки', () => {
+    // Скрепка — Tauri-приложение, окно ей рисует WebView2 Runtime. Нет его — окна не
+    // будет, а раньше человек видел на финальном экране ЗЕЛЁНУЮ галочку и пустой стол.
+    const real = [
+      'ВНИМАНИЕ: WebView2 Runtime не найден — скрепка может не показать окно.',
+      'СКРЕПКА НЕ ЗАРАБОТАЕТ: в системе нет WebView2 Runtime — компонента Windows.',
+    ];
+    const r = FE.explainScriptFailure(real);
+    assert(r && r.kind === 'webview2-missing', 'свой случай не опознан: ' + (r ? r.kind : 'null'));
+    assert(/webview2/i.test(r.lines.join(' ')), 'в объяснении нет ссылки на WebView2');
+
+    // ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ, и он здесь главный. Предупреждение «WebView2 не найден»
+    // скрипт печатает ВСЕГДА, когда ключа нет в реестре, — включая случаи, когда
+    // установка потом падает совсем по другой причине. Правило, написанное по одному
+    // слову «WebView2», крало бы такие падения себе и подсовывало неверный совет.
+    // Ровно эта ошибка и была в первой редакции правила.
+    const foreign = [
+      ['file-locked', 'Error: EPERM: operation not permitted, rename'],
+      ['disk-full', 'No space left on device'],
+      ['artifact-integrity', 'БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256'],
+    ];
+    foreign.forEach(([expected, line]) => {
+      const got = FE.explainScriptFailure([
+        'ВНИМАНИЕ: WebView2 Runtime не найден — скрепка может не показать окно.',
+        line,
+      ]);
+      assert(got && got.kind === expected,
+        'падение «' + line.slice(0, 30) + '…» украдено правилом WebView2: получено ' +
+        (got ? got.kind : 'null') + ', ждали ' + expected);
+    });
+  });
+
+  ok('mascot.ps1: без WebView2 и без ответа на health — честный exit 1, а не зелёная галочка', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'mascot.ps1'), 'utf8');
+    assert(/СКРЕПКА НЕ ЗАРАБОТАЕТ/.test(s), 'нет решающей строки, по которой опознаётся причина');
+    // Ветка обязана стоять ВЫШЕ утешительной «не успела ответить — это не ошибка»:
+    // иначе она недостижима, и всё останется как было.
+    //
+    // Порядок меряем по САМИМ ВЕТКАМ, а не по фразам в тексте файла. Первая редакция
+    // этого теста искала фразу через indexOf по всему исходнику, находила её в
+    // комментарии (там она процитирована) и падала на исправном коде. Проверка,
+    // измеряющая не то, что утверждает, бесполезна ровно так же, как её отсутствие, —
+    // просто ломается в другую сторону.
+    const branches = s.split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /^(if|elseif|else)\b/.test(l) && /Write-Host|\{/.test(l));
+    const iHard = branches.findIndex((l) => /^elseif\s*\(\s*-not\s*\$wvOk\s*\)/.test(l));
+    const iSoft = branches.findIndex((l) => /^elseif\s*\(\s*\$launched\s*\)/.test(l));
+    assert(iHard !== -1, 'нет ветки elseif (-not $wvOk) — честного исхода не существует');
+    assert(iSoft !== -1, 'не найдена утешительная ветка elseif ($launched) — форма изменилась');
+    assert(iHard < iSoft, 'ветка WebView2 стоит ПОСЛЕ утешительной — она недостижима');
+    // И она обязана возвращать НЕнулевой код: иначе финальный экран снова покажет зелёное.
+    const tail = s.slice(s.indexOf('elseif (-not $wvOk)'));
+    assert(/exit 1/.test(tail.slice(0, tail.indexOf('elseif ($launched)') + 1 || undefined)),
+      'ветка WebView2 не возвращает ненулевой код — галочка останется зелёной');
+    // Совет обязан быть исполнимым: без ссылки человеку некуда идти.
+    assert(/developer\.microsoft\.com\/microsoft-edge\/webview2/.test(s), 'нет ссылки на рантайм');
+    // И красный не должен ни на что каскадить: от скрепки не зависит ни один компонент.
+    const dependents = [];
+    (components.groups || []).forEach((g) => (g.components || []).forEach((c) => {
+      if ((c.requires || []).indexOf('mascot') !== -1) dependents.push(c.id);
+    }));
+    assert.deepStrictEqual(dependents, [],
+      'от скрепки кто-то зависит — честный красный начнёт каскадить: ' + dependents.join(','));
+  });
+
   ok('main.js: перевод подключён и его результат доезжает до renderer (res.hint)', () => {
     const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
     assert(m.indexOf("require('./failure-explain.js')") !== -1, 'main.js не подключает failure-explain');
