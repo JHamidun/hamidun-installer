@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "hamidun_installer",
+  "project_id": "3e9f50c8-78ba-48a4-b026-47f2ef75960d"
+}
