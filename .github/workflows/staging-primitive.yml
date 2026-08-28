@@ -14,6 +14,12 @@ on:
       - 'test/staging-primitive.ps1'
       - '.github/workflows/staging-primitive.yml'
 
+# Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
+# бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   primitive:
     name: New-HmSecureStagingDir на чистой Windows
