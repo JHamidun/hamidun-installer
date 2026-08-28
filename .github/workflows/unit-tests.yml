@@ -23,6 +23,12 @@ on:
   pull_request:
     branches: ['main']
 
+# Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
+# бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests-windows:
     name: npm test (Windows — .ps1 + bash-скрипты)
@@ -34,6 +40,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
@@ -60,6 +67,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
