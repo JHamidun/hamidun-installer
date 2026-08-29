@@ -319,7 +319,11 @@ jobs:
           ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
           cp -R "$APP" "$ST/"
           cp -R "$LV" "$ST/vendor"
-          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          # Обязательна, а не «если получится» — см. тот же блок в build-mac.yml.
+          HMTXT="assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+          [ -f "$HMTXT" ] || { echo "::error::нет файла инструкции: $HMTXT"; ls -la assets/mac/; exit 1; }
+          cp "$HMTXT" "$ST/"
+          [ -s "$ST/$(basename "$HMTXT")" ] || { echo "::error::инструкция не легла в стейджинг"; exit 1; }
           ln -s /Applications "$ST/Applications"
           OUT="release/Hamidun-Setup-Mac-Lite.dmg"; rm -f "$OUT"
           echo "=== hdiutil create (том сам под размер контента) ==="
@@ -335,8 +339,20 @@ jobs:
             if [ "$attempt" = 5 ]; then echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; fi
           done
           echo "=== подпись dmg Developer ID ==="
+          # Тот же гейт, что в build-mac.yml. `--verify` принимает и ad-hoc подпись,
+          # поэтому пустой секрет дал бы ЗЕЛЁНУЮ сборку и «повреждено» у человека.
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::пуст секрет APPLE_SIGNING_IDENTITY — подписывать нечем."
+            exit 1
+          fi
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KC" "$OUT"
           codesign --verify --verbose "$OUT"
+          AUTH=$(codesign -dvv "$OUT" 2>&1 | grep -E '^Authority=' | head -1 || true)
+          echo "подписант: ${AUTH:-(не определён)}"
+          case "$AUTH" in
+            *"Developer ID Application"*) echo "OK: dmg подписан Developer ID." ;;
+            *) echo "::error::dmg подписан НЕ Developer ID (${AUTH:-подписант не определён})."; exit 1 ;;
+          esac
           ls -la "$OUT"
           DMGMB=$(du -m "$OUT" | awk '{print $1}')
           echo "итоговый lite-dmg: ${DMGMB} МБ"

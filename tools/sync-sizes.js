@@ -63,6 +63,19 @@ const COMPONENTS = path.join(ROOT, 'components.json');
 //       суммировать их нельзя — берём больший (консервативно, без занижения).
 //   {rel:'...', optional:true} — часть может отсутствовать законно.
 // ---------------------------------------------------------------------------
+// Компоненты, чей вшитый артефакт ФИЗИЧЕСКИ один и тот же на всех платформах —
+// значит его размер переносим и его можно записать в чужую платформу с этой машины.
+//
+// Сейчас такой ровно один: курс. Это закоммиченный в репозиторий zip
+// (vendor/course/vibecoding-course.zip, `!vendor/course/` в .gitignore), а не то, что
+// раскладывает fetch-vendor под конкретную ОС.
+//
+// Добавлять сюда можно ТОЛЬКО артефакт, лежащий в репозитории и одинаковый для всех
+// ОС. Общий ПУТЬ основанием не является: у claude и nomad пути тоже общие
+// (npm-cache/, nomad-src/), а содержимое туда кладёт fetch-vendor — своё для каждой
+// системы.
+const PLATFORM_INDEPENDENT = new Set(['course']);
+
 const VENDOR_PARTS = {
   win32: {
     // scripts/windows/git.ps1:59
@@ -334,6 +347,34 @@ function main(argv) {
   const raw = fs.readFileSync(COMPONENTS, 'utf8');
   const data = JSON.parse(raw);
   const res = computeSizes(data, platform, {});
+
+  // --force САМ ПО СЕБЕ ничего не защищает: он снимает вопрос, а не опасность.
+  // Живой случай 29.08.2026 — понадобилось поправить darwin-размер курса (один и тот
+  // же зип на обеих платформах), запуск с `--platform darwin --force` на Windows молча
+  // переписал ЕЩЁ ТРИ числа виндовыми байтами: claude 135→103 МиБ, nomad 165→110,
+  // mascot 202→279. Все три правдоподобны, ни одно не верно; заметил только потому,
+  // что посмотрел дифф, а не код возврата (он был 0).
+  //
+  // Поэтому запрет теперь ПОКОМПОНЕНТНЫЙ: при измерении чужой платформы пишем только
+  // те компоненты, что перечислены в PLATFORM_INDEPENDENT.
+  //
+  // Сравнивать пути между платформами БЕСПОЛЕЗНО, и это тоже проверено, а не
+  // предположено: у claude и nomad пути как раз ОДИНАКОВЫЕ (npm-cache/, nomad-src/) —
+  // содержимое туда кладёт fetch-vendor, своё для каждой ОС. То есть совпадение путей
+  // здесь признак ОПАСНОСТИ, а не безопасности, и правило «совпали пути — пишем»
+  // пропустило ровно те три числа, ради которых заводилось. Переносимость — свойство
+  // артефакта, а не пути, и объявить её можно только руками.
+  if (platform !== process.platform) {
+    const dropped = [];
+    for (const id of Array.from(res.updates.keys())) {
+      if (!PLATFORM_INDEPENDENT.has(id)) { dropped.push(id); res.updates.delete(id); }
+    }
+    if (dropped.length) {
+      console.log('НЕ ПИШУ (артефакт свой у каждой ОС — байты с этой машины про него ничего не говорят): ' + dropped.join(', '));
+      console.log('  Эти числа берутся только на самой ' + platform + ', после fetch-vendor.');
+    }
+  }
+
   const changes = applySizes(data, res);
   const out = serialize(data);
 
@@ -397,7 +438,7 @@ function main(argv) {
 module.exports = {
   VENDOR_PARTS, NO_BUNDLED_PAYLOAD, VENDOR, COMPONENTS,
   sizeOf, expandGlob, measureComponent, vendorPresent, computeSizes, applySizes,
-  readComponents, serialize, eachComponent, fmtMiB,
+  readComponents, serialize, eachComponent, fmtMiB, PLATFORM_INDEPENDENT,
 };
 
 if (require.main === module) process.exit(main(process.argv));

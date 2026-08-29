@@ -1,8 +1,13 @@
 name: Build macOS (.dmg)
 
-# Собирает Mac-версию установщика на облачном macOS-раннере GitHub.
+# Собирает Mac-версию установщика — ПОЛНОЕ ОФЛАЙН-издание (весь vendor едет на томе dmg) —
+# на облачном macOS-раннере GitHub. Лёгкая (стриминговая) редакция — в build-mac-lite.yml.
 # Запуск: вкладка Actions -> "Build macOS (.dmg)" -> Run workflow.
-# Артефакт (.dmg) появится в результатах запуска (Artifacts). Без подписи (v1).
+#
+# Подпись и нотаризация ЕСТЬ: .app подписывает Developer ID и нотаризует electron-builder
+# (шаг «Build .dmg»), финальный том собирает и подписывает шаг «Assemble final dmg».
+# Готовый .dmg (~2.7 ГБ) в ассет GitHub Release не влезает (лимит 2 GiB) — он уезжает
+# в Reg.ru S3, а Release создаётся УКАЗАТЕЛЕМ на S3-ссылку с sha256.
 
 on:
   workflow_dispatch:
@@ -44,6 +49,20 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      # Тот же гейт, что стоит первым в `npm run dist` / `dist:win` / `dist:mac`. Здесь он
+      # нужен отдельным шагом, потому что сборка ниже зовёт electron-builder НАПРЯМУЮ, мимо
+      # npm-скрипта, — а хука beforePack у этой проверки нет (в отличие от preflight).
+      # Ловит она случай, когда мутацию от lite-сборки закоммитили: build-lite.js возвращает
+      # package.json и config.json в finally, но до finally процесс доживает не всегда —
+      # жёсткое убийство, падение машины, — а бывает, что и сам возврат не проходит
+      # (EPERM, файл держит антивирус: build-lite это печатает и выходит ненулевым, но
+      # дерево остаётся грязным). Опаснее половина с config.json: застрявшее edition:'lite' МОЛЧА
+      # выключает предполётные гейты (preflight решает «для этого издания проверять нечего»),
+      # и офлайн-dmg уехал бы без проверки свежести конфиг-пака, а по логу выглядел бы нормально.
+      # Проверка на секунду и без зависимостей — поэтому стоит ДО npm install и до фетчей.
+      - name: Assert clean tree (собираем офлайн-издание, а не остатки lite)
+        run: npm run assert:clean
 
       - name: Install deps
         run: npm install --no-audit --no-fund
@@ -144,7 +163,15 @@ jobs:
           ST="$RUNNER_TEMP/dmgstage"; rm -rf "$ST"; mkdir -p "$ST"
           cp -R "$APP" "$ST/"
           cp -R vendor "$ST/vendor"
-          cp "assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt" "$ST/" 2>/dev/null || true
+          # Инструкция — обязательна, а не «если получится». Именно её читает человек,
+          # у которого Gatekeeper написал «повреждено», и без неё он остаётся с кирпичом.
+          # Прежнее `2>/dev/null || true` глотало ровно тот случай, ради которого файл и
+          # существует: имя кириллическое, и любая осечка с кодировкой или переименование
+          # молча выпускали образ БЕЗ инструкции — в логе при этом всё зелёное.
+          HMTXT="assets/mac/ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt"
+          [ -f "$HMTXT" ] || { echo "::error::нет файла инструкции: $HMTXT"; ls -la assets/mac/; exit 1; }
+          cp "$HMTXT" "$ST/"
+          [ -s "$ST/$(basename "$HMTXT")" ] || { echo "::error::инструкция не легла в стейджинг"; exit 1; }
           ln -s /Applications "$ST/Applications"
           OUT="release/Hamidun-Setup-Mac.dmg"; rm -f "$OUT"
           echo "=== hdiutil create (том сам под размер контента) ==="
@@ -160,8 +187,29 @@ jobs:
             [ "$attempt" = 5 ] && { echo "hdiutil create: все 5 попыток исчерпаны"; exit 1; }
           done
           echo "=== подпись dmg Developer ID ==="
+          # Пустой секрет ловим ЗДЕСЬ, а не по симптомам. Идентификатор приехал из
+          # секрета (в нём юридическое имя владельца, в публичном репозитории ему не
+          # место) — а секрет можно переименовать, отозвать или просто не завести в
+          # форке. `codesign --sign ""` при этом не обязан падать: он может уйти в
+          # ad-hoc подпись, и следующая же строка `--verify` её ПРИМЕТ. Тогда сборка
+          # зелёная, dmg «подписан», а у человека Gatekeeper всё равно ругается.
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::error::пуст секрет APPLE_SIGNING_IDENTITY — подписывать нечем."
+            echo "Заведи его в Settings → Secrets (значение: строка Developer ID Application из вывода"
+            echo "security find-identity -v -p codesigning). Собирать НЕподписанный dmg молча не будем."
+            exit 1
+          fi
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KC" "$OUT"
           codesign --verify --verbose "$OUT"
+          # --verify говорит «подпись цела», но НЕ говорит «подписано Developer ID»:
+          # ad-hoc подпись он тоже считает целой. Спрашиваем, КТО подписал, и требуем
+          # именно Developer ID Application.
+          AUTH=$(codesign -dvv "$OUT" 2>&1 | grep -E '^Authority=' | head -1 || true)
+          echo "подписант: ${AUTH:-(не определён)}"
+          case "$AUTH" in
+            *"Developer ID Application"*) echo "OK: dmg подписан Developer ID." ;;
+            *) echo "::error::dmg подписан НЕ Developer ID (${AUTH:-подписант не определён}) — у человека это даст «повреждено»."; exit 1 ;;
+          esac
           ls -la "$OUT"
 
       # Universal dmg ~2.7 ГБ > 2 GiB — лимит ассета GitHub Release (HTTP 422). Заливаем

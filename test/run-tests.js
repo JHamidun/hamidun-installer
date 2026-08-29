@@ -3288,6 +3288,44 @@ ok('components.json: компонент nomad — позиционировани
   assert(!/hermes/i.test(comp.name + comp.desc + comp.why), 'нет «Hermes» в описании (переименовано в Nomad)');
 });
 
+ok('каждый локальный require в src/ разрешается (модуль не потерян при коммите)', () => {
+  // Ловит КЛАСС, а не случай. 28.08.2026: src/uid-telemetry.js уехал в коммит с
+  // require('./uid-fallback'), а сам uid-fallback.js остался неотслеженным. Падения
+  // не было — вызов стоит внутри catch, который всё глотает, — поэтому вся ветка
+  // восстановления метки была мертва во ВСЕХ сборках молча. По замеру в самом
+  // комментарии это метка у 27% установок на Windows и 5% на macOS.
+  //
+  // Ни один тест этого не поймал: файл лежал на диске у автора, и локально всё
+  // работало. Проверять надо разрешимость require по тому, что РЕАЛЬНО в дереве.
+  const srcDir = path.join(ROOT, 'src');
+  const files = [];
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (e.isFile() && e.name.endsWith('.js')) files.push(full);
+    }
+  })(srcDir);
+  assert(files.length > 3, 'в src/ должны быть js-файлы — иначе тест ничего не проверяет');
+
+  const missing = [];
+  for (const f of files) {
+    const code = fs.readFileSync(f, 'utf8');
+    const re = new RegExp('require\\(\\s*[\'"](\\.[^\'"]+)[\'"]\\s*\\)', 'g');
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      const spec = m[1];
+      const base = path.resolve(path.dirname(f), spec);
+      const ok = ['', '.js', '.json', '/index.js'].some((ext) => {
+        try { return fs.statSync(base + ext).isFile(); } catch (e) { return false; }
+      });
+      if (!ok) missing.push(path.relative(ROOT, f).split('\\').join('/') + ' -> ' + spec);
+    }
+  }
+  assert.deepStrictEqual(missing, [],
+    'require указывает на файл, которого нет в дереве: ' + missing.join('; '));
+});
+
 ok('git-гигиена: vendor/nomad-src (приватный код агента) НЕ закоммичен и покрыт .gitignore', () => {
   const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
   assert(/vendor\/\*|vendor\//.test(gi), '.gitignore покрывает vendor/');
@@ -3534,6 +3572,166 @@ ok('P0-3 (функц.): маркер-symlink НЕ считается валид�
     assert(r.status === 'kept', 'маркер-symlink → НЕ валиден → kept: ' + JSON.stringify(r));
     assert(fs.existsSync(dir), 'каталог возвращён на место');
   } finally { dropDir(home); }
+});
+
+console.log('== Возврат из карантина: транзиентный EPERM больше не стоит чужой папки ==');
+
+// Дефект: захват цели в карантин делал 5 попыток, а ВОЗВРАТ — одну. На Windows rename
+// свежесозданного дерева транзиентно падает с EPERM/EBUSY, пока Defender или индексатор
+// держат хендл, — и чужой каталог оставался под именем «.hm-quar.<hex>». Опаснее всего
+// это в ветке «маркера нет»: там уже установлено, что каталог НЕ наш.
+//
+// Именно этот тест и «плавал» в CI: падал без причины, зелёнел на перезапуске.
+
+ok('renameWithRetry: переживает транзиентный EPERM, сдаётся на постоянном, не ретраит бессмысленное', () => {
+  const real = fs.renameSync;
+  const calls = [];
+  const stub = (failTimes, code) => {
+    let n = 0;
+    fs.renameSync = () => {
+      calls.push(code);
+      if (n++ < failTimes) { const e = new Error('stub'); e.code = code; throw e; }
+    };
+  };
+  try {
+    // (1) две транзиентные осечки, затем успех → каталог вернулся.
+    calls.length = 0; stub(2, 'EPERM');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 5, 1), true, 'EPERM ×2 → всё равно вернули');
+    assert.strictEqual(calls.length, 3, 'ровно 3 попытки (2 провала + успех), а не больше');
+
+    // (2) отрицательный контроль: если бы ретраев не было, (1) прошёл бы и на сломанной
+    // реализации. Одной попытки НЕ хватает — значит ретраи и правда работают.
+    calls.length = 0; stub(2, 'EPERM');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 1, 1), false, 'одна попытка при 2 осечках → провал');
+
+    // (3) постоянная занятость → честный false, а не вечный цикл.
+    calls.length = 0; stub(99, 'EBUSY');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 4, 1), false, 'постоянный EBUSY → сдаёмся');
+    assert.strictEqual(calls.length, 4, 'ровно столько попыток, сколько заказано');
+
+    // (4) ENOENT ретраить бессмысленно — цели просто нет. Одна попытка, не четыре.
+    calls.length = 0; stub(99, 'ENOENT');
+    assert.strictEqual(uxMod.renameWithRetry('a', 'b', 4, 1), false, 'ENOENT → false');
+    assert.strictEqual(calls.length, 1, 'ENOENT не ретраится (это не «занято», а «нечего возвращать»)');
+  } finally { fs.renameSync = real; }
+});
+
+ok('removeDirTreeGated: чужой каталог возвращается на место, даже если первый rename занят', () => {
+  const home = mkHomeDir();
+  const real = fs.renameSync;
+  try {
+    const opts = { home, platform: process.platform };
+    const parent = path.join(home, 'AppData', 'Local');
+    const foreign = path.join(parent, 'nomad-src');
+    fs.mkdirSync(foreign, { recursive: true });
+    fs.writeFileSync(path.join(foreign, 'notes.txt'), 'чужое');
+
+    // Первый возврат из карантина «занят» — ровно то, что делает антивирус.
+    // Захват в карантин при этом должен пройти, поэтому подменяем ТОЛЬКО обратный ход.
+    let blocked = 0;
+    fs.renameSync = (from, to) => {
+      if (String(from).indexOf('.hm-quar.') !== -1 && blocked < 1) {
+        blocked++; const e = new Error('stub'); e.code = 'EPERM'; throw e;
+      }
+      return real(from, to);
+    };
+
+    const r = uxMod.removeDirTreeGated(foreign, opts, '.hamidun-nomad');
+    assert.strictEqual(blocked, 1, 'подлог сработал (иначе тест ничего не проверил)');
+    assert.strictEqual(r.status, 'kept', 'без маркера → kept: ' + JSON.stringify(r));
+    assert(fs.existsSync(path.join(foreign, 'notes.txt')), 'чужой файл на месте, каталог вернулся');
+    const leftovers = fs.readdirSync(parent).filter((n) => n.indexOf('.hm-quar.') === 0);
+    assert.deepStrictEqual(leftovers, [], 'карантинных остатков нет');
+  } finally { fs.renameSync = real; dropDir(home); }
+});
+
+console.log('== needsConfig: компонент, которому нечего слушаться, помечен ДО выбора ==');
+
+// Дефект был такой: мост требует прав администратора, ставит прокси, PAC и автозапуск —
+// а адрес enroll-сервиса в config.json пуст, и мост встаёт и простаивает. Человек отдавал
+// права и получал зелёную галочку ни за что. Починка объявлена ДАННЫМИ: components.json →
+// needsConfig = путь в config.json, needsConfigNote = текст.
+//
+// Проверять это регуляркой «есть ли в app.js слово needsConfig» бессмысленно: опечатка в
+// пути («bridge.enrolEndpoint») такую проверку проходит и молча гасит предупреждение
+// НАВСЕГДА — ровно тот класс тихого отказа, из-за которого задача и завелась. Поэтому две
+// функции вынимаются из app.js и исполняются по-настоящему, а путь сверяется с config.json.
+
+const NC_CFG = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+
+// Достаёт componentUnconfigured из renderer/app.js и запускает его в изолированном
+// контексте с подменённым STATE.config.
+function ncLoadFn(configObj) {
+  const vm = require('vm');
+  const src = EG_APP();
+  const grab = (name) => {
+    const m = new RegExp('\\nfunction ' + name + '\\s*\\([\\s\\S]*?\\n\\}').exec(src);
+    assert(m, 'в src/renderer/app.js нет функции ' + name);
+    return m[0];
+  };
+  const sandbox = { STATE: { config: configObj } };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    grab('configValueByPath') + grab('componentUnconfigured') +
+    '\nthis.__unconf = componentUnconfigured;',
+    sandbox
+  );
+  return sandbox.__unconf;
+}
+
+ok('componentUnconfigured: пусто → «не настроен», заполнено → молчит, чужие компоненты не трогает', () => {
+  const unconf = ncLoadFn({ bridge: { enrollEndpoint: '' }, x: { list: [] } });
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), true,
+    'пустая строка в config → компонент помечен');
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'x.list' }), true,
+    'пустой массив тоже считается незаполненным');
+  assert.strictEqual(unconf({ id: 'git' }), false,
+    'компонент без needsConfig НИКОГДА не помечается');
+  assert.strictEqual(unconf({ id: 'bridge', needsConfig: 'нет.такого.пути' }), true,
+    'несуществующий путь → fail-closed (лучше лишнее предупреждение, чем тихое обещание)');
+
+  // Отрицательный контроль: заполненный адрес обязан гасить пометку. Без этой половины
+  // тест проходил бы и на функции, которая всегда возвращает true.
+  const filled = ncLoadFn({ bridge: { enrollEndpoint: 'https://enroll.example/api' } });
+  assert.strictEqual(filled({ id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), false,
+    'адрес вписан → пометка и предупреждение исчезают сами, править код не нужно');
+  assert.strictEqual(ncLoadFn({ bridge: { enrollEndpoint: '   ' } })(
+    { id: 'bridge', needsConfig: 'bridge.enrollEndpoint' }), true, 'одни пробелы — не адрес');
+});
+
+ok('needsConfig в components.json указывает на РЕАЛЬНЫЙ ключ config.json (опечатка = тихо погашенное предупреждение)', () => {
+  const cfg = NC_CFG();
+  const withNC = [];
+  (components.groups || []).forEach((g) => (g.components || []).forEach((c) => {
+    if (c.needsConfig) withNC.push(c);
+  }));
+  assert(withNC.length > 0, 'хотя бы один компонент с needsConfig (иначе механизм мёртв)');
+
+  withNC.forEach((c) => {
+    let node = cfg;
+    c.needsConfig.split('.').forEach((seg, i, all) => {
+      assert(node && typeof node === 'object' && Object.prototype.hasOwnProperty.call(node, seg),
+        c.id + ': needsConfig="' + c.needsConfig + '" — в config.json нет ключа "' +
+        all.slice(0, i + 1).join('.') + '"');
+      node = node[seg];
+    });
+    // Текст обязателен. В app.js есть фолбэк, но он на случай забывчивости в разработке —
+    // в раздаваемой сборке человек должен читать про КОНКРЕТНЫЙ компонент.
+    assert(typeof c.needsConfigNote === 'string' && c.needsConfigNote.trim().length > 30,
+      c.id + ': needsConfig без внятного needsConfigNote');
+  });
+});
+
+ok('предупреждение показано в ОБОИХ местах: карточка и окно «что установится»', () => {
+  const s = EG_APP();
+  const inCard = /function renderCard[\s\S]*?\n\}/.exec(s);
+  const inWhat = /function showWhatInstalls[\s\S]*?\n\}/.exec(s);
+  assert(inCard && /componentUnconfigured\(/.test(inCard[0]), 'renderCard не спрашивает componentUnconfigured');
+  assert(inWhat && /componentUnconfigured\(/.test(inWhat[0]),
+    'showWhatInstalls не спрашивает — а там человек читает описание отдельно от карточки');
+  // Текст предупреждения — через escapeHtml: он приходит из components.json, то есть из
+  // данных, и втыкать его в innerHTML сырым нельзя.
+  assert(/escapeHtml\(unconfiguredNoteText\(c\)\)/.test(s), 'текст предупреждения не экранируется');
 });
 
 console.log('== Codex round-4: reg/launchctl/debris — ошибка ≠ absent ==');
@@ -8913,6 +9111,103 @@ ok('config.json в репозитории без сборочных маркер
     const r = FE.explainScriptFailure(mixed);
     assert(r && r.kind === 'no-prebuilt-binary',
       'сетевой шум перебил настоящую причину — получено ' + (r ? r.kind : 'null'));
+  });
+
+  ok('sync-sizes: чужую платформу пишем ТОЛЬКО для переносимых артефактов', () => {
+    const ss = require(path.join(ROOT, 'tools', 'sync-sizes.js'));
+    assert(ss.PLATFORM_INDEPENDENT instanceof Set, 'список переносимых артефактов не экспортирован');
+    assert(ss.PLATFORM_INDEPENDENT.has('course'),
+      'курс обязан быть переносимым: это закоммиченный zip, один и тот же на всех ОС');
+
+    // Живой случай 29.08.2026: `--platform darwin --force` на Windows переписал ТРИ
+    // чужих числа виндовыми байтами (claude 135→103 МиБ, nomad 165→110, mascot
+    // 202→279) — все правдоподобны, ни одно не верно. Код возврата при этом 0.
+    //
+    // Первая редакция защиты сравнивала ПУТИ и пропустила ровно эти три: у claude и
+    // nomad пути как раз ОДИНАКОВЫЕ (npm-cache/, nomad-src/), содержимое туда кладёт
+    // fetch-vendor — своё для каждой ОС. То есть совпадение путей здесь признак
+    // опасности, а не безопасности. Тест закрепляет именно это, чтобы «упрощение до
+    // сравнения путей» не вернулось.
+    ['claude', 'nomad', 'mascot', 'config'].forEach((id) => {
+      assert(!ss.PLATFORM_INDEPENDENT.has(id),
+        id + ' объявлен переносимым, хотя его артефакт свой у каждой ОС');
+      assert.deepStrictEqual(ss.VENDOR_PARTS.win32[id], ss.VENDOR_PARTS.darwin[id],
+        id + ': пути платформ разошлись — значит пример «одинаковый путь ≠ одинаковый ' +
+        'файл» перестал быть примером, и комментарий в sync-sizes.js надо переписать');
+    });
+
+    // Обратная сторона: переносимым можно звать только то, что лежит В РЕПОЗИТОРИИ.
+    ss.PLATFORM_INDEPENDENT.forEach((id) => {
+      const parts = ss.VENDOR_PARTS.win32[id] || [];
+      assert(parts.some((p) => typeof p === 'string' && p.indexOf('course/') === 0),
+        id + ': объявлен переносимым, но его артефакт кладёт fetch-vendor, а не репозиторий');
+    });
+  });
+
+  ok('WebView2: правило ловит СВОЙ случай и не крадёт чужие падения скрепки', () => {
+    // Скрепка — Tauri-приложение, окно ей рисует WebView2 Runtime. Нет его — окна не
+    // будет, а раньше человек видел на финальном экране ЗЕЛЁНУЮ галочку и пустой стол.
+    const real = [
+      'ВНИМАНИЕ: WebView2 Runtime не найден — скрепка может не показать окно.',
+      'СКРЕПКА НЕ ЗАРАБОТАЕТ: в системе нет WebView2 Runtime — компонента Windows.',
+    ];
+    const r = FE.explainScriptFailure(real);
+    assert(r && r.kind === 'webview2-missing', 'свой случай не опознан: ' + (r ? r.kind : 'null'));
+    assert(/webview2/i.test(r.lines.join(' ')), 'в объяснении нет ссылки на WebView2');
+
+    // ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ, и он здесь главный. Предупреждение «WebView2 не найден»
+    // скрипт печатает ВСЕГДА, когда ключа нет в реестре, — включая случаи, когда
+    // установка потом падает совсем по другой причине. Правило, написанное по одному
+    // слову «WebView2», крало бы такие падения себе и подсовывало неверный совет.
+    // Ровно эта ошибка и была в первой редакции правила.
+    const foreign = [
+      ['file-locked', 'Error: EPERM: operation not permitted, rename'],
+      ['disk-full', 'No space left on device'],
+      ['artifact-integrity', 'БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256'],
+    ];
+    foreign.forEach(([expected, line]) => {
+      const got = FE.explainScriptFailure([
+        'ВНИМАНИЕ: WebView2 Runtime не найден — скрепка может не показать окно.',
+        line,
+      ]);
+      assert(got && got.kind === expected,
+        'падение «' + line.slice(0, 30) + '…» украдено правилом WebView2: получено ' +
+        (got ? got.kind : 'null') + ', ждали ' + expected);
+    });
+  });
+
+  ok('mascot.ps1: без WebView2 и без ответа на health — честный exit 1, а не зелёная галочка', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'mascot.ps1'), 'utf8');
+    assert(/СКРЕПКА НЕ ЗАРАБОТАЕТ/.test(s), 'нет решающей строки, по которой опознаётся причина');
+    // Ветка обязана стоять ВЫШЕ утешительной «не успела ответить — это не ошибка»:
+    // иначе она недостижима, и всё останется как было.
+    //
+    // Порядок меряем по САМИМ ВЕТКАМ, а не по фразам в тексте файла. Первая редакция
+    // этого теста искала фразу через indexOf по всему исходнику, находила её в
+    // комментарии (там она процитирована) и падала на исправном коде. Проверка,
+    // измеряющая не то, что утверждает, бесполезна ровно так же, как её отсутствие, —
+    // просто ломается в другую сторону.
+    const branches = s.split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => /^(if|elseif|else)\b/.test(l) && /Write-Host|\{/.test(l));
+    const iHard = branches.findIndex((l) => /^elseif\s*\(\s*-not\s*\$wvOk\s*\)/.test(l));
+    const iSoft = branches.findIndex((l) => /^elseif\s*\(\s*\$launched\s*\)/.test(l));
+    assert(iHard !== -1, 'нет ветки elseif (-not $wvOk) — честного исхода не существует');
+    assert(iSoft !== -1, 'не найдена утешительная ветка elseif ($launched) — форма изменилась');
+    assert(iHard < iSoft, 'ветка WebView2 стоит ПОСЛЕ утешительной — она недостижима');
+    // И она обязана возвращать НЕнулевой код: иначе финальный экран снова покажет зелёное.
+    const tail = s.slice(s.indexOf('elseif (-not $wvOk)'));
+    assert(/exit 1/.test(tail.slice(0, tail.indexOf('elseif ($launched)') + 1 || undefined)),
+      'ветка WebView2 не возвращает ненулевой код — галочка останется зелёной');
+    // Совет обязан быть исполнимым: без ссылки человеку некуда идти.
+    assert(/developer\.microsoft\.com\/microsoft-edge\/webview2/.test(s), 'нет ссылки на рантайм');
+    // И красный не должен ни на что каскадить: от скрепки не зависит ни один компонент.
+    const dependents = [];
+    (components.groups || []).forEach((g) => (g.components || []).forEach((c) => {
+      if ((c.requires || []).indexOf('mascot') !== -1) dependents.push(c.id);
+    }));
+    assert.deepStrictEqual(dependents, [],
+      'от скрепки кто-то зависит — честный красный начнёт каскадить: ' + dependents.join(','));
   });
 
   ok('main.js: перевод подключён и его результат доезжает до renderer (res.hint)', () => {

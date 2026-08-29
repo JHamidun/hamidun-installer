@@ -166,8 +166,8 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 340706,
-            "darwin": 340706
+            "win32": 340969,
+            "darwin": 340969
           }
         }
       ]
@@ -233,6 +233,8 @@
             "pydeps"
           ],
           "needsAdmin": true,
+          "needsConfig": "bridge.enrollEndpoint",
+          "needsConfigNote": "Сервер доступа в этой сборке не прописан: мост установится и будет ждать — сам он не включится, и выдать доступ через бота в этой сборке тоже нечем. Заработает он только если ты впишешь свой сервер руками в файл настроек моста: на Windows %LOCALAPPDATA%\\HamidunBridge\\config.json, на macOS ~/Library/Application Support/HamidunBridge/config.json. Не собираешься этого делать — сними галочку, компонент просит права администратора.",
           "sizeNote": "ставится из уже вшитых Python-пакетов"
         }
       ]
