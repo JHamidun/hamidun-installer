@@ -3123,6 +3123,8 @@ function describeTarget(t) {
     case 'reg': return 'реестр HKCU\\' + t.key + ' → ' + t.value;
     case 'pathentry': return 'запись PATH ' + t.dir + ' (только если каталог исчез)';
     case 'profileline': return 'точная строка «' + t.line + '» из ' + t.file;
+    case 'hookurl': return 'hook-url «' + t.from + '» → «' + t.to + '» в ' + t.file +
+      (t.why ? ' (' + t.why + ')' : '');
     case 'launchagent': return 'LaunchAgent ' + t.label + ' (' + t.plist + ')';
     case 'appbundle': return '.app ' + t.path + ' (при совпадении идентичности)';
     case 'killproc': return 'остановка процесса ' + (t.image || t.pattern);
@@ -3148,6 +3150,11 @@ function executeUninstallTarget(t, guardOpts) {
       return uninstallExec.removeDirTree(t.path, guardOpts);
     }
     case 'profileline': return uninstallExec.removeProfileLine(t.file, t.line, guardOpts);
+    // Не удаление, а обратная правка: hook-url скрепки возвращается к плейсхолдеру
+    // пака. Свой узкий допуск внутри restoreHookUrl (ровно ~/.claude/settings.json),
+    // потому что checkTarget закрывает весь ~/.claude — и правильно делает: там
+    // нельзя УДАЛЯТЬ. Здесь ничего и не удаляется.
+    case 'hookurl': return uninstallExec.restoreHookUrl(t.file, t.from, t.to, guardOpts);
     case 'launchagent': {
       if (!IS_MAC) return { status: 'failed', message: 'launchagent вне macOS' };
       // P1-3: guard plist ПЕРВЫМ — для подозрительной цели launchctl не дёргаем.
