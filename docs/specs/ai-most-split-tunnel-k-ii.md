@@ -1,0 +1,110 @@
+# AI-мост (split-tunnel к ИИ)
+
+<!-- spec-id: ai-most-split-tunnel-k-ii -->
+
+- **Раздел:** Установка компонентов
+- **Код:** `components.json:221-241`, `agent/bridge_agent.py`, `scripts/windows/bridge.ps1`, `scripts/macos/bridge.sh`, `scripts/windows/_deelev.ps1`, `src/renderer/app.js:393-437`, `src/renderer/app.js:1287-1288`, `src/install-env.js:20-36`, `src/uninstall-targets.js:58-61`, `src/uninstall-targets.js:159-183`, `src/main.js:2695-2701`, `config.json`, `mac-arch-support.json:128-134`, `server/enroll-ssh-server.js`
+- **Тесты:** «мост (статика): guard пустого токена, selftest-гейт до Run, launchctl подтверждается», «bridge.ps1 (прогон PS 5.1): пустой HM_BRIDGE_TOKEN НЕ затирает токен ученика; selftest OK → Run пишется ПОСЛЕ selftest», «bridge.ps1 (прогон PS 5.1): selftest падает → HKCU\\Run НЕ пишется, успех не объявляется; непустой токен при этом доставлен», «bridge.sh (прогон): пустой HM_BRIDGE_TOKEN НЕ затирает токен ученика; непустой — доставляется», «мост: повторная установка не сносит чужой рабочий автозапуск», «bridge.ps1: PowerShell 5.1 парсер без ошибок (синтаксис + BOM)», «bridge.sh: bash -n без синтаксических ошибок», «targets: bridge — config.json (SSH-креды) НИ в одной цели, зато в preserve; reg — точное HKCU\\...\\Run», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «componentUnconfigured: пусто → «не настроен», заполнено → молчит, чужие компоненты не трогает», «needsConfig в components.json указывает на РЕАЛЬНЫЙ ключ config.json (опечатка = тихо погашенное предупреждение)», «install-скрипты: легаси HM-RECEIPT эмиссии (фильтруются из UI-лога; целей удаления НЕ задают)», «bridge.sh (прогон, launchctl-стаб): загрузка НЕ подтверждена → НЕТ «OK: AI-мост установлен», exit 1; подтверждена → успех»
+
+## Что обещает человеку
+
+Claude, ChatGPT и часть соседних сервисов не пускают из России. Мост даёт зарубежный адрес **только этим доменам** — список зашит в `config.json` → `bridge.pacDomains` и по умолчанию равен девяти именам (`claude.ai`, `anthropic.com`, `openai.com`, `chatgpt.com`, `oaistatic.com`, `oaiusercontent.com`, `claudeusercontent.com`, `sora.com`, `higgsfield.ai`). Всё остальное — банк, госуслуги, видео, торренты — идёт напрямую, как и раньше: PAC-функция для нецелевых хостов возвращает `DIRECT` (`agent/bridge_agent.py`, `pac_text`), а HTTP-мост для CLI отправляет их через `direct_connect` (`do_CONNECT`).
+
+Второе обещание — про честность установки. Компонент просит права администратора, ставит системный прокси и автозапуск, поэтому установщик не имеет права рапортовать «готово», когда работать нечему. Если адрес enroll-сервиса в сборке пуст, карточка ещё до выбора несёт жёлтый бейдж «не настроен» и текст `needsConfigNote` (`src/renderer/app.js`, `componentUnconfigured`/`unconfiguredNoteText`). Если агент не прошёл самопроверку на этой машине, автозапуск не прописывается вовсе, а в лог уходит «AI-мост распакован, автозапуск не ставился (агент не прошёл самопроверку)» — вместо «установлен».
+
+## Как работает
+
+**1. Ветка выбора и передача настроек.** `components.json:226` объявляет `bridge` с `requires: ["pydeps"]`, `needsAdmin: true`, `needsConfig: "bridge.enrollEndpoint"` и `default: false` — по умолчанию галочка снята. Renderer кладёт в окружение установки `HM_BRIDGE_ENDPOINT` из `config.json` → `bridge.enrollEndpoint` и `HM_BRIDGE_PACDOMAINS` из `bridge.pacDomains` (`src/renderer/app.js:1287-1288`); allowlist `RENDERER_ENV_ALLOW` (`src/install-env.js:20-23`) пропускает именно эти два ключа, а `hm_bridge_token` в списке отсутствует — токен из renderer не доезжает по конструкции.
+
+**2. Установка на Windows (`scripts/windows/bridge.ps1`).**
+- `--dry-run` (`$env:HM_DRY_RUN`) печатает намерение и выходит с кодом 0, ничего не меняя (строки 31-34).
+- Нет `bridge_agent.py` в сборке (`$env:HM_AGENT_DIR`) → `exit 1` сразу.
+- Ставится OpenSSH Client через `Add-WindowsCapability`; если после этого `ssh` не найден, скрипт печатает предупреждение, но **продолжает** — это единственная критичная зависимость, которую он не превращает в отказ.
+- Ищется настоящий Python: `Get-Command python` с отбрасыванием Store-заглушки (`WindowsApps`), затем фиксированные пути `%LOCALAPPDATA%\Programs\Python\Python313|312`. Не нашёлся — `exit 1` с подсказкой про компонент «Python-пакеты».
+- Агент копируется в `%LOCALAPPDATA%\HamidunBridge\bridge_agent.py`.
+- `pip install --user pystray pillow` (офлайн из `$env:HM_VENDOR\pywheels`, если каталог есть) и последующий `import pystray, PIL` идут **де-элевированно** через `Invoke-HmDeElevated` из `scripts/windows/_deelev.ps1`. Fail-closed: примитив вернул `$null` или `Gate ≠ 'medium'` → пакеты трея пропускаются, под админом их не ставят.
+- Конфиг `%LOCALAPPDATA%\HamidunBridge\config.json`: если файла нет — пишется с нуля (`enabled: false`, порты 1080/1081/1082, домены из `HM_BRIDGE_PACDOMAINS` или встроенный список) через `System.Text.UTF8Encoding($false)`, то есть **без BOM**. Если файл есть и задан `HM_BRIDGE_ENDPOINT` — правится только `enrollEndpoint`, а `bridgeToken` перезаписывается **лишь при непустом** `HM_BRIDGE_TOKEN`. Любая ошибка правки ставит `$cfgOk = $false`, и строка «Сервер настроен» уже не печатается.
+- Гейт: `Invoke-HmDeElevated $py @($agentPath, '--selftest')`. Только при `Gate = 'medium'` и `Code = 0` пишется `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `HamidunBridge` = `"pythonw.exe|python.exe" "…\bridge_agent.py"`, а трей стартует сейчас через `explorer.exe` + `launch-bridge.cmd` (запуск оболочкой, medium integrity). Сбой запуска «сейчас» только логируется — агент поднимется при следующем входе.
+- Квитанции: `HM-RECEIPT path <dst>` всегда, `HM-RECEIPT reg HKCU|…|HamidunBridge` — только если Run реально писали.
+
+**3. Установка на macOS (`scripts/macos/bridge.sh`).** Отличия от Windows:
+- интерпретатор ищется в `/Library/Frameworks/Python.framework/Versions/3.13|3.12`, а `/usr/bin/python3` принимается только когда `xcode-select -p` проходит (иначе CLT-шим уводит launchd в цикл);
+- `pip` и `import` идут напрямую (`--break-system-packages`), де-элевации здесь нет;
+- перед `--selftest` дополнительно прогоняется `py_compile`;
+- автозапуск — LaunchAgent `com.hamidun.bridge` с `KeepAlive → SuccessfulExit=false`, `ThrottleInterval 300`, `ProcessType Background`; аргумент `--headless` добавляется **только** если трей не встал (`TRAY_OK != 1`);
+- после `launchctl load` факт загрузки подтверждается `launchctl list | grep com.hamidun.bridge`; не подтвердился — `exit 1` без слова «установлен»;
+- дополнительно в `~/.zshrc` и `~/.bash_profile` идемпотентно (по маркеру `# Hamidun Bridge CLI proxy`) добавляется строка `source` для `cli_proxy.env`.
+
+**4. Работа агента (`agent/bridge_agent.py`).**
+- `--selftest` — отдельный режим без побочных эффектов: читает конфиг, строит объект `Bridge`, печатает `HM-BRIDGE-SELFTEST-OK` и выходит с 0 (иначе `HM-BRIDGE-SELFTEST-FAIL: …` и 1). Портов не занимает, серверов не поднимает, прокси не трогает.
+- Обычный старт: `install_failopen_handlers()` (atexit + SIGINT/SIGTERM/SIGHUP/SIGBREAK) → `acquire_single_instance()` (эксклюзивный bind `127.0.0.1:1079`; занято — выход с 0 без единой правки прокси) → при `enabled=false` однократное `startup_selfheal` → `--headless` (сон циклами по часу) либо `run_tray`.
+- `resolve_ssh`: при непустых `enrollEndpoint`+`bridgeToken` — POST `{bridgeToken, client: hostname}` с ретраями по задержкам `[0, 3, 8, 20, 45]`. Ответ проверяется: `sshHost`/`sshUser` обязаны совпасть с `^[A-Za-z0-9._-]+$` и не начинаться с дефиса, порт — в 1…65535; невалидный ответ отклоняется и остаётся SSH из конфига («База»). Присланный `sshKey` пишется в `<appdata>/bridge_key` с `newline=""` и `chmod 0o600` (best-effort).
+- `Bridge.start()` отказывается включаться, если нет `host`/`user`; если задан `password` без `keyPath` (парольная авторизация неинтерактивным `ssh -D` не поддерживается); если занят PAC-порт или HTTP-порт. Успех: `serve_pac` → `serve_http_bridge` → поток `Tunnel.run` (`ssh -N -D 127.0.0.1:<socksPort>` с `ExitOnForwardFailure=yes`, реконнект каждые 3 с) → `set_system_proxy(..., True)` → `enabled=true` в конфиг.
+- Системный прокси: Windows — `HKCU\…\Internet Settings\AutoConfigURL` + `InternetSetOptionW(39/37)` и `setx HTTPS_PROXY http://127.0.0.1:<httpPort>`; macOS — `networksetup -setautoproxyurl/-setautoproxystate` по всем активным сервисам (`mac_active_services`) плюс файл `cli_proxy.env`.
+- Снятие (`_remove_our_proxy`) сравнивает текущее значение с нашим `pac_url`/`http_proxy` и чужое не трогает; глобальный флаг `_WE_SET_PROXY` не даёт второму экземпляру или выключенному агенту убить живой мост первого.
+
+## Инварианты
+
+1. **Автозапуск прописывается только после успешного `--selftest`.** Windows: `Invoke-HmDeElevated … '--selftest'` → `Gate='medium'` и `Code=0` → и только тогда `New-ItemProperty` для `HKCU\…\Run` (`scripts/windows/bridge.ps1:141-145`). macOS: `py_compile` + `--selftest` → `AGENT_OK=1`, иначе `exit 0` до записи plist (`scripts/macos/bridge.sh:127-144`).
+2. **Провал самопроверки не разрушает уже работающий автозапуск.** Windows не трогает существующий Run-ключ в ветке `else`; macOS печатает «Прежний автозапуск моста остался на месте» и plist не перезаписывает (`scripts/macos/bridge.sh:134-144`).
+3. **Самопроверка не имеет побочных эффектов.** Режим `--selftest` выходит до `install_failopen_handlers`, `acquire_single_instance`, `Bridge.start` (`agent/bridge_agent.py:630-638`).
+4. **Слова «AI-мост установлен» печатаются только при доказанном автозапуске.** Windows: ветка `if (-not $agentOk)` даёт «распакован» (`bridge.ps1:172-181`). macOS: `LOAD_OK != 1` → `exit 1` без «установлен» (`bridge.sh:210-215`).
+5. **«Сервер настроен» печатается только при подтверждённой записи конфига** — `$env:HM_BRIDGE_ENDPOINT -and $cfgOk` (`bridge.ps1:175`), `[ -n "$HM_BRIDGE_ENDPOINT" ] && [ "$CFG_OK" = "1" ]` (`bridge.sh:218`).
+6. **Пустой `HM_BRIDGE_TOKEN` не затирает сохранённый `bridgeToken`.** Запись только внутри `if ($env:HM_BRIDGE_TOKEN)` (`bridge.ps1:117-120`) и `if [ -n "${HM_BRIDGE_TOKEN:-}" ]` (`bridge.sh:82-86`).
+7. **`config.json` пишется без BOM**, а читается через `utf-8-sig` (`bridge.ps1:106`, `agent/bridge_agent.py:50`).
+8. **Нецелевой трафик идёт напрямую.** PAC возвращает `DIRECT` вне списка доменов (`pac_text`), CLI-мост вызывает `direct_connect` при `host_in_pac == False` (`do_CONNECT`).
+9. **Совпадение домена — по границе, а не по подстроке:** `h == d or h.endswith("." + d)` (`host_in_pac`), в PAC — `host == d || shExpMatch(host, "*.d")` (`pac_text`).
+10. **Fail-open при упавшем туннеле.** PAC заканчивается `; DIRECT`; в `do_CONNECT` неудачный `socks_connect` переходит в `direct_connect`, 502 отдаётся только если и прямое соединение не встало.
+11. **Прокси снимается только свой.** `_remove_our_proxy` сверяет `AutoConfigURL`/`HTTPS_PROXY`/`-getautoproxyurl` с собственными значениями; `failopen_cleanup` вообще не работает при `_WE_SET_PROXY == False`.
+12. **Один экземпляр агента.** `acquire_single_instance` держит эксклюзивный bind `127.0.0.1:1079`; второй процесс выходит с кодом 0, не трогая прокси.
+13. **Мост не включается, если авторизация невозможна:** `password` без `keyPath` → `start()` возвращает `False` и пишет причину в лог (`agent/bridge_agent.py:528-531`).
+14. **Ответ enroll-сервиса не попадает в argv `ssh` без валидации** — `_valid_ssh_field` + диапазон порта (`agent/bridge_agent.py:63-96`).
+15. **User-writable `python`/`pythonw` не исполняется под админом.** `pip`, `import`-проверка и `--selftest` идут через `Invoke-HmDeElevated`; трей стартует через `explorer.exe` (`bridge.ps1:77-83, 142, 157`).
+16. **Деинсталляция сохраняет `config.json`.** Он в `preserve`, а не в `targets`; каталог удаляется только как `emptydir` (`src/uninstall-targets.js:159-183`).
+17. **Из rc-файлов удаляется только строка, дословно равная `BRIDGE_RC_LINE`** — константа в `src/uninstall-targets.js:61` совпадает с `bridge.sh:185` (тест сверяет их посимвольно).
+18. **Компонент с незаполненным `needsConfig` помечен до выбора:** `componentUnconfigured` считает пустой строку, пробелы и пустой массив (`src/renderer/app.js:400-405`).
+
+## Что ломается, если инвариант нарушить
+
+1. Windows при каждом входе в систему запускает заведомо нерабочий агент; на macOS launchd с `KeepAlive` крутит цикл «упал — поднялся», и ноутбук греется (в комментарии `bridge.sh:99-105` описан именно этот живой случай — 99% CPU).
+2. Повторная установка убивает уже работающий мост человека и рапортует успех — доступ к Claude пропадает после «успешной» переустановки.
+3. Проба поднимает настоящий туннель, оставляет осиротевший `ssh -D 1080`, и следующий агент бесконечно бьётся в занятый порт.
+4. Человек читает «установлен», отдав права администратора, а мост не запустится ни сейчас, ни после перезагрузки — искать причину он не будет.
+5. Человек ждёт, что мост включится сам («сервер настроен»), а агент простаивает с пустым `enrollEndpoint`; при этом ему уже отдали админские права.
+6. Ученик теряет выданный ботом токен при обычной переустановке: мост перестаёт получать SSH-доступ и молча простаивает.
+7. `json.load` падает на BOM, конфиг «теряется» целиком — вместе с endpoint, токеном и состоянием `enabled`; мост выглядит установленным и не работает.
+8. Весь трафик — банк, госуслуги, видео — уходит через чужой зарубежный VPS: и медленно, и подозрительно для банка.
+9. Хост `notopenai.com` (или любой look-alike) уводится в платный туннель: чужой сайт видит трафик, а владелец платит за него трафиком VPS.
+10. Упавший туннель делает Claude и остальной интернет полностью недоступным вместо деградации до прямого соединения — человек читает «сайт недоступен» и думает, что сломался интернет.
+11. Второй запуск агента или его выключение сносит прокси, поставленный другим инструментом (корпоративный PAC, чужой VPN), либо убивает мост первого экземпляра.
+12. Два агента дерутся за порты 1080/1081/1082 и за системный прокси; состояние «включён/выключен» становится неопределённым.
+13. `ssh -D` уходит в вечный тихий реконнект (пароль ввести некому), а трей показывает «ВКЛ» — человек уверен, что мост работает.
+14. Скомпрометированный или подменённый enroll-ответ подставляет строку вроде `-oProxyCommand=…` в аргументы `ssh` — выполнение произвольной команды на машине ученика.
+15. Medium-integrity вредонос того же пользователя подменяет `python.exe` в профиле и получает исполнение под администратором (установщик — `requireAdministrator`).
+16. Деинсталляция стирает SSH-ключ и токен ученика: после переустановки доступ придётся выдавать заново через бота.
+17. Из `~/.zshrc` вырезается пользовательская строка, лишь содержащая маркер в тексте (например, комментарий или `export NOTE="… # Hamidun Bridge CLI proxy …"`), — ломается чужая настройка оболочки.
+18. Человек ставит компонент, требующий прав администратора, ради функции, которая в этой сборке не может заработать, и узнаёт об этом только из лога после установки.
+
+## Границы
+
+- Мост **не** VPN и не меняет маршрут по умолчанию: он трогает системный PAC-прокси и переменную `HTTPS_PROXY`, а не сетевой стек. Приложения, игнорирующие системный прокси, поедут напрямую.
+- HTTP-мост для CLI обслуживает **только** метод `CONNECT` (`do_CONNECT`); обработчиков `do_GET`/`do_POST` в нём нет, то есть простой `http://` через порт 1081 не проксируется.
+- Туннель строится **системным** `ssh`. Своего SSH-клиента установщик не везёт: на Windows он пытается доставить OpenSSH Client через `Add-WindowsCapability`, и при неудаче лишь предупреждает.
+- Парольная SSH-авторизация не поддерживается принципиально — нужен ключ (`keyPath` или `sshKey` из enroll).
+- В этой сборке `config.json` → `bridge.enrollEndpoint` пуст, а `HM_BRIDGE_TOKEN` не эмитится ни одним местом установщика (в `RENDERER_ENV_ALLOW` его нет намеренно). Значит из коробки мост встаёт «в простой»: включить его можно, только вписав SSH-доступ в конфиг руками либо подняв свой enroll-сервис — `server/enroll-ssh-server.js` описан в шапке файла как REFERENCE и в состав установки не входит.
+- macOS-ветка не использует де-элевацию: `pip`, `import` и `--selftest` там запускаются напрямую (`bridge.sh:47-52, 128-133`).
+- Автоудаление компонента разрешено (`REMOVABLE` в `src/renderer/app.js:43`), но `config.json` при этом остаётся на диске сознательно.
+- Определение «установлен» в `src/main.js:2695-2701` — это существование файла `bridge_agent.py`; версия не определяется (`detectedVersion: ''`), работоспособность не проверяется.
+- `mac-arch-support.json:128-134` относит мост к `resolvedAtInstall`: своих бинарей нет, арх-риски наследуются от `pydeps`.
+
+## Риски и открытые вопросы
+
+- **Windows не подтверждает, что мост реально запустился.** `Start-Process explorer.exe` — «выстрелил и забыл»: сбой ловится только как исключение самого запуска, отсутствие процесса агента после этого не проверяется. Паритета с macOS-подтверждением (`launchctl list`) здесь нет.
+- **Отсутствие `ssh` не блокирует установку.** При неудаче `Add-WindowsCapability` (корпоративный WSUS, офлайн) скрипт печатает предупреждение и идёт дальше — `--selftest` `ssh` не проверяет, поэтому мост будет объявлен установленным и получит автозапуск, хотя туннель построить нечем.
+- **`--selftest` проверяет очень мало.** Он читает конфиг и конструирует объект `Bridge` — то есть ловит битый JSON и сломанный интерпретатор, но не проверяет ни портов, ни `ssh`, ни `pystray`. «Прошёл самопроверку» ≠ «мост работоспособен».
+- **Права на приватный ключ.** `os.chmod(kp, 0o600)` обёрнут в `try/except: pass` (`agent/bridge_agent.py:104-105`); что именно даёт `chmod` на Windows-файле в `%LOCALAPPDATA%` — **не подтверждено кодом**, ACL там не выставляются явно.
+- **Токен ходит по указанному endpoint без проверки схемы.** `resolve_ssh` передаёт `enrollEndpoint` в `urlrequest.Request` как есть; принудительного `https://` в агенте нет — доверие целиком на том, кто заполняет `config.json`.
+- **Ретраи enroll блокируют поток.** Суммарно до 76 секунд `time.sleep` плюс до пяти запросов по 20 с таймаута внутри `Bridge.start()`; на macOS без трея это происходит в стартующем LaunchAgent.
+- **Тесты моста — статические и песочные.** Прогоны `bridge.ps1`/`bridge.sh` идут со стабами (`Invoke-HmDeElevated`, `New-ItemProperty`, `Start-Process`, `launchctl`), настоящий агент в них не исполняется. Поведение `agent/bridge_agent.py` под нагрузкой (PAC, SOCKS-handshake, `_pump`, снятие прокси) отдельными тестами **не покрыто** — в `test/run-tests.js` найдены только проверки строк `HM-BRIDGE-SELFTEST-OK`/статики. Функциональные прогоны пропускаются целиком, если на машине нет `powershell` или `bash`.
+- **Ветки без обработки ошибки.** `set_system_proxy` на macOS не смотрит код возврата `networksetup` (`stderr=DEVNULL`), а на Windows не проверяет результат `setx`: прокси мог не встать, но агент всё равно логирует «системный прокси: ON» и рапортует «МОСТ ВКЛЮЧЁН».
+- **Расхождение между документом и данными не обнаружено:** `needsConfig: "bridge.enrollEndpoint"` указывает на реально существующий ключ `config.json`, и это проверяется тестом.

@@ -1,0 +1,91 @@
+# Строгий allowlist окружения
+
+<!-- spec-id: strogiy-allowlist-okruzheniya -->
+
+- **Раздел:** Целостность и гейты
+- **Код:** `src/install-env.js`, `src/main.js:812-862`, `src/main.js:928-929`, `src/main.js:1082-1087`, `src/main.js:1164-1187`, `src/renderer/app.js:1264-1309`, `src/remote-fetch.js:173-190`
+- **Тесты:** «#4 main.js: install-env allowlist wired (buildInstallEnv + filterRendererEnv + admin PATH)», «#4 allowlist: NODE_OPTIONS/npm_config_*/GIT_EXEC_PATH/NODE_PATH/произвольный не-HM_ ключ отброшены», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен», «#4 allowlist: список ключей совпадает с envForRun (app.js) — ни одного лишнего/недостающего», «#4 allowlist: HM_REMOTE_CACHE из renderer отброшен, main ставит свой», «#4 allowlist: регистр-варианты отброшены (nodE_optionS, HM_remote_CACHE), Hm_* распознан», «#4 anti-spoof: authoritativeWinSystemEnv(C:\\Windows, C:\\) даёт валидные ProgramFiles/SystemRoot/SystemDrive», «#4 anti-spoof: другой диск (D:) корректно проброшен в ProgramFiles/SystemDrive», «#4 main.js: authoritativeWinSystemEnv провязан после filterRendererEnv», «P1-A main.js: childEnv.HM_REMOTE_CACHE стирается СРАЗУ после buildInstallEnv (до задания из проверенного remoteCache)»
+
+## Что обещает человеку
+
+Установщик запускает install-скрипты с правами администратора. Обещание в том, что программа, которая ставится на машину, — это git, Node, VS Code и конфиг из репозитория Жемала, а не что-то, что подложил под тем же именем посторонний процесс. Конкретно: `git.exe`, `node.exe` и `powershell.exe`, которые запускает установщик под админом, берутся только из системных каталогов и `Program Files`; репозиторий, который клонируется в `~/.claude`, — только `https://github.com/JHamidun/…` из вшитого в сборку `config.json`.
+
+Человеку это не видно и не настраивается. Гарантия односторонняя: даже если окно установщика (renderer) скомпрометировано или подменено, оно не может передать элевейтед-скрипту ни свой `PATH`, ни свой адрес репозитория, ни ключ вроде `NODE_OPTIONS`, который выполнил бы чужой код при первом же старте `node`.
+
+## Как работает
+
+**1. Renderer отдаёт env через IPC.** `src/renderer/app.js:1264-1309`, функция `envForRun()`, собирает объект из 13 ключей `HM_*` (`HM_CONFIG_REPO_URL`, `HM_CONFIG_REPO_BRANCH`, `HM_CLAUDE_EXT_ID`, `HM_HOME`, `HM_KEEP_SKILLS`, `HM_ALL_PACK_SKILLS`, `HM_BRIDGE_ENDPOINT`, `HM_BRIDGE_PACDOMAINS`, `HM_SELECTED`, `HM_ADDITIVE`, `HM_REPAIR`, `HM_REPAIR_CONFIRMED`, `HM_HANDY_MIC`) и передаёт его в `window.installer.runComponent(id, runEnv)` (`src/renderer/app.js:1627`). `src/preload.js:8` пробрасывает это как `ipcRenderer.invoke('run-component', { id, env })`.
+
+**2. Main отрезает `HM_REMOTE_CACHE` ещё до фильтра.** `src/main.js:928-929`: копия `payload.env` и безусловный `delete rendererEnv.HM_REMOTE_CACHE`. Путь кэша докачки задаёт только main из sha-проверенного места.
+
+**3. Фильтр по явному списку.** `src/install-env.js:20-28` — `RENDERER_ENV_ALLOW`, `Set` из 13 имён в нижнем регистре. `isAllowedRendererEnvKey` (строки 34-36) сравнивает `String(k).toLowerCase()`, поэтому `nodE_optionS` и `HM_remote_CACHE` не проскакивают за счёт регистра. `filterRendererEnv` (строки 39-46) возвращает **новый** объект — исходник не мутируется. Список — именно перечисление ключей, а не префикс-тест `HM_*`: `HM_COURSE_TARGET`, `HM_COURSE_BEACON_URL`, `HM_NOMAD_CLOUD_BASEURL`, `HM_BRIDGE_TOKEN` начинаются с `HM_`, но в списке их нет, потому что их renderer не эмитит, а элевейтед-скрипты читают как путь раскладки или внешний URL.
+
+**4. Сборка childEnv — `buildInstallEnv` (`src/main.js:812-862`). Две ветки.**
+
+*Windows (`IS_WIN`), строки 814-854.* Условие ветвления — платформа. Порядок сборки принципиален:
+- `winRoot = remoteFetch.winSystemRoot() || 'C:\\Windows'` — валидированный корень (`src/remote-fetch.js:173-190`: `lstatSync` проверяет, что корень, `System32` и `kernel32.dll` не symlink/reparse; кандидат `C:\Windows` проверяется первым, `%SystemRoot%` из env — только вторым);
+- копируются реальные значения `WIN_SYS_ENV_KEYS` (`src/main.js:782-790`) из `process.env`;
+- поверх — `filterRendererEnv(rendererEnv)` (строка 824);
+- поверх — `authoritativeWinSystemEnv(winRoot, drive)` (строка 828, реализация `src/install-env.js:55-79`): `SystemRoot`, `windir`, `SystemDrive`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432`, `ProgramData`, `ALLUSERSPROFILE`, `CommonProgramFiles`, `CommonProgramFiles(x86)`, `CommonProgramW6432` пересобираются из валидированного диска через `require('path').win32` (явно win32, чтобы функция была проверяема на не-Windows CI);
+- `PATH`/`Path` (строки 830-845) собираются из фиксированного списка: `System32`, `%winRoot%`, `System32\WindowsPowerShell\v1.0`, `System32\OpenSSH`, `Program Files\Git\cmd`, `Program Files\Git\bin`, `Program Files\nodejs`, `Program Files (x86)\Git\cmd`; дубли снимаются регистронезависимо. Vendor-каталог в `PATH` **не** попадает намеренно (комментарий 838-841): portable-издание распаковывает vendor в user-writable `%TEMP%`;
+- `ComSpec` — абсолютный `System32\cmd.exe`, `PSModulePath` — только два системных каталога модулей (строки 846-850);
+- `PATHEXT` ставится дефолтом **только если пуст** (строка 851);
+- последним накатывается `NONINTERACTIVE_ENV` (`src/main.js:800-810`).
+
+*POSIX, строки 855-861.* Условие — всё, что не `IS_WIN`. Здесь `out = Object.assign({}, process.env)` — реальное окружение наследуется целиком, включая `PATH`; поверх кладётся тот же `filterRendererEnv` и `NONINTERACTIVE_ENV`. Обоснование в комментарии 855-857: uv-флоу на POSIX неэлевейтед end-to-end, эскалации нет.
+
+**5. После сборки** (`src/main.js:1082-1087`) `childEnv.HM_REMOTE_CACHE` стирается ещё раз — уже из унаследованного `process.env` на POSIX-ветке; заново он ставится только при непустом `remoteCache` (строка 1153).
+
+**6. Ключи, которые задаёт исключительно main.** `HM_VENDOR`, `HM_BUNDLED_CONFIG`, `HM_AGENT_DIR`, `HM_NOMAD_SRC`, `HM_ASSETS` (строки 1127-1131), `HM_COURSE_BEACON_URL`/`HM_COURSE_BEACON_SECRET` из вшитого `config.json` (строки 1149-1151), `HM_DRY_RUN` (строка 1156).
+
+**7. Адрес репозитория конфига** — блок `if (id === 'config')`, `src/main.js:1164-1187`. Условие ветвления: только компонент `config`. Читается вшитый `config.json` (`readJson`, `src/main.js:154-160`, относительно `resourceRoot()`), и `childEnv.HM_CONFIG_REPO_URL` ставится по регулярке `/^https:\/\/github\.com\/JHamidun\//i` — совпало, берётся значение из файла, иначе жёсткий дефолт `https://github.com/JHamidun/claude-code-config-pack`. `HM_CONFIG_REPO_BRANCH` — `configRepoBranch` или `main`. Значение, пришедшее из renderer через allowlist, здесь перезаписывается. Тут же перезаписывается `HM_ADDITIVE`: решение принимает `installMode.decideConfigMode` по живой детекции ФС, renderer-подсказка игнорируется.
+
+Потребитель этих двух ключей — `scripts/windows/config.ps1:76-77` и `scripts/macos/config.sh:73,78`, ветка онлайн-фолбэка (когда вшитого конфига нет): `git @gitHard clone --depth 1 -b $branch $url $clone`. `git` там вызывается **бареволовым именем** после `Update-Path` (`scripts/windows/config.ps1:3-22`), который выводит каталоги Git и node из `$env:ProgramFiles` и `$env:SystemRoot` — то есть ровно из тех переменных, которые перезаписывает `authoritativeWinSystemEnv`.
+
+## Инварианты
+
+1. **Из renderer-env в childEnv проходят только 13 перечисленных ключей.** Держится `RENDERER_ENV_ALLOW` (`src/install-env.js:20-28`) и единственной точкой входа `filterRendererEnv` (`src/main.js:824` и `:859`).
+2. **Сравнение имён регистронезависимо.** `isAllowedRendererEnvKey` приводит к нижнему регистру (`src/install-env.js:34-36`); в Windows `Path` и `PATH` — одно имя.
+3. **`HM_REMOTE_CACHE` из renderer не доходит до скрипта никогда.** Три независимых барьера: его нет в allowlist; `delete rendererEnv.HM_REMOTE_CACHE` (`src/main.js:929`); `delete childEnv.HM_REMOTE_CACHE` (`src/main.js:1087`).
+4. **Список allowlist равен множеству ключей, которые эмитит `envForRun`.** Держится не кодом, а тестом-сверкой («#4 allowlist: список ключей совпадает с envForRun (app.js) …»): он читает обе стороны и падает на лишнем и на недостающем ключе.
+5. **На Windows `PATH` элевейтед-скрипта состоит только из System32, `%SystemRoot%`, PowerShell 5.1, OpenSSH, `Program Files\Git\{cmd,bin}`, `Program Files\nodejs`, `Program Files (x86)\Git\cmd`.** `src/main.js:830-845`; ни `process.env.PATH`, ни vendor-каталог в список не входят.
+6. **На Windows `ProgramFiles`/`ProgramFiles(x86)`/`ProgramW6432`/`ProgramData`/`ALLUSERSPROFILE`/`CommonProgramFiles*`/`SystemRoot`/`windir`/`SystemDrive` выводятся из валидированного корня, а не из launch-env.** `authoritativeWinSystemEnv` (`src/install-env.js:55-79`) вызывается строкой 828 — **после** `filterRendererEnv` (строка 824) и после копирования `WIN_SYS_ENV_KEYS` (строка 821).
+7. **Корень системы валидируется на reparse-point до использования.** `winSystemRoot` (`src/remote-fetch.js:173-190`) отвергает symlink на корне, `System32` и `kernel32.dll`; `C:\Windows` пробуется раньше значения из env.
+8. **`ComSpec` и `PSModulePath` задаются авторитетно, не наследуются.** `src/main.js:846-850`.
+9. **PowerShell запускается по абсолютному пути из валидированного System32, иначе установка блокируется.** `remoteFetch.winPowershellPath()` (`src/remote-fetch.js:199-205`) возвращает `null` → `src/main.js:1194-1198` возвращает ошибку, fail-closed, без фолбэка в короткое имя.
+10. **`HM_CONFIG_REPO_URL` для компонента `config` всегда указывает на `https://github.com/JHamidun/…`.** `src/main.js:1184-1185`: регулярка + жёсткий дефолт при несовпадении. Renderer-значение перезаписывается.
+11. **`HM_ADDITIVE` для компонента `config` определяет main по детекции ФС, а не renderer.** `src/main.js:1164-1173`.
+12. **Любая опция компонента из `components.json` (`options[].env`) обязана быть в allowlist и эмититься из `envForRun`.** Кодом это не проверяется — держится тестом про опцию микрофона у `handy` (см. «Риски»).
+
+## Что ломается, если инвариант нарушить
+
+1. **Пропуск произвольных ключей.** `NODE_OPTIONS=--require=…\evil.js` из скомпрометированного renderer выполняет чужой JS при первом же старте `node`/`npm` под админским токеном. Для человека: он поставил редактор и Node, а вместе с ними — постоянный чужой код на своей машине, о котором ничего не узнает.
+2. **Регистрозависимое сравнение.** `nodE_optionS` в Windows — та же переменная, что `NODE_OPTIONS`. Последствие идентично п.1, но обходится тривиальной сменой регистра.
+3. **Утечка `HM_REMOTE_CACHE`.** Скрипт распаковывает и запускает бинарь из каталога, который выбрал не main, а посторонний, — то есть sha256-проверка докачанных байтов обходится целиком: под видом «установки VS Code» запускается чужой exe.
+4. **Расхождение allowlist и `envForRun`.** Тихий отказ без падения: добавили новую галочку в интерфейсе, ключ до скрипта не доехал, компонент ставится «как будто без опции». Человек видит успешную установку и настройку, которой на самом деле нет.
+5. **Пользовательский `PATH` в элевейтед-окружении.** `Get-Command git` и `git clone` в `config.ps1` — bare-вызовы. Подложенный `git.exe` в user-writable каталоге из `PATH` выполняется под администратором: полная эскалация с medium до админа на машине ученика.
+6. **Spoof `ProgramFiles`.** Установщик, запущенный с `ProgramFiles=C:\Users\…\evil`, получил бы `evil\Git\cmd` в начале `PATH` (`Update-Path` в `config.ps1:15-17` строит путь именно из этой переменной) — тот же исход, что в п.5, только через переменную, а не через `PATH`.
+7. **Невалидированный корень системы.** Symlink на `C:\Windows` уводит `System32` целиком: `cmd.exe`, `powershell.exe` и весь `PATH` начинают указывать в подконтрольный каталог. Установка идёт «нормально», исполняется чужое.
+8. **Наследованный `ComSpec`/`PSModulePath`.** Любой `.bat`-вызов уходит в подменённый `cmd.exe`; загрузка модуля PowerShell — в подменённый модуль (module hijack) под админом.
+9. **Фолбэк `powershell.exe` по короткому имени.** Воскресает PATH-hijack на самом первом шаге — до того, как отработает хоть одна защита install-скрипта.
+10. **Подменяемый адрес репозитория.** В `~/.claude` клонируется чужой репозиторий: у человека оказывается чужой набор скиллов, агентов, хуков и `settings.json` — то есть чужой код, который дальше запускает уже он сам, каждой сессией.
+11. **Renderer решает режим конфига.** Скомпрометированное окно объявляет «чистую установку» там, где есть кастомизации, — существующая настройка `~/.claude` перезаписывается базой. Потеря пользовательских файлов вместо доустановки недостающих.
+12. **Опция мимо allowlist.** Галочка в карточке компонента (например, согласие на микрофон для Handy) молча не доезжает: интерфейс показал выбор, скрипт его не увидел. Человек уверен, что настроил, а поведение установленной программы другое.
+
+## Границы
+
+- **Строгий `PATH` — только Windows.** POSIX-ветка `buildInstallEnv` (`src/main.js:855-861`) наследует `process.env` целиком, включая `PATH`, `DYLD_*`, `LD_*`. Обоснование в комментарии: на macOS/Linux uv-флоу неэлевейтед, эскалации нет. Allowlist для renderer-env там при этом действует — тот же самый.
+- **Профильные переменные не валидируются.** `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`, `TEMP`, `TMP`, `HOMEDRIVE`, `HOMEPATH`, `PUBLIC` копируются из `process.env` как есть (`src/main.js:782-790`, 821) и в `authoritativeWinSystemEnv` не входят. Уступка названа прямо в `src/install-env.js:53-54`: эти каталоги user-writable по природе, абсолютные фолбэки скриптов ведут туда же.
+- **Vendor не в `PATH`.** Артефакты потребляются только по абсолютному `HM_VENDOR`-пути внутри install-скриптов (`src/main.js:838-841`). Скрипт, который попробует вызвать вшитый бинарь бареволовым именем, работать не будет.
+- **Allowlist не означает доверие к значению.** Он решает, доедет ли ключ, а не корректно ли его содержимое. Часть допущенных ключей всё равно перезаписывается main-ом (`HM_CONFIG_REPO_URL`, `HM_CONFIG_REPO_BRANCH`, `HM_ADDITIVE`); остальные (`HM_HOME`, `HM_KEEP_SKILLS`, `HM_SELECTED`, `HM_BRIDGE_ENDPOINT`…) уходят в скрипт в том виде, в каком их прислал renderer. Их санитайзинг — не эта фича.
+- **Часть renderer-подсказок main читает до фильтра, для собственных решений.** `HM_DRY_RUN` (`src/main.js:933`), `HM_REPAIR`/`HM_REPAIR_CONFIRMED` (`src/main.js:1166-1167`) берутся из `rendererEnv` напрямую. В childEnv они попадают либо через allowlist (`HM_REPAIR*`), либо авторитетно от main (`HM_DRY_RUN`, строка 1156).
+- **Авторитетная перезапись адреса репозитория действует только для `id === 'config'`.** Для остальных компонентов renderer-значение `HM_CONFIG_REPO_URL` проходит через allowlist неизменным. Практического выхода это не имеет: по `grep` в `scripts/` и `tools/` эти переменные читают только `config.ps1` и `config.sh`.
+- **Фича не защищает от подмены самих байтов установщика.** Она про окружение процесса; целостность вшитых артефактов — соседний контур (`Confirm-HmArtifact`, sha256, `checksums.json`).
+
+## Риски и открытые вопросы
+
+- **`PATHEXT` — единственная переменная резолвинга, которая переживает сборку из launch-env.** `src/main.js:851`: `if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;…'` — дефолт ставится только когда значение пусто, а скопированное на строке 821 из `process.env` сохраняется как есть. Эксплуатируемость **не подтверждена кодом**: все каталоги `PATH` admin-owned, дописать туда исполняемый файл нужного расширения нельзя. Отличие от соседних `ComSpec`/`PSModulePath`, которые перезаписываются безусловно, в коде ничем не объяснено.
+- **Авторитетная перезапись `HM_CONFIG_REPO_URL` (`src/main.js:1184-1185`) тестом не покрыта.** По `grep` в `test/run-tests.js` совпадения на `JHamidun` относятся только к сборочному гейту свежести конфиг-пака (`evaluateConfigFreshness`, строки 8720+), а на `HM_CONFIG_REPO_URL` — к запуску `config.sh` в dry-run (строка 2395). Ни один тест не проверяет, что renderer-значение перезаписывается и что несовпадение с `github.com/JHamidun/` откатывает к дефолту. Порядок «фильтр → authoritative» для системных path-переменных тестом закреплён (тест «#4 main.js: authoritativeWinSystemEnv провязан после filterRendererEnv»), для репозитория — нет.
+- **Инвариант 12 (опции компонентов) держится тестом, который нельзя процитировать в шапке.** Тест существует — `test/run-tests.js:8257`, `ok('handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом', …)`; он гоняет `isAllowedRendererEnvKey` и `filterRendererEnv` по всем `options[].env` из `components.json`. В шапку он не вынесен потому, что его собственный заголовок содержит «ёлочки», а `tools/check-specs.js` (функция `quotedTitles`, регулярка `/«([^»]+)»/g`) вырезал бы из него только слово «микрофон».
+- **Два теста режут тело `envForRun` по разным якорям.** Строка 487 — до `'function appendLog'`, строка 8272 — до `'// Журнал установки'`. Перестановка функций в `src/renderer/app.js` сломает один из них молча (срез станет пустым или чужим). В тесте на строке 8273 есть страховка `assert(envFn.length > 100)`, в тесте на строке 487 — только косвенная (`emitted.length >= 12`).
+- **Фолбэк `winSystemRoot() || 'C:\\Windows'` (`src/main.js:815`) не обрабатывается как ошибка.** Если валидация не прошла ни по одному кандидату, `PATH` строится от литерала `C:\Windows`. Прямого вреда нет (значение не из env), а запуск всё равно упрётся в fail-closed `winPowershellPath()` на строке 1194 — но диагностики «корень системы не прошёл валидацию» человек не увидит: он получит сообщение про PowerShell.

@@ -160,16 +160,32 @@ function main() {
           'спека пишет «НЕТ», а инвентарь видел тест — либо найди и процитируй, либо поправь INVENTORY.md');
       }
     } else {
+      // Две законные формы цитирования, и вторая появилась не для удобства.
+      //
+      //   «заголовок»          — тест внутри test/run-tests.js, ищется ДОСЛОВНО;
+      //   `test/что-то.test.js` — тест ОТДЕЛЬНЫМ ФАЙЛОМ, проверяется существование.
+      //
+      // Первая редакция знала только про run-tests.js — и развернула спеку фичи
+      // «аудит работоспособности конфига», у которой тесты лежат в
+      // test/audit-pack-regex.test.js и test/audit-pack-run.test.js. Агент честно
+      // написал «НЕТ», потому что заголовков в run-tests.js нет, а гейт обвинил его
+      // в сокрытии покрытия. Виноват был гейт: его модель «все тесты в одном файле»
+      // не совпадала с деревом.
       const titles = quotedTitles(testLine);
-      if (!titles.length) {
+      const files = backticked(testLine).filter((p) => /^test\//.test(p));
+      if (!titles.length && !files.length) {
         add(f.id, 'нечитаемая шапка',
-          'в строке «Тесты» нет ни одного заголовка в «ёлочках» и нет слова НЕТ');
+          'в строке «Тесты» нет ни заголовка в «ёлочках», ни пути к тест-файлу, ни слова НЕТ');
       }
       for (const t of titles) {
         checkedTests++;
         if (testsSrc.indexOf(t) === -1) {
           add(f.id, 'теста нет', '«' + t.slice(0, 80) + (t.length > 80 ? '…' : '') + '» не найден в test/run-tests.js');
         }
+      }
+      for (const p of files) {
+        checkedTests++;
+        if (!fs.existsSync(path.join(ROOT, p))) add(f.id, 'теста нет', 'файла ' + p + ' не существует');
       }
     }
   }
