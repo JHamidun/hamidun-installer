@@ -3574,6 +3574,131 @@ ok('P0-3 (функц.): маркер-symlink НЕ считается валид�
   } finally { dropDir(home); }
 });
 
+console.log('== Удаление скрепки снимает и её хуки (полминуты в каждой сессии) ==');
+
+// Установка скрепки правит ~/.claude/settings.json: подставляет её порт вместо
+// плейсхолдера пака. Удаление сносило только файлы — четырнадцать хук-записей
+// оставались указывать на порт, где никто не слушает.
+//
+// Цена ИЗМЕРЕНА, а не оценена: обращение на закрытый локальный порт под Windows не
+// отбивается мгновенно (SYN уходит в повтор) — 2,2 с на попытку, около полуминуты
+// мёртвого ожидания в каждой сессии Claude Code. Самолечение живёт внутри самой
+// скрепки и после удаления сработать не может.
+
+const HOOK_FROM = '127.0.0.1:45832/hook';
+const HOOK_TO = '127.0.0.1:VSCODE_PORT/hook';
+const hookSettings = (url) => JSON.stringify({
+  hooks: { PreToolUse: [{ hooks: [{ type: 'command', url: 'http://' + url }] }] },
+  permissions: { allow: ['Bash(ls)'] },
+  ownKey: 'не трогать',
+}, null, 2);
+function mkHookHome(content) {
+  const home = mkHomeDir();
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  if (content !== null) fs.writeFileSync(path.join(home, '.claude', 'settings.json'), content, 'utf8');
+  return home;
+}
+
+ok('цель hookurl заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё', () => {
+  const w = utMod.uninstallTargets('mascot', { home: 'C:/Users/probe', platform: 'win32' });
+  const m = utMod.uninstallTargets('mascot', { home: '/Users/probe', platform: 'darwin' });
+  const hooks = (p) => ((p && p.targets) || []).filter((t) => t.type === 'hookurl');
+  [['win32', w], ['darwin', m]].forEach(([name, plan]) => {
+    const h = hooks(plan);
+    assert.strictEqual(h.length, 1, name + ': ожидалась ровно одна цель hookurl, получено ' + h.length);
+    assert.strictEqual(h[0].from, HOOK_FROM, name + ': не тот порт-источник');
+    assert.strictEqual(h[0].to, HOOK_TO, name + ': не тот плейсхолдер');
+    assert(/[\\/]\.claude[\\/]settings\.json$/.test(h[0].file), name + ': не тот файл: ' + h[0].file);
+  });
+  // Чужим компонентам эта цель не положена: они хуков не писали.
+  ['git', 'node', 'course', 'nomad'].forEach((id) => {
+    const p = utMod.uninstallTargets(id, { home: 'C:/Users/probe', platform: 'win32' });
+    assert.strictEqual(hooks(p).length, 0, id + ': завелась чужая цель hookurl');
+  });
+});
+
+ok('restoreHookUrl (реальная ФС): порт снят, чужие ключи целы, повтор идемпотентен', () => {
+  let home = mkHookHome(hookSettings(HOOK_FROM));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    assert.strictEqual(r.status, 'removed', JSON.stringify(r));
+    const after = fs.readFileSync(f, 'utf8');
+    assert(after.indexOf(HOOK_FROM) === -1, 'мёртвый порт остался в конфиге');
+    assert(after.indexOf(HOOK_TO) !== -1, 'плейсхолдер пака не вернулся');
+    assert.strictEqual(JSON.parse(after).ownKey, 'не трогать', 'чужой ключ пострадал');
+    const junk = fs.readdirSync(path.join(home, '.claude')).filter((n) => /hm-un|\.bak$/.test(n));
+    assert.deepStrictEqual(junk, [], 'остались временные файлы: ' + junk.join(','));
+  } finally { dropDir(home); }
+
+  // Повтор: нечего менять → absent, файл байт-в-байт прежний.
+  home = mkHookHome(hookSettings(HOOK_TO));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    const before = fs.readFileSync(f, 'utf8');
+    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    assert.strictEqual(r.status, 'absent', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'файл тронут вхолостую');
+  } finally { dropDir(home); }
+});
+
+ok('restoreHookUrl: подлоги отбиты — чужой путь, symlink, битый JSON; dry-run не пишет', () => {
+  // (1) Чужой путь. Допуск ровно один — ~/.claude/settings.json.
+  let home = mkHookHome(hookSettings(HOOK_FROM));
+  try {
+    const foreign = path.join(home, 'foreign-settings.json');
+    fs.writeFileSync(foreign, hookSettings(HOOK_FROM), 'utf8');
+    const r = uxMod.restoreHookUrl(foreign, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    assert.strictEqual(r.status, 'failed', 'чужой файл принят: ' + JSON.stringify(r));
+    assert(fs.readFileSync(foreign, 'utf8').indexOf(HOOK_FROM) !== -1, 'чужой файл всё-таки изменён');
+  } finally { dropDir(home); }
+
+  // (2) settings.json подменён symlink-ом на чужой файл — писать через ссылку нельзя.
+  home = mkHookHome(null);
+  try {
+    const victim = path.join(home, 'victim.json');
+    fs.writeFileSync(victim, hookSettings(HOOK_FROM), 'utf8');
+    const f = path.join(home, '.claude', 'settings.json');
+    let linked = false;
+    try { fs.symlinkSync(victim, f, 'file'); linked = true; } catch (e) { linked = false; }
+    if (!linked) { console.log('     (symlink недоступен — этот подлог пропущен)'); }
+    else {
+      const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+      assert.strictEqual(r.status, 'failed', 'symlink принят: ' + JSON.stringify(r));
+      assert(fs.readFileSync(victim, 'utf8').indexOf(HOOK_FROM) !== -1, 'через ссылку записали в чужой файл');
+    }
+  } finally { dropDir(home); }
+
+  // (3) Битый JSON не трогаем вовсе: чинить чужой сломанный конфиг — не наша работа,
+  // а испортить сильнее — легко.
+  home = mkHookHome('{ это не json ' + HOOK_FROM);
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    const before = fs.readFileSync(f, 'utf8');
+    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    assert.strictEqual(r.status, 'failed', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'битый конфиг всё-таки переписан');
+  } finally { dropDir(home); }
+
+  // (4) dry-run обязан НИЧЕГО не писать.
+  home = mkHookHome(hookSettings(HOOK_FROM));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    const before = fs.readFileSync(f, 'utf8');
+    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform }, true);
+    assert.strictEqual(r.status, 'removed', JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'dry-run записал в файл');
+  } finally { dropDir(home); }
+});
+
+ok('main.js: hookurl подключён и к описанию, и к исполнению (иначе цель молча ничья)', () => {
+  const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert(/case 'hookurl': return uninstallExec\.restoreHookUrl\(/.test(m),
+    'main.js не исполняет hookurl — цель попадёт в план и не будет выполнена');
+  assert(/case 'hookurl': return 'hook-url/.test(m),
+    'main.js не описывает hookurl — человек увидит в плане пустую строку');
+});
+
 console.log('== Возврат из карантина: транзиентный EPERM больше не стоит чужой папки ==');
 
 // Дефект: захват цели в карантин делал 5 попыток, а ВОЗВРАТ — одну. На Windows rename

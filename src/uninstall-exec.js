@@ -444,13 +444,31 @@ function removeProfileLine(rcFile, line, opts, dry) {
   if (kept.length === lines.length) return res('absent', 'нашей строки нет');
   const next = kept.join('\n');
   if (dry) return res('removed', '[dry-run] WOULD убрать точную installer-строку');
+  try {
+    atomicReplaceContent(g.norm, next);
+    return res('removed', 'точная installer-строка убрана');
+  } catch (e) {
+    return res('failed', 'перезапись rc не удалась: ' + String((e && e.message) || e));
+  }
+}
+
+// Укреплённая перезапись СУЩЕСТВУЮЩЕГО файла новым содержимым.
+//
+// Вынесено из removeProfileLine без единого изменения логики: появился второй
+// потребитель (restoreHookUrl), а копия такого кода — гарантированный дрейф. Здесь
+// каждая строка отвечает на конкретную атаку или на конкретный отказ Windows, и
+// вторая копия рано или поздно отстала бы ровно на ту защиту, которую забыли
+// перенести.
+//
+// Бросает при неудаче; временный файл за собой убирает.
+function atomicReplaceContent(norm, next) {
   let tmp = '';
   try {
     // O_EXCL + случайное имя: заранее заготовленный hardlink на чужой файл
     // (например ~/.claude/settings.json) даст EEXIST, а не запись в его inode.
     let fd = -1;
     for (let attempt = 0; attempt < 3 && fd < 0; attempt++) {
-      const cand = g.norm + '.hm-un.' + crypto.randomBytes(8).toString('hex') + '.tmp';
+      const cand = norm + '.hm-un.' + crypto.randomBytes(8).toString('hex') + '.tmp';
       try { fd = fs.openSync(cand, 'wx', 0o600); tmp = cand; }
       catch (e) { if (!e || e.code !== 'EEXIST') throw e; }
     }
@@ -465,25 +483,81 @@ function removeProfileLine(rcFile, line, opts, dry) {
       try { fs.fsyncSync(fd); } catch (e) { /* не фатально */ }
     } finally { fs.closeSync(fd); }
     if (fs.readFileSync(tmp, 'utf8') !== next) throw new Error('tmp не совпал');
-    try { fs.renameSync(tmp, g.norm); }
+    try { fs.renameSync(tmp, norm); }
     catch (e) {
       // Windows EPERM поверх существующего: old→bak (тоже непредсказуемое имя),
       // tmp→dst, откат при сбое.
-      const bak = g.norm + '.' + crypto.randomBytes(8).toString('hex') + '.bak';
+      const bak = norm + '.' + crypto.randomBytes(8).toString('hex') + '.bak';
       let moved = false;
       try {
-        fs.renameSync(g.norm, bak); moved = true;
-        fs.renameSync(tmp, g.norm);
+        fs.renameSync(norm, bak); moved = true;
+        fs.renameSync(tmp, norm);
         try { fs.rmSync(bak, { force: true }); } catch (e2) { /* bak останется рядом */ }
       } catch (e3) {
-        if (moved) { try { fs.renameSync(bak, g.norm); } catch (e4) { /* bak остаётся для ручного восстановления */ } }
+        if (moved) { try { fs.renameSync(bak, norm); } catch (e4) { /* bak остаётся для ручного восстановления */ } }
         throw e3;
       }
     }
-    return res('removed', 'точная installer-строка убрана');
-  } catch (e) {
+    tmp = '';
+  } finally {
     if (tmp) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } }
-    return res('failed', 'перезапись rc не удалась: ' + String((e && e.message) || e));
+  }
+}
+
+// Вернуть hook-url скрепки к плейсхолдеру пака при удалении компонента.
+//
+// ЗАЧЕМ. Установка скрепки правит ~/.claude/settings.json: подставляет её порт вместо
+// плейсхолдера (mascot.ps1 §4, `127.0.0.1:VSCODE_PORT/hook` → `127.0.0.1:45832/hook`).
+// Удаление же сносило только файлы, а хуки оставались — навсегда указывать на порт,
+// на котором больше никто не слушает.
+//
+// Цена этого измерена, а не оценена: обращение на закрытый локальный порт под Windows
+// НЕ отбивается мгновенно (SYN уходит в повтор) — 2,2 с на попытку. Хуков в паке
+// четырнадцать, то есть около ПОЛУМИНУТЫ мёртвого ожидания в каждой сессии Claude
+// Code, у каждого, кто скрепку снял. Самолечению взяться неоткуда: оно живёт внутри
+// самой скрепки, а её больше не запускают.
+//
+// БЕЗОПАСНОСТЬ. settings.json — весь конфиг человека, и он лежит внутри защищённого
+// ~/.claude, куда checkTarget не пускает НИЧЕГО (и правильно: там нельзя удалять).
+// Поэтому здесь свой узкий допуск, как у removeProfileLine с rc-файлами: ровно один
+// разрешённый путь, замена ТОЧНОЙ подстроки, JSON валидируется до и после, запись
+// атомарная. Ни одного пути, которым эта операция могла бы что-то удалить.
+function restoreHookUrl(settingsFile, from, to, opts, dry) {
+  if (!valueHygieneOk(from) || !valueHygieneOk(to)) return res('failed', 'ЗАЩИТА: некорректная подстрока');
+  const home = path.resolve(opts.home);
+  const allowed = path.join(home, '.claude', 'settings.json');
+  if (!pathEq(allowed, settingsFile, opts.platform)) {
+    return res('failed', 'ЗАЩИТА: правка hook-url разрешена только для ~/.claude/settings.json, получено: ' + settingsFile);
+  }
+  // checkTarget здесь НЕ применим (он защищает весь ~/.claude от удаления), но
+  // symlink-подмену проверить обязаны: писать в файл, на который кто-то подложил
+  // ссылку, нельзя.
+  let st = null;
+  try { st = fs.lstatSync(settingsFile); }
+  catch (e) {
+    if (e && e.code === 'ENOENT') return res('absent', 'settings.json нет — править нечего');
+    return res('failed', 'чтение settings.json: ' + ((e && e.code) || e));
+  }
+  if (st.isSymbolicLink()) return res('failed', 'ЗАЩИТА: settings.json — symlink');
+  if (!st.isFile()) return res('failed', 'ЗАЩИТА: settings.json — не обычный файл');
+
+  let raw;
+  try { raw = fs.readFileSync(settingsFile, 'utf8'); }
+  catch (e) { return res('failed', 'чтение settings.json: ' + ((e && e.code) || e)); }
+  if (raw.indexOf(from) === -1) return res('absent', 'hook-url скрепки в настройках нет');
+  // Битый JSON не трогаем вовсе: чинить чужой сломанный конфиг — не наша работа,
+  // а испортить его сильнее — легко.
+  try { JSON.parse(raw); }
+  catch (e) { return res('failed', 'settings.json не парсится как JSON — не трогаю'); }
+  const next = raw.split(from).join(to);
+  try { JSON.parse(next); }
+  catch (e) { return res('failed', 'после замены JSON стал невалидным — откат, файл не тронут'); }
+  if (dry) return res('removed', '[dry-run] WOULD вернуть hook-url к плейсхолдеру пака');
+  try {
+    atomicReplaceContent(settingsFile, next);
+    return res('removed', 'hook-url скрепки возвращён к плейсхолдеру пака');
+  } catch (e) {
+    return res('failed', 'перезапись settings.json не удалась: ' + String((e && e.message) || e));
   }
 }
 
@@ -605,7 +679,7 @@ module.exports = {
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
   removeFileGated, removeDirTreeGated, anyOwnerMarker,
   allowedRcFiles, computeUserPathWithout,
-  classifyLaunchctlPrint, launchctlRemoveError,
+  classifyLaunchctlPrint, launchctlRemoveError, restoreHookUrl,
   verifyPostconditions,
   renameWithRetry // экспортируется РАДИ ТЕСТА: без него ретрай возврата из карантина
                   // проверяется только «повезло/не повезло» на живой ФС, то есть никак
