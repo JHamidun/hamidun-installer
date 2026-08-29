@@ -332,6 +332,71 @@ function checkSize() {
   reportBuiltArtifacts(S);
 }
 
+// Личные данные в том, что ФИЗИЧЕСКИ доезжает до ученика.
+//
+// ЗАЧЕМ ОТДЕЛЬНАЯ ПРОВЕРКА. Утечка в репозитории — неприятность; утечка в vendor —
+// это файл на диске у каждого, кто поставил установщик, и отозвать его нельзя.
+// 29.08.2026 личный путь владельца (C:\Users\<имя>\claude-mascot\…) нашёлся
+// захардкоженным в tools/fetch-vendor.ps1 ПУБЛИЧНОГО репозитория, причём `git grep`
+// его не видел: файл считался двоичным. Нашёл только сплошной обход с перебором
+// кодировок — он здесь и повторён.
+//
+// Проверяется ровно раздаваемое: снимок конфиг-пака, зип курса, стартовый проект,
+// офлайн-памятка. Не гейт по строгости, а WARN: vendor может быть не развёрнут, и
+// падать из-за его отсутствия значило бы останавливать исправное. Но НАЙДЕННОЕ
+// валит — это уже не «нечего проверять», а факт.
+function checkShippedPrivacy() {
+  const S = 'приватность';
+  const NEEDLES = ['Users\\hamid', 'Users/hamid', 'C:\\Vibecode', 'C:/Vibecode'];
+  const TEXT_EXT = new Set(['md', 'js', 'json', 'py', 'sh', 'ps1', 'txt', 'yml', 'yaml', 'html', 'css']);
+  const hits = [];
+  let scanned = 0;
+
+  const scanBuf = (name, buf) => {
+    scanned++;
+    for (const enc of ['utf8', 'utf16le']) {
+      let t;
+      try { t = buf.toString(enc); } catch (e) { continue; }
+      for (const nd of NEEDLES) if (t.indexOf(nd) !== -1) { hits.push(name + ' → ' + nd); return; }
+      return;                       // одной кодировки достаточно: utf8 покрывает наши файлы
+    }
+  };
+  const walk = (dir, label) => {
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return false; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== '.git' && e.name !== 'node_modules') walk(p, label); continue; }
+      if (!e.isFile()) continue;
+      const ext = (e.name.split('.').pop() || '').toLowerCase();
+      if (!TEXT_EXT.has(ext)) continue;
+      let b;
+      try { b = fs.readFileSync(p); } catch (e2) { continue; }
+      if (b.length > 3 * MIB) continue;
+      scanBuf(path.relative(ROOT, p), b);
+    }
+    return true;
+  };
+
+  const targets = [
+    [path.join(ROOT, 'vendor', 'config-pack'), 'конфиг-пак'],
+    [path.join(ROOT, 'assets', 'starter-project'), 'стартовый проект'],
+    [path.join(ROOT, 'assets'), 'assets'],
+  ];
+  let any = false;
+  for (const [dir, label] of targets) if (walk(dir, label)) any = true;
+
+  if (!any || !scanned) {
+    warn(S, 'нечего проверять: vendor не развёрнут (нормально до fetch:vendor) — прогони ещё раз перед выкладкой');
+    return;
+  }
+  if (hits.length) {
+    fail(S, 'ЛИЧНЫЕ ПУТИ в раздаваемом (отозвать нельзя — файл окажется на диске у каждого):\n      ' + hits.slice(0, 10).join('\n      '));
+    return;
+  }
+  okLine(S, 'в раздаваемом нет личных путей: сверено ' + scanned + ' текстовых файлов');
+}
+
 // Фактический размер УЖЕ СОБРАННЫХ артефактов.
 //
 // ЗАЧЕМ ОТДЕЛЬНО ОТ checkNsisLimit. Тот считает ПРОГНОЗ по содержимому vendor — до
@@ -421,6 +486,7 @@ async function main(argv) {
   checkConfigPack(network);
   const reg = checkRegistry(platforms, chk);
   checkSize();
+  checkShippedPrivacy();
   if (network) await checkMirrors(reg, platforms);
   else warn('зеркала', '--offline: живость зеркал НЕ проверена — перед выкладкой прогони с сетью.');
 
