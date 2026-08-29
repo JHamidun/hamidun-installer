@@ -1,0 +1,1371 @@
+{
+  "generatedFrom": "docs/INVENTORY.md",
+  "count": 61,
+  "features": [
+    {
+      "id": "git",
+      "section": "Установка компонентов",
+      "name": "Git",
+      "what": "Ставит систему контроля версий, чтобы Claude сам сохранял историю проекта и откатывал правки. Три источника по очереди: вшитый exe, winget, прямая загрузка.",
+      "codeRefs": [
+        {
+          "raw": "components.json:8-20",
+          "file": "components.json",
+          "lines": "8-20"
+        },
+        {
+          "raw": "scripts/windows/git.ps1:64-92",
+          "file": "scripts/windows/git.ps1",
+          "lines": "64-92"
+        },
+        {
+          "raw": "scripts/macos/git.sh",
+          "file": "scripts/macos/git.sh",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "node-js-lts",
+      "section": "Установка компонентов",
+      "name": "Node.js LTS",
+      "what": "Движок, на котором работает сам Claude Code и всё, что человек соберёт на JS. На macOS `.pkg` ставится через root-staging с пином Team ID.",
+      "codeRefs": [
+        {
+          "raw": "components.json:21-34",
+          "file": "components.json",
+          "lines": "21-34"
+        },
+        {
+          "raw": "scripts/windows/node.ps1:107-134",
+          "file": "scripts/windows/node.ps1",
+          "lines": "107-134"
+        },
+        {
+          "raw": "scripts/macos/node.sh",
+          "file": "scripts/macos/node.sh",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "vs-code-dva-rasshireniya",
+      "section": "Установка компонентов",
+      "name": "VS Code + два расширения",
+      "what": "Редактор и панель Claude внутри него, чтобы новичок не сидел в терминале. Успех засчитывается только при обоих расширениях.",
+      "codeRefs": [
+        {
+          "raw": "components.json:36-49",
+          "file": "components.json",
+          "lines": "36-49"
+        },
+        {
+          "raw": "scripts/windows/vscode.ps1",
+          "file": "scripts/windows/vscode.ps1",
+          "lines": ""
+        },
+        {
+          "raw": "scripts/macos/vscode.sh",
+          "file": "scripts/macos/vscode.sh",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "cursor-opcionalno",
+      "section": "Установка компонентов",
+      "name": "Cursor (опционально)",
+      "what": "Альтернативный AI-редактор для тех, кто к нему привык. `default: false`.",
+      "codeRefs": [
+        {
+          "raw": "components.json:50-63",
+          "file": "components.json",
+          "lines": "50-63"
+        },
+        {
+          "raw": "scripts/windows/cursor.ps1:83-92",
+          "file": "scripts/windows/cursor.ps1",
+          "lines": "83-92"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "claude-code-cli",
+      "section": "Установка компонентов",
+      "name": "Claude Code CLI",
+      "what": "Сам ИИ-агент — команда `claude`, которой пишешь задачу словами. Офлайн из `vendor/npm-cache`, иначе установочный скрипт с сайта.",
+      "codeRefs": [
+        {
+          "raw": "components.json:64-80",
+          "file": "components.json",
+          "lines": "64-80"
+        },
+        {
+          "raw": "scripts/windows/claude.ps1:184-247",
+          "file": "scripts/windows/claude.ps1",
+          "lines": "184-247"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "rasshirenie-claude-code-dlya-cursor",
+      "section": "Установка компонентов",
+      "name": "Расширение Claude Code для Cursor",
+      "what": "Кнопка Claude внутри Cursor. Оба VS Code-расширения ставит `vscode.ps1` — здесь только Cursor, чтобы не было второго elevated-пути.",
+      "codeRefs": [
+        {
+          "raw": "components.json:81-96",
+          "file": "components.json",
+          "lines": "81-96"
+        },
+        {
+          "raw": "scripts/windows/extension.ps1:34-48",
+          "file": "scripts/windows/extension.ps1",
+          "lines": "34-48"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "skrytyy-shag-proverka-ustanovki",
+      "section": "Установка компонентов",
+      "name": "Скрытый шаг «Проверка установки»",
+      "what": "В конце сам проверяет git/node/claude/конфиг/расширение и рисует галочки на финале. Диагностика никогда не роняет установку (всегда `exit 0`).",
+      "codeRefs": [
+        {
+          "raw": "components.json:97-106",
+          "file": "components.json",
+          "lines": "97-106"
+        },
+        {
+          "raw": "scripts/windows/verify.ps1:43-241",
+          "file": "scripts/windows/verify.ps1",
+          "lines": "43-241"
+        },
+        {
+          "raw": "src/renderer/app.js:1480-1483",
+          "file": "src/renderer/app.js",
+          "lines": "1480-1483"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "konfig-zhemala-claude",
+      "section": "Установка компонентов",
+      "name": "Конфиг Жемала (`~/.claude`)",
+      "what": "Раскладывает готовую настройку Claude — правила, агентов, команды, скиллы. Два режима: дополнить недостающее или переустановить начисто. `~/.claude` никогда не переносится и не стирается.",
+      "codeRefs": [
+        {
+          "raw": "components.json:114-130",
+          "file": "components.json",
+          "lines": "114-130"
+        },
+        {
+          "raw": "scripts/windows/config.ps1:33-48",
+          "file": "scripts/windows/config.ps1",
+          "lines": "33-48"
+        },
+        {
+          "raw": "src/install-mode.js",
+          "file": "src/install-mode.js",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "nabory-skillov-packs-s-pruningom",
+      "section": "Установка компонентов",
+      "name": "Наборы скиллов (packs) с прунингом",
+      "what": "Тематические пачки навыков вместо «всё подряд». Проверено разбором `packs.json`: **core 23 скилла + 11 паков / 186 скиллов**. Скилл вне всех паков ставится всегда. Прунинг fail-closed.",
+      "codeRefs": [
+        {
+          "raw": "packs.json",
+          "file": "packs.json",
+          "lines": ""
+        },
+        {
+          "raw": "src/renderer/app.js:1213-1257",
+          "file": "src/renderer/app.js",
+          "lines": "1213-1257"
+        },
+        {
+          "raw": "scripts/windows/config.ps1:292-337",
+          "file": "scripts/windows/config.ps1",
+          "lines": "292-337"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "python-pakety-pydeps-playwright-brauzery",
+      "section": "Установка компонентов",
+      "name": "Python-пакеты (pydeps) + Playwright-браузеры",
+      "what": "Python и библиотеки для продвинутых навыков — картинки, документы, автоматизация. Офлайн из `vendor/pywheels`, при неудаче — с PyPI.",
+      "codeRefs": [
+        {
+          "raw": "components.json:132-150",
+          "file": "components.json",
+          "lines": "132-150"
+        },
+        {
+          "raw": "scripts/windows/pydeps.ps1:144-186",
+          "file": "scripts/windows/pydeps.ps1",
+          "lines": "144-186"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "nomad-privatnyy-ai-agent",
+      "section": "Установка компонентов",
+      "name": "Nomad — приватный AI-агент",
+      "what": "Личный автономный агент с командой `nmd`: свой ключ к любой нейросети или облако без VPN. Только из вшитого `vendor/nomad-src` — клонирования нет вовсе.",
+      "codeRefs": [
+        {
+          "raw": "components.json:180-193",
+          "file": "components.json",
+          "lines": "180-193"
+        },
+        {
+          "raw": "scripts/windows/nomad.ps1:69-83,240",
+          "file": "scripts/windows/nomad.ps1",
+          "lines": "69-83,240"
+        },
+        {
+          "raw": "config.json:5-17",
+          "file": "config.json",
+          "lines": "5-17"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "pole-klyucha-nomad-na-finishe",
+      "section": "Установка компонентов",
+      "name": "Поле ключа Nomad на финише",
+      "what": "Даёт вставить ключ из кабинета уже после установки — раньше вставить было некуда. Пишет управляемый блок в `HERMES_HOME/config.yaml`.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:1940-1996",
+          "file": "src/main.js",
+          "lines": "1940-1996"
+        },
+        {
+          "raw": "src/preload.js:37",
+          "file": "src/preload.js",
+          "lines": "37"
+        },
+        {
+          "raw": "src/renderer/app.js:2313-2320",
+          "file": "src/renderer/app.js",
+          "lines": "2313-2320"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "uv-tolko-vshityy",
+      "section": "Установка компонентов",
+      "name": "uv (только вшитый)",
+      "what": "Быстрый менеджер Python для продвинутых навыков, полностью офлайн. Единственный компонент, который в lite-издании не докачивается.",
+      "codeRefs": [
+        {
+          "raw": "components.json:201-218",
+          "file": "components.json",
+          "lines": "201-218"
+        },
+        {
+          "raw": "scripts/windows/uv.ps1:1-13",
+          "file": "scripts/windows/uv.ps1",
+          "lines": "1-13"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "ai-most-split-tunnel-k-ii",
+      "section": "Установка компонентов",
+      "name": "AI-мост (split-tunnel к ИИ)",
+      "what": "Зарубежный адрес только ИИ-доменам через SSH, остальной интернет напрямую. Автозапуск прописывается только после успешного self-test.",
+      "codeRefs": [
+        {
+          "raw": "components.json:226-238",
+          "file": "components.json",
+          "lines": "226-238"
+        },
+        {
+          "raw": "agent/bridge_agent.py",
+          "file": "agent/bridge_agent.py",
+          "lines": ""
+        },
+        {
+          "raw": "scripts/windows/bridge.ps1:130-169",
+          "file": "scripts/windows/bridge.ps1",
+          "lines": "130-169"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "skrepka-maskot",
+      "section": "Установка компонентов",
+      "name": "Скрепка (маскот)",
+      "what": "Помощник поверх окон: показывает, что делает Claude, и даёт кнопки «Разрешить/Отклонить» прямо на экране. Правит `~/.claude/settings.json` атомарно, с бэкапом.",
+      "codeRefs": [
+        {
+          "raw": "components.json:245-259",
+          "file": "components.json",
+          "lines": "245-259"
+        },
+        {
+          "raw": "scripts/windows/mascot.ps1:8,18,55-88",
+          "file": "scripts/windows/mascot.ps1",
+          "lines": "8,18,55-88"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "claude-desktop-onlayn",
+      "section": "Установка компонентов",
+      "name": "Claude Desktop (онлайн)",
+      "what": "Нативное приложение Claude отдельным окном. Скачивается в Admins-only кэш, подпись проверяется до запуска.",
+      "codeRefs": [
+        {
+          "raw": "components.json:267-281",
+          "file": "components.json",
+          "lines": "267-281"
+        },
+        {
+          "raw": "scripts/windows/claude-desktop.ps1:1-12",
+          "file": "scripts/windows/claude-desktop.ps1",
+          "lines": "1-12"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "chatgpt-desktop-onlayn",
+      "section": "Установка компонентов",
+      "name": "ChatGPT Desktop (онлайн)",
+      "what": "ChatGPT отдельным окном: на Windows из Microsoft Store, на macOS с сайта OpenAI (точный Team ID + bundle id).",
+      "codeRefs": [
+        {
+          "raw": "components.json:283-297",
+          "file": "components.json",
+          "lines": "283-297"
+        },
+        {
+          "raw": "scripts/windows/chatgpt-desktop.ps1:1-12",
+          "file": "scripts/windows/chatgpt-desktop.ps1",
+          "lines": "1-12"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "handy-golosovoy-vvod",
+      "section": "Установка компонентов",
+      "name": "Handy — голосовой ввод",
+      "what": "Диктовка вместо печати: зажал Ctrl+Alt+Space, продиктовал — текст вставился, распознавание локальное. Опция микрофона пишет согласие в реестр только при явном выборе.",
+      "codeRefs": [
+        {
+          "raw": "components.json:299-328",
+          "file": "components.json",
+          "lines": "299-328"
+        },
+        {
+          "raw": "scripts/windows/handy.ps1:57-61,122",
+          "file": "scripts/windows/handy.ps1",
+          "lines": "57-61,122"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "startovyy-proekt-hamidunstart",
+      "section": "Установка компонентов",
+      "name": "Стартовый проект `~/HamidunStart`",
+      "what": "Готовая папка с пятью примерами промптов, чтобы первый шаг после установки был очевиден. Дополняется, а не пропускается, если папка уже есть.",
+      "codeRefs": [
+        {
+          "raw": "assets/starter-project/",
+          "file": "assets/starter-project/",
+          "lines": ""
+        },
+        {
+          "raw": "scripts/windows/config.ps1:337-386",
+          "file": "scripts/windows/config.ps1",
+          "lines": "337-386"
+        },
+        {
+          "raw": "package.json:93-96",
+          "file": "package.json",
+          "lines": "93-96"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "detekciya-uzhe-ustanovlennogo",
+      "section": "Установка компонентов",
+      "name": "Детекция уже установленного",
+      "what": "Перед установкой честно показывает, что на машине уже стоит, и не предлагает ставить поверх рабочего. Если системный PATH не прочитался — честный баннер вместо ложного «не установлено».",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:2540-2784",
+          "file": "src/main.js",
+          "lines": "2540-2784"
+        },
+        {
+          "raw": "src/install-manifest.js",
+          "file": "src/install-manifest.js",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "udalenie-komponenta-s-kvitanciyami",
+      "section": "Установка компонентов",
+      "name": "Удаление компонента с квитанциями",
+      "what": "Кнопка «Удалить» сносит только то, что поставил этот установщик. Удаляемых компонентов четыре: `course`, `uv`, `mascot`, `bridge`.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:3236-3356",
+          "file": "src/main.js",
+          "lines": "3236-3356"
+        },
+        {
+          "raw": "src/uninstall-targets.js",
+          "file": "src/uninstall-targets.js",
+          "lines": ""
+        },
+        {
+          "raw": "src/install-receipts.js",
+          "file": "src/install-receipts.js",
+          "lines": ""
+        },
+        {
+          "raw": "src/renderer/app.js:43",
+          "file": "src/renderer/app.js",
+          "lines": "43"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "pereustanovit-nachisto-repair",
+      "section": "Установка компонентов",
+      "name": "«Переустановить начисто» (repair)",
+      "what": "Форсирует чистую переустановку конфига, но только после явного диалога-подтверждения — нужны оба флага сразу.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/app.js:462-513",
+          "file": "src/renderer/app.js",
+          "lines": "462-513"
+        },
+        {
+          "raw": "src/install-mode.js",
+          "file": "src/install-mode.js",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:1164-1176",
+          "file": "src/main.js",
+          "lines": "1164-1176"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "geyt-celostnosti-vshityh-artefaktov",
+      "section": "Целостность и гейты",
+      "name": "Гейт целостности вшитых артефактов",
+      "what": "Ни один вшитый установщик не запускается, если байты не совпали с манифестом. При любом несовпадении или отсутствии манифеста установка останавливается.",
+      "codeRefs": [
+        {
+          "raw": "scripts/windows/_verify.ps1",
+          "file": "scripts/windows/_verify.ps1",
+          "lines": ""
+        },
+        {
+          "raw": "vendor/checksums.json",
+          "file": "vendor/checksums.json",
+          "lines": ""
+        },
+        {
+          "raw": "scripts/macos/_lib.sh",
+          "file": "scripts/macos/_lib.sh",
+          "lines": ""
+        },
+        {
+          "raw": "tools/regen-checksums.js",
+          "file": "tools/regen-checksums.js",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "vtoroy-geyt-vnutri-dokachannogo-arhiva",
+      "section": "Целостность и гейты",
+      "name": "Второй гейт — внутри докачанного архива",
+      "what": "Проверяет не только архив целиком, но и конкретные исполняемые файлы внутри: `gatedFiles` есть у 19 из 23 записей реестра. Не удалось положить манифест в staging — компонент не пускается.",
+      "codeRefs": [
+        {
+          "raw": "remote-components.json",
+          "file": "remote-components.json",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:1064-1077",
+          "file": "src/main.js",
+          "lines": "1064-1077"
+        },
+        {
+          "raw": "scripts/windows/_verify.ps1",
+          "file": "scripts/windows/_verify.ps1",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "de-elevaciya",
+      "section": "Целостность и гейты",
+      "name": "Де-элевация",
+      "what": "То, что лежит в папке пользователя, никогда не исполняется с правами администратора. Единый примитив, отдельный CI-гейт на него.",
+      "codeRefs": [
+        {
+          "raw": "scripts/windows/_deelev.ps1",
+          "file": "scripts/windows/_deelev.ps1",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:1605-1877",
+          "file": "src/main.js",
+          "lines": "1605-1877"
+        },
+        {
+          "raw": "scripts/macos/_lib.sh",
+          "file": "scripts/macos/_lib.sh",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "strogiy-allowlist-okruzheniya",
+      "section": "Целостность и гейты",
+      "name": "Строгий allowlist окружения",
+      "what": "Renderer не может подсунуть подменённый PATH или чужой репозиторий конфига: явный список из 13 ключей, PATH только из admin-owned каталогов, адрес репозитория — из вшитого `config.json`.",
+      "codeRefs": [
+        {
+          "raw": "src/install-env.js:20-28",
+          "file": "src/install-env.js",
+          "lines": "20-28"
+        },
+        {
+          "raw": "src/main.js:812-862,1177-1187",
+          "file": "src/main.js",
+          "lines": "812-862,1177-1187"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "blokiruyuschiy-stop-ekran-pri-otorvannom-vendor",
+      "section": "Целостность и гейты",
+      "name": "Блокирующий стоп-экран при оторванном vendor",
+      "what": "Не даёт запустить заведомо сломанную установку, когда офлайн-файлы рядом с приложением недоступны. Проверка идёт по изданию, а не по одному файлу.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:32-152,890-895",
+          "file": "src/main.js",
+          "lines": "32-152,890-895"
+        },
+        {
+          "raw": "src/renderer/app.js:810-832",
+          "file": "src/renderer/app.js",
+          "lines": "810-832"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "proba-servera-dokachki-preflight-lite",
+      "section": "Целостность и гейты",
+      "name": "Проба сервера докачки (preflight lite)",
+      "what": "До нажатия «Установить» проверяет, отвечает ли сервер, и предупреждает жёлтым баннером с кнопкой «Проверить снова». Сеть трогает только main — CSP renderer'а запрещает fetch.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:676-694",
+          "file": "src/main.js",
+          "lines": "676-694"
+        },
+        {
+          "raw": "src/renderer/app.js:161-201",
+          "file": "src/renderer/app.js",
+          "lines": "161-201"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "odin-ekzemplyar-uborka-za-soboy",
+      "section": "Целостность и гейты",
+      "name": "Один экземпляр + уборка за собой",
+      "what": "Второй запуск не плодит вторую установку; закрытие окна не оставляет висящих инсталляторов и гигабайтов мусора. Замок живёт в main, переживает Ctrl+R.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:196-242,298-340,348-385",
+          "file": "src/main.js",
+          "lines": "196-242,298-340,348-385"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "ekran-privetstviya",
+      "section": "Экраны и сценарий ученика",
+      "name": "Экран приветствия",
+      "what": "Объясняет новичку, что будет поставлено, сколько займёт и куда бежать за помощью.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/index.html:18-87",
+          "file": "src/renderer/index.html",
+          "lines": "18-87"
+        },
+        {
+          "raw": "src/renderer/app.js:298-324",
+          "file": "src/renderer/app.js",
+          "lines": "298-324"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "ekran-vybora-komponentov-s-zavisimostyami",
+      "section": "Экраны и сценарий ученика",
+      "name": "Экран выбора компонентов с зависимостями",
+      "what": "Карточки компонентов, автоматическое включение зависимостей, платформенный гейт (чужая ОС — компонент не показывается вовсе и отбивается на запуске).",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/index.html:90-142",
+          "file": "src/renderer/index.html",
+          "lines": "90-142"
+        },
+        {
+          "raw": "src/renderer/app.js:365-542",
+          "file": "src/renderer/app.js",
+          "lines": "365-542"
+        },
+        {
+          "raw": "src/renderer/deps.js:8-21",
+          "file": "src/renderer/deps.js",
+          "lines": "8-21"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "popap-chto-popadet-chto-skachaetsya",
+      "section": "Экраны и сценарий ученика",
+      "name": "Попап «что попадёт / что скачается»",
+      "what": "Снимает страх «а не вирус ли это»: список всего с честными размерами. Где размера нет — прочерк, а не выдуманное число.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/app.js:868-918",
+          "file": "src/renderer/app.js",
+          "lines": "868-918"
+        },
+        {
+          "raw": "tools/sync-sizes.js",
+          "file": "tools/sync-sizes.js",
+          "lines": ""
+        },
+        {
+          "raw": "remote-components.json",
+          "file": "remote-components.json",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "ekran-progressa",
+      "section": "Экраны и сценарий ученика",
+      "name": "Экран прогресса",
+      "what": "Шаги, живой лог, проценты, часы на идущем шаге. Лог — кольцо из 800 строк с одной перерисовкой на кадр.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/index.html:145-192",
+          "file": "src/renderer/index.html",
+          "lines": "145-192"
+        },
+        {
+          "raw": "src/renderer/app.js:1275-1416",
+          "file": "src/renderer/app.js",
+          "lines": "1275-1416"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "progress-dokachki-v-megabaytah",
+      "section": "Экраны и сценарий ученика",
+      "name": "Прогресс докачки в мегабайтах",
+      "what": "«Скачиваю N% · X из Y МБ», чтобы не казалось, что всё зависло. Дедлайн считается от размера архива, но не меньше 20 минут.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:1033",
+          "file": "src/main.js",
+          "lines": "1033"
+        },
+        {
+          "raw": "src/preload.js:19-23",
+          "file": "src/preload.js",
+          "lines": "19-23"
+        },
+        {
+          "raw": "src/renderer/app.js:1716-1735",
+          "file": "src/renderer/app.js",
+          "lines": "1716-1735"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "karusel-podskazok",
+      "section": "Экраны и сценарий ученика",
+      "name": "Карусель подсказок",
+      "what": "Пока идёт долгая установка, крутятся короткие советы — раз в 12 секунд.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/app.js:1757-1795",
+          "file": "src/renderer/app.js",
+          "lines": "1757-1795"
+        },
+        {
+          "raw": "src/renderer/index.html:178-185",
+          "file": "src/renderer/index.html",
+          "lines": "178-185"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "maskot-omleton-v-interfeyse",
+      "section": "Экраны и сценарий ученика",
+      "name": "Маскот Омлетон в интерфейсе",
+      "what": "Персонаж меняет выражение по ходу: смотрит, думает, работает, радуется. Четыре `.webp` на диске.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/mascot/*.webp",
+          "file": "src/renderer/mascot/*.webp",
+          "lines": ""
+        },
+        {
+          "raw": "src/renderer/app.js:282-293,1905-1908",
+          "file": "src/renderer/app.js",
+          "lines": "282-293,1905-1908"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "finishnyy-ekran-tri-shaga",
+      "section": "Экраны и сценарий ученика",
+      "name": "Финишный экран «три шага»",
+      "what": "Ровно три следующих действия и большая кнопка «Открыть VS Code». Если упал редактор — кнопка гасится, первый шаг меняется.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/app.js:1971-2270",
+          "file": "src/renderer/app.js",
+          "lines": "1971-2270"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "cta-bota-s-deep-link-po-rezultatu",
+      "section": "Экраны и сценарий ученика",
+      "name": "CTA бота с deep-link по результату",
+      "what": "Ведёт застрявшего в Telegram-бота, ссылка сама сообщает боту, что упало. Хэндл только из `config.json`, хардкода нет.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/finish-link.js:14-47",
+          "file": "src/renderer/finish-link.js",
+          "lines": "14-47"
+        },
+        {
+          "raw": "src/renderer/app.js:2041-2057",
+          "file": "src/renderer/app.js",
+          "lines": "2041-2057"
+        },
+        {
+          "raw": "config.json:60",
+          "file": "config.json",
+          "lines": "60"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "pamyatka-chto-dalshe-oflayn",
+      "section": "Экраны и сценарий ученика",
+      "name": "Памятка «Что дальше» офлайн",
+      "what": "Кладёт на рабочий стол постоянную инструкцию и показывает её в окне установщика, не выдёргивая браузер. Путь только из вшитого конфига.",
+      "codeRefs": [
+        {
+          "raw": "assets/START-HERE.html",
+          "file": "assets/START-HERE.html",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:1526-1562",
+          "file": "src/main.js",
+          "lines": "1526-1562"
+        },
+        {
+          "raw": "src/renderer/app.js:920-1010",
+          "file": "src/renderer/app.js",
+          "lines": "920-1010"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "mini-vizard-api-klyuchey",
+      "section": "Экраны и сценарий ученика",
+      "name": "Мини-визард API-ключей",
+      "what": "Даёт вписать ключи Google/OpenAI/ElevenLabs на финише. Fail-closed на чтении: любая ошибка кроме «файла нет» — ключи не сохраняются.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:2253-2303",
+          "file": "src/main.js",
+          "lines": "2253-2303"
+        },
+        {
+          "raw": "src/renderer/app.js:2414-2434",
+          "file": "src/renderer/app.js",
+          "lines": "2414-2434"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "knopki-zapuska-posle-ustanovki",
+      "section": "Экраны и сценарий ученика",
+      "name": "Кнопки запуска после установки",
+      "what": "Открывает VS Code на папке проекта, Cursor, папку курса или терминал с `claude`. Терминал не запускается напрямую из elevated-процесса.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:1583-1600,1938,2003-2029,2180-2248",
+          "file": "src/main.js",
+          "lines": "1583-1600,1938,2003-2029,2180-2248"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "preduprezhdenie-zapuschen-pod-drugoy-uchetkoy",
+      "section": "Экраны и сценарий ученика",
+      "name": "Предупреждение «запущен под другой учёткой»",
+      "what": "Ловит случай, когда UAC-пароль дал другой пользователь и всё встало бы в чужой профиль. Отдельный async-IPC, чтобы не морозить стартовый экран.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:439-511,564-566",
+          "file": "src/main.js",
+          "lines": "439-511,564-566"
+        },
+        {
+          "raw": "src/renderer/app.js:109-118",
+          "file": "src/renderer/app.js",
+          "lines": "109-118"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "predpoletnye-proverki-mashiny",
+      "section": "Экраны и сценарий ученика",
+      "name": "Предполётные проверки машины",
+      "what": "Свободное место и версия ОС до старта. Best-effort: не смог замерить — просто не показывает цифру.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:513-559",
+          "file": "src/main.js",
+          "lines": "513-559"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "kaskad-propuscheno-iz-za-zavisimosti",
+      "section": "Экраны и сценарий ученика",
+      "name": "Каскад «пропущено из-за зависимости»",
+      "what": "Когда падает один компонент и за ним встают пять — объясняет одной фразой, что чинить первым. Различает целостность / сеть / окружение.",
+      "codeRefs": [
+        {
+          "raw": "src/renderer/app.js:1418-1444,1459-1473",
+          "file": "src/renderer/app.js",
+          "lines": "1418-1444,1459-1473"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "storozh-molchaschego-shaga",
+      "section": "Экраны и сценарий ученика",
+      "name": "Сторож молчащего шага",
+      "what": "Если шаг десять минут не выдаёт ни строчки — честно пишет, что установка идёт и закрывать окно рано. Процесс не убивает.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:1288-1308",
+          "file": "src/main.js",
+          "lines": "1288-1308"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "chelovecheskiy-perevod-provala",
+      "section": "Экраны и сценарий ученика",
+      "name": "Человеческий перевод провала",
+      "what": "Вместо простыни из cargo/pip/npm говорит словами, что случилось и виноват ли человек. Девять видов причин, выжимка строится всегда.",
+      "codeRefs": [
+        {
+          "raw": "src/failure-explain.js:23-144",
+          "file": "src/failure-explain.js",
+          "lines": "23-144"
+        },
+        {
+          "raw": "src/main.js:1376-1409",
+          "file": "src/main.js",
+          "lines": "1376-1409"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "macos-samolechenie-karantina-i-translokacii",
+      "section": "Экраны и сценарий ученика",
+      "name": "macOS: самолечение карантина и транслокации",
+      "what": "Кнопкой чинит «повреждённый» установщик: сам находит образ, снимает карантин, проверяет факт и перезапускается — без команд в Терминале.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:3358-3540",
+          "file": "src/main.js",
+          "lines": "3358-3540"
+        },
+        {
+          "raw": "src/renderer/app.js:719-808",
+          "file": "src/renderer/app.js",
+          "lines": "719-808"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "dva-izdaniya-oflayn-i-legkoe",
+      "section": "Публикация и издания",
+      "name": "Два издания: офлайн и лёгкое",
+      "what": "Один продукт в двух видах: тяжёлый файл без интернета и лёгкий, докачивающий выбранное. В lite компоненты выводятся в remote автоматически по реестру. Замер на 2026-08-25: офлайн-exe 1 438 688 139 Б, lite 87 950 026 Б.",
+      "codeRefs": [
+        {
+          "raw": "config.json:2",
+          "file": "config.json",
+          "lines": "2"
+        },
+        {
+          "raw": "tools/build-lite.js",
+          "file": "tools/build-lite.js",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:89-101,628-651",
+          "file": "src/main.js",
+          "lines": "89-101,628-651"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "dokachka-tyazhelyh-komponentov-iz-cdn",
+      "section": "Публикация и издания",
+      "name": "Докачка тяжёлых компонентов из CDN",
+      "what": "Лёгкий установщик тянет только выбранное — с двух зеркал, с обязательным sha256, admin-owned staging, только HTTPS, анти-SSRF, пиннинг DNS. Реестр: 23 записи (12 win32, 11 darwin).",
+      "codeRefs": [
+        {
+          "raw": "src/remote-fetch.js:23-70",
+          "file": "src/remote-fetch.js",
+          "lines": "23-70"
+        },
+        {
+          "raw": "remote-components.json",
+          "file": "remote-components.json",
+          "lines": ""
+        },
+        {
+          "raw": "src/main.js:950-1078",
+          "file": "src/main.js",
+          "lines": "950-1078"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "predpoletnye-geyty-sborki",
+      "section": "Публикация и издания",
+      "name": "Предполётные гейты сборки",
+      "what": "Не даёт выпустить установщик со вчерашним конфигом или размером, на котором makensis молча ломается. Хук `beforePack` обойти через `npx electron-builder` нельзя.",
+      "codeRefs": [
+        {
+          "raw": "tools/preflight-build.js",
+          "file": "tools/preflight-build.js",
+          "lines": ""
+        },
+        {
+          "raw": "tools/before-pack.js",
+          "file": "tools/before-pack.js",
+          "lines": ""
+        },
+        {
+          "raw": "tools/assert-clean.js",
+          "file": "tools/assert-clean.js",
+          "lines": ""
+        },
+        {
+          "raw": "tools/fetch-config.js",
+          "file": "tools/fetch-config.js",
+          "lines": ""
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "obsluzhivanie-vendor",
+      "section": "Публикация и издания",
+      "name": "Обслуживание vendor",
+      "what": "Держит цифры на карточках правдивыми, а вес сборки под потолком: пересчёт размеров, регенерация хешей, чистка npm-кеша. `npm run sizes:check` — гейт расхождения без перезаписи.",
+      "codeRefs": [
+        {
+          "raw": "tools/sync-sizes.js",
+          "file": "tools/sync-sizes.js",
+          "lines": ""
+        },
+        {
+          "raw": "tools/regen-checksums.js",
+          "file": "tools/regen-checksums.js",
+          "lines": ""
+        },
+        {
+          "raw": "tools/prune-npm-cache.js",
+          "file": "tools/prune-npm-cache.js",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "edinyy-predreliznyy-verdikt-go-no-go",
+      "section": "Публикация и издания",
+      "name": "Единый предрелизный вердикт GO/NO-GO",
+      "what": "Один прогон вместо пяти проверок «по памяти»: свежесть vendor, сверка компонентов, реестр против checksums, живость зеркал. WARN не роняет, но печатается отдельно.",
+      "codeRefs": [
+        {
+          "raw": "tools/release-check.js",
+          "file": "tools/release-check.js",
+          "lines": ""
+        },
+        {
+          "raw": "package.json:16",
+          "file": "package.json",
+          "lines": "16"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "publikaciya-artefaktov-v-s3",
+      "section": "Публикация и издания",
+      "name": "Публикация артефактов в S3",
+      "what": "Выкладывает установщики и компоненты content-addressed, чтобы перезалив не ломал старые сборки. Fail-closed по диапазону размера при выкладке дистрибутивов.",
+      "codeRefs": [
+        {
+          "raw": "tools/publish-dist.py",
+          "file": "tools/publish-dist.py",
+          "lines": ""
+        },
+        {
+          "raw": "tools/publish-vendor.py",
+          "file": "tools/publish-vendor.py",
+          "lines": ""
+        },
+        {
+          "raw": "tools/push-component.py",
+          "file": "tools/push-component.py",
+          "lines": ""
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "не найден"
+    },
+    {
+      "id": "ci-obyazatelnyy-yunit-geyt",
+      "section": "Публикация и издания",
+      "name": "CI: обязательный юнит-гейт",
+      "what": "Каждый коммит в main проверяется автоматически, `continue-on-error` не ставится нигде. Тяжёлые прогоны (E2E, mac-сборки) — вручную перед релизом.",
+      "codeRefs": [
+        {
+          "raw": ".github/workflows/unit-tests.yml",
+          "file": ".github/workflows/unit-tests.yml",
+          "lines": ""
+        },
+        {
+          "raw": "e2e-win.yml",
+          "file": ".github/workflows/e2e-win.yml",
+          "lines": ""
+        },
+        {
+          "raw": "build-mac.yml",
+          "file": ".github/workflows/build-mac.yml",
+          "lines": ""
+        },
+        {
+          "raw": "staging-primitive.yml",
+          "file": ".github/workflows/staging-primitive.yml",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "e2e-progon-nastoyaschego-gui",
+      "section": "Публикация и издания",
+      "name": "E2E-прогон настоящего GUI",
+      "what": "Проверяет установщик так, как его увидит человек: клики по реальному окну, реальная докачка, изолированный профиль; сценарий `preserve` сверяет каждый пользовательский файл побайтово по sha256.",
+      "codeRefs": [
+        {
+          "raw": "test/e2e-gui.js",
+          "file": "test/e2e-gui.js",
+          "lines": ""
+        },
+        {
+          "raw": ".github/workflows/e2e-win.yml",
+          "file": ".github/workflows/e2e-win.yml",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "kurs-simulyator-yarlyk-na-stole",
+      "section": "Курс",
+      "name": "Курс-симулятор + ярлык на столе",
+      "what": "Интерактивный курс: открываешь папку в Claude Code, агент-наставник ведёт по миссиям офлайн. На macOS распаковка через `ditto` — `unzip` ломает кириллицу в именах.",
+      "codeRefs": [
+        {
+          "raw": "components.json:158-172",
+          "file": "components.json",
+          "lines": "158-172"
+        },
+        {
+          "raw": "scripts/windows/course.ps1:29-57",
+          "file": "scripts/windows/course.ps1",
+          "lines": "29-57"
+        },
+        {
+          "raw": "vendor/course/vibecoding-course.zip",
+          "file": "vendor/course/vibecoding-course.zip",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "mayak-zaversheniya-kursa",
+      "section": "Курс",
+      "name": "Маяк завершения курса",
+      "what": "Сигналит академии, что человек дошёл до конца.",
+      "codeRefs": [
+        {
+          "raw": "config.json:38-45",
+          "file": "config.json",
+          "lines": "38-45"
+        },
+        {
+          "raw": "src/main.js:1132-1151",
+          "file": "src/main.js",
+          "lines": "1132-1151"
+        },
+        {
+          "raw": "scripts/windows/course.ps1:46-50",
+          "file": "scripts/windows/course.ps1",
+          "lines": "46-50"
+        }
+      ],
+      "tested": "unknown",
+      "testRaw": "нет"
+    },
+    {
+      "id": "telemetriya-s-opt-out-i-privyazkoy-k-cheloveku",
+      "section": "Сопутствующее",
+      "name": "Телеметрия с opt-out и привязкой к человеку",
+      "what": "Отправляет в академию, что и как встало, чтобы бот помогал адресно. Закрытый список событий, чистка ПД, uid ставит только главный процесс. Галочку можно снять.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:1444-1496",
+          "file": "src/main.js",
+          "lines": "1444-1496"
+        },
+        {
+          "raw": "src/uid-telemetry.js",
+          "file": "src/uid-telemetry.js",
+          "lines": ""
+        },
+        {
+          "raw": "src/renderer/app.js:1825-1966",
+          "file": "src/renderer/app.js",
+          "lines": "1825-1966"
+        },
+        {
+          "raw": "config.json:46-49",
+          "file": "config.json",
+          "lines": "46-49"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "zhurnal-ustanovki-na-diske",
+      "section": "Сопутствующее",
+      "name": "Журнал установки на диске",
+      "what": "Пишет всё в один файл `~/.hamidun-setup/install.log`, который человек может целиком отправить в поддержку. Один удерживаемый дескриптор вместо записи на каждой строке.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:169-191,1935",
+          "file": "src/main.js",
+          "lines": "169-191,1935"
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "audit-rabotosposobnosti-konfiga",
+      "section": "Сопутствующее",
+      "name": "Аудит работоспособности конфига",
+      "what": "Проверяет не «файлы разложились», а что конфиг на машине ученика реально работает: включённые плагины без маркетплейса, объявленные но не поднявшиеся MCP, правила со ссылками на несуществующие скрипты.",
+      "codeRefs": [
+        {
+          "raw": "tools/audit-pack.js",
+          "file": "tools/audit-pack.js",
+          "lines": ""
+        },
+        {
+          "raw": "test/audit-pack-regex.test.js",
+          "file": "test/audit-pack-regex.test.js",
+          "lines": ""
+        },
+        {
+          "raw": "test/audit-pack-run.test.js",
+          "file": "test/audit-pack-run.test.js",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    },
+    {
+      "id": "rezhim-holostogo-progona-dry-run",
+      "section": "Сопутствующее",
+      "name": "Режим холостого прогона (dry-run)",
+      "what": "Показывает, что именно будет сделано, ничего не трогая: без докачки, без записи журнала, деинсталляция печатает WOULD/KEEP.",
+      "codeRefs": [
+        {
+          "raw": "src/main.js:930-935,980-985,3291-3295",
+          "file": "src/main.js",
+          "lines": "930-935,980-985,3291-3295"
+        },
+        {
+          "raw": "scripts/*/*.ps1|sh",
+          "file": "scripts/*/*.ps1|sh",
+          "lines": ""
+        },
+        {
+          "raw": "test/clean-machine-test.ps1",
+          "file": "test/clean-machine-test.ps1",
+          "lines": ""
+        }
+      ],
+      "tested": "yes",
+      "testRaw": "есть"
+    }
+  ]
+}

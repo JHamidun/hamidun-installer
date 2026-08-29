@@ -176,6 +176,28 @@ jobs:
       - name: Проверка размеров компонентов (генератор жив и не врёт)
         run: npm run sizes:check
 
+  # Гейт против расхождения спек с кодом.
+  #
+  # ОТДЕЛЬНАЯ ubuntu-джоба, и это не про экономию, а про полноту. Проверка
+  # платформонезависимая (читает файлы репозитория), поэтому дважды её гонять
+  # незачем — но главное в другом: классификатор `changes` считает `docs/*` и `*.md`
+  # НЕ кодом, и правка одной только спеки не поднимает тестовые джобы вовсе. Стой
+  # эта проверка шагом внутри windows-джобы, она бы молча пропускала ровно тот
+  # случай, ради которого написана: PR, который правит спеку и разъезжает с кодом.
+  #
+  # Поэтому джоба идёт ВСЕГДА, без условия на `changes`. Она дешёвая: ubuntu по
+  # одинарному тарифу, без npm ci — скрипты стоят на голом Node.
+  specs:
+    name: Спеки сверены с кодом и тестами
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm run specs:check
+
   # ЕДИНСТВЕННАЯ обязательная проверка для защиты ветки.
   #
   # Идёт всегда (if: always()), поэтому «пропущено» никогда не превращается в
@@ -184,7 +206,7 @@ jobs:
   gate:
     name: Гейт юнит-тестов
     if: always()
-    needs: [changes, unit-tests-windows, unit-tests-macos]
+    needs: [changes, unit-tests-windows, unit-tests-macos, specs]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -193,15 +215,25 @@ jobs:
           W="${{ needs.unit-tests-windows.result }}"
           M="${{ needs.unit-tests-macos.result }}"
           C="${{ needs.changes.result }}"
-          echo "changes=$C  windows=$W  macos=$M"
+          S="${{ needs.specs.result }}"
+          echo "changes=$C  windows=$W  macos=$M  specs=$S"
           if [ "$C" != "success" ]; then
             echo "::error::Определение затронутого не отработало — не могу утверждать, что тесты не нужны."
             exit 1
           fi
+          # Тестовые джобы: пропуск законен (правились только документы).
           for r in "$W" "$M"; do
             case "$r" in
               success|skipped) ;;
               *) echo "::error::Юнит-тесты не прошли (windows=$W macos=$M)"; exit 1 ;;
             esac
           done
+          # Спеки — БЕЗ поблажки на skipped: джоба идёт всегда и условий не имеет,
+          # поэтому «пропущено» здесь означало бы поломку самого воркфлоу, а не
+          # законный пропуск. Принять его за успех значило бы завести проверку,
+          # которая молча перестаёт проверять.
+          if [ "$S" != "success" ]; then
+            echo "::error::Спеки разошлись с кодом или проверка не отработала (specs=$S)"
+            exit 1
+          fi
           echo "Гейт пройден."
