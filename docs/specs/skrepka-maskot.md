@@ -18,7 +18,7 @@
 
 ### Откуда берётся бинарь
 
-Windows: `tools/fetch-vendor.ps1:320-331` копирует `claude-mascot.exe` из локальной сборки (`C:\Users\hamid\claude-mascot\src-tauri\target\release\claude-mascot.exe`) в `vendor/apps/claude-mascot/`. Если компонент `mascot` объявлен в `components.json`, а exe нет — сборка валится с FATAL (`tools/fetch-vendor.ps1:599-610`).
+Windows: `tools/fetch-vendor.ps1:320-331` копирует `claude-mascot.exe` из локальной сборки (`$env:HM_MASCOT_SRC`, по умолчанию `%USERPROFILE%\claude-mascot\src-tauri\target\release\claude-mascot.exe`) в `vendor/apps/claude-mascot/`. Если компонент `mascot` объявлен в `components.json`, а exe нет — сборка валится с FATAL (`tools/fetch-vendor.ps1:599-610`).
 
 macOS: `tools/fetch-vendor-mac.sh:326-366` тянет подписанную и нотаризованную `*.app` из релизов публичного репозитория `JHamidun/claude-mascot-macos-ci` (переопределяется `HM_MASCOT_MAC_URL`). Сборочный гейт (`tools/fetch-vendor-mac.sh:618-698`) проверяет `Info.plist`, `CFBundleExecutable`, Mach-O, оба слайса `lipo` (arm64 + x86_64), `codesign --verify --deep --strict`, точное совпадение `TeamIdentifier` с `3VN93XA9DY`, нотаризацию (`stapler validate` либо `spctl --assess`) и наличие записи в `checksums.json` — иначе FATAL. Отсюда же и запись `mac-arch-support.json` → `mascot`: `"kind": "universal"`.
 
