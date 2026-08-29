@@ -127,6 +127,8 @@ function main() {
   let checkedTests = 0;
   let checkedPaths = 0;
   let skippedBuildOutputs = 0;
+  let checkedRanges = 0;
+  const lineCounts = new Map();
 
   for (const f of features) {
     const file = path.join(SPECS_DIR, f.id + '.md');
@@ -165,6 +167,54 @@ function main() {
         }
         checkedPaths++;
         if (!fs.existsSync(path.join(ROOT, p))) add(f.id, 'путь не существует', p);
+      }
+    }
+
+      // (4б) диапазоны строк не должны выходить за конец файла.
+    //
+    // ЧТО ЭТО ЛОВИТ И ЧЕГО НЕ ЛОВИТ — важно не путать. Проверяется ГРАНИЦА, а не
+    // содержимое: `src/main.js:1940-1996` пройдёт, даже если по этим строкам лежит
+    // совсем не то. Но «строка 3850 в файле на 900 строк» — самый частый способ,
+    // которым ссылка гниёт после правки кода, и он ловится тут за миллисекунды.
+    //
+    // Введено после замера: независимая проверка спек нашла у одной систематический
+    // сдвиг на −8 строк, и часть сдвигов навела моя же правка src/main.js. Сплошной
+    // прогон по 2594 диапазонам после починки дал ноль выходящих за пределы —
+    // проверка недорога и держит достигнутое.
+    //
+    // Требуем каталог в пути: без этого в выборку лезут имена из прозы
+    // (`bridge.ps1:130`) и адреса вида `127.0.0.1:1080`, неотличимые от файл:строка.
+    {
+      const re = /`([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,6}):(\d+)(?:-(\d+))?`/g;
+      let mm;
+      while ((mm = re.exec(md)) !== null) {
+        const rel = mm[1];
+        if (isBuildOutput(rel)) continue;
+        // Отбор по ФАКТУ СУЩЕСТВОВАНИЯ, а не по форме пути.
+        //
+        // Первая редакция требовала каталог в пути — чтобы не ловить `bridge.ps1:130`
+        // из прозы и адреса вида `127.0.0.1:1080`, неотличимые от «файл:строка».
+        // Правило выглядело разумным и выбросило заодно ВСЕ корневые файлы:
+        // components.json, config.json, package.json. Подлог с `components.json:99999`
+        // проверка не поймала — и это был бы гейт, пропускающий целый класс ссылок.
+        //
+        // Существование решает обе задачи разом: корневой файл в репозитории есть,
+        // а «127.0.0.1» — нет. Отсутствующий путь тут молча пропускаем: за него
+        // отвечает проверка (4) на строке «Код», где путь обязателен.
+        let n = lineCounts.get(rel);
+        if (n === undefined) {
+          try { n = fs.readFileSync(path.join(ROOT, rel), 'utf8').split(/\r?\n/).length; }
+          catch (e) { n = -1; }
+          lineCounts.set(rel, n);
+        }
+        if (n < 0) continue;
+        checkedRanges++;
+        const a = Number(mm[2]);
+        const b = mm[3] ? Number(mm[3]) : a;
+        if (a < 1 || b > n) {
+          add(f.id, 'диапазон за концом файла',
+            rel + ':' + mm[2] + (mm[3] ? '-' + mm[3] : '') + ' — в файле ' + n + ' строк');
+        }
       }
     }
 
@@ -245,6 +295,7 @@ function main() {
   const withSpec = features.filter((f) => fs.existsSync(path.join(SPECS_DIR, f.id + '.md'))).length;
   console.log('Спеки: ' + withSpec + ' из ' + features.length +
     ' | сверено путей: ' + checkedPaths + ' | сверено заголовков тестов: ' + checkedTests +
+    ' | диапазонов строк: ' + checkedRanges +
     ' | путей в PRD/ADR: ' + checkedProse +
     (skippedBuildOutputs ? ' | продуктов сборки не проверял: ' + skippedBuildOutputs + ' (vendor/, release/ — их нет в чистом чекауте)' : ''));
 
