@@ -31,6 +31,21 @@ const SPECS_DIR = path.join(ROOT, 'docs', 'specs');
 const FEATURES = path.join(SPECS_DIR, '_features.json');
 const TESTS = path.join(ROOT, 'test', 'run-tests.js');
 
+// Пути, которые ЗАКОННО отсутствуют в чистом чекауте: их производит сборка, и в
+// репозиторий они не коммитятся (vendor/ и release/ под .gitignore).
+//
+// Найдено первым же прогоном в CI: локально гейт был зелёный, а на раннере упал —
+// спеки цитируют `vendor/checksums.json`, манифест целостности, который создаёт
+// fetch:vendor. Проверять существование на рабочем дереве значило проверять
+// «развёрнут ли у МЕНЯ vendor», а не «верна ли ссылка». Ровно тот класс, о котором
+// весь этот контур: проверка, чей ответ зависит от машины, ничего не доказывает.
+//
+// Список УЗКИЙ и осознанный. Пускать сюда каталоги с исходниками нельзя — там
+// отсутствие файла означает опечатку, а не «ещё не собрано». Пропущенные по этой
+// причине пути не исчезают молча: их число печатается в итоговой строке.
+const BUILD_OUTPUT_PREFIXES = ['vendor/', 'release/'];
+const isBuildOutput = (p) => BUILD_OUTPUT_PREFIXES.some((pre) => p.startsWith(pre));
+
 const REQUIRED_SECTIONS = [
   'Что обещает человеку',
   'Как работает',
@@ -111,6 +126,7 @@ function main() {
 
   let checkedTests = 0;
   let checkedPaths = 0;
+  let skippedBuildOutputs = 0;
 
   for (const f of features) {
     const file = path.join(SPECS_DIR, f.id + '.md');
@@ -137,6 +153,7 @@ function main() {
       for (const ref of refs) {
         const p = ref.split(':')[0];
         if (/[*?]/.test(p)) continue;              // шаблон — не проверяем
+        if (isBuildOutput(p)) { skippedBuildOutputs++; continue; }
         // В строке «Код» допускаются ТОЛЬКО пути. Идентификаторы (`startTips`,
         // `#tips`, `.hidden`) в этой строке — не мелочь стиля: шапка машиночитаемая,
         // и по ней ходит проверка существования. Пустив их, пришлось бы угадывать,
@@ -213,6 +230,7 @@ function main() {
       // а не путь. Требуем каталог: иначе проверка ругалась бы на нормальный текст.
       if (!p.includes('/')) continue;
       if (/[*?]/.test(p)) continue;
+      if (isBuildOutput(p)) { skippedBuildOutputs++; continue; }
       checkedProse++;
       if (!fs.existsSync(path.join(ROOT, p))) add(rel, 'путь не существует', p);
     }
@@ -221,7 +239,8 @@ function main() {
   const withSpec = features.filter((f) => fs.existsSync(path.join(SPECS_DIR, f.id + '.md'))).length;
   console.log('Спеки: ' + withSpec + ' из ' + features.length +
     ' | сверено путей: ' + checkedPaths + ' | сверено заголовков тестов: ' + checkedTests +
-    ' | путей в PRD/ADR: ' + checkedProse);
+    ' | путей в PRD/ADR: ' + checkedProse +
+    (skippedBuildOutputs ? ' | продуктов сборки не проверял: ' + skippedBuildOutputs + ' (vendor/, release/ — их нет в чистом чекауте)' : ''));
 
   if (!problems.length) {
     console.log('\nОК: каждая спека ссылается на существующий код и на реально существующие тесты.');
