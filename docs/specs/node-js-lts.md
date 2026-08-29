@@ -3,7 +3,7 @@
 <!-- spec-id: node-js-lts -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:21-34`, `scripts/windows/node.ps1`, `scripts/macos/node.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:700-742`, `remote-components.json`, `tools/fetch-vendor.ps1:21-24`, `tools/fetch-vendor-mac.sh:35-37`, `tools/sync-sizes.js:80-116`, `scripts/windows/verify.ps1:55-67`, `scripts/macos/verify.sh:45-52`
+- **Код:** `components.json:21-34`, `scripts/windows/node.ps1`, `scripts/macos/node.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:700-742`, `remote-components.json`, `tools/fetch-vendor.ps1:21-24`, `tools/fetch-vendor-mac.sh:35-37`, `tools/sync-sizes.js:80-116`, `scripts/windows/verify.ps1:55-67`, `scripts/macos/verify.sh:44-54`
 - **Тесты:** «node.sh: admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" (Team ID позиционным); verify+install атомарно под root; verify_pkg_team_id убран», «_lib.sh (функц.): HM_PKG_INSTALL_SH — verify+install на STAGED копии (не источник); wrong-team/unsigned → fail-closed», «bash -n без синтаксических ошибок», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «размеры: файловые компоненты (setup.exe/msi/vsix/zip) сходятся с vendor»
 
 ## Что обещает человеку
@@ -29,7 +29,7 @@
 1. **Node уже есть** (`Get-Command node`, строка 93). Печатает версию. В dry-run выходит сразу (строка 95). Иначе — молча чинит системный PATH через `Add-HmMachinePath` и `exit 0` (строки 98-99).
 2. **Вшитый MSI** — если задан `HM_VENDOR` и существует `$HM_VENDOR\apps\node-lts.msi` (строки 102-103). Перед запуском вызывается `Confirm-HmArtifact` (fail-closed sha256 против `vendor/checksums.json`), затем `msiexec /i "<msi>" /qn /norestart` под `-Wait` (строка 106).
 3. **winget** — если MSI нет, но `Get-Command winget` находит winget (строка 107): `winget install -e --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements` (строка 109).
-4. **Онлайн-загрузка** (строки 110-156). Создаётся Admins-only каталог `New-HmSecureStagingDir -Elevated $true` в `%ProgramData%` (строка 124); не удалось создать — ветка обрывается с `exit 1` (строки 126-129), в user-writable `%TEMP%` не качаем. Дальше `Invoke-RestMethod` на `index.json` с `-TimeoutSec 60`, выбор первой LTS-записи, `Invoke-WebRequest` на `node-<ver>-x64.msi` с `-TimeoutSec 600` и `$ProgressPreference='SilentlyContinue'` (строки 132-136). Сбой сети — чистка кэша и `exit 1` (строки 137-141). Перед запуском — `Test-HmTrustedSigner` (строка 147): недостаточно `Status='Valid'`, требуется корень цепочки в `LocalMachine\Root` и EKU Code Signing (`_deelev.ps1:375-435`). Подпись не подтвердилась — `msiexec` **не** запускается, печатается «БЕЗОПАСНОСТЬ: … НЕ запускаю (fail-closed)» (строки 150-152). Кэш убирается в любом случае (строка 154).
+4. **Онлайн-загрузка** (строки 110-156). Первым делом гасится прогресс-бар — `$ProgressPreference = 'SilentlyContinue'` (строка 118, ещё до создания кэша; по комментарию на строке 114 в PS 5.1 он «в разы замедляет скачивание»). Создаётся Admins-only каталог `New-HmSecureStagingDir -Elevated $true` в `%ProgramData%` (строка 124); не удалось создать — ветка обрывается с `exit 1` (строки 126-129), в user-writable `%TEMP%` не качаем. Дальше `Invoke-RestMethod` на `index.json` с `-TimeoutSec 60`, выбор первой LTS-записи, сборка URL и `Invoke-WebRequest` на `node-<ver>-x64.msi` с `-TimeoutSec 600` (строки 132-136). Сбой сети — чистка кэша и `exit 1` (строки 137-141). Перед запуском — `Test-HmTrustedSigner` (строка 147): недостаточно `Status='Valid'`, требуется корень цепочки в `LocalMachine\Root` и EKU Code Signing (`_deelev.ps1:375-435`). Подпись не подтвердилась — `msiexec` **не** запускается, печатается «БЕЗОПАСНОСТЬ: … НЕ запускаю (fail-closed)» (строки 150-152). Кэш убирается в любом случае (строка 154).
 
 Финал (строки 158-173): в dry-run выход 0; иначе `Update-Path` правит PATH **только внутри процесса** (строки 5-24; HKCU PATH не читается намеренно — комментарий на строках 6-10 объясняет, что medium-процесс того же пользователя мог бы дописать туда каталог с подложенным node), затем повторный `Get-Command node`. Если node найден — вызывается `Add-HmMachinePath` на `%ProgramFiles%\nodejs`, потом читается реальный `Machine`-PATH и ищется запись, оканчивающаяся на `\nodejs` (строки 163-165). Не нашлась — печатается предупреждение про неработающие `npx` и MCP (строки 166-169), но шаг всё равно завершается `exit 0` со строкой `OK: node <ver>, npm <ver>`. Node не найден — `exit 1`.
 
@@ -51,7 +51,7 @@
 
 ### Проверка после установки
 
-Шаг `verify` (отдельный компонент, `components.json:97-106`) печатает `CHECK ok Node` / `CHECK fail Node`, если компонент был выбран: Windows — `Get-Command node` + `node -v` (`scripts/windows/verify.ps1:55-67`), macOS — `have node && node -v` (`scripts/macos/verify.sh:45-52`).
+Шаг `verify` (отдельный компонент, `components.json:97-106`) печатает `CHECK ok Node` / `CHECK fail Node`, если компонент был выбран: Windows — `Get-Command node` + `node -v` (`scripts/windows/verify.ps1:55-67`), macOS — `have node && node -v` (`scripts/macos/verify.sh:44-54`).
 
 ## Инварианты
 

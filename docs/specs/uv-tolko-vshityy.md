@@ -3,7 +3,7 @@
 <!-- spec-id: uv-tolko-vshityy -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:196-220`, `scripts/windows/uv.ps1`, `scripts/macos/uv.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/macos/_lib.sh:69-109`, `src/main.js:639`, `src/main.js:122-132`, `src/main.js:1116-1134`, `src/install-receipts.js:33-34`, `src/uninstall-targets.js:140-157`, `src/renderer/app.js:43`, `tools/build-lite.js:45-60`, `tools/fetch-vendor.ps1:208-274`, `tools/fetch-vendor-mac.sh:600-617`, `tools/release-check.js:34-39`, `remote-components.json:19-40`, `vendor/checksums.json`, `scripts/windows/nomad.ps1:123-183`
+- **Код:** `components.json:196-220`, `scripts/windows/uv.ps1`, `scripts/macos/uv.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/macos/_lib.sh:69-109`, `src/main.js:639`, `src/main.js:122-132`, `src/main.js:1116-1134`, `src/install-receipts.js:33-34`, `src/uninstall-targets.js:140-157`, `src/renderer/app.js:43`, `tools/build-lite.js:45-60`, `tools/fetch-vendor.ps1:208-274`, `tools/fetch-vendor-mac.sh:600-617`, `tools/release-check.js:48`, `remote-components.json:19-40`, `vendor/checksums.json`, `scripts/windows/nomad.ps1:123-183`
 - **Тесты:** «P1-A uv.ps1: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed SHA; никакой сети», «P1-A uv.sh: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed verify_artifact; никакой сети», «uv.ps1: fail-closed guards (run-from-source, Leaf, reparse, exit-code, формат версии)», «uv.sh: fail-closed guards (run-from-source, non-symlink, exit-code, формат версии)», «#7 uv.ps1: junction-guard перед Copy-Item (reparse родителя → фейл, leaf → .Delete)», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «offline: uv вшит — НЕ remote-компонент (нет remote:true/remoteId), platforms win32+darwin», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «P1-B fetch-vendor.ps1: uv качается в .part → проверка zip содержит uv.exe/uvx.exe → atomic move; сбой → .part удалён», «P1 fetch-vendor.ps1: skip валидирует существующий uv (оба EXE) — битый → Remove+перекачка; FATAL требует uv+uvx», «P1-B fetch-vendor-mac.sh: uv качается в .part → проверка tar содержит uv+uvx → atomic mv; сбой → .part удалён», «P1 fetch-vendor-mac.sh: skip валидирует существующий tarball (tar+uv/uvx) — битый → rm+перекачка; FATAL требует uv+uvx», «release-check загружается и знает про законные исключения реестра (uv/course)», «lite (macOS): неполный сиблинг (нет checksums.json / нет uv / нет курса) → плашка горит»
 
 ## Что обещает человеку
@@ -30,8 +30,9 @@ uv всё равно проходит.
 после этого делает Move-Item на `vendor/apps/uv`. Провал на любом шаге → `.part`/`_stage`
 удаляются, каталог не публикуется. Существующий `vendor/apps/uv` пропускается (skip)
 только если проходит ту же валидацию; полуизвлечённый каталог удаляется и качается
-заново. Финальный гейт `tools/fetch-vendor.ps1:591-597`: если строка `"uv"` встречается
-в `components.json`, а `Test-HmUvVendorValid` не проходит — сборка падает с `exit 1`.
+заново. Финальный гейт `tools/fetch-vendor.ps1:592-603`: если строка `"uv"` встречается
+в `components.json` (условие на строке 597), а `Test-HmUvVendorValid` не проходит
+(проверка на 598) — сборка падает с `exit 1` (строка 600).
 macOS-аналог — `tools/fetch-vendor-mac.sh:600-617`: два арх-специфичных тарболла
 `uv-macos-arm64.tar.gz` и `uv-macos-x64.tar.gz`, каждый валидируется `uv_tarball_valid`
 (tar читается И содержит `uv`, И содержит `uvx`), иначе FATAL. Имена арх-специфичны
@@ -53,8 +54,10 @@ remote-компонентов по реестру (`loadRemoteMaps`, ветка 
 **исключает** uv, поэтому даже при наличии записи в `remote-components.json:19-40`
 (запись есть, `platform: "win32"`, sha и два зеркала) main её не использует.
 Ветка `if (c.remote && c.remoteId)` стоит раньше и сработала бы, но в `components.json`
-у uv нет ни `remote`, ни `remoteId`. `tools/release-check.js:39` заносит uv в
-`NO_REGISTRY_OK` — отсутствие записи в реестре для него не считается дырой.
+у uv нет ни `remote`, ни `remoteId`. `tools/release-check.js:48` заносит uv в
+`NO_REGISTRY_OK` — отсутствие записи в реестре для него не считается дырой; послабление
+применяется на `:170` (`if (NO_REGISTRY_OK.has(id)) continue;`) и `:191`, а сам набор
+экспортируется на `:538`. Строки `34-47` — только комментарий-обоснование к нему.
 
 **Windows-путь (`scripts/windows/uv.ps1`).** Скрипт дот-сорсит `_verify.ps1` и:
 1. При `HM_DRY_RUN` печатает план и выходит `exit 0` **до** любой записи на диск и до проверки vendor (строки 20-23). Абсолютной границей «диска» ветка не является: строка 16 (`. (Join-Path $PSScriptRoot '_verify.ps1')`) дот-сорсит файл ещё до неё.
@@ -102,7 +105,8 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
    маркер установки (`shouldRecordInstall` требует `code === 0`).
 4. **uv никогда не докачивается из облака.** `BUNDLED_ONLY` в `src/main.js:639`
    исключает его из авто-remote lite-издания; `components.json` не содержит `remote`/
-   `remoteId` у uv; `tools/release-check.js:39` фиксирует это как норму.
+   `remoteId` у uv; `tools/release-check.js:48` фиксирует это как норму
+   (`const NO_REGISTRY_OK = new Set(['uv', 'course']);`).
 5. **Lite-издание обязано физически нести uv.** `tools/build-lite.js:45-60`
    (`LITE_KEEP_WIN`/`LITE_KEEP_MAC`), и `editionVendorPresent()` (`src/main.js:122-132`)
    считает lite-vendor «на месте» только при наличии `checksums.json` + uv + курса.
@@ -110,8 +114,16 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
    запускается.** `uv.ps1:57` (`& $srcUv --version`), копия появляется только на строке
    90 — после проверки. Успех = код 0 И формат `^uv\s+\d` (`uv.ps1:62`); на macOS —
    `case "$VER" in 'uv '[0-9]*)` (`uv.sh:62-65`).
-7. **Reparse-point/симлинк в цепочке отвергается.** Источник (`uv.ps1:33-36`,
-   `uv.sh:52`), родитель приёмника (`uv.ps1:79-82`), сам приёмник (`uv.ps1:83-86`).
+7. **Reparse-point/симлинк в цепочке отвергается — безусловно только на источнике.**
+   Источник (`uv.ps1:33-36`, `uv.sh:52`) проверяется fail-closed: `Get-Item -Force`
+   на `uv.ps1:32` идёт без `try/catch` при `$ErrorActionPreference = 'Stop'`
+   (`uv.ps1:15`), поэтому сбой чтения роняет скрипт, а не пропускает путь. Родитель
+   приёмника (`uv.ps1:79-82`) и сам приёмник (`uv.ps1:83-86`) опираются на хелпер
+   `Test-HmReparse` (`uv.ps1:74-77`), который глотает исключение и возвращает `$false`
+   («не reparse»). Это fail-OPEN: при отказе доступа, гонке или слишком длинном пути
+   обе проверки пропускают путь дальше — к `New-Item`/`Copy-Item` (`uv.ps1:89-91`).
+   Код это признаёт сам: комментарий `uv.ps1:69` помечен «#7 (best-effort)», а
+   сообщение на `uv.ps1:85` — «не удалось убрать (best-effort)».
 8. **PATH пишется как `REG_EXPAND_SZ` и только если нашего каталога там ещё нет.**
    `uv.ps1:108-126`: чтение с `DoNotExpandEnvironmentNames`, сравнение по
    `TrimEnd('\')`, запись `RegistryValueKind::ExpandString`.
@@ -124,7 +136,9 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
     `file`-таргета, `emptydir` на каталоге, `pathentry` с `onlyIfDirGone: true`; на
     macOS `~/.local/bin` не удаляется никогда (общий каталог).
 11. **Сборка падает, если компонент объявлен, а бинарей нет.**
-    `tools/fetch-vendor.ps1:591-597` и `tools/fetch-vendor-mac.sh:604-616` требуют
+    `tools/fetch-vendor.ps1:592-603` (условие по `components.json` — 597,
+    `Test-HmUvVendorValid` — 598, `exit 1` — 600) и `tools/fetch-vendor-mac.sh:604-616`
+    (цикл `for UVA in arm64 x64`, `exit 1` на 608 и 612) требуют
     оба бинаря / оба валидных тарболла.
 
 ## Что ломается, если инвариант нарушить
@@ -143,9 +157,11 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
 4. **Если uv станет remote**, единственный компонент с гарантией офлайна её потеряет:
    у пользователя без доступа к S3-зеркалам (или с DPI-блокировкой) uv не встанет, а
    вместе с ним отвалится офлайн-путь Nomad — `nomad.ps1` уйдёт в
-   `Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression` **под
-   администратором**, то есть в скачивание и исполнение скрипта из сети с админскими
-   правами.
+   `Invoke-RestMethod https://astral.sh/uv/install.ps1 -TimeoutSec 120 | Invoke-Expression`
+   (`nomad.ps1:177`, ветка «последнего фолбэка» 168-182) **под администратором**, то есть
+   в скачивание и исполнение скрипта из сети с админскими правами. Таймаут здесь не
+   косметика: комментарий `nomad.ps1:172-176` объясняет, что по умолчанию у
+   `Invoke-RestMethod` он `0`, то есть бесконечность.
 5. **Если lite соберётся без uv**, mac-издание вдобавок начнёт вечно показывать плашку
    «файлы рядом не подхватятся» (`editionVendorPresent` вернёт false), и человек будет
    искать поломку там, где её нет.
@@ -199,12 +215,12 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
 
 1. **Тесты самих `uv.ps1`/`uv.sh` — текстовые, не функциональные.** Десять
    процитированных проверок читают исходник (`fs.readFileSync`) и матчат регулярками:
-   `run-tests.js:4730` (dry-run), `:4818`, `:4829`, `:4838`, `:4850`, `:4868` (гейты
-   скриптов), `:4897`, `:4913`, `:4932`, `:4951` (fetch-vendor). На остальные
+   `run-tests.js:4773` (dry-run), `:4861`, `:4872`, `:4881`, `:4893`, `:4911` (гейты
+   скриптов), `:4940`, `:4956`, `:4975`, `:4994` (fetch-vendor). На остальные
    процитированные тесты это НЕ распространяется — они вызывают продуктовый код и
    сверяют его результат: `:2622` → `utMod.uninstallTargets('uv', …)` и разбор плана,
-   `:267` → `rf.pickEntry(remoteReg, 'uv', 'win32')`, `:8095` → `ctx.__editionVendorPresent()`
-   на собранном контексте, `:8815` → `require('tools/release-check.js')` и проверка
+   `:267` → `rf.pickEntry(remoteReg, 'uv', 'win32')`, `:8138` → `ctx.__editionVendorPresent()`
+   на собранном контексте, `:8858` → `require('tools/release-check.js')` и проверка
    `NO_REGISTRY_OK instanceof Set`; `:281` сверяет данные `components.json` и
    `remote-components.json`, тоже без регулярок по исходнику. Но ни один из них не
    запускает сами `uv.ps1`/`uv.sh`: функционального прогона uv в `test/run-tests.js`
@@ -212,7 +228,12 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
    `uv`. Значит, гейты скриптов защищены от УДАЛЕНИЯ строк, но не от
    ситуации, когда строка на месте, а поведение другое. Частичное покрытие даёт
    `test/e2e-gui.js` (uv там — компонент по умолчанию для сценария установки и
-   удаления, `HM_E2E_UNINSTALL_COMPONENT`), но это отдельный файл, вне гейта check-specs.
+   удаления: `test/e2e-gui.js:57` — `const UNINSTALL_COMPONENT = process.env.HM_E2E_UNINSTALL_COMPONENT || 'uv';`),
+   но в шапке ЭТОЙ спеки он не указан, поэтому машинно не сверяется. Сам гейт такие
+   ссылки понимает: `tools/check-specs.js:246-248` вынимает из строки «Тесты» пути
+   вида `test/<файл>` (срезая суффикс `:строки`), а `:259-261` проверяет их
+   существование; форма `test/e2e-gui.js:374-398` прямо названа законной в
+   комментарии `tools/check-specs.js:242-245`.
 2. **Заголовок теста «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
    шире его тела.** В теле (`test/run-tests.js:281-290`) uv не проверяется вовсе:
    перечислены `git…mascot` (обязаны быть в реестре) и `course/bridge/verify/…` (не
