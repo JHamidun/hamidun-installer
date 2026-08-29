@@ -92,8 +92,12 @@ function main() {
   const problems = [];        // [{ id, kind, text }]
   const add = (id, kind, text) => problems.push({ id, kind, text });
 
+  // README.md здесь — СГЕНЕРИРОВАННЫЙ указатель (tools/extract-features.js), а не
+  // спека. Без этого исключения он читался бы как спека-сирота, и гейт требовал бы
+  // удалить собственный оглавительный файл.
+  const NOT_A_SPEC = new Set(['README.md']);
   const onDisk = fs.existsSync(SPECS_DIR)
-    ? fs.readdirSync(SPECS_DIR).filter((n) => n.endsWith('.md') && !n.startsWith('_'))
+    ? fs.readdirSync(SPECS_DIR).filter((n) => n.endsWith('.md') && !n.startsWith('_') && !NOT_A_SPEC.has(n))
     : [];
   const expected = new Set(features.map((f) => f.id + '.md'));
 
@@ -133,6 +137,15 @@ function main() {
       for (const ref of refs) {
         const p = ref.split(':')[0];
         if (/[*?]/.test(p)) continue;              // шаблон — не проверяем
+        // В строке «Код» допускаются ТОЛЬКО пути. Идентификаторы (`startTips`,
+        // `#tips`, `.hidden`) в этой строке — не мелочь стиля: шапка машиночитаемая,
+        // и по ней ходит проверка существования. Пустив их, пришлось бы угадывать,
+        // «путь это или имя функции», а угадывающая проверка перестаёт быть
+        // проверкой. Имена функций и селекторов — в разделы прозы, там им и место.
+        if (!p.includes('/') && !/\.[A-Za-z0-9]{1,6}$/.test(p)) {
+          add(f.id, 'в строке «Код» не путь', '«' + p + '» — перенеси в текст раздела');
+          continue;
+        }
         checkedPaths++;
         if (!fs.existsSync(path.join(ROOT, p))) add(f.id, 'путь не существует', p);
       }
