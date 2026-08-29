@@ -3,7 +3,7 @@
 <!-- spec-id: udalenie-komponenta-s-kvitanciyami -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `src/uninstall-targets.js`, `src/uninstall-exec.js`, `src/install-receipts.js`, `src/main.js:3243-3363`, `src/main.js:3117-3241`, `src/main.js:3092-3109`, `src/main.js:2976-3052`, `src/main.js:2750-2784`, `src/main.js:1313-1358`, `src/main.js:366-373`, `src/renderer/app.js:38-43`, `src/renderer/app.js:506-575`, `src/preload.js:12`, `src/install-manifest.js:160-167`
+- **Код:** `src/uninstall-targets.js`, `src/uninstall-exec.js`, `src/install-receipts.js`, `src/main.js:3251-3371`, `src/main.js:3125-3249`, `src/main.js:3102-3117`, `src/main.js:2984-3059`, `src/main.js:2750-2784`, `src/main.js:1328-1363`, `src/main.js:366-373`, `src/renderer/app.js:38-43`, `src/renderer/app.js:506-575`, `src/preload.js:12`, `src/install-manifest.js:160-167`
 - **Тесты:** «targets: course (win32) — контент курса из известных мест; ярлык из вшитого config; НИ одной цели в ~/.claude», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «targets: mascot (darwin) БЕЗ vendor → НЕТ appbundle-цели (fail-closed); с vendor → точный путь + пин TeamID», «targets: неизвестный/не-removable id → null (деинсталляция отклоняется fail-closed)», «guard: сам ~/.claude, всё внутри него, дом, предок дома, ~/CLAUDE.md, ~/.hamidun-setup → отказ», «PRESERVE: деинсталляция курса — sandbox/state.json/identity.json/settings.local.json ЦЕЛЫ, контент курса удалён, ~/.claude цел», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «crafted-квитанция с artifacts на ~/.claude НЕ влияет на план: artifacts игнорируются целиком», «uninstall: REMOVABLE (app.js) гейтится квитанцией-маркером; все REMOVABLE имеют зашитую карту целей», «main.js: uninstall гейтится hasReceipt (маркер); receipted в detect-state; маркер пишется при успехе установки», «main.js (source): деактивация маркера ДО удаления, restore при провале, stillThere → ok:false, финальная очистка проверяется», «receipts: deactivate (атомарно, ДО удаления) → hasReceipt=false; restore → true; finalize с ПРОВЕРКОЙ результата», «прерванное удаление: маркер возвращается на старте, живой не затирается», «P0-4 (source): uninstall-component — platform-гейт ДО плана (win32-компонент на darwin → отказ)», «main.js (source) + app.js: Nomad-uninstall отбит ранним гейтом (UNINSTALL_DISABLED) и НЕ предлагается в UI», «P1-7 main.js: учёт чистится ТОЛЬКО после пост-детекции отсутствия; оставшийся компонент → ok:false», «цель hookurl заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё», «restoreHookUrl (реальная ФС): порт снят, чужие ключи целы, повтор идемпотентен»
 
 ## Что обещает человеку
@@ -19,7 +19,7 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
 Кнопка появляется только у компонентов, которые установщик ставил САМ: в UI её
 показывает `renderInstalledActions` при условии `REMOVABLE.has(c.id) && det.receipted`
 (`src/renderer/app.js:513`), а в main то же требование стоит гейтом
-`receipts.hasReceipt` (`src/main.js:3280`). Обещание «удалю только своё» проверяемо: у
+`receipts.hasReceipt` (`src/main.js:3288`). Обещание «удалю только своё» проверяемо: у
 человека, который поставил uv руками год назад, кнопки не будет, а если он вызовет
 операцию в обход UI — она откажет с текстом «этот установщик его не ставил».
 
@@ -36,7 +36,7 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
 `ipcRenderer.invoke('uninstall-component', { id, env })` (`src/preload.js:12`).
 
 **Гейты в обработчике** `ipcMain.handle('uninstall-component')`
-(`src/main.js:3243-3363`), строго по порядку:
+(`src/main.js:3251-3371`), строго по порядку:
 
 1. id из `VALID_COMPONENT_IDS`, иначе `Unknown component id`;
 2. `meta.hidden` → «Служебный компонент … не деинсталлируется»;
@@ -48,7 +48,7 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
 5. `receipts.hasReceipt(home, id)` → нет маркера, значит ставили не мы, отказ.
 
 **Построение плана.** `uninstallTargets(id, buildUninstallCtx())`
-(`src/main.js:3289`). Контекст `buildUninstallCtx` (`src/main.js:3092-3109`) собран
+(`src/main.js:3297`). Контекст `buildUninstallCtx` (`src/main.js:3102-3117`) собран
 только из доверенных источников: `process.platform`, `os.homedir()`,
 `app.getPath('desktop')`, вшитый `config.json` (`course.targetDirDefault`,
 `course.shortcutName`, `nomad.packageName`) и — на macOS — vendor-бандл маскота через
@@ -77,20 +77,31 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
   Windows: `killproc claude-mascot.exe`, `dirtree` каталога приложения,
   `.claude-mascot/.installed`, `emptydir`, `reg`-значение `ClaudeMascot`. macOS:
   `launchagent com.hamidun.claude-mascot` + plist, и `appbundle` в `~/Applications` —
-  ТОЛЬКО если `ctx.mascotMac` дал имя и bundleId из vendor; иначе цели `.app` нет
-  вовсе и в план уходит нота «Vendor недоступен».
+  ТОЛЬКО если `ctx.mascotMac` дал ИМЯ `.app` из vendor: гейт проверяет ровно
+  `ctx.mascotMac.appName` и его расширение (`src/uninstall-targets.js:221`), bundleId
+  в условии не участвует и берётся строкой ниже как `String(bundleId || '')`
+  (`src/uninstall-targets.js:226`). Имени нет — цели `.app` нет вовсе и в план уходит
+  нота «Vendor недоступен» (`src/uninstall-targets.js:232`). Имя есть, а bundleId
+  вычислить не удалось (`macBundleIdOf` возвращает `''` при ЛЮБОМ сбое PlistBuddy,
+  `src/main.js:3062-3068`; `resolveMascotVendorApp` отдаёт результат как есть,
+  `src/main.js:3087-3098`) — цель ВСЁ РАВНО попадает в план с пустым эталоном, и ноты
+  «Vendor недоступен» человек не видит. Fail-closed при этом не теряется, но
+  срабатывает позже и дороже: `executeUninstallTarget` отбивает такую цель как
+  `failed` («ЗАЩИТА: нет эталонного CFBundleIdentifier (vendor) — отказ удалять
+  .app», `src/main.js:3212`), а один `failed` роняет ВСЮ деинсталляцию маскота в
+  `ok:false` с возвратом маркера (`src/main.js:3344-3352`).
 
 **Dry-run.** `isDryRun` берётся из `process.env.HM_DRY_RUN` ИЛИ из renderer-подсказки
-(`src/main.js:3268`). В этом режиме печатаются строки `WOULD:` и `KEEP:` и возврат
+(`src/main.js:3276`). В этом режиме печатаются строки `WOULD:` и `KEEP:` и возврат
 происходит ДО деактивации маркера — ни одной операции над диском.
 
 **Учёт до и после.** `receipts.deactivateReceipt` атомарным `rename` превращает
 маркер в `<id>.json.uninst` ДО первой операции удаления; не смог — деинсталляция
 прерывается, ничего не удаляется. Дальше каждая цель исполняется
-`executeUninstallTarget` (`src/main.js:3136-3241`), который раскладывает тип на
+`executeUninstallTarget` (`src/main.js:3144-3249`), который раскладывает тип на
 исполнителя из `uninstall-exec` (`removeFile`, `removeEmptyDir`, `removeDirTree`,
 `removeProfileLine`, `restoreHookUrl`) либо на локальные `winRegDeleteValue` /
-`winRemoveUserPathEntry` (`src/main.js:2980-3051`), а неизвестный тип отбивает
+`winRemoveUserPathEntry` (`src/main.js:2988-3059`), а неизвестный тип отбивает
 fail-closed. Каждая строка результата уходит и в UI (`component-log`), и в
 `install.log`.
 
@@ -114,49 +125,57 @@ fail-closed. Каждая строка результата уходит и в U
    `uninstallTargets` из `home`/вшитого config/vendor. Легаси-квитанция v1 с
    artifacts остаётся валидным маркером, её artifacts игнорируются целиком.
 2. Удаление без маркера невозможно: `receipts.hasReceipt(home, id)` — обязательный
-   гейт (`src/main.js:3280-3286`), а в UI кнопка вообще не рендерится без
+   гейт (`src/main.js:3288-3294`), а в UI кнопка вообще не рендерится без
    `det.receipted` (`src/renderer/app.js:513`).
-3. Ни одна цель не может лежать в `~/.claude`, `~/CLAUDE.md`, `~/.hamidun-setup`, в
-   самом доме или его предке: `checkTarget` отбивает и точное совпадение, и «внутри»,
-   и «предок существующего защищённого» (`src/uninstall-exec.js:139-158`). На POSIX
-   дополнительно сверяются device+inode (`src/uninstall-exec.js:162-181`).
+3. Ни одна УДАЛЯЮЩАЯ цель не может лежать в `~/.claude`, `~/CLAUDE.md`,
+   `~/.hamidun-setup`, в самом доме или его предке: `checkTarget` отбивает и точное
+   совпадение, и «внутри», и «предок существующего защищённого»
+   (`src/uninstall-exec.js:139-158`). На POSIX дополнительно сверяются device+inode
+   (`src/uninstall-exec.js:162-181`). Исключение ровно одно и оно ничего не удаляет:
+   цель `hookurl` на `~/.claude/settings.json` (`src/uninstall-targets.js:201-207`) —
+   первая в плане маскота на обеих платформах. Через `checkTarget` она НЕ проходит:
+   `executeUninstallTarget` отправляет её напрямую в `restoreHookUrl`
+   (`src/main.js:3165`), а тот заменяет guard собственным узким допуском — см.
+   инвариант 4.
 4. Единственная операция, которой разрешено писать в `~/.claude`, — `restoreHookUrl`,
    и она ничего не удаляет: допущен ровно один путь `~/.claude/settings.json`
    (`src/uninstall-exec.js:528-531`), проверяется, что это не symlink и обычный файл,
    JSON парсится ДО и ПОСЛЕ замены, запись атомарная.
 5. Пути из `preserve` переживают удаление: они уходят в `guardOpts.extraProtected`
-   (`src/main.js:3293`), и `removeDirTree` отказывает всей цели, если внутри неё лежит
+   (`src/main.js:3301`), и `removeDirTree` отказывает всей цели, если внутри неё лежит
    сохраняемый путь (`src/uninstall-exec.js:235-239`).
 6. `emptydir` физически не может удалить содержимое: используется `fs.rmdirSync` без
    рекурсии, а непустой каталог возвращает `kept`
    (`src/uninstall-exec.js:209-228`).
 7. Запись PATH убирается только при реально отсутствующем каталоге: существует —
    `kept`; ошибка проверки, отличная от ENOENT/ENOTDIR — `failed`
-   (`src/main.js:3010-3017`). Само значение переписывается с сохранением типа и с
-   отказом при подозрении на потерю символов (`src/main.js:3033-3035`).
+   (`src/main.js:3018-3025`). Само значение переписывается с сохранением типа и с
+   отказом при подозрении на потерю символов (`src/main.js:3041-3043`).
 8. Из реестра удаляется только точное значение под единственным разрешённым ключом:
    `WIN_REG_ALLOWED_KEYS` содержит ровно `software\microsoft\windows\currentversion\run`
-   (`src/main.js:2976`), hive обязан быть `HKCU`, результат верифицируется повторным
+   (`src/main.js:2984`), hive обязан быть `HKCU`, результат верифицируется повторным
    чтением.
 9. Из rc-файла уходит только строка, ЦЕЛИКОМ равная installer-строке после `trim`
    (`src/uninstall-exec.js:441-444`), и только из `~/.zshrc`, `~/.bash_profile`,
    `~/.bashrc` (`allowedRcFiles`).
 10. `.app` на macOS удаляется только при двойном совпадении идентичности:
     `CFBundleIdentifier` равен значению из vendor И `TeamIdentifier` равен пину
-    `3VN93XA9DY` (`src/main.js:3199-3214`, `src/uninstall-targets.js:56`). Vendor
-    недоступен — цели `.app` в плане нет.
+    `3VN93XA9DY` (`src/main.js:3207-3221`, `src/uninstall-targets.js:56`). Vendor не
+    дал ИМЕНИ `.app` — цели `.app` в плане нет (`src/uninstall-targets.js:221`); дал
+    имя, но не bundleId — цель в плане есть с пустым `expectBundleId`, и её отбивает
+    уже исполнитель (`src/main.js:3212`), а не построитель плана.
 11. Маркер деактивируется ДО первой операции удаления, и невозможность деактивации
-    прерывает всё (`src/main.js:3304-3308`).
+    прерывает всё (`src/main.js:3312-3316`).
 12. Учёт (tombstone + манифест) чистится только после подтверждённой пост-проверки, и
     результат чистки проверяется: `finalizeRemoval` возвращает `ok:false`, если
     tombstone остался или остались хвосты `.bak`/`.tmp`
     (`src/install-receipts.js:268-291`).
 13. Неизвестный тип цели не исполняется: `default` в `executeUninstallTarget` →
-    `failed` с «ЗАЩИТА: неизвестный тип цели» (`src/main.js:3238-3239`).
+    `failed` с «ЗАЩИТА: неизвестный тип цели» (`src/main.js:3246-3247`).
 14. Компонент из `UNINSTALL_DISABLED` отбивается ДО построения плана даже при валидной
-    квитанции (`src/main.js:3261-3263`).
+    квитанции (`src/main.js:3269-3271`).
 15. В dry-run не деактивируется маркер, не исполняется ни одна цель и не пишется
-    `install.log` (`src/main.js:3270`, `3298-3302`).
+    `install.log` (`src/main.js:3278`, `3306-3310`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -199,8 +218,15 @@ fail-closed. Каждая строка результата уходит и в U
 ## Границы
 
 - Не удаляет Nomad: он ставится, но авто-удаление отключено (`UNINSTALL_DISABLED`), и
-  ни одной цели для него не строится. Человеку сообщается нотой, что удалять придётся
-  вручную.
+  ни одной цели для него не строится. Человек видит текст РАННЕГО ОТКАЗА обработчика
+  («Авто-удаление компонента «nomad» в этой версии отключено — он остаётся
+  установленным. Удали вручную при необходимости», `src/main.js:3270`), а не ноту:
+  гейт `UNINSTALL_DISABLED` (`src/main.js:3269-3271`) возвращает ДО единственного в
+  файле вызова `uninstallTargets` (`src/main.js:3297`), поэтому ветка `case 'nomad'`
+  (`src/uninstall-targets.js:241-253`) вместе с её нотой
+  (`src/uninstall-targets.js:251`) на пути деинсталляции недостижима — печатать ноты
+  плана некому (`src/main.js:3304`). В UI кнопки «Удалить» у nomad нет вовсе:
+  `REMOVABLE` его не содержит (`src/renderer/app.js:43`).
 - Не удаляет `config`, `claude-code`, `node`, `git` и прочие компоненты: у них нет
   зашитой карты целей, `uninstallTargets` вернёт `null` и операция откажет.
 - Не деинсталлирует Python, uv-окружения других инструментов и вообще что-либо, чего
@@ -208,7 +234,12 @@ fail-closed. Каждая строка результата уходит и в U
 - На macOS не чистит `~/.local/bin` — только два файла внутри; общий каталог остаётся
   сознательно (`src/uninstall-targets.js:153`).
 - На macOS без доступного vendor-бандла `.app` маскота НЕ удаляется — по коду это
-  штатный fail-closed, человеку предлагается удалить вручную.
+  штатный fail-closed. Предложение удалить вручную человек видит только тогда, когда
+  vendor не дал ИМЕНИ `.app`: тогда цели нет и печатается нота
+  (`src/uninstall-targets.js:232`). Если имя есть, а `CFBundleIdentifier` из vendor
+  вычислить не удалось, `.app` тоже не удаляется, но ноты нет — вместо неё человек
+  получает `failed` по цели и общий отказ деинсталляции (`src/main.js:3212`,
+  `3344-3352`).
 - Не откатывает частичное удаление: при провале возвращается только маркер установки,
   уже удалённые файлы обратно не появляются.
 - Каталоги, где остались чужие или сохраняемые файлы, остаются на диске (`kept`) — это
@@ -229,7 +260,7 @@ fail-closed. Каждая строка результата уходит и в U
    `verifyPostconditions` для плана `mascot` (win32) возвращает
    `{ ok: false, problems: ['неизвестный тип цели в пост-проверке: hookurl'] }`. В
    `main.js` это даёт `stillThere = true` → `restoreReceipt` → ответ `ok:false`
-   (`src/main.js:3325-3344`). То есть при фактически успешном удалении человек видит
+   (`src/main.js:3333-3352`). То есть при фактически успешном удалении человек видит
    «Не удалось удалить», маркер возвращается, кнопка «Удалить» остаётся, а файлы уже
    снесены; повтор пройдёт по `absent`-целям и упрётся в ту же пост-проверку. Учёт
    (`finalizeRemoval`, `manifest.removeEntry`) при этом не выполняется никогда.
@@ -237,7 +268,7 @@ fail-closed. Каждая строка результата уходит и в U
    добавляется цель, правящая `~/.claude/settings.json`
    (`src/uninstall-targets.js:201-207`), и тут же — нота «Хуки в ~/.claude/settings.json
    НЕ трогаю (там могут быть твои правки)» (`src/uninstall-targets.js:237`). Обе строки
-   печатаются человеку в одном логе удаления (`src/main.js:3296`, `3316`).
+   печатаются человеку в одном логе удаления (`src/main.js:3304`, `3324`).
 3. **Тестами не покрыт сквозной путь удаления маскота.** Тестовый исполнитель
    `execFsPlan` (test/run-tests.js) прогоняет только `file`, `emptydir`, `dirtree`,
    `profileline`; `hookurl`, `reg`, `pathentry`, `launchagent`, `appbundle` через него
@@ -246,7 +277,7 @@ fail-closed. Каждая строка результата уходит и в U
    изолированно, связка «план маскота → пост-проверка → вердикт» — нет.
 4. **Частичный провал оставляет расхождение диска и учёта.** Ветка
    `failed > 0 || stillThere` возвращает маркер, но не восстанавливает удалённое
-   (`src/main.js:3336-3344`). Состояние «часть артефактов удалена, компонент числится
+   (`src/main.js:3344-3352`). Состояние «часть артефактов удалена, компонент числится
    установленным» штатно не разрешается ничем, кроме переустановки.
 5. **`restoreReceipt` может не сработать**, и код это честно печатает («Отметка
    установки НЕ восстановилась»), но никакого дальнейшего сценария для человека нет.

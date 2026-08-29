@@ -3,7 +3,7 @@
 <!-- spec-id: claude-desktop-onlayn -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:264-283`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:113-125`, `src/main.js:2718-2732`, `src/main.js:569-573`, `src/install-receipts.js:33-37`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
+- **Код:** `components.json:264-283`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:113-125`, `src/main.js:2726-2740`, `src/main.js:569-573`, `src/install-receipts.js:33-37`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
 - **Тесты:** «components: claude-desktop + chatgpt-desktop опциональны (default:false), online, platforms win32+darwin», «claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпись (chain→LocalMachine\\Root + exact O= + EKU) ДО запуска; exit 120; идемпотентно; cleanup», «claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl (require, fail-closed) + Team ID + bundle id ДО ditto; curl https; exit 120», «grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи», «6b: нет spoofable substring-пина подписи + есть проверяемая криптоцепочка (все 4 desktop-скрипта)», «main.js: detectComponents знает claude-desktop и chatgpt-desktop (идемпотентность)», «claude-desktop.ps1: вердикт через Wait-HmClaudeDesktopVerdict (факт завершения процесса), гоночный опрос 90 c убран, вечного ожидания нет», «claude-desktop.ps1 (прогон PS 5.1): вердикт ждёт живой процесс, НЕ ждёт вечно, успех — сразу по маркеру», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
 
 ## Что обещает человеку
@@ -32,7 +32,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 что компонент разрешён на этой платформе (`src/main.js:915-919`), и что файл скрипта
 существует (`src/main.js:921-924`). Код возврата 120 разбирается как «осознанно
 пропущен»: `EXIT_SKIP = 120` и `isSkipExit` (`src/install-receipts.js:33-34`),
-`const skipped = receipts.isSkipExit(code)` (`src/main.js:1322`); при таком коде маркер
+`const skipped = receipts.isSkipExit(code)` (`src/main.js:1330`); при таком коде маркер
 установки и запись в манифест НЕ пишутся (`shouldRecordInstall`,
 `src/install-receipts.js:35-37`).
 
@@ -123,11 +123,18 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 `/darwin/universal/dmg/`.
 
 **Идемпотентность в UI.** Независимо от скриптов, `main.js` сам определяет, установлено
-ли приложение, для отрисовки карточки (`src/main.js:2718-2732`): на Windows — те же два
-пути к `claude.exe`, плюс подкаталог вида `app-<цифра>` внутри `AnthropicClaude`, плюс
-подкаталог вида `Claude-<цифра>` внутри `%LOCALAPPDATA%\Packages`
-(`dirHasChildStarting`, `src/main.js:2488-2494`); на macOS — `/Applications/Claude.app`
-и `~/Applications/Claude.app`.
+ли приложение, для отрисовки карточки (`src/main.js:2726-2740`): на Windows — те же два
+пути к `claude.exe`, плюс подкаталог вида `Claude-<цифра>` внутри
+`%LOCALAPPDATA%\Packages` (`dirHasChildStarting`, `src/main.js:2496-2502`); на macOS —
+`/Applications/Claude.app` и `~/Applications/Claude.app`.
+
+Третья проверка — подкаталог внутри `AnthropicClaude` — в коде есть
+(`dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-')`, `src/main.js:2734`),
+но она **мертва**: `dirHasChildStarting` дописывает к переданному префиксу собственный
+`-\d` (`src/main.js:2498`), поэтому из `app-` получается регулярка `^app--\d` с двойным
+дефисом. Реальный Squirrel-каталог `app-0.13.0` под неё не подходит; совпало бы только
+имя вида `app--1` (воспроизведено запуском той же строки в node). Ветка с префиксом
+`Claude` от этого не страдает — там префикс без дефиса, и регулярка выходит `^Claude-\d`.
 
 ## Инварианты
 
@@ -157,7 +164,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    (`scripts/windows/claude-desktop.ps1:274-276`).
 7. **Любой отказ — graceful skip 120, а не ошибка и не тихий успех.** Все ветки отказа
    в обоих скриптах выходят с 120; `main.js` трактует 120 как «пропущен» и не пишет
-   маркер установки (`src/main.js:1322`, `src/install-receipts.js:33-37`).
+   маркер установки (`src/main.js:1330`, `src/install-receipts.js:33-37`).
 8. **Защищённый кэш убирается ровно одним помощником.** `Remove-HmSecureStagingDir` в
    `finally` (`scripts/windows/claude-desktop.ps1:298`), который поднимается от `w` к
    внешнему каталогу и удаляет только имя вида `HmDeElev-<32 hex>`
@@ -213,8 +220,13 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
     заново и может перезаписать существующую установку.
 12. Сухой прогон перестаёт быть сухим: создаёт каталоги в `ProgramData` и тянет файл из
     сети — то есть тестовый режим меняет систему.
-13. На Linux скрипта нет вовсе — компонент упал бы с `Script not found`, вместо того
-    чтобы просто не показываться.
+13. На Linux резолвер путей выбирает каталог по одному признаку `IS_WIN`
+    (`const dir = IS_WIN ? 'windows' : 'macos'`, `src/main.js:570`), то есть на любой
+    не-Windows платформе берёт `macos`. Путь разрешится в существующий
+    `scripts/macos/claude-desktop.sh`, проверка `fs.existsSync` (`src/main.js:922`)
+    пройдёт — и bash-скрипт будет реально запущен вместо того, чтобы компонент просто не
+    показывался. `Script not found` при этом не появится; сломается позже и невнятно
+    (например, на отсутствующем `hdiutil`).
 14. Появляется кнопка «Удалить» у чужого приложения. Поскольку целей удаления квитанция
     не задаёт, кнопка либо ничего не сделает, либо удалит не то.
 
@@ -268,9 +280,9 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    id на реальной desktop-сборке. Оба помечены как fail-closed при несовпадении, то
    есть цена ошибки — тихий пропуск компонента, а не небезопасная установка.
 4. **Детект в UI и детект в скрипте не совпадают.** `scripts/windows/claude-desktop.ps1:153-155`
-   спрашивает `Get-AppxPackage`, а `src/main.js:2727` ищет подкаталог
+   спрашивает `Get-AppxPackage`, а `src/main.js:2735` ищет подкаталог
    `%LOCALAPPDATA%\Packages\Claude-<цифра>`: регулярка `dirHasChildStarting`
-   (`src/main.js:2490`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
+   (`src/main.js:2498`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
    каталога MSIX-пакета с этим шаблоном — **кодом не подтверждено**; если нет, карточка
    может показывать «не установлено» там, где скрипт корректно выйдет с 0.
 5. **Развилка архитектуры на Windows читает только `PROCESSOR_ARCHITECTURE`**

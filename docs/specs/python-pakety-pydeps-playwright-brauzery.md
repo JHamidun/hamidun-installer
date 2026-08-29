@@ -3,7 +3,7 @@
 <!-- spec-id: python-pakety-pydeps-playwright-brauzery -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1093-1128`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
+- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1101-1116`, `src/main.js:1135-1136`, `src/main.js:1330-1335`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
 - **Тесты:** «enableWithDeps: selecting "pydeps" transitively pulls config+git+node», «disableDependents: turning off git turns off config+pydeps», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «pydeps.sh: ОБА .pkg через общий root-скрипт HM_PKG_INSTALL_SH (PSF Team ID позиционным); verify_pkg_team_id убран», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)»
 
 ## Что обещает человеку
@@ -26,13 +26,17 @@ AI-провайдеров (`anthropic`, `openai`, `google-genai`) и брауз�
 Компонент объявлен в `components.json:131-150`: `id: "pydeps"`, `default: true`,
 `requires: ["config"]`, `needsAdmin: false`. Числа `sizeBytes` (win32 203 922 495,
 darwin 797 395 819) не пишутся руками — их генерирует `tools/sync-sizes.js` из карты
-`VENDOR_PARTS` (win32: `apps/python-setup.exe` + `pywheels`; darwin: те же плюс
-`playwright-browsers-*`, `tools/sync-sizes.js:98-101` и `:122-123`).
+`VENDOR_PARTS`, и наборы у платформ РАЗНЫЕ: win32 — `['apps/python-setup.exe', 'pywheels']`
+(`tools/sync-sizes.js:101`), darwin — `['apps/python.pkg', 'pywheels', { glob:
+'playwright-browsers-*', pick: 'max' }]` (`:123`). Отличий два: на macOS Python приезжает
+не установщиком `.exe`, а пакетом `.pkg` (`scripts/macos/pydeps.sh:15`), и туда же входят
+браузеры Playwright.
 
 Перед запуском скрипта `src/main.js` собирает окружение: `HM_VENDOR` указывает либо на
-докачанный staging (lite-издание), либо на вшитый vendor, а `HM_BUNDLED_CONFIG`
-резолвится через `vendorPick('config-pack')` — «есть в staging → оттуда, иначе из
-вшитого vendor» (`src/main.js:1093-1128`). Именно из-за lite-издания там и появился
+докачанный staging (lite-издание), либо на вшитый vendor (`vroot`, `src/main.js:1101`;
+присвоение — `:1135`), а `HM_BUNDLED_CONFIG` резолвится через `vendorPick('config-pack')` —
+«есть в staging → оттуда, иначе из вшитого vendor» (`vendorPick` объявлен в
+`src/main.js:1109-1116`, присвоение — `:1136`). Именно из-за lite-издания там и появился
 `vendorPick`: staging компонента `pydeps` не содержит config-pack, и без этого шаг падал.
 
 ### Windows — `scripts/windows/pydeps.ps1`
@@ -115,9 +119,11 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
 ### Как результат виден в интерфейсе
 
 `exit 0` → маркер установки пишется (`shouldRecordInstall`, `src/install-receipts.js:36-38`).
-`exit 120` → `isSkipExit` (`:33-34`), маркер и манифест **не** пишутся
-(`src/main.js:1322`, `:1356`), renderer ставит шагу статус `skipped`, добавляет его в
-`bad` (чтобы зависимые не стартовали) и печатает «Пропущено: нечего устанавливать»
+`exit 120` → `isSkipExit` (`:33-34`), маркер и манифест **не** пишутся: `skipped =
+receipts.isSkipExit(code)` (`src/main.js:1330`), гейт записи `shouldRecordInstall(code,
+isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уходит «пропущен (код 120, нечего
+ставить) — маркер/манифест НЕ записаны» (`:1365`). Renderer ставит шагу статус `skipped`,
+добавляет его в `bad` (чтобы зависимые не стартовали) и печатает «Пропущено: нечего устанавливать»
 (`src/renderer/app.js:1646-1657`).
 
 ## Инварианты
@@ -136,13 +142,25 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
 4. **Elevated-PATH не содержит пользовательских каталогов.** `Update-Path`
    (`pydeps.ps1:6-26`) читает только `Machine`-PATH и фиксированные системные пути;
    `WindowsApps`-заглушка отбрасывается отдельно (`:33`, `:45`).
-5. **Ни один сетевой вызов не остаётся без таймаута.** `Invoke-WebRequest … -TimeoutSec 600`
-   (`pydeps.ps1:85`). Держится тестом «Windows: НИ ОДИН сетевой вызов без -TimeoutSec…».
+5. **Ни один вызов `Invoke-WebRequest`/`Invoke-RestMethod` не остаётся без таймаута.**
+   `Invoke-WebRequest … -TimeoutSec 600` (`pydeps.ps1:85`). Держится тестом «Windows: НИ
+   ОДИН сетевой вызов без -TimeoutSec…», но тело теста (`test/run-tests.js:5464-5471`)
+   сканирует строки только на `/Invoke-RestMethod|Invoke-WebRequest/` — гарантия ровно на
+   эти два командлета, и ни на что больше. Остальные сетевые шаги скрипта таймаута не
+   имеют вовсе: `winget install` (`:58`), `pip install` (`:154`, `:160`, `:161`, `:164`,
+   `:166`) и `python -m playwright install chromium` (`:184`, `:194`). Хост их тоже не
+   убивает: watchdog в `src/main.js:1296-1298` намеренно без kill, `stallTimer`
+   (`:1300-1316`) только печатает сообщение раз в 10 минут. Единственный kill по таймауту
+   в файле — `src/main.js:1712` — относится к 20-секундному примитиву детекции, а не к
+   install-скриптам. Практически это значит, что вечный спиннер из «Что ломается №5»
+   остаётся достижим — самый хрупкий по сети шаг (докачка Chromium, ~150 МБ, о чём
+   говорит комментарий `pydeps.ps1:190-192`) не защищён ничем.
 6. **`Start-Process -Wait` допустим только с тихим флагом.** Оба запуска установщика Python
    идут с `/quiet` (`pydeps.ps1:55`, `:96`). Держится тестом «Windows: установщики, САМИ
    запускающие приложение, идут БЕЗ -Wait».
 7. **Отсутствие `requirements.txt` на Windows — код 120, а не 1.** `pydeps.ps1:140`;
-   следствие в `src/install-receipts.js:33-38` и `src/main.js:1322/1356`: маркер установки
+   следствие в `src/install-receipts.js:33-38` и `src/main.js:1330` (`isSkipExit`), `:1335`
+   (`shouldRecordInstall` не пропускает код 120), `:1365` (запись в лог): маркер установки
    не пишется, шаг помечается «пропущено».
 8. **Провал офлайн-ветки pip не завершает шаг.** После ненулевого кода идёт онлайн-докачка
    с сохранённым `--find-links` (`pydeps.ps1:155-162`; зеркало — `pydeps.sh:83-87`).
@@ -231,11 +249,17 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
 ## Риски и открытые вопросы
 
 1. **Мёртвый третий кандидат `requirements.txt`.** `pydeps.ps1:120` читает
-   `$env:HM_VENDOR_BUNDLED`, но эту переменную никто не устанавливает: `src/main.js`
-   кладёт в `childEnv` только `HM_VENDOR`, `HM_BUNDLED_CONFIG`, `HM_AGENT_DIR`,
-   `HM_NOMAD_SRC`, `HM_ASSETS`, `HM_COURSE_*`, `HM_REMOTE_CACHE`, `HM_DRY_RUN`
-   (`src/main.js:1127-1156`), а allowlist `src/install-env.js:20-28` такой ключ из
-   renderer не пропускает. В `scripts/windows/nomad.ps1:138-142` то же чтение снабжено
+   `$env:HM_VENDOR_BUNDLED`, но эту переменную никто не устанавливает. Во всём
+   `src/main.js` присвоений `childEnv.*` двенадцать, и это полный список ключей:
+   `HM_VENDOR` (`:1135`), `HM_BUNDLED_CONFIG` (`:1136`), `HM_AGENT_DIR` (`:1137`),
+   `HM_NOMAD_SRC` (`:1138`), `HM_ASSETS` (`:1139`), `HM_COURSE_BEACON_URL` и
+   `HM_COURSE_BEACON_SECRET` (`:1158-1159`), `HM_REMOTE_CACHE` (`:1161`), `HM_DRY_RUN`
+   (`:1164`), `HM_ADDITIVE` (`:1178`), `HM_CONFIG_REPO_URL` (`:1192`),
+   `HM_CONFIG_REPO_BRANCH` (`:1194`); плюс два снятия через `delete` — `HM_REMOTE_CACHE`
+   (`:1095`) и `HM_ADDITIVE` (`:1180`). `HM_VENDOR_BUNDLED` среди них нет: поиск по
+   репозиторию даёт этому имени только ЧТЕНИЯ (здесь же `:120` и
+   `scripts/windows/nomad.ps1:142`) и ни одной записи. Allowlist `src/install-env.js:20-28`
+   такой ключ из renderer не пропускает. В `scripts/windows/nomad.ps1:138-142` то же чтение снабжено
    оговоркой «если main его пробросил» — то есть ветка писалась под ещё не сделанный
    проброс. Сейчас кандидат просто пропускается.
 2. **Комментарий про ABI колёс расходится с кодом сборки.** `pydeps.ps1:65-66` утверждает:
@@ -243,7 +267,8 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
    `tools/fetch-vendor.ps1:59-61` берёт версию **локального** Python сборочной машины, а
    `3.12.10` — только фолбэк, если `python` на машине не нашёлся; колёса качаются тем же
    локальным Python «без кросс-флагов» (`:276-286`). В рабочем `vendor/pywheels` на этой
-   машине 48 колёс с тегом `cp313` и **ни одного** `cp312`. Практическое следствие:
+   машине 130 файлов: 128 `.whl` и два sdist (`docopt-0.6.2.tar.gz`, `pyaes-1.6.1.tar.gz`).
+   Из колёс **24** несут тег `cp313` и **ни одного** — `cp312`. Практическое следствие:
    онлайн-фолбэк ставит 3.12.10, вшитые колёса под него не подойдут, офлайн-ветка
    провалится и уйдёт в онлайн — то есть «офлайн» обещание в этой комбинации не держится.
    Дыру закрывает фолбэк из инварианта 8, но комментарий читается как гарантия, которой нет.
@@ -278,6 +303,7 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
 8. **У Windows-ветки нет собственного лога pip и объяснителя.** На macOS вывод pip
    дублируется в `$PIPLOG` и разбирается `hm_explain_build_failure`; на Windows человек
    получает «Часть библиотек не установилась — смотри лог» (`pydeps.ps1:168`).
-   Общий разбор хвоста в `src/main.js:1377` (`failure-explain.js` знает про
-   `cargo`/`rustc`/`PyO3`) частично это компенсирует, но специализированного объяснения,
+   Общий разбор хвоста — `failureExplain.explainScriptFailure(outTail)` в
+   `src/main.js:1385` (словарь `src/failure-explain.js:27` знает про
+   `cargo`/`rustc`/`PyO3`) — частично это компенсирует, но специализированного объяснения,
    как на macOS, здесь нет.

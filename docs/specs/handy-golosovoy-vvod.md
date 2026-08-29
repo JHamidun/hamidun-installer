@@ -3,7 +3,7 @@
 <!-- spec-id: handy-golosovoy-vvod -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:300-330`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,95-97,342-347,447-459,481-504,1264-1308`, `src/install-env.js:19-46`, `src/main.js:601-604,701-723,742,968-985,1248-1251`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:524-685`, `scripts/macos/_lib.sh:97-109,219-246,314-328`, `src/install-receipts.js:33-43`, `src/uninstall-targets.js:255-256`, `vendor/checksums.json:10`, `remote-components.json:459-503`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:42-57`, `tools/fetch-vendor-mac.sh:39-61,559-564`, `tools/release-check.js:154-172`
+- **Код:** `components.json:300-330`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,95-97,342-347,447-459,481-504,1264-1308`, `src/install-env.js:19-46`, `src/main.js:601-604,701-723,742,968-993,1256-1274`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:524-685`, `scripts/macos/_lib.sh:97-109,219-246,314-328`, `src/install-receipts.js:33-43`, `src/uninstall-targets.js:255-256`, `vendor/checksums.json:10`, `remote-components.json:459-503`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:42-57`, `tools/fetch-vendor-mac.sh:39-61,559-564`, `tools/release-check.js:154-172`
 - **Тесты:** «handy: компонент объявлен, опционален и не требует администратора», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского», «handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой», «handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом», «app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит», «app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент», «handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json»
 
 ## Что обещает человеку
@@ -47,9 +47,12 @@ Main принимает из renderer не любые env-ключи, а тол�
 (Windows, sha256 и размер в `vendor/checksums.json:10`) либо
 `$HM_VENDOR/apps/handy-macos-<arch>.dmg` (macOS, две отдельные сборки — upstream не даёт
 universal, `mac-arch-support.json:40-47`). В `src/main.js:701-723` компонент записан в
-`COMPONENT_VENDOR_ARTIFACT` как `apps/handy-setup.exe`, и это включает vendor-first: если
-артефакт уже лежит рядом или издание офлайновое — докачка не запускается вовсе
-(`:968-985`). Lite-издание качает по двум записям `remote-components.json:459-503`
+`COMPONENT_VENDOR_ARTIFACT` как `apps/handy-setup.exe`, и это включает vendor-first:
+наличие вшитого файла считает `vendorHasArtifact` (`:972-974`), решение принимает
+`const useBundled = vendorHasArtifact || isOfflineEdition();` (`:987`), а пропускает
+докачку ветка `else if (declared && useBundled)` (`:990-993`) — то есть если артефакт уже
+лежит рядом или издание офлайновое, загрузка не запускается вовсе. Lite-издание качает
+по двум записям `remote-components.json:459-503`
 (win32 и darwin, зеркала regru + yandex, хеши вложенных файлов в `gatedFiles`). В
 `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`) handy **не входит** — провал докачки не
 прощается и не выдаётся за успех.
@@ -105,9 +108,14 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 
 1. **Вшитый установщик не запускается без совпадения sha256.** Windows:
    `Confirm-HmArtifact $local` (`scripts/windows/handy.ps1:137` → `_verify.ps1:64-104`) —
-   нет файла, нет `HM_VENDOR`, нет `checksums.json`, нет записи для имени, не совпал хеш
-   или размер → `exit 1`. macOS: `verify_artifact "$DMG"` (`handy.sh:76` → `_lib.sh:219-246`),
-   те же условия → `exit 1`.
+   нет файла (`:69`), нет `HM_VENDOR` (`:73`), нет `checksums.json` (`:78`), нет записи
+   для имени (`:84`), не совпал хеш (`:90`) или размер (`:96-102`) → `exit 1`. macOS:
+   `verify_artifact "$DMG"` (`handy.sh:76` → `_lib.sh:219-246`) — набор условий ДРУГОЙ.
+   Совпадают четыре первых (нет файла `:222`, нет `HM_VENDOR` `:225`, нет
+   `checksums.json` `:228`, нет записи для имени — пустой `expected` `:232`) и сравнение
+   хеша (`:239`). Проверки размера на macOS нет вообще — слова `bytes` в `verify_artifact`
+   не встречается ни разу. Зато есть условие, которого нет на Windows: пустой результат
+   вычисления sha, то есть отсутствие `shasum`/`openssl` (`:236-238`) → `exit 1`.
 2. **В `/Applications` попадает только бандл с подтверждённой подписью Team ID UWFLB4GC25
    и принятой нотаризацией.** `handy.sh:95` → `HM_APP_INSTALL_SH` (`_lib.sh:319-328`):
    проверка идёт на root-owned staged копии, любой сбой `codesign`/`spctl` → `exit 1`
@@ -166,8 +174,13 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 11. Либо вся установка краснеет из-за необязательного компонента (и человек бросает её на
     середине), либо, наоборот, компонент считается установленным и получает маркер — и в
     интерфейсе появляется управление тем, чего нет.
-12. Опциональный компонент, тянущий за собой ещё сотни мегабайт модели, ставится всем
-    подряд без спроса — на медленном канале это срывает установку основного стека.
+12. Опциональный компонент ставится всем подряд без спроса. Модель распознавания при
+    этом не качается — установщик её не тянет ни на одной платформе (см. «Границы»,
+    `scripts/windows/handy.ps1:11-14`, `scripts/macos/handy.sh:21-22`); добавляется вес
+    только самого артефакта Handy: в lite-издании 20 927 084 Б на win32
+    (`remote-components.json:462`) или 40 693 722 Б на darwin (`:483`), в офлайновом —
+    вшитые 20 946 752 Б (`vendor/checksums.json:10`). Плюс на macOS у человека, который
+    об этом компоненте не просил, спрашивают пароль администратора (`handy.sh:94-95`).
 
 ## Границы
 
@@ -187,7 +200,11 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
   `course, uv, mascot, bridge` (`src/renderer/app.js:43`) — кнопки «Удалить» у карточки
   не будет.
 - **Строки `HM-RECEIPT` из скриптов ничего не удаляют.** Они только фильтруются из
-  UI-лога (`src/install-receipts.js:40-43`, `src/main.js:1248-1251`); цели удаления
+  UI-лога: `ALLOWED_TYPES` с комментарием «используются ТОЛЬКО чтобы отфильтровать эти
+  строки из UI-лога» (`src/install-receipts.js:40-43`), а сама фильтрация живёт в
+  `emitLine` — `src/main.js:1266-1274` (`const ri = receipts.parseReceiptLine(l);
+  if (ri) { logLine(l); return; }`: строка попадает в журнал и не уходит в `send`);
+  объясняющий её комментарий — `:1256-1259`. Цели удаления
   считает доверенный код по своему аллоулисту. Строка
   `HM-RECEIPT reg HKCU|...\Uninstall\Handy|UninstallString` (`handy.ps1:218`) — след, а
   не действие.

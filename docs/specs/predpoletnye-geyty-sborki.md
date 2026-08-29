@@ -3,7 +3,7 @@
 <!-- spec-id: predpoletnye-geyty-sborki -->
 
 - **Раздел:** Публикация и издания
-- **Код:** `tools/preflight-build.js:70-74`, `tools/preflight-build.js:159-192`, `tools/preflight-build.js:205-234`, `tools/preflight-build.js:275-355`, `tools/preflight-build.js:390-414`, `tools/before-pack.js:19-30`, `tools/assert-clean.js:39-88`, `tools/fetch-config.js:36-93`, `tools/prune-npm-cache.js`, `tools/release-check.js:127-133`, `tools/audit-pack.js`, `package.json`, `config.json`
+- **Код:** `tools/preflight-build.js:70-74`, `tools/preflight-build.js:159-192`, `tools/preflight-build.js:205-234`, `tools/preflight-build.js:275-355`, `tools/preflight-build.js:390-414`, `tools/before-pack.js:19-30`, `tools/assert-clean.js:39-88`, `tools/fetch-config.js:36-93`, `tools/prune-npm-cache.js`, `tools/release-check.js:136-141`, `tools/release-check.js:314-333`, `tools/audit-pack.js`, `package.json`, `config.json`
 - **Тесты:** «гейт подключён так, что его нельзя обойти: build.beforePack -> tools/before-pack.js», «dist/dist:win зовут fetch:config И preflight ДО electron-builder», «свежесть: нет штампа .hamidun-config-pack.json -> СТОП (что в exe — недоказуемо)», «свежесть: вшитый коммит == origin/main -> OK», «свежесть: origin ушёл вперёд -> СТОП (это и есть «старый снапшот»)», «свежесть: чужой репозиторий или чужая ветка в штампе -> СТОП», «свежесть: битый sha в штампе -> СТОП (снапшот не идентифицируется)», «свежесть: пин по sha сверяется с пином, а не с HEAD», «свежесть: origin недоступен -> СТОП; с HM_ALLOW_OFFLINE_BUILD=1 -> предупреждение», «свежесть: HM_ALLOW_STALE_CONFIG понижает провал, но НЕ прячет его», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: прогноз против потолка 2 ГиБ различает норму, предупреждение и провал», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «preflight предупреждает о накоплении версий и даёт точную команду чистки», «fetch-config: вшитый конфиг пиннится и оставляет след о версии», «config.json в репозитории без сборочных маркеров»
 
 ## Что обещает человеку
@@ -45,10 +45,13 @@
 
 Обёртка `checkConfigFresh()` читает `config.json` и штамп с диска, вычисляет
 `wantRef` по приоритету `HM_CONFIG_REF` → `configRepoRef` → `configRepoBranch` →
-`'main'`, и **только если ref не sha и `opts.network !== false`** зовёт
-`gitLsRemote()` (`git ls-remote <url> <ref>`, таймаут 30 000 мс, окружение с
-`GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=echo`, `GCM_INTERACTIVE=never` — чтобы git не
-завис на запросе пароля). Факты с диска даёт `readPackStats()`: скилл считается тем же
+`'main'`, и зовёт `gitLsRemote()` **только при выполнении всех трёх условий сразу:
+штамп прочитан (`st.ok`), ref не sha и `opts.network !== false`** (строка 379). Первое
+условие важно для читателя, решающего «полезет ли гейт в сеть»: без штампа на диске (или
+если он не разобрался) сеть не трогается вовсе и `remoteHead` остаётся `null` — на
+вердикт это не влияет, ветка `!stamp` и так даёт `fail`. Сам вызов — `git ls-remote <url>
+<ref>`, таймаут 30 000 мс, окружение с `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=echo`,
+`GCM_INTERACTIVE=never` — чтобы git не завис на запросе пароля. Факты с диска даёт `readPackStats()`: скилл считается тем же
 правилом, что и в `tools/fetch-config.js` — каталог внутри `.claude/skills`, в котором
 лежит `SKILL.md`. При ошибке чтения `skills` возвращается `null`, и сравнение просто не
 делается (комментарий строки 251-255: гейт, падающий из-за собственной неудачи чтения,
@@ -97,8 +100,17 @@
   бросает `Error` со списком id непройденных гейтов — electron-builder прекращает
   сборку. Это **необходимый** рубеж: хук срабатывает при любом способе запуска, включая
   `npx electron-builder --win` и чужой CI-шаг.
-- `npm run preflight` внутри `dist`, `dist:win`, `dist:mac` — **быстрый** отказ до фетчей
-  и получасовой упаковки. В `dist:mac` передаётся `-- --platform darwin`.
+- `npm run preflight` внутри `dist`, `dist:win`, `dist:mac` — отказ **до получасовой
+  упаковки**, но уже **после фетчей**. Фактический порядок: в `dist` и `dist:win` —
+  `assert:clean` → `fetch:config` → `fetch:vendor` → `preflight` → `electron-builder`
+  (`package.json:17-18`); в `dist:mac` — `assert:clean` → `fetch:config` →
+  `preflight -- --platform darwin` → `electron-builder --mac` (`package.json:20`).
+  К моменту preflight пак уже склонирован, а на Windows скачан и vendor. Иначе и нельзя: гейт свежести сверяет штамп, который кладёт
+  `fetch:config`, — и именно этот порядок стережёт тест «dist/dist:win зовут fetch:config
+  И preflight ДО electron-builder» (`assertOrder(s, 'fetch:config', 'preflight', …)`).
+  Комментарий `tools/before-pack.js:9` обещает «БЫСТРЫЙ отказ (до фетчей и получасовой
+  упаковки)» — это неверно; правильная формулировка лежит рядом, в
+  `tools/preflight-build.js:25-26`: «быстрый отказ ДО получасовой упаковки».
 - `tools/release-check.js` зовёт `preflight.checkConfigFresh()` и
   `preflight.checkNsisLimit()` как часть общего вердикта перед выкладкой; потолок
   makensis там проверяется только при `process.platform === 'win32'` — на маке гейт
@@ -199,11 +211,11 @@
   продолжается.
 - **Накопление версий в кеше не блокирует никогда** — только `warn`.
 - **Потолок makensis — только Windows и только офлайн-издание.** У lite свой size-assert
-  в `tools/build-lite.js`, у mac `.dmg` собирает `hdiutil`, и `release-check.js:312-320`
+  в `tools/build-lite.js`, у mac `.dmg` собирает `hdiutil`, и `release-check.js:325-329`
   явно отказывается судить о потолке вне win32.
 - **`assert-clean.js` подключён только к npm-скриптам** `dist`, `dist:win`, `dist:mac`,
   но не к `beforePack`.
-- **`assert-clean.js` не проверяет `configRepoBranch`**, хотя `build-lite.js:317-325` его
+- **`assert-clean.js` не проверяет `configRepoBranch`**, хотя `build-lite.js:326` его
   тоже переписывает. Сейчас он пишет туда `'main'` — то же значение, что в коммите, —
   поэтому остаток невидим; при смене ветки по умолчанию это перестанет быть верным.
 - **Отсутствие правила `extraResources` → `vendor` у `build.mac` ошибкой не считается**

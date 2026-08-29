@@ -3,7 +3,7 @@
 <!-- spec-id: skrytyy-shag-proverka-ustanovki -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1:261-324`, `src/main.js:568-573`, `src/main.js:1313-1358`, `src/main.js:2749-2758`, `src/main.js:3243-3251`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
+- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1:261-324`, `src/main.js:568-573`, `src/main.js:1321-1366`, `src/main.js:2757-2766`, `src/main.js:3251-3259`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
 - **Тесты:** «P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен»
 
 ## Что обещает человеку
@@ -12,9 +12,15 @@
 чек-лист: Git, Node, Claude CLI, Конфиг, Python-пакеты, Расширение — каждый пункт с галочкой,
 крестом или прочерком. Проверку он не выбирает и не может забыть включить: она добавляется сама
 и идёт последним шагом. Прочерк рядом с пунктом значит «этого не ставили» и не пугает; крест
-значит «поставили, но не работает» — и тогда финальный экран прямо меняет заголовок на
-«Установка завершена, но проверка нашла проблемы» и предлагает отправить лог в бота
-(`src/renderer/app.js:1927-1939`).
+значит «поставили, но не работает».
+
+Заголовок «Установка завершена, но проверка нашла проблемы» с предложением отправить лог в бота
+человек увидит **только когда все компоненты встали**: эта ветка стоит под условием
+`failed.length === 0 && depSkipped.length === 0` (`src/renderer/app.js:1936-1939`). Если хоть один
+компонент упал или был снят из-за провала зависимости, управление доходит до `else` и заголовок
+будет «Установка завершена с предупреждениями» (`src/renderer/app.js:1949-1951`) — независимо от
+того, есть крест в чек-листе или нет. В этом случае крест влияет только на `okAll`
+(`src/renderer/app.js:1931`), маскота (1958) и поле `ok` телеметрии (1984) — см. §9 и инвариант 10.
 
 Второе обещание — обратное: сама проверка никогда не может испортить установку. Оба скрипта
 заканчиваются безусловным `exit 0` (`scripts/windows/verify.ps1:245`, `scripts/macos/verify.sh:149`),
@@ -24,18 +30,25 @@
 
 **1. Компонент.** В `components.json:97-106` объявлен компонент `verify` («Проверка установки»)
 с `"hidden": true`, `"default": true`, `"requires": []`, без `sizeBytes`. `hidden` означает
-ровно четыре вещи, а не «его не видно вообще»:
+не «его не видно вообще», а шесть конкретных отсечек. Полный список мест, где читается
+`.hidden`: `src/renderer/app.js` 232, 248, 371, 919, 1230; `src/main.js` 1335, 2765, 3257 —
+других нет.
 
 * карточка не рисуется на экране выбора — `renderGroups` фильтрует `!c.hidden`
   (`src/renderer/app.js:371`);
 * он не попадает в счётчик выбранного (`src/renderer/app.js:1230`);
+* попап «что попадёт/скачается на мой ПК» его не перечисляет — `showWhatInstalls` отсекает
+  hidden (`src/renderer/app.js:919`, комментарий 904-906: «Служебные (hidden, напр. verify) не
+  показываем»);
 * детекция «уже установлено» его не видит — `detect-state` пропускает hidden
-  (`src/main.js:2757`), поэтому автоснятие уже установленного его не касается
+  (`src/main.js:2765`), поэтому автоснятие уже установленного его не касается
   (`src/renderer/app.js:232` требует `!c.hidden`);
+* жёлтый баннер «часть компонентов уже установлена» не считает hidden установленными —
+  `renderInstalledBanner` требует `!STATE.byId[id].hidden` (`src/renderer/app.js:248`);
 * маркер установки и запись в `installed.json` для него не пишутся
-  (`src/main.js:1327` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
+  (`src/main.js:1335` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
   а `uninstall-component` для hidden отвечает отказом «Служебный компонент … не деинсталлируется»
-  (`src/main.js:3249-3251`).
+  (`src/main.js:3257-3259`).
 
 В списке шагов на экране установки он **виден** — `buildSteps` рисует все id прогона по
 `STATE.byId[id].name` (`src/renderer/app.js:1445-1455`), то есть человек видит строку
@@ -59,7 +72,7 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 
 | Пункт | Windows (verify.ps1) | macOS (verify.sh) |
 |---|---|---|
-| Git | `Get-Command git` + `git --version` (52) | сначала проверка CLT (`xcode-select -p` или бинарь CLT), иначе git не из `/usr/bin`-шима — чтобы не всплыл системный диалог (29-40) |
+| Git | `Get-Command git` (46) + `git --version` (48), весь блок 42-53 | сначала проверка CLT (`xcode-select -p` или бинарь CLT), иначе git не из `/usr/bin`-шима — чтобы не всплыл системный диалог (29-40) |
 | Node | `Get-Command node` + `node -v` (60-66) | `have node` + `node -v` (49-53) |
 | Claude CLI | **переносит вердикт** из `~/.hamidun-setup/checks.json` (106-126) | `have claude` либо `-x ~/.local/bin/claude` (61-67) |
 | Конфиг | `settings.json` И `skills` И запись `components.config` в `~/.hamidun-setup/installed.json` (145-167) | то же тремя свидетелями, но квитанция проверяется `grep -q '"config"'` (78-94) |
@@ -119,8 +132,12 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
    ни `--list-extensions`, ни `& $cli` в файле нет — это elevated-процесс, и запуск
    user-writable `code.cmd`/`cursor.cmd` был бы повышением привилегий.
 6. **PATH проверки не берётся из пользовательского реестра.** `Update-Path` собирает PATH только
-   из `Machine`-ветки и фиксированных админских каталогов (`scripts/windows/verify.ps1:5-25`),
-   claude ищется абсолютными путями (`Find-ClaudeBinary`, 70-96).
+   из `Machine`-ветки и фиксированных админских каталогов (`scripts/windows/verify.ps1:5-25`);
+   HKCU не читается вовсе. Оговорка про claude: `Find-ClaudeBinary` (70-96) абсолютным путём
+   ищет только в третьей ветке (`$env:USERPROFILE\.local\bin`, 89-93). Первая ветка — обычный
+   PATH-lookup `Get-Command claude` (71-72), вторая берёт каталог из `npm config get prefix`
+   (75-85), а это значение npm читает из user-writable `~/.npmrc`. Практических последствий
+   нет: найденный путь только печатается (строка 115) и на вердикт не влияет (§5, инвариант 7).
 7. **Один факт — один стандарт доказательства (Claude CLI, Windows).** `CHECK ok Claude CLI`
    печатается ровно при `verdict -eq 'works'` из `checks.json`; наличие файла-обёртки даёт
    только строку с путём (`scripts/windows/verify.ps1:106-126`).
@@ -134,8 +151,8 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 10. **Крест чек-листа ломает «Готово!».** `okAll` включает `!checkFailed`
     (`src/renderer/app.js:1927-1931`).
 11. **Служебный компонент не удаляется и не числится установленным.** hidden отсекается в
-    `detect-state` (`src/main.js:2757`), в записи маркера (`src/main.js:1327`) и в
-    `uninstall-component` (`src/main.js:3249-3251`).
+    `detect-state` (`src/main.js:2765`), в записи маркера (`src/main.js:1335`) и в
+    `uninstall-component` (`src/main.js:3257-3259`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -144,11 +161,23 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 2. **Не `exit 0`** — компонент `verify` попадёт в `failed`, финиш скажет «Установка завершена с
    предупреждениями» и предложит «Повторить» там, где всё установлено. Диагностика начнёт
    изображать поломку вместо того, чтобы её находить.
-3. **Крест вместо прочерка на невыбранном** — человек, снявший Cursor или Python-пакеты, увидит
-   красный экран за собственный осознанный выбор и потеряет доверие к остальным галочкам.
-4. **Не чистится `runtimeSkipped`** — после «Повторить» вернутся кресты по компонентам, которых
-   нет в сборке (VS Code, Nomad, курс): экран будет спорить сам с собой — «пропущено, нечего
-   ставить» в логе и «✕» в чек-листе.
+3. **Крест вместо прочерка на невыбранном** — человек, снявший Python-пакеты, увидит красный
+   экран за собственный осознанный выбор и потеряет доверие к остальным галочкам. Пример
+   работает только для шести реально проверяемых id (`git`, `node`, `claude`, `config`,
+   `pydeps`, `extension`): снятый Cursor не даёт на чек-листе ничего — ни креста, ни прочерка,
+   потому что `cursor` в списке проверяемых отсутствует (`verify.ps1` 42/56/97/130/178/218,
+   `verify.sh` 24/45/57/72/100/125). Каталог `.cursor\extensions` в verify.ps1 используется
+   только как одно из мест поиска расширения Claude (строка 225), а не как проверка Cursor.
+4. **Не чистится `runtimeSkipped`** — после «Повторить» вернутся кресты по компонентам, которые
+   в этом прогоне корректно не ставили. Крестов по VS Code, Nomad и курсу быть не может: verify
+   не печатает по ним ни одной строки `CHECK` (проверяются ровно шесть id, см. «Границы»).
+   Реальное следствие — «✕ Расширение»: `extension` объявляет `requires: ["vscode"]`
+   (`components.json:88-90`), поэтому при `exit 120` у `vscode` он уходит в dep-skip
+   (`src/renderer/app.js:1571-1577`), оставаясь в `HM_SELECTED`; именно этот случай назван в
+   комментарии кода (`src/renderer/app.js:1548`, «vscode/extension/nomad exit-120»). Тот же
+   механизм даёт кресты «Конфиг» (`requires: ["git","node","claude"]`, `components.json:120-124`)
+   и «Python-пакеты» (`pydeps`, `requires: ["config"]`, `components.json:138-140`). Экран будет
+   спорить сам с собой — «пропущено, нечего ставить» в логе и «✕» в чек-листе.
 5. **Запуск `code.cmd`/`cursor.cmd` из verify** — админский процесс исполнит файл, который может
    переписать обычный пользователь: локальное повышение привилегий на машине новичка, который
    как раз и запускает установщик «от администратора».
@@ -214,8 +243,12 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
    verify.ps1».
 5. **macOS-скрипт не покрыт ни одним тестом.** В `test/run-tests.js` нет ни одной ссылки на
    `scripts/macos/verify.sh` (единственное упоминание — комментарий на строке 1519); `bash -n`
-   прогоняется по списку из девяти скриптов, verify.sh в него не входит (`test/run-tests.js:898`).
-   Все процитированные тесты, кроме двух общих, проверяют Windows-ветку.
+   прогоняется по списку из девяти скриптов (vscode.sh, claude-desktop.sh, chatgpt-desktop.sh,
+   uv.sh, _lib.sh, cursor.sh, node.sh, pydeps.sh, mascot.sh), verify.sh в него не входит
+   (`test/run-tests.js:898`). Из шести процитированных в шапке тестов Windows-специфичны три
+   (`test/run-tests.js:1452`, `1480`, `7626`); остальные три Windows-ветку не трогают вовсе:
+   1543 читает `src/renderer/app.js` через `EG_APP()`, 281 сверяет данные
+   `remote-components.json` и `components.json`, 470 вызывает `installEnv.filterRendererEnv`.
 6. **Тесты проверяют текст скрипта, а не поведение.** Найденные тесты verify.ps1 — grep-инварианты
    по исходнику (`EG_VERIFY()`); ни один не запускает verify и не сверяет напечатанный чек-лист с
    состоянием файловой системы. Синтаксический прогон verify.ps1 существует, но его заголовок
