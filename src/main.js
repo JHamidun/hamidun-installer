@@ -972,10 +972,18 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   const bundledVendorEarly = vendorRoot();
   const bundledRel = COMPONENT_VENDOR_ARTIFACT[id];
   const vendorHasArtifact = !!(bundledRel && fs.existsSync(path.join(bundledVendorEarly, bundledRel)));
-  // Офлайн-издание НИКОГДА не качает (защита от remote-флагов в общей components.json;
-  // и mac-офлайн, где win-артефактов по этим путям нет, не должен идти в докачку —
-  // darwin-записей в реестре пока нет). Lite-издание (offlineEdition=false) без вшитого
-  // артефакта — качает.
+  // Офлайн-издание НИКОГДА не качает — защита от remote-флагов в общей
+  // components.json. Держит это именно isOfflineEdition(), и снимать проверку нельзя.
+  //
+  // ОСТОРОЖНО с прежним обоснованием. Здесь стояло «mac-офлайн … darwin-записей в
+  // реестре пока нет» — и это неверно с тех пор, как в реестре появились darwin-сборки:
+  // в remote-components.json 23 записи, из них ОДИННАДЦАТЬ darwin (git, node, vscode,
+  // cursor, claude, mascot, nomad, config, pydeps, extension, handy). Поведение
+  // правильное, но по неправильной причине: mac-офлайн не качает из-за этой проверки,
+  // а вовсе не из-за пустого реестра. Следующий, кто поверил бы комментарию, снял бы
+  // проверку как избыточную — и офлайн-издание пошло бы в сеть.
+  //
+  // Lite-издание (offlineEdition=false) без вшитого артефакта — качает.
   const useBundled = vendorHasArtifact || isOfflineEdition();
   if (declared && isDryRun) {
     send('[dry-run] Докачка «' + declared + '» пропущена — ничего не скачиваем.');

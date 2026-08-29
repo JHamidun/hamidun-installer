@@ -445,6 +445,16 @@ function main(argv) {
     // конфиг разложился успешно, а плагины были включены без маркетплейса, MCP не
     // поднялись, правила ссылались на отсутствующие скрипты. Печатаем, чтобы это
     // видели ДО выкладки, а не по скриншоту от человека через неделю.
+    // Под GitHub Actions поднимаем находки в аннотации: «напечатали в лог сборки»
+    // и «человек это увидел» — разные вещи. Лог релизной сборки идёт тысячами строк,
+    // и предупреждение в его середине не читает никто; аннотация показывается в
+    // сводке прогона. Блокирующим этот блок делать НЕЛЬЗЯ, и это не осторожность:
+    // audit-pack среди прочего проверяет, поднялись ли MCP-серверы, а на сборочном
+    // раннере они заведомо не подняты. Гейт, красный по причине окружения, отключат
+    // через неделю — и тогда он перестанет проверять вообще.
+    const annotate = (msg) => {
+      if (process.env.GITHUB_ACTIONS === 'true') console.log('::warning title=Связность конфиг-пака::' + msg);
+    };
     try {
       const out = execFileSync(process.execPath, [path.join(__dirname, 'audit-pack.js')],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -454,8 +464,12 @@ function main(argv) {
       // audit-pack выходит кодом 1 при проблемах — это не повод рушить сборку,
       // но показать надо обязательно.
       const out = (e.stdout || '') + (e.stderr || '');
-      for (const line of out.split('\n').filter((l) => /СТОП|ВЕРДИКТ/.test(l))) {
-        console.log('[preflight] ' + line.trim());
+      const bad = out.split('\n').filter((l) => /СТОП|ВЕРДИКТ/.test(l)).map((l) => l.trim());
+      for (const line of bad) console.log('[preflight] ' + line);
+      const stops = bad.filter((l) => l.indexOf('СТОП') !== -1);
+      if (stops.length) {
+        annotate('конфиг-пак разложится, но работать будет не весь: ' + stops.length +
+          ' проблем(ы). Первая: ' + stops[0].replace(/^СТОП\s*/, ''));
       }
     }
   }
