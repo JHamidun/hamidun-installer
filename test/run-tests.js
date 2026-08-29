@@ -224,7 +224,7 @@ ok('реестр: platform только из enum win32|darwin|linux (опеча
 ok('реестр: нет дублей (remoteId, platform)', () => {
   const seen = new Set();
   (remoteReg.components || []).forEach((e) => {
-    const k = e.remoteId + ' ' + (e.platform || '');
+    const k = e.remoteId + '\u0000' + (e.platform || '');
     assert(!seen.has(k), `дубликат записи (remoteId=${e.remoteId}, platform=${e.platform || '—'})`);
     seen.add(k);
   });
