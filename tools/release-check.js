@@ -320,6 +320,55 @@ function checkSize() {
   }
   const r = preflight.checkNsisLimit({});
   add(S, r.level === 'skip' ? 'warn' : r.level, r.lines.join('\n      '));
+  reportBuiltArtifacts(S);
+}
+
+// Фактический размер УЖЕ СОБРАННЫХ артефактов.
+//
+// ЗАЧЕМ ОТДЕЛЬНО ОТ checkNsisLimit. Тот считает ПРОГНОЗ по содержимому vendor — до
+// сборки, чтобы не выпустить заведомо битый exe. А здесь печатается то, что реально
+// лежит на диске ПОСЛЕ неё, и печатается ровно там, где человек принимает решение
+// «выкладывать или нет».
+//
+// Без этого текущий размер не зафиксирован нигде, и в репозитории живут три разных
+// числа: package.json помнит замер от 19.08 (1 253 186 377 Б), preflight — от 30.07
+// (2 045 972 046 Б), а на диске лежит 1 438 688 139 Б. Из этого разнобоя уже вырос
+// дефект: сценарий ручного теста требовал сверять с «~2.0 ГБ» — округлением
+// ОТМЕНЁННОГО замера, — и тестировщик ставил ✘ на исправном продукте.
+//
+// Не гейт, а строка отчёта: артефакта может не быть вовсе (release-check гоняют и до
+// сборки), а падать из-за отсутствия файла, который эта команда не обязана видеть, —
+// значит останавливать исправное.
+function reportBuiltArtifacts(S) {
+  const NSIS_CEILING = 2 * 1024 * MIB;   // 32-битный makensis падает на mmap около 2 ГиБ
+  const known = [
+    ['Hamidun-Setup-Windows.exe', true],
+    ['Hamidun-Setup-Windows-Lite.exe', true],
+    ['Hamidun-Setup-Mac.dmg', false],
+    ['Hamidun-Setup-Mac-Lite.dmg', false],
+  ];
+  const found = [];
+  for (const [name, nsisBound] of known) {
+    const abs = path.join(ROOT, 'release', name);
+    let st = null;
+    try { st = fs.statSync(abs); } catch (e) { continue; }
+    if (!st.isFile()) continue;
+    const when = new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ');
+    let line = `${name}: ${st.size} Б (${mib(st.size)}), собран ${when}`;
+    if (nsisBound) {
+      const left = NSIS_CEILING - st.size;
+      line += left > 0
+        ? ` — до потолка makensis ${mib(left)}`
+        : ` — ПОТОЛОК makensis ПРЕВЫШЕН на ${mib(-left)}`;
+      if (left <= 0) fail(S, line);
+    }
+    found.push([line, nsisBound && st.size >= NSIS_CEILING]);
+  }
+  if (!found.length) {
+    okLine(S, 'собранных артефактов в release/ нет — размер печатать нечего (это не ошибка: проверку гоняют и до сборки)');
+    return;
+  }
+  for (const [line, bad] of found) if (!bad) okLine(S, line);
 }
 
 // --- прогон и вердикт ---------------------------------------------------------
