@@ -3288,6 +3288,49 @@ ok('components.json: компонент nomad — позиционировани
   assert(!/hermes/i.test(comp.name + comp.desc + comp.why), 'нет «Hermes» в описании (переименовано в Nomad)');
 });
 
+ok('ни один отслеживаемый текстовый файл не двоичен для git (литеральный NUL)', () => {
+  // Ловит КЛАСС. 29.08.2026: ОДНОГО литерального NUL-байта хватает, чтобы git счёл
+  // файл двоичным, и тогда он выпадает разом из трёх мест:
+  //   * дифф в PR показывается как «Bin 0 -> 11799 bytes» — ревьюер не видит ни строки;
+  //   * `git grep` по нему НЕ ИЩЕТ, молча;
+  //   * сканы утечек и любые grep-обходы его пропускают.
+  //
+  // Цена была измерена, а не предположена: `git grep` вернул НОЛЬ совпадений на
+  // tools/fetch-vendor.ps1, где лежал захардкоженный личный путь владельца, — в
+  // ПУБЛИЧНОМ репозитории. Нашёл его только штатный сканер утечек. Тогда же
+  // выяснилось, что и test/run-tests.js был непоискуем: главный файл проверок.
+  //
+  // Намерение всегда законное (разделитель ключа, магия заголовка SQLite, заполнитель).
+  // Ломает не намерение, а ЗАПИСЬ ЛИТЕРАЛЬНЫМ БАЙТОМ. Escape-последовательность
+  // (обратная косая, u, четыре нуля) даёт то же значение до бита и оставляет файл
+  // текстом. Пример здесь намеренно НЕ приведён символами: редактор трижды подряд
+  // превращал его обратно в байт — прямо в комментарии к этой же проверке.
+  const exts = new Set(['.js', '.json', '.md', '.yml', '.yaml', '.ps1', '.sh',
+    '.py', '.txt', '.html', '.css', '.gitignore', '.gitattributes']);
+  const { execFileSync } = require('child_process');
+  let listed = '';
+  try {
+    listed = execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+  } catch (e) {
+    console.log('     (git недоступен — проверка пропущена)');
+    return HM_SKIP;
+  }
+  const bad = [];
+  for (const rel of listed.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    const ext = path.extname(rel).toLowerCase() || path.basename(rel);
+    if (!exts.has(ext)) continue;
+    let buf;
+    try { buf = fs.readFileSync(path.join(ROOT, rel)); } catch (e) { continue; }
+    const n = buf.indexOf(0);
+    if (n !== -1) {
+      const line = buf.slice(0, n).toString('utf8').split('\n').length;
+      bad.push(rel + ':' + line);
+    }
+  }
+  assert.deepStrictEqual(bad, [],
+    'литеральный NUL делает файл двоичным для git — замени на escape \\u0000: ' + bad.join(', '));
+});
+
 ok('каждый локальный require в src/ разрешается (модуль не потерян при коммите)', () => {
   // Ловит КЛАСС, а не случай. 28.08.2026: src/uid-telemetry.js уехал в коммит с
   // require('./uid-fallback'), а сам uid-fallback.js остался неотслеженным. Падения
