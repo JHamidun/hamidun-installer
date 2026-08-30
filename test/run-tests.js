@@ -6346,19 +6346,43 @@ if (powershellAvailable()) {
         assert(mm, 'гарнесс отчитался: ' + (r.stdout || '') + (r.stderr || ''));
         return { r: mm[1], el: Number(mm[2]), alive: mm[3] };
       };
+      // Верхние пороги привязаны к КОНСТАНТАМ своего сценария, а не к круглым
+      // числам. Разница принципиальная: доказываем мы «вердикт НЕ дожидался вот
+      // этого», и порогом обязана быть длительность того самого «этого». Прежние
+      // 12 и 25 были заметно туже, чем требует утверждение, и на загруженной машине
+      // краснели бы по причине среды — как это уже случилось 31.08 с тестом
+      // реестра. `el` меряется ВНУТРИ гарнесса (`$t0 = Get-Date` до вызова), то
+      // есть старт самого powershell в него не входит; запас нужен на опросы и
+      // планировщик под нагрузкой, а не на запуск процесса.
+      //
       // 1) Маркер появился, установщик ещё работает -> успех СРАЗУ, не ждём выхода процесса.
-      const s1 = run({ HM_T_MARKER_AT: '3', HM_T_CHILD_SLEEP: '25', HM_T_CAP: '20', HM_T_GRACE: '5' });
-      assert(s1.r === 'True' && s1.el <= 12, 'успех по маркеру без ожидания процесса: ' + JSON.stringify(s1));
+      //    Отличаем «успех по маркеру на 3-й секунде» от «дождались потолка 20 с»:
+      //    порог обязан лежать НИЖЕ потолка, иначе утверждение пустое.
+      const S1 = { markerAt: 3, child: 25, cap: 20, grace: 5 };
+      const s1 = run({ HM_T_MARKER_AT: String(S1.markerAt), HM_T_CHILD_SLEEP: String(S1.child),
+        HM_T_CAP: String(S1.cap), HM_T_GRACE: String(S1.grace) });
+      assert(s1.r === 'True' && s1.el < S1.cap,
+        'успех по маркеру (' + S1.markerAt + ' c) без ожидания потолка (' + S1.cap + ' c) и процесса (' +
+        S1.child + ' c): ' + JSON.stringify(s1));
       assert(s1.alive === 'True', 'процесс ещё жил — трей не держит успех');
       // 2) Маркера нет -> вердикт «нет» выносится НЕ РАНЬШЕ фактического завершения процесса
       //    (старый опрос был оторван от процесса — в этом и была гонка).
-      const s2 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: '5', HM_T_CAP: '40', HM_T_GRACE: '2' });
+      const S2 = { child: 5, cap: 40, grace: 2 };
+      const s2 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: String(S2.child),
+        HM_T_CAP: String(S2.cap), HM_T_GRACE: String(S2.grace) });
       assert(s2.r === 'False', 'без маркера — честное False: ' + JSON.stringify(s2));
-      assert(s2.el >= 5, 'вердикт вынесен ПОСЛЕ завершения процесса (' + s2.el + ' c >= 5 c)');
-      assert(s2.el <= 25, 'и без лишнего зависания: ' + s2.el + ' c');
+      assert(s2.el >= S2.child,
+        'вердикт вынесен ПОСЛЕ завершения процесса (' + s2.el + ' c >= ' + S2.child + ' c)');
+      assert(s2.el < S2.cap,
+        'и не дожидался потолка ' + S2.cap + ' c: ' + s2.el + ' c');
       // 3) Установщик висит дольше потолка -> False около CapSec, БЕЗ вечного ожидания.
-      const s3 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: '40', HM_T_CAP: '4', HM_T_GRACE: '60' });
-      assert(s3.r === 'False' && s3.el <= 25, 'потолок работает (нет вечного ожидания): ' + JSON.stringify(s3));
+      //    Доказываем, что не дождались ни процесса (40 с), ни grace (60 с).
+      const S3 = { child: 40, cap: 4, grace: 60 };
+      const s3 = run({ HM_T_MARKER_AT: '', HM_T_CHILD_SLEEP: String(S3.child),
+        HM_T_CAP: String(S3.cap), HM_T_GRACE: String(S3.grace) });
+      assert(s3.r === 'False' && s3.el < S3.child,
+        'потолок ' + S3.cap + ' c сработал: не дождались ни процесса (' + S3.child + ' c), ни grace (' +
+        S3.grace + ' c): ' + JSON.stringify(s3));
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 }
