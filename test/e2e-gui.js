@@ -143,10 +143,53 @@ function poisonRegistry(regPath) {
   fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
 }
 
-/** В source-mode подменяем реестр прямо в корне (CI-прогон, дерево одноразовое). */
+/** В source-mode подменяем реестр ПРЯМО В РАБОЧЕМ ДЕРЕВЕ — с обязательным возвратом.
+ *
+ * `remote-components.json` лежит в git и хранит зеркала докачки. Подмена меняет их
+ * на `hm-e2e-dead-host.invalid`. Прежнее оправдание — «CI-прогон, дерево
+ * одноразовое» — верно только на раннере: разработчик, запустивший сценарий
+ * `netfail` у себя, оставался с отравленным реестром в рабочем дереве. Дальше
+ * достаточно `git add -A` (в этом проекте такое уже случалось), и мёртвый хост
+ * уезжает в коммит, а оттуда — в сборку, которая не может ничего скачать.
+ *
+ * Поэтому оригинал запоминается и возвращается в `cleanupContext`, в том числе
+ * когда прогон падает. `HM_E2E_KEEP` сохраняет артефакты, но НЕ отравленный
+ * реестр: держать сломанным отслеживаемый файл нельзя ни в каком режиме.
+ */
+let poisonedRegistryBackup = null;
+
 function poisonSourceRegistry() {
-  poisonRegistry(path.join(ROOT, 'remote-components.json'));
-  log('source-mode netfail: зеркала подменены на мёртвый хост');
+  const p = path.join(ROOT, 'remote-components.json');
+  poisonedRegistryBackup = { path: p, text: fs.readFileSync(p, 'utf8') };
+  poisonRegistry(p);
+  log('source-mode netfail: зеркала подменены на мёртвый хост (оригинал вернётся при уборке)');
+}
+
+function restoreSourceRegistry() {
+  if (!poisonedRegistryBackup) return;
+  const { path: p, text } = poisonedRegistryBackup;
+  poisonedRegistryBackup = null;
+  try {
+    fs.writeFileSync(p, text);
+    log('реестр зеркал возвращён в исходное состояние');
+  } catch (e) {
+    // Молчать здесь нельзя: в дереве остался сломанный отслеживаемый файл.
+    console.error('\n!!! НЕ УДАЛОСЬ ВЕРНУТЬ ' + p + ': ' + e.message +
+      '\n!!! В рабочем дереве ОСТАЛСЯ отравленный реестр зеркал.' +
+      '\n!!! Восстанови вручную: git checkout HEAD -- remote-components.json\n');
+    process.exitCode = 1;
+  }
+}
+
+// Возврат обязан случиться и при аварийном выходе — иначе Ctrl+C или падение
+// оставляют сломанный файл в дереве ровно так же, как раньше это делал успешный
+// прогон.
+for (const sig of ['exit', 'SIGINT', 'SIGTERM', 'uncaughtException']) {
+  process.on(sig, (arg) => {
+    restoreSourceRegistry();
+    if (sig === 'uncaughtException') { console.error(arg); process.exit(1); }
+    if (sig === 'SIGINT' || sig === 'SIGTERM') process.exit(130);
+  });
 }
 
 /** Изолированный профиль пользователя — установка НЕ трогает реальную машину. */
@@ -182,6 +225,10 @@ function makeContext() {
 }
 
 function cleanupContext(ctx) {
+  // Реестр возвращаем ВСЕГДА и ПЕРВЫМ делом — даже при HM_E2E_KEEP. Сохранять на
+  // память временные каталоги полезно, а держать сломанным отслеживаемый git-файл
+  // в рабочем дереве нельзя ни в каком режиме.
+  restoreSourceRegistry();
   if (process.env.HM_E2E_KEEP) { log('артефакты сохранены:', ctx.appDir, ctx.home); return; }
   if (!ctx.source) rmrf(ctx.appDir);
   rmrf(ctx.home);
@@ -191,7 +238,37 @@ function cleanupContext(ctx) {
 // Канарейка изоляции: РЕАЛЬНЫЙ профиль пользователя не должен измениться
 // ---------------------------------------------------------------------------
 
-/** Снимок «следов установщика» в НАСТОЯЩЕМ домашнем каталоге (вне изоляции). */
+/** Снимок «следов установщика» в НАСТОЯЩЕМ домашнем каталоге (вне изоляции).
+ *
+ * Сравнивать ФАКТ СУЩЕСТВОВАНИЯ здесь недостаточно, и это не теория. У человека,
+ * который гоняет e2e, `~/.claude` уже есть — он был `true` до прогона и остался
+ * `true` после, поэтому канарейка сказала бы «профиль не тронут» даже если прогон
+ * ПЕРЕЗАПИСАЛ живой конфиг. Ровно то, ради чего канарейка и стоит, она пропускала.
+ *
+ * Поэтому снимаем отпечаток: существование + mtime самого пути + для каталога
+ * список верхнего уровня (имя, размер, mtime). Этого хватает, чтобы поймать
+ * создание, удаление, появление и пропажу детей и перезапись любого файла верхнего
+ * уровня — включая settings.json и CLAUDE.md, то есть всё, что установщик трогает.
+ *
+ * Граница честная: правку в глубине (`.claude/projects/…/файл`), не меняющую
+ * верхний уровень, отпечаток не увидит. Считать рекурсивно нельзя — в `~/.claude`
+ * десятки гигабайт, и снимок стоил бы дороже самого прогона.
+ */
+function fingerprint(p) {
+  let st;
+  try { st = fs.statSync(p); } catch (e) { return 'нет'; }
+  if (!st.isDirectory()) return 'файл:' + st.size + ':' + Math.round(st.mtimeMs);
+  let kids;
+  try { kids = fs.readdirSync(p, { withFileTypes: true }); } catch (e) { return 'каталог:нечитаем'; }
+  const rows = kids.map((d) => {
+    let s = null;
+    try { s = fs.statSync(path.join(p, d.name)); } catch (e) { /* исчез между вызовами */ }
+    return d.name + ':' + (s ? s.size + ':' + Math.round(s.mtimeMs) : '?');
+  }).sort();
+  return 'каталог:' + rows.length + ':' +
+    crypto.createHash('sha256').update(rows.join('\n')).digest('hex').slice(0, 16);
+}
+
 function realHomeSnapshot() {
   const h = os.homedir();
   let backups = 0;
@@ -199,17 +276,18 @@ function realHomeSnapshot() {
   return {
     home: h,
     backups,
-    claude: exists(path.join(h, '.claude')),
-    setupDir: exists(path.join(h, '.hamidun-setup')),
-    start: exists(path.join(h, 'HamidunStart')),
-    course: exists(path.join(h, 'HamidunCourse')),
+    claude: fingerprint(path.join(h, '.claude')),
+    claudeMd: fingerprint(path.join(h, 'CLAUDE.md')),
+    setupDir: fingerprint(path.join(h, '.hamidun-setup')),
+    start: fingerprint(path.join(h, 'HamidunStart')),
+    course: fingerprint(path.join(h, 'HamidunCourse')),
   };
 }
 
 function checkIsolation(before) {
   const after = realHomeSnapshot();
   const diffs = [];
-  for (const k of ['backups', 'claude', 'setupDir', 'start', 'course']) {
+  for (const k of ['backups', 'claude', 'claudeMd', 'setupDir', 'start', 'course']) {
     if (before[k] !== after[k]) diffs.push(`${k}: ${before[k]} → ${after[k]}`);
   }
   check('изоляция соблюдена: РЕАЛЬНЫЙ профиль (' + before.home + ') не тронут',

@@ -134,18 +134,34 @@ ok('core has no overlap with packs', () => {
   assert.strictEqual(overlap.length, 0, 'core/pack overlap: ' + overlap.join(', '));
 });
 
-if (fs.existsSync(SKILLS_DIR)) {
-  const real = new Set(fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name));
+// Тесты регистрируются ВСЕГДА, а отсутствие каталога скиллов становится честным
+// пропуском ВНУТРИ теста.
+//
+// Раньше оба `ok()` стояли внутри `if (fs.existsSync(SKILLS_DIR))`, и на чистом
+// чекауте они не регистрировались ВООВСЕ: ни ✅, ни ⏭ — строка просто исчезала из
+// прогона, а итоговый счёт молча уменьшался на два. Это хуже ложного зелёного:
+// у ложного хотя бы видно строку, а тут проверки нет и следа. Условие срабатывает
+// легко: `vendor/` в .gitignore, а третий кандидат пути — АБСОЛЮТНЫЙ путь машины
+// автора (`C:\Vibecode\hamidun-installer-assets\config-repo`), которого нет ни на
+// раннере, ни у второго разработчика.
+const skillsPresent = fs.existsSync(SKILLS_DIR);
+const real = skillsPresent
+  ? new Set(fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name))
+  : new Set();
 
-  ok('every core skill exists in repo', () => {
-    const missing = packs.core.filter((s) => !real.has(s));
-    assert.strictEqual(missing.length, 0, 'missing core skills: ' + missing.join(', '));
-  });
+ok('every core skill exists in repo', () => {
+  if (!skillsPresent) SKIP('каталог скиллов не развёрнут (' + SKILLS_DIR + ')');
+  const missing = packs.core.filter((s) => !real.has(s));
+  assert.strictEqual(missing.length, 0, 'missing core skills: ' + missing.join(', '));
+});
 
-  ok('every pack skill exists in repo', () => {
-    const missing = allPackSkills.filter((s) => !real.has(s));
-    assert.strictEqual(missing.length, 0, 'missing/typo skills: ' + missing.join(', '));
-  });
+ok('every pack skill exists in repo', () => {
+  if (!skillsPresent) SKIP('каталог скиллов не развёрнут (' + SKILLS_DIR + ')');
+  const missing = allPackSkills.filter((s) => !real.has(s));
+  assert.strictEqual(missing.length, 0, 'missing/typo skills: ' + missing.join(', '));
+});
+
+if (skillsPresent) {
 
   // Coverage report (informational, not a failure).
   const categorized = new Set([...packs.core, ...allPackSkills]);
@@ -2332,7 +2348,7 @@ if (bashAvailable()) {
       let linked = false;
       try { fs.symlinkSync(base + '/external-skills', home + '/.claude/skills', 'junction'); linked = true; }
       catch (e) { linked = false; }
-      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      if (!linked) SKIP('symlink/junction недоступен');
       const r = runCfgSh(home, clone, {});   // repair (clone везёт skills/our-skill/SKILL.md)
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert.strictEqual(fs.readFileSync(base + '/external-skills/our-skill/DATA.md', 'utf8'), 'EXTERNAL',
@@ -2354,7 +2370,7 @@ if (bashAvailable()) {
       // skills — реальный каталог, но скрытый .hidden внутри — junction на внешнюю папку
       try { fs.symlinkSync(base + '/ext-hidden', home + '/.claude/skills/.hidden', 'junction'); linked = true; }
       catch (e) { linked = false; }
-      if (!linked) { console.log('     (junction недоступен — пропуск)'); return; }
+      if (!linked) SKIP('junction недоступен');
       const r = runCfgSh(home, clone, {});   // repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert(/симлинк\/junction/.test(r.stdout || ''), 'dot-child junction обнаружен → skills пропущен: ' + (r.stdout || ''));
@@ -2410,7 +2426,7 @@ if (bashAvailable()) {
       let linked = false;
       try { fs.symlinkSync(base + '/elsewhere-skill', home + '/.claude/skills/link-skill', 'junction'); linked = true; }
       catch (e) { linked = false; }
-      if (!linked) { console.log('     (symlink недоступен — пропуск)'); return; }
+      if (!linked) SKIP('symlink недоступен');
       const r = runCfgSh(home, clone, { HM_ADDITIVE: '1', HM_ALL_PACK_SKILLS: 'link-skill,our-skill', HM_KEEP_SKILLS: 'something-else' });
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert(fs.existsSync(home + '/.claude/skills/link-skill'), 'symlink-скилл ЦЕЛ');
@@ -2479,7 +2495,7 @@ if (powershellAvailable()) {
       let linked = false;
       try { fs.symlinkSync(base + '/external-skills', home + '/.claude/skills', 'junction'); linked = true; }
       catch (e) { linked = false; }
-      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      if (!linked) SKIP('symlink/junction недоступен');
       const r = runCfgPs1(home, clone, {});   // repair (clone везёт skills/our-skill/SKILL.md)
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert.strictEqual(fs.readFileSync(base + '/external-skills/our-skill/DATA.md', 'utf8'), 'EXTERNAL',
@@ -2503,7 +2519,7 @@ if (powershellAvailable()) {
       let linked = false;
       try { fs.symlinkSync(base + '/ext-one', home + '/.claude/skills/our-skill', 'junction'); linked = true; }
       catch (e) { linked = false; }
-      if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+      if (!linked) SKIP('symlink/junction недоступен');
       const r = runCfgPs1(home, clone, {});   // repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert(!fs.existsSync(base + '/ext-one/SKILL.md'), 'во внешнюю цель слинкованного скилла НЕ писали');
@@ -2754,7 +2770,7 @@ ok('guard: symlink/junction-ПРЕДОК → отказ; цель за ссыл�
     let linked = false;
     try { fs.symlinkSync(path.join(home, 'realdir'), path.join(home, 'linkdir'), 'junction'); linked = true; }
     catch (e) { linked = false; }
-    if (!linked) { console.log('     (symlink недоступен — пропуск)'); return; }
+    if (!linked) SKIP('symlink недоступен');
     const opts = { home, platform: process.platform };
     const g = uxMod.checkTarget(path.join(home, 'linkdir', 'payload'), opts);
     assert(!g.ok && /symlink|junction/i.test(g.reason), 'ссылка-предок → отказ: ' + JSON.stringify(g));
@@ -2907,7 +2923,7 @@ ok('P0-1 removeProfileLine: hardlink-ловушка на temp-имени → О�
     let linked = false;
     const trapTmp = rc + '.hm-un.' + fixed.toString('hex') + '.tmp';
     try { fs.linkSync(settings, trapTmp); linked = true; } catch (e) { linked = false; }
-    if (!linked) { console.log('     (hardlink недоступен — пропуск)'); return; }
+    if (!linked) SKIP('hardlink недоступен');
     const r = uxMod.removeProfileLine(rc, LINE, opts);
     assert.strictEqual(r.status, 'failed', 'ловушка → отказ: ' + JSON.stringify(r));
     assert.strictEqual(fs.readFileSync(settings, 'utf8'), '{"user":"precious-hooks"}', 'settings.json ЦЕЛ (не перезаписан через hardlink)');
@@ -3373,7 +3389,15 @@ ok('git-гигиена: vendor/nomad-src (приватный код агента
   const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
   assert(/vendor\/\*|vendor\//.test(gi), '.gitignore покрывает vendor/');
   const tracked = spawnSync('git', ['-C', ROOT, 'ls-files', 'vendor/nomad-src'], { encoding: 'utf8' });
-  if (tracked.error) { console.log('     (git недоступен — пропуск проверки ls-files)'); return; }
+  // Проверять только `.error` мало: он ловит лишь «процесс не запустился». Живой git,
+  // отказавший по своей причине (`fatal: not a git repository`, битый индекс), даёт
+  // status ≠ 0 при ПУСТОМ stdout — и сравнение '' === '' проходит. То есть тест
+  // рапортовал бы «приватный код не закоммичен», ничего на самом деле не проверив.
+  if (tracked.error) SKIP('git не запустился — ls-files');
+  if (tracked.status !== 0) {
+    SKIP('git ls-files отказал (код ' + tracked.status + '): ' +
+      String(tracked.stderr || '').trim().slice(0, 80) + ' — проверка НЕ выполнена');
+  }
   assert.strictEqual((tracked.stdout || '').trim(), '', 'vendor/nomad-src НЕ в git (приватный код агента не коммитим)');
 });
 
@@ -3404,12 +3428,28 @@ const NOMAD_FAKE_UV =
   '  *) exit 0 ;;\n' +
   'esac\n' +
   'exit 0\n';
+// Подставной curl. БЕЗ него эти тесты зависели от НАСТОЯЩЕЙ сети раннера:
+// `nomad.sh` перед установкой пробует `curl -sI --connect-timeout 3` к github.com и
+// pypi.org и при неудаче честно выходит кодом 120 («поставишь позже»). Тест ждал 0 —
+// и краснел, когда проба не успевала. Ровно это и случилось 30.08 на main: та же
+// ветка на PR прошла, на main упала. Плавающий тест хуже отсутствующего: он учит
+// перезапускать до зелёного и однажды скроет настоящую поломку.
+//
+// Флагом HM_FAKE_NET_DOWN=1 проба «падает» (код 7 — couldn't connect у curl), что
+// делает проверяемой и офлайн-ветку: её раньше не покрывал ни один тест, хотя
+// краснела в CI именно она.
+const NOMAD_FAKE_CURL =
+  '#!/bin/sh\n' +
+  ': > "$HOME/.hm-curl-called"\n' +
+  'if [ "$HM_FAKE_NET_DOWN" = "1" ]; then exit 7; fi\n' +
+  'exit 0\n';
 
 function writeNomadFakes(bin) {
   try {
     fs.mkdirSync(bin, { recursive: true });
     fs.writeFileSync(path.join(bin, 'git'), NOMAD_FAKE_GIT); fs.chmodSync(path.join(bin, 'git'), 0o755);
     fs.writeFileSync(path.join(bin, 'uv'), NOMAD_FAKE_UV); fs.chmodSync(path.join(bin, 'uv'), 0o755);
+    fs.writeFileSync(path.join(bin, 'curl'), NOMAD_FAKE_CURL); fs.chmodSync(path.join(bin, 'curl'), 0o755);
     fs.writeFileSync(path.join(bin, 'hm_probe'), '#!/bin/sh\necho HM_PROBE_OK\n'); fs.chmodSync(path.join(bin, 'hm_probe'), 0o755);
     const p = spawnSync('bash', ['-c', 'hm_probe'], {
       encoding: 'utf8',
@@ -3462,6 +3502,23 @@ function sealNomadVendor(base) {
   return r.status === 0 && fs.existsSync(vendor + '/checksums.json') && fs.existsSync(vendor + '/nomad-src.sha256');
 }
 
+// Убедиться, что пробу сети перехватил ПОДСТАВНОЙ curl, а не настоящий.
+//
+// `nomad.sh:5` формирует PATH как `/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:…`,
+// то есть наш фейк стоит ТРЕТЬИМ. На обычной macOS системный curl лежит в /usr/bin
+// (то есть позже фейка) и фейк выигрывает; но если на машине окажется curl из brew,
+// выиграет он — и тест снова начнёт зависеть от настоящей сети.
+//
+// Молчать об этом нельзя: именно так тест и мигал. Поэтому — честный SKIP с
+// причиной. «Пропущен, потому что не смог проверить» и «прошёл» — разные вещи,
+// и набор их считает отдельно.
+function requireFakeCurl(home, r) {
+  if (fs.existsSync(home + '/.hm-curl-called')) return;
+  const tail = ((r && r.stdout) || '').slice(-160).trim();
+  SKIP('подставной curl проиграл гонку PATH (вероятно, curl из brew стоит раньше ' +
+    '$HOME/.local/bin) — тест зависел бы от настоящей сети' + (tail ? '; хвост вывода: ' + tail : ''));
+}
+
 function runNomadSh(home, script, extraEnv) {
   // Таймаут — сторож от ЗАВИСАНИЯ, не перф-гейт. Git Bash на Windows форкает медленно
   // (под нагрузкой машины ~1-2с на КАЖДЫЙ процесс: замер 20.08 — 10× /bin/true = 16с при
@@ -3490,7 +3547,7 @@ if (bashAvailable()) {
     const { base, home, script } = mkNomadTree();
     try {
       const bin = home + '/.local/bin';
-      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      if (!writeNomadFakes(bin)) SKIP('fake-exec недоступен');
       // Даже если рядом лежит чужой ~/.nomad-src с pyproject — vendor-only его игнорирует.
       fs.mkdirSync(home + '/.nomad-src', { recursive: true });
       fs.writeFileSync(home + '/.nomad-src/pyproject.toml',
@@ -3509,10 +3566,11 @@ if (bashAvailable()) {
     const { base, home, script, vsrc } = mkNomadTree();
     try {
       const bin = home + '/.local/bin';
-      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
-      if (!sealNomadVendor(base)) { console.log('     (shasum/seal недоступен — пропуск)'); return; }
+      if (!writeNomadFakes(bin)) SKIP('fake-exec недоступен');
+      if (!sealNomadVendor(base)) SKIP('shasum/seal недоступен');
       const hermesHome = home + '/.hermes';
       const r = runNomadSh(home, script, { HERMES_HOME: hermesHome, HM_NOMAD_SRC: vsrc, HM_VENDOR: base + '/vendor' });
+      requireFakeCurl(home, r);
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert(!fs.existsSync(home + '/.hm-git-called'), 'git НЕ вызван (клонирования нет — vendor-only)');
       assert(fs.existsSync(home + '/.hm-uv-called'), 'uv реально вызван (установка из vendor)');
@@ -3528,15 +3586,41 @@ if (bashAvailable()) {
     const { base, home, script, vsrc } = mkNomadTree();
     try {
       const bin = home + '/.local/bin';
-      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
-      if (!sealNomadVendor(base)) { console.log('     (shasum/seal недоступен — пропуск)'); return; }
+      if (!writeNomadFakes(bin)) SKIP('fake-exec недоступен');
+      if (!sealNomadVendor(base)) SKIP('shasum/seal недоступен');
       const hermesHome = home + '/.hermes';
       fs.mkdirSync(hermesHome, { recursive: true });
       fs.writeFileSync(hermesHome + '/SOUL.md', 'USER_SOUL_KEEP');
       const r = runNomadSh(home, script, { HERMES_HOME: hermesHome, HM_NOMAD_SRC: vsrc, HM_VENDOR: base + '/vendor' });
+      requireFakeCurl(home, r);
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       assert.strictEqual(fs.readFileSync(hermesHome + '/SOUL.md', 'utf8'), 'USER_SOUL_KEEP', 'существующий SOUL.md ЦЕЛ (не перезаписан)');
       assert(/SOUL\.md уже существует/.test(r.stdout || ''), 'сообщение о не-перезаписи брендинга');
+    } finally { dropDir(base); }
+  });
+
+  // Офлайн-ветка. Её не покрывал НИ ОДИН тест — а краснела в CI именно она: проба
+  // сети не успевала, скрипт честно выходил кодом 120, и тест на install падал.
+  // Теперь ветка проверяется прямо: подставной curl «не дозвонился» (код 7).
+  ok('nomad.sh (функц.): нет сети → честный skip 120 БЕЗ установки, vendor и чужие файлы целы', () => {
+    const { base, home, script, vsrc } = mkNomadTree();
+    try {
+      const bin = home + '/.local/bin';
+      if (!writeNomadFakes(bin)) SKIP('fake-exec недоступен');
+      if (!sealNomadVendor(base)) SKIP('shasum/seal недоступен');
+      const hermesHome = home + '/.hermes';
+      const r = runNomadSh(home, script, {
+        HERMES_HOME: hermesHome, HM_NOMAD_SRC: vsrc, HM_VENDOR: base + '/vendor',
+        HM_FAKE_NET_DOWN: '1',
+      });
+      requireFakeCurl(home, r);
+      assert.strictEqual(r.status, 120, 'нет сети → осознанный skip 120, а не падение: ' + (r.stdout || '') + (r.stderr || ''));
+      assert(/сеть недоступна/.test(r.stdout || ''), 'человеку сказано ПОЧЕМУ пропущено: ' + (r.stdout || '').slice(-200));
+      assert(/Поставь позже/.test(r.stdout || ''), 'сказано, что делать дальше');
+      // Главное: пропуск обязан быть БЕЗ побочных действий.
+      assert(!fs.existsSync(home + '/.hm-uv-called'), 'uv НЕ вызван — ставить нечем без сети');
+      assert(!fs.existsSync(bin + '/nmd'), 'шим nmd НЕ создан');
+      assert(!fs.existsSync(hermesHome + '/SOUL.md'), 'брендинг НЕ разложен при пропуске');
     } finally { dropDir(base); }
   });
 
@@ -3544,7 +3628,7 @@ if (bashAvailable()) {
     const { base, home, script, vsrc } = mkNomadTree();
     try {
       const bin = home + '/.local/bin';
-      if (!writeNomadFakes(bin)) { console.log('     (fake-exec недоступен — пропуск)'); return; }
+      if (!writeNomadFakes(bin)) SKIP('fake-exec недоступен');
       // Чужой шим nmd уже на месте — guard обязан отбить ДО установки (vendor валиден).
       fs.writeFileSync(bin + '/nmd', '#!/bin/sh\necho "FOREIGN NMD"\n'); fs.chmodSync(bin + '/nmd', 0o755);
       const r = runNomadSh(home, script, { HM_NOMAD_SRC: vsrc });
@@ -3610,7 +3694,7 @@ ok('P0-3 (функц.): маркер-symlink НЕ считается валид�
     let linked = false;
     try { fs.symlinkSync(realMarker, path.join(dir, '.hamidun-nomad'), 'file'); linked = true; }
     catch (e) { linked = false; }
-    if (!linked) { console.log('     (symlink недоступен — пропуск)'); return; }
+    if (!linked) SKIP('symlink недоступен');
     const r = uxMod.removeDirTreeGated(dir, opts, '.hamidun-nomad');
     assert(r.status === 'kept', 'маркер-symlink → НЕ валиден → kept: ' + JSON.stringify(r));
     assert(fs.existsSync(dir), 'каталог возвращён на место');
@@ -4138,6 +4222,40 @@ ok('main.js: PATH с потерянными символами не перепи
       deps.spawnSync, deps.remoteFetch, deps.detectSpawnEnv, deps.IS_WIN);
   }
 
+  // Сбой ЗАПУСКА процесса — не вердикт о проверяемом коде.
+  //
+  // `winPsPayload` даёт PowerShell 20 секунд на старт (`src/main.js:2747`). На
+  // загруженной машине этого не хватает: 30.08 прогон шёл параллельно с роем
+  // субагентов, и поштучное чтение вернуло
+  // `spawnSync …\powershell.exe ETIMEDOUT` — тест покраснел, хотя слой реестра
+  // исправен. Это ровно та беда, что и с сетью в тестах nomad.sh, только
+  // ресурс другой: тест мерил не код, а занятость машины.
+  //
+  // Поднимать таймаут в ПРОДАКШНЕ нельзя — это поведение у живых людей, и
+  // 20 секунд на чтение ключа реестра и так щедро. Поэтому: одна повторная
+  // попытка (случайное голодание переживается), а если и она упёрлась в старт —
+  // честный SKIP с причиной. Настоящее зависание кода так не замаскируется: оно
+  // упрётся в таймаут ОБА раза и отличается текстом от «не стартовал».
+  const SPAWN_LEVEL = /ETIMEDOUT|EAGAIN|ENOMEM|EBUSY|ENFILE|EMFILE/;
+  // Формы ответа две: одиночный `{ok:false,error}` и МАССИВ таких же — при сбое
+  // запуска `regQueryManyDotNet` возвращает по отказу на каждый запрос
+  // (`src/main.js:2818`). Проверяем обе, иначе сторож молча пропустил бы пачку.
+  const spawnDied = (r) => {
+    const one = (x) => !!x && x.ok === false && SPAWN_LEVEL.test(String(x.error || ''));
+    if (Array.isArray(r)) return r.length > 0 && r.every(one);
+    return one(r);
+  };
+  const errText = (r) => String((Array.isArray(r) ? (r[0] || {}).error : (r || {}).error) || '');
+  const regRetry = (fn, what) => {
+    let r = fn();
+    if (spawnDied(r)) r = fn();
+    if (spawnDied(r)) {
+      SKIP('PowerShell не стартовал дважды подряд (' + errText(r).slice(0, 70) +
+        ') — перегруз машины, а НЕ вердикт о ' + what);
+    }
+    return r;
+  };
+
   let LIVE = null;
   const live = () => {
     if (process.platform !== 'win32') SKIP('реестр Windows недоступен на ' + process.platform);
@@ -4257,7 +4375,7 @@ ok('main.js: PATH с потерянными символами не перепи
         { key: REG_KEY, name: names[3] },
       ];
       const t0 = Date.now();
-      const got = L.regQueryManyDotNet(reqs);
+      const got = regRetry(() => L.regQueryManyDotNet(reqs), 'пачки');
       const batchMs = Date.now() - t0;
       assert(Array.isArray(got) && got.length === reqs.length,
         'результатов ровно столько, сколько запросов: ' + (got && got.length));
@@ -4291,10 +4409,10 @@ ok('main.js: PATH с потерянными символами не перепи
         }
         return m;
       };
-      const batchBest = best(() => L.regQueryManyDotNet(reqs), 3);
+      const batchBest = best(() => regRetry(() => L.regQueryManyDotNet(reqs), 'пачки'), 3);
       const singleBest = best(() => {
         for (const n of names) {
-          const r = L.regQueryValueDotNet(REG_KEY, n);
+          const r = regRetry(() => L.regQueryValueDotNet(REG_KEY, n), 'поштучного чтения');
           assert(r.ok && r.found, 'поштучное чтение ' + n + ': ' + JSON.stringify(r));
         }
       }, 3);
@@ -4390,7 +4508,7 @@ ok('P0-5 (функц.): checkTarget каталога-цели за symlink/junct
     let linked = false;
     try { fs.symlinkSync(real, path.join(home, 'linkbin'), 'junction'); linked = true; }
     catch (e) { try { fs.symlinkSync(real, path.join(home, 'linkbin'), 'dir'); linked = true; } catch (e2) { /* нет прав */ } }
-    if (!linked) { console.log('     (symlink/junction недоступен — пропуск)'); return; }
+    if (!linked) SKIP('symlink/junction недоступен');
     const g = uxMod.checkTarget(path.join(home, 'linkbin', 'uv'), { home, platform: process.platform });
     assert(!g.ok && /symlink|junction/i.test(g.reason), 'pathentry-каталог за ссылкой → отказ: ' + JSON.stringify(g));
   } finally { dropDir(home); }
