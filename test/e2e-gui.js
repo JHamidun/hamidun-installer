@@ -925,8 +925,17 @@ async function scenarioOkOrNetfail(ctx) {
         console.log(String(logText).slice(-4000) || '(журнал пуст)');
         console.log('[e2e] --- конец журнала ---');
       }
-      if (EXPECT_LITE) check('lite: докачка стартовала (в UI виден прогресс скачивания)', sawDownload, steps.slice(0, 200));
-      else check('offline: установка без докачки (сеть не нужна)', !sawDownload, steps.slice(0, 200));
+      // Подпись говорит ровно то, что проверяется. `armDownloadWatcher` следит ЗА
+      // ТЕКСТОМ ПРОГРЕССА САМОГО УСТАНОВЩИКА (регексп по «Скачиваю N%»), а не за
+      // сетью машины. Прежняя формулировка «сеть не нужна» обещала больше: внутри
+      // офлайн-издания компонент `config` зовёт `setup_runtime.py`
+      // (`scripts/macos/config.sh:456`, зеркало `config.ps1:460`), а тот делает
+      // `npm install -g pnpm` и `npm install -g @beads/bd` — то есть в сеть ходит.
+      // Отказ там нефатальный (печатается «Рантайм доехал НЕ полностью»), поэтому
+      // установка не рушится и проверка остаётся верной — но верной ИМЕННО про
+      // отсутствие докачки компонентов, а не про отсутствие сети вообще.
+      if (EXPECT_LITE) check('lite: докачка компонентов стартовала (в UI виден прогресс скачивания)', sawDownload, steps.slice(0, 200));
+      else check('offline: компоненты поставлены БЕЗ докачки (прогресса скачивания в UI не было)', !sawDownload, steps.slice(0, 200));
       check('прогон дошёл до финиша', terminal.kind === 'finish', terminal.kind + ' ' + (terminal.text || ''));
       // Реальная проверка результата: конфиг разложен в ИЗОЛИРОВАННЫЙ профиль.
       if (COMPONENT === 'config') {
