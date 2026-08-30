@@ -3,7 +3,7 @@
 <!-- spec-id: proba-servera-dokachki-preflight-lite -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:670-694`, `src/main.js:628-651`, `src/main.js:98-101`, `src/main.js:529-531`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:80`, `src/renderer/app.js:160-210`, `src/renderer/app.js:1246-1254`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:479-496`, `src/remote-fetch.js:571-595`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
+- **Код:** `src/main.js:672-696`, `src/main.js:630-653`, `src/main.js:100-103`, `src/main.js:531-533`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:80`, `src/renderer/app.js:160-210`, `src/renderer/app.js:1246-1254`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:479-496`, `src/remote-fetch.js:571-595`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
 - **Тесты:** «remote-fetch.js загружается и фильтрует URL/зеркала»
 
 ## Что обещает человеку
@@ -19,7 +19,7 @@
 `netProbeDone`, а не её результат). Человек вправе попробовать всё равно: провайдер мог
 резать один хост, а второе зеркало ответить. Второе обещание — тихая работа в
 офлайн-издании: там качать нечего, и проба не ходит в сеть вовсе
-(`src/main.js:678`, `src/renderer/app.js:170`).
+(`src/main.js:680`, `src/renderer/app.js:170`).
 
 ## Как работает
 
@@ -36,7 +36,7 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 1. `STATE.edition !== 'lite'` **или** в `window.installer` нет `probeRemote` (старый
    preload) → `netProbeDone = true`, `refreshDerived()`, выход. Сеть не трогается
    (`app.js:170-174`). Само поле `edition` приходит из bootstrap и решается в main
-   (`src/main.js:529-531`).
+   (`src/main.js:531-533`).
 2. Иначе: `netProbeDone = false` + `refreshDerived()` — на время пробы «Установить»
    выключается (`app.js:175-176` вместе с гейтом на `app.js:1253`). Дальше `await
    window.installer.probeRemote()`; `online = !(r && r.online === false)` — то есть
@@ -53,11 +53,11 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 подпись «Проверяю…», `runNetProbe()` — то есть повтор идёт по тому же пути, а баннер
 пересоздаётся заново (кнопка снова активна).
 
-**Main, обработчик `probe-remote`** (`src/main.js:676-694`), по шагам:
+**Main, обработчик `probe-remote`** (`src/main.js:678-696`), по шагам:
 
 1. `if (!isLiteEdition()) return { online: true, skipped: true }` — издание определяется
-   по `edition === 'lite'` в `config.json` (`src/main.js:98-101`).
-2. `loadRemoteMaps()` (`src/main.js:628-651`) строит карту «id компонента → remoteId»:
+   по `edition === 'lite'` в `config.json` (`src/main.js:100-103`).
+2. `loadRemoteMaps()` (`src/main.js:630-653`) строит карту «id компонента → remoteId»:
    явный `remote` + `remoteId` из `components.json`, а в lite — автоматически по наличию
    записи в реестре `remote-components.json` (`id == remoteId`), кроме `BUNDLED_ONLY =
    {'uv'}`.
@@ -100,21 +100,21 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
    `probeRemote` (`src/preload.js:26`), а собственный сетевой запрос из страницы
    запрещён CSP `default-src 'self'` (`src/renderer/index.html:8-9`).
 2. Renderer не может выбрать, куда пойдёт проба: обработчик игнорирует аргументы
-   (`src/main.js:676`), а список URL строится из вшитого `remote-components.json` через
-   `loadRemoteMaps` + `pickEntry` (`src/main.js:679-686`).
+   (`src/main.js:678`), а список URL строится из вшитого `remote-components.json` через
+   `loadRemoteMaps` + `pickEntry` (`src/main.js:681-688`).
 3. Пробуются только https-URL без плейсхолдеров — фильтр `remoteFetch.isFetchableUrl`
-   (`src/main.js:686`, `src/remote-fetch.js:100-105`); каждое соединение и каждый
+   (`src/main.js:688`, `src/remote-fetch.js:100-105`); каждое соединение и каждый
    редирект дополнительно проходят `guardUrl`: https-only + отказ на приватный/loopback/
    link-local адрес (`src/remote-fetch.js:479-496`).
 4. Проба не качает содержимое: `Range: bytes=0-0`, «живо» = только 200/206, тело
    немедленно уничтожается (`src/remote-fetch.js:585-592`).
 5. Проба ограничена по времени: абсолютный дедлайн 8000 мс на зеркало
    (`PROBE_DEADLINE`, `src/remote-fetch.js:79,583`), main передаёт тот же 8000
-   (`src/main.js:688`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:580`).
+   (`src/main.js:690`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:580`).
 6. Достаточно ОДНОГО живого зеркала, чтобы вернуть `online: true`
-   (`settled.some(... r.value.ok)`, `src/main.js:688-689`).
+   (`settled.some(... r.value.ok)`, `src/main.js:690-691`).
 7. В нелайт-издании и когда докачивать нечего проба в сеть не ходит и отвечает
-   `{ online: true, skipped: true }` (`src/main.js:678`, `src/main.js:685`).
+   `{ online: true, skipped: true }` (`src/main.js:680`, `src/main.js:687`).
 8. Результат пробы НЕ запирает «Установить»: в гейт кнопки входит `netProbeDone`,
    `detectDone`, число выбранных компонентов и `vendorBlocked` — но не `netOnline`
    (`src/renderer/app.js:1253`).
@@ -131,7 +131,7 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
     гасится и переименовывается, вызывается `runNetProbe`, узел пересоздаётся
     (`src/renderer/app.js:204-209`).
 13. Исключение внутри обработчика превращается в честный `{ online: false }`, а не в
-    «всё хорошо» (`src/main.js:691-693`).
+    «всё хорошо» (`src/main.js:693-695`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -176,7 +176,7 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
 ## Границы
 
 - **Это не проверка интернета.** Пробуются зеркала ОДНОЙ записи реестра — первой, для
-  которой нашлась платформенная запись (`src/main.js:681-684`). Доступность остальных
+  которой нашлась платформенная запись (`src/main.js:683-686`). Доступность остальных
   хостов, DNS, прокси и корпоративных политик фича не проверяет.
 - **Не связана с выбором пользователя.** Проба идёт при старте окна, до всякого выбора
   компонентов, и не смотрит, какие из них выбраны и являются ли они remote.
@@ -205,7 +205,7 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   строительные блоки, которые обработчик вызывает: `isFetchableUrl` и `pickEntry`.
   Инвентарь при этом помечает фичу `tested: "yes"` — это покрытие блоков, а не фичи.
 - **Причина отказа теряется.** Main умеет вернуть `{ online: false, error }`
-  (`src/main.js:692`), но `runNetProbe` читает только `r.online`
+  (`src/main.js:694`), но `runNetProbe` читает только `r.online`
   (`src/renderer/app.js:180`); текст ошибки никуда не попадает — ни в баннер, ни в лог
   (в обработчике `probe-remote` нет ни одного вызова логирования). Диагностика «почему
   не ответило» недоступна ни человеку, ни поддержке.
@@ -214,13 +214,13 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   коде помечено только ОДНО решение из двух — fail-open в renderer: `src/renderer/app.js:181`
   (`} catch (e) { online = true; } // fail-open: ошибка пробы ≠ «сети нет»`) плюс шапка
   `runNetProbe` (`src/renderer/app.js:165-168`). Fail-closed в main не помечен никак: у
-  `catch` (`src/main.js:691-693`) нет ни одного комментария, шапка обработчика
-  (`src/main.js:670-675`) объясняет CSP, отсутствие аргументов, `probeMirror`, дедлайн 8 с
+  `catch` (`src/main.js:693-695`) нет ни одного комментария, шапка обработчика
+  (`src/main.js:672-677`) объясняет CSP, отсутствие аргументов, `probeMirror`, дедлайн 8 с
   и ветки `online:true`, но про поведение на исключении молчит — обдуманный это выбор или
   побочный эффект общего `catch`, из кода не видно. Вместе же они означают: одинаковая по
   сути неполадка даёт противоположный UI в зависимости от того, на какой стороне моста она
   случилась.
-- **Пустой список URL = `{ online: false }`** (`src/main.js:687`) — то есть реестр, где
+- **Пустой список URL = `{ online: false }`** (`src/main.js:689`) — то есть реестр, где
   все зеркала окажутся плейсхолдерами, зажжёт баннер «сервер недоступен» при идеальной
   сети. Сегодня это не срабатывает: в `remote-components.json` у каждой записи два
   реальных https-зеркала (`s3.regru.cloud` и `storage.yandexcloud.net`), плейсхолдеров
@@ -229,12 +229,12 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   перестановка групп/компонентов молча сменит проверяемую запись. Комментарий об этой
   зависимости в коде ЕСТЬ — и он указывает не на тот файл: шапка обработчика обещает
   «пробуем зеркала ПЕРВОГО платформенного remote-компонента **реестра**»
-  (`src/main.js:672-673`), тогда как очерёдность задаёт `compRemote`, построенный обходом
-  `components.json` (`src/main.js:633`, `src/main.js:640-648`) и перебираемый в порядке
-  вставки (`for (const rid of new Set(compRemote.values()))`, `src/main.js:681`). Реестр
+  (`src/main.js:674-675`), тогда как очерёдность задаёт `compRemote`, построенный обходом
+  `components.json` (`src/main.js:635`, `src/main.js:642-650`) и перебираемый в порядке
+  вставки (`for (const rid of new Set(compRemote.values()))`, `src/main.js:683`). Реестр
   `remote-components.json` решает лишь, попадёт ли компонент в карту авто-выводом в lite
-  (`ids.has(c.id)`, `src/main.js:645`) и найдётся ли платформенная запись
-  (`pickEntry`, `src/main.js:682`), но не то, какая из них проверится первой. То есть
+  (`ids.has(c.id)`, `src/main.js:647`) и найдётся ли платформенная запись
+  (`pickEntry`, `src/main.js:684`), но не то, какая из них проверится первой. То есть
   комментарий не отсутствует, а расходится с кодом — и переставившего группы в
   `components.json` он от смены объекта пробы не убережёт, а уведёт искать причину в
   другом файле. Теста, который зафиксировал бы выбор записи, нет: во всём `test/` нет ни

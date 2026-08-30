@@ -3,7 +3,7 @@
 <!-- spec-id: pamyatka-chto-dalshe-oflayn -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `assets/START-HERE.html`, `src/main.js:1508-1525`, `src/main.js:1534-1550`, `src/main.js:1558-1570`, `src/main.js:22-25`, `src/main.js:154-160`, `src/main.js:544`, `src/main.js:1430-1442`, `src/preload.js:27-32`, `src/renderer/app.js:138-141`, `src/renderer/app.js:976-1008`, `src/renderer/app.js:1014-1020`, `src/renderer/app.js:1029-1043`, `src/renderer/app.js:1048-1121`, `src/renderer/app.js:2116-2120`, `src/renderer/app.js:2443-2457`, `src/renderer/index.html:6-9`, `src/renderer/index.html:106-109`, `src/renderer/styles.css:673-703`, `config.json:53-54`, `package.json:99-102`
+- **Код:** `assets/START-HERE.html`, `src/main.js:1510-1527`, `src/main.js:1536-1552`, `src/main.js:1560-1572`, `src/main.js:24-27`, `src/main.js:156-162`, `src/main.js:546`, `src/main.js:1432-1444`, `src/preload.js:27-32`, `src/renderer/app.js:138-141`, `src/renderer/app.js:976-1008`, `src/renderer/app.js:1014-1020`, `src/renderer/app.js:1029-1043`, `src/renderer/app.js:1048-1121`, `src/renderer/app.js:2116-2120`, `src/renderer/app.js:2443-2457`, `src/renderer/index.html:6-9`, `src/renderer/index.html:106-109`, `src/renderer/styles.css:673-703`, `config.json:53-54`, `package.json:99-102`
 - **Тесты:** «сборка: assets/starter-project едет в дистрибутив и содержит PROMPTS.md»
 
 > Единственный тест, который вообще касается этой фичи, проверяет лишь СОГЛАСОВАННОСТЬ
@@ -31,37 +31,37 @@
 **Где лежит источник.** Путь к памятке задан ТОЛЬКО в вшитом `config.json`:
 `finish.startHtmlRelPath = "assets/START-HERE.html"` (`config.json:54`). Файл едет в
 сборку отдельной записью `build.extraResources` (`package.json:99-102`). Абсолютный
-корень ресурсов считает `resourceRoot()` (`src/main.js:22-25`): в упакованном
+корень ресурсов считает `resourceRoot()` (`src/main.js:24-27`): в упакованном
 приложении — `process.resourcesPath`, в dev — `path.join(__dirname, '..')`.
 
 **Три IPC-ручки в main (путь ОТ renderer'а принимает только третья).**
 
-1. `save-start-here` (`src/main.js:1534-1550`) — читает `config.json` через
-   `readJson()` (`src/main.js:154-160`, всегда от `resourceRoot()`), берёт
+1. `save-start-here` (`src/main.js:1536-1552`) — читает `config.json` через
+   `readJson()` (`src/main.js:156-162`, всегда от `resourceRoot()`), берёт
    `finish.startHtmlRelPath` со строковым дефолтом `'assets/START-HERE.html'`,
    резолвит его относительно корня ресурсов и проверяет
    `src.startsWith(root + path.sep)` → иначе `{ok:false, error:'bad-path'}`. Нет файла →
    `{ok:false, error:'source-missing'}`. Иначе `fs.copyFileSync(src, dest)`, где
    `dest = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html')`. В `catch`
    возвращает `src` всё равно — комментарий рядом объясняет это фолбэком на вшитую копию
-   (`src/main.js:1547-1548`), но renderer поле `src` не читает: `saveStartHere()`
+   (`src/main.js:1549-1550`), но renderer поле `src` не читает: `saveStartHere()`
    вызывается в `app.js:990` и `1017`, и в обоих местах берутся только `r.ok` и `r.dest`.
    Путь к вшитой копии renderer собирает независимо, из `STATE.resourcesRoot`
    (`app.js:983`).
-2. `read-start-here` (`src/main.js:1558-1570`) — тот же вывод пути и та же проверка
+2. `read-start-here` (`src/main.js:1560-1572`) — тот же вывод пути и та же проверка
    вложенности, но отдаёт `{ok, html, error}`: содержимое файла строкой,
    `fs.readFileSync(src, 'utf8')`. Кэша нет — при каждом открытии оверлея по IPC едет
    вся строка (583 502 символа на текущем чекауте с CRLF; 582 517 при LF-нормализации).
-3. `open-path` (`src/main.js:1508-1525`) — единственная ручка, принимающая путь ОТ
+3. `open-path` (`src/main.js:1510-1527`) — единственная ручка, принимающая путь ОТ
    renderer'а, и потому с аллоулистом ровно из трёх целей: `LOG_PATH`, точное совпадение
    с `path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html')`, либо путь внутри
    `resourceRoot() + path.sep`. Отказных исходов четыре: пустой аргумент отбивается
-   раньше аллоулиста — `{ok:false, error:'empty-path'}` (`src/main.js:1509`); не прошедшее
-   аллоулист — `{ok:false, error:'bad-path'}` (`src/main.js:1519`); ошибка самой оболочки —
+   раньше аллоулиста — `{ok:false, error:'empty-path'}` (`src/main.js:1511`); не прошедшее
+   аллоулист — `{ok:false, error:'bad-path'}` (`src/main.js:1521`); ошибка самой оболочки —
    результат `shell.openPath` приходит строкой (пустая = успех, непустая = текст ошибки),
-   и ручка разворачивает это в `{ok: !err, error: err || ''}` (`src/main.js:1521`); и
+   и ручка разворачивает это в `{ok: !err, error: err || ''}` (`src/main.js:1523`); и
    брошенное внутри исключение — `{ok:false, error: e.message}` из `catch`
-   (`src/main.js:1522-1524`).
+   (`src/main.js:1524-1526`).
 
 Мост (`src/preload.js:27-32`) экспортирует `saveStartHere()` и `readStartHere()` БЕЗ
 аргументов, `openPath(p)` и `openExternal(url)` — с аргументом.
@@ -79,19 +79,19 @@
   селекторы не совпали бы ни с чем и пропали бы все CSS-переменные. Клики по ссылкам
   перехватываются всегда (`preventDefault`): якоря `#…` скроллятся внутри shadow,
   остальное уходит в `openExternal`, где схемы ограничены `http:/https:/mailto:/tg:`
-  (`src/main.js:1430-1442`). Провал чтения → фолбэк-блок, собранный через `textContent`
+  (`src/main.js:1432-1444`). Провал чтения → фолбэк-блок, собранный через `textContent`
   (не `innerHTML`), с отсылкой к кнопке «Открыть в браузере» (`app.js:1075-1088`).
 - `openStartHereMemo()` (`src/renderer/app.js:976-1008`) — внешний путь. Замок
   `STATE.memoBusy` от повторного клика. Если пусто поле `STATE.startHerePath`
   (`app.js:987-988`) — зовёт `saveStartHere()` и кэширует `dest` в `STATE.startHerePath`.
   Наличие файла на столе при этом НЕ проверяется: `fs.existsSync(dest)` нет ни в
   renderer'е, ни в `save-start-here`, а `fs.copyFileSync` вызывается безусловно
-  (`src/main.js:1544`) — то есть первый за сессию вызов перезаписывает копию, даже если
+  (`src/main.js:1546`) — то есть первый за сессию вызов перезаписывает копию, даже если
   она уже лежит. Дальше — `openPath(dest)`; при неуспехе сбрасывает кэш и пробует вшитую
   копию (`app.js:1000-1003`), собирая путь как
   `STATE.resourcesRoot + sep + startRel` (разделитель и слэши нормализуются по
   `STATE.platform`, `app.js:980-983`). `STATE.resourcesRoot` приходит из bootstrap
-  (`src/main.js:544` → `app.js:71`).
+  (`src/main.js:546` → `app.js:71`).
 - `saveStartHereQuiet()` (`src/renderer/app.js:1014-1020`) — тихая копия на стол без
   открытия чего-либо.
 
@@ -122,36 +122,36 @@
 
 1. **Что читать и что копировать, main решает сам — из вшитого `config.json`.**
    `saveStartHere()`/`readStartHere()` в `src/preload.js:29,32` вызываются БЕЗ аргументов,
-   а обработчики `src/main.js:1537-1538` и `1560-1561` берут `cfg.finish.startHtmlRelPath`
+   а обработчики `src/main.js:1539-1540` и `1560-1561` берут `cfg.finish.startHtmlRelPath`
    сами. Иначе IPC из недоверенного renderer'а дал бы произвольное чтение файлов
    elevated-процессом. Оговорка: свой путь к вшитой копии renderer всё-таки вычисляет
    (`app.js:978-983`) и передаёт его в третью ручку — `openPath(resPath)`
-   (`app.js:996,1001` → `src/preload.js:28` → `src/main.js:1508`); там защита держится не
+   (`app.js:996,1001` → `src/preload.js:28` → `src/main.js:1510`); там защита держится не
    на отсутствии аргумента, а на аллоулисте (инвариант 3).
 2. **Источник обязан лежать внутри корня ресурсов.** `src.startsWith(root + path.sep)`
-   в обеих ручках (`src/main.js:1541` и `1564`) → иначе `bad-path`, файл не читается и
+   в обеих ручках (`src/main.js:1543` и `1564`) → иначе `bad-path`, файл не читается и
    не копируется.
 3. **`shell.openPath` вызывается только по трём разрешённым целям** — `LOG_PATH`, точный
    путь памятки на рабочем столе, что-либо внутри `resourceRoot()`; весь аллоулист — одна
-   строка `src/main.js:1518`, единственный вызов `shell.openPath` во всём `src/` —
-   `src/main.js:1520`. Не прошедшее аллоулист отбивается `bad-path` ДО вызова оболочки
-   (`src/main.js:1519`), пустой аргумент — ещё раньше, `empty-path` (`src/main.js:1509`).
+   строка `src/main.js:1520`, единственный вызов `shell.openPath` во всём `src/` —
+   `src/main.js:1522`. Не прошедшее аллоулист отбивается `bad-path` ДО вызова оболочки
+   (`src/main.js:1521`), пустой аргумент — ещё раньше, `empty-path` (`src/main.js:1511`).
 4. **Имя файла на рабочем столе — одна и та же литеральная строка в двух местах:**
-   `'Что дальше — Hamidun.html'` в аллоулисте `open-path` (`src/main.js:1517`) и в
-   `save-start-here` (`src/main.js:1543`).
+   `'Что дальше — Hamidun.html'` в аллоулисте `open-path` (`src/main.js:1519`) и в
+   `save-start-here` (`src/main.js:1545`).
 5. **Копирование идемпотентно:** `fs.copyFileSync` перезаписывает файл при каждом вызове
-   (`src/main.js:1544`), а renderer в рамках сессии не копирует повторно —
+   (`src/main.js:1546`), а renderer в рамках сессии не копирует повторно —
    `STATE.startHerePath` (`app.js:987-988`, ранний выход `app.js:1015`).
 6. **Скрипты памятки не исполняются в окне установщика.** Держится дважды:
    `stripMemoScripts()` вырезает их до разбора (`app.js:1029-1033,1094`), и CSP
    `script-src 'self'` (`src/renderer/index.html:9`) не дала бы им запуститься.
 7. **Ни одна ручка не бросает исключение — только честный `{ok:false, error}`**
-   (`src/main.js:1541-1548`, `1564-1568`), и renderer рисует отказ через `textContent`,
+   (`src/main.js:1543-1550`, `1564-1568`), и renderer рисует отказ через `textContent`,
    а не `innerHTML` (`app.js:1076-1087`).
 8. **Клик по ссылке внутри памятки не уводит окно установщика с `app.js`:**
    `e.preventDefault()` выполняется для ЛЮБОГО `a[href]` (`app.js:1109-1112`), внешние
    адреса уходят в `openExternal` с аллоулистом схем `http/https/mailto/tg` — одна строка
-   `src/main.js:1436` внутри обработчика `src/main.js:1430-1442`.
+   `src/main.js:1438` внутри обработчика `src/main.js:1432-1444`.
 9. **Автопоказ на финише — ровно один раз за сессию и только встроенный.** Гейт
    `STATE.startHereOpened` (`app.js:2447-2451`); внешний браузер в этой ветке не
    вызывается.
@@ -175,11 +175,11 @@
 3. Без аллоулиста в `open-path` renderer смог бы попросить открыть
    `\\attacker\share\x.exe`, и `shell.openPath` запустил бы это ПОД АДМИНИСТРАТОРОМ.
    Для человека это «я нажал памятку — и что-то установилось».
-4. Разъедутся две строки с именем файла — `bad-path` (`src/main.js:1519`) вернётся только
+4. Разъедутся две строки с именем файла — `bad-path` (`src/main.js:1521`) вернётся только
    на ПЕРВУЮ цель, копию на столе. Кнопка при этом не провалится: `openStartHereMemo`
    молча пробует вшитую копию из ресурсов (`app.js:1000-1003`), а она аллоулист проходит
-   (`rp.startsWith(root + path.sep)`, `src/main.js:1518`), и браузер её откроет. Симптом
-   мягче и оттого незаметнее: копия на стол по-прежнему кладётся (`src/main.js:1543-1544`),
+   (`rp.startsWith(root + path.sep)`, `src/main.js:1520`), и браузер её откроет. Симптом
+   мягче и оттого незаметнее: копия на стол по-прежнему кладётся (`src/main.js:1545-1546`),
    но открыть кнопкой можно уже не её, а вшитую в ресурсы — человек читает файл из недр
    установщика, а лежащий на столе артефакт становится по кнопке недостижимым.
    «Не открывается ничего» бывает лишь в отдельном случае — когда пуст
@@ -243,7 +243,7 @@
   у памятки нет вообще.
 - Копия кладётся на рабочий стол ТОГО пользователя, под которым идёт процесс. Под UAC с
   чужими кредами это будет стол другого человека — ограничение названо в комментарии
-  (`src/main.js:1532-1533`) и не устраняется.
+  (`src/main.js:1534-1535`) и не устраняется.
 - Фича не следит за содержимым копии: человек может отредактировать или удалить файл на
   столе, и до следующего запуска установщика об этом никто не узнает.
 - Никакого версионирования и слияния: копия перезаписывается целиком.
@@ -281,9 +281,9 @@
    `videoBtn` рисуется по `links.video`, `startBtn` — по `startHtmlRelPath`. Памятка
    показывается всегда, а не вместо видео. (Фолбэк по `links.bot` действительно есть, но
    это другая строка — `app.js:2186-2188`.)
-6. **Ссылка на несуществующий TODO.** `src/main.js:1532-1533` отсылает «см. TODO про
+6. **Ссылка на несуществующий TODO.** `src/main.js:1534-1535` отсылает «см. TODO про
    cross-user elevation выше»; во всём `src/main.js` слово `TODO` встречается ровно один
-   раз — в этой самой фразе (`src/main.js:1532`). Читатель пойдёт искать контекст и не
+   раз — в этой самой фразе (`src/main.js:1534`). Читатель пойдёт искать контекст и не
    найдёт его.
 7. **Тихий отказ внешнего пути.** Если `saveStartHere` не сработал И `STATE.resourcesRoot`
    пуст, `openStartHereMemo` возвращает `false`, не показав ничего (`app.js:994-1004`);
@@ -295,7 +295,7 @@
    (undefined ложно), но список полей `STATE` перестал быть полным описанием состояния.
 9. **Вся памятка гоняется по IPC при каждом открытии оверлея** — 583 502 символа
    (замер на текущем чекауте, файл с CRLF; при LF-нормализации 582 517), без кэша
-   (`app.js:1091` → `src/main.js:1566`). Функционально не ломает ничего, но это самый
+   (`app.js:1091` → `src/main.js:1568`). Функционально не ломает ничего, но это самый
    крупный единичный IPC-ответ в приложении.
 10. **Замена `body`/`html` в `adaptMemoCss` — текстовая, с `\b`.** Селектор вида
     `body-x` тоже попадёт под правило `/(^|[\s,{}])body\b/g`. В текущем CSS памятки таких

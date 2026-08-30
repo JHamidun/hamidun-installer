@@ -3,7 +3,7 @@
 <!-- spec-id: python-pakety-pydeps-playwright-brauzery -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1101-1116`, `src/main.js:1135-1136`, `src/main.js:1330-1335`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
+- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1103-1118`, `src/main.js:1137-1138`, `src/main.js:1332-1337`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
 - **Тесты:** «enableWithDeps: selecting "pydeps" transitively pulls config+git+node», «disableDependents: turning off git turns off config+pydeps», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «pydeps.sh: ОБА .pkg через общий root-скрипт HM_PKG_INSTALL_SH (PSF Team ID позиционным); verify_pkg_team_id убран», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)»
 
 ## Что обещает человеку
@@ -33,10 +33,10 @@ darwin 797 395 819) не пишутся руками — их генерируе
 браузеры Playwright.
 
 Перед запуском скрипта `src/main.js` собирает окружение: `HM_VENDOR` указывает либо на
-докачанный staging (lite-издание), либо на вшитый vendor (`vroot`, `src/main.js:1101`;
+докачанный staging (lite-издание), либо на вшитый vendor (`vroot`, `src/main.js:1103`;
 присвоение — `:1135`), а `HM_BUNDLED_CONFIG` резолвится через `vendorPick('config-pack')` —
 «есть в staging → оттуда, иначе из вшитого vendor» (`vendorPick` объявлен в
-`src/main.js:1109-1116`, присвоение — `:1136`). Именно из-за lite-издания там и появился
+`src/main.js:1111-1118`, присвоение — `:1136`). Именно из-за lite-издания там и появился
 `vendorPick`: staging компонента `pydeps` не содержит config-pack, и без этого шаг падал.
 
 ### Windows — `scripts/windows/pydeps.ps1`
@@ -124,7 +124,7 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:172` в упако
 
 `exit 0` → маркер установки пишется (`shouldRecordInstall`, `src/install-receipts.js:36-38`).
 `exit 120` → `isSkipExit` (`:33-34`), маркер и манифест **не** пишутся: `skipped =
-receipts.isSkipExit(code)` (`src/main.js:1330`), гейт записи `shouldRecordInstall(code,
+receipts.isSkipExit(code)` (`src/main.js:1332`), гейт записи `shouldRecordInstall(code,
 isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уходит «пропущен (код 120, нечего
 ставить) — маркер/манифест НЕ записаны» (`:1365`). Renderer ставит шагу статус `skipped`,
 добавляет его в `bad` (чтобы зависимые не стартовали) и печатает «Пропущено: нечего устанавливать»
@@ -154,9 +154,9 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    эти два командлета, и ни на что больше. Остальные сетевые шаги скрипта таймаута не
    имеют вовсе: `winget install` (`:58`), `pip install` (`:154`, `:160`, `:161`, `:164`,
    `:166`) и `python -m playwright install chromium` (`:184`, `:194`). Хост их тоже не
-   убивает: watchdog в `src/main.js:1296-1298` намеренно без kill, `stallTimer`
+   убивает: watchdog в `src/main.js:1298-1300` намеренно без kill, `stallTimer`
    (`:1300-1316`) только печатает сообщение раз в 10 минут. Единственный kill по таймауту
-   в файле — `src/main.js:1712` (20 с) — сидит внутри `winMakeSecureDir()` (объявлена на
+   в файле — `src/main.js:1714` (20 с) — сидит внутри `winMakeSecureDir()` (объявлена на
    `:1649`), примитива СОЗДАНИЯ Admins-only staging-каталога, и к install-скриптам
    отношения не имеет. Практически это значит, что вечный спиннер из «Что ломается №5»
    остаётся достижим — самый хрупкий по сети шаг (докачка Chromium, ~150 МБ, о чём
@@ -165,7 +165,7 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    идут с `/quiet` (`pydeps.ps1:55`, `:96`). Держится тестом «Windows: установщики, САМИ
    запускающие приложение, идут БЕЗ -Wait».
 7. **Отсутствие `requirements.txt` на Windows — код 120, а не 1.** `pydeps.ps1:140`;
-   следствие в `src/install-receipts.js:33-38` и `src/main.js:1330` (`isSkipExit`), `:1335`
+   следствие в `src/install-receipts.js:33-38` и `src/main.js:1332` (`isSkipExit`), `:1335`
    (`shouldRecordInstall` не пропускает код 120), `:1365` (запись в лог): маркер установки
    не пишется, шаг помечается «пропущено».
 8. **Провал офлайн-ветки pip не завершает шаг.** После ненулевого кода идёт онлайн-докачка
@@ -322,6 +322,6 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    `hm_explain_build_failure`; на Windows человек
    получает «Часть библиотек не установилась — смотри лог» (`pydeps.ps1:168`).
    Общий разбор хвоста — `failureExplain.explainScriptFailure(outTail)` в
-   `src/main.js:1385` (словарь `src/failure-explain.js:27` знает про
+   `src/main.js:1387` (словарь `src/failure-explain.js:27` знает про
    `cargo`/`rustc`/`PyO3`) — частично это компенсирует, но специализированного объяснения,
    как на macOS, здесь нет.

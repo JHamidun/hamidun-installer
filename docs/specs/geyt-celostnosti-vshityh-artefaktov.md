@@ -3,7 +3,7 @@
 <!-- spec-id: geyt-celostnosti-vshityh-artefaktov -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `scripts/windows/_verify.ps1:1-118`, `scripts/macos/_lib.sh:196-271`, `vendor/checksums.json`, `tools/regen-checksums.js`, `tools/fetch-vendor.ps1:436-547`, `tools/fetch-vendor-mac.sh:510-541`, `scripts/windows/nomad.ps1:197-215`, `scripts/macos/nomad.sh:42-65`, `scripts/windows/uv.ps1`, `scripts/windows/vscode.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/git.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/mascot.ps1`, `scripts/windows/node.ps1`, `scripts/windows/pydeps.ps1`, `scripts/macos/uv.sh`, `scripts/macos/vscode.sh`, `scripts/macos/course.sh`, `scripts/macos/extension.sh`, `scripts/macos/mascot.sh`, `src/main.js:1078-1083`, `src/main.js:1124-1134`, `src/failure-explain.js:51-66`, `tools/build-lite.js:150-239`, `tools/release-check.js:50-101`, `tools/push-component.py:105-124`
+- **Код:** `scripts/windows/_verify.ps1:1-118`, `scripts/macos/_lib.sh:196-271`, `vendor/checksums.json`, `tools/regen-checksums.js`, `tools/fetch-vendor.ps1:436-547`, `tools/fetch-vendor-mac.sh:510-541`, `scripts/windows/nomad.ps1:197-215`, `scripts/macos/nomad.sh:42-65`, `scripts/windows/uv.ps1`, `scripts/windows/vscode.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/git.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/mascot.ps1`, `scripts/windows/node.ps1`, `scripts/windows/pydeps.ps1`, `scripts/macos/uv.sh`, `scripts/macos/vscode.sh`, `scripts/macos/course.sh`, `scripts/macos/extension.sh`, `scripts/macos/mascot.sh`, `src/main.js:1080-1085`, `src/main.js:1126-1136`, `src/failure-explain.js:51-66`, `tools/build-lite.js:150-239`, `tools/release-check.js:50-101`, `tools/push-component.py:105-124`
 - **Тесты:** «P1-A uv.ps1: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed SHA; никакой сети», «P1-A uv.sh: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed verify_artifact; никакой сети», «vscode.ps1: ставит ОБА расширения; no-vendor → exit 120; идемпотентно; тихая установка; fail-closed», «vscode.sh: ставит ОБА расширения; no-vendor → exit 120; установка через HM_VSCODE_INSTALL_SH (root-staging); идемпотентно; fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «Nomad собирается из КОПИИ — иначе повторная установка падает на гейте целостности», «nomad.sh (функц.): вшитый vendor (HM_NOMAD_SRC с pyproject + аттестация) → install БЕЗ клона + брендинг, exit 0; git НЕ вызван», «WebView2: правило ловит СВОЙ случай и не крадёт чужие падения скрепки», «девять причин не путаются между собой»
 
 ## Что обещает человеку
@@ -111,17 +111,17 @@ Windows при сбое `Copy-Item` установка идёт из vendor на
 
 **Ветка докачки (lite-издание).** Компонент приезжает архивом, распаковывается в
 проверенный по sha staging, и этот staging становится `HM_VENDOR`. Чтобы второй гейт
-не остался без манифеста, `src/main.js:1078-1079` кладёт в staging **копию вшитого**
+не остался без манифеста, `src/main.js:1080-1081` кладёт в staging **копию вшитого**
 `checksums.json`; не удалось скопировать — компонент не запускается вовсе
-(`src/main.js:1080-1083`, `stage: 'fetch'` с текстом «второй гейт целостности не
+(`src/main.js:1082-1085`, `stage: 'fetch'` с текстом «второй гейт целостности не
 сработает»). Ниже, `main.js:1124-1134`, в staging компонента `nomad` доносится вшитый
 uv. Это **оптимизация, а не единственная преграда** перед сетевой установкой: сама
 доставка best-effort — при провале `main.js:1133` только пишет строку в лог, установка
 продолжается, — а `nomad.ps1:140-147` ищет `apps\uv\uv.exe` в ТРЁХ корнях:
 `HM_VENDOR`, `HM_VENDOR_BUNDLED` и `<resources>\vendor` (третий — вшитый vendor
-упакованного приложения: `resourceRoot()` = `process.resourcesPath`, `src/main.js:22-25`,
-`vendorRoot()` = `resourceRoot()/vendor`, `src/main.js:33`, а скрипты лежат в
-`resourceRoot()/scripts/windows`, `src/main.js:572`; в lite-издании там гарантированно
+упакованного приложения: `resourceRoot()` = `process.resourcesPath`, `src/main.js:24-27`,
+`vendorRoot()` = `resourceRoot()/vendor`, `src/main.js:35`, а скрипты лежат в
+`resourceRoot()/scripts/windows`, `src/main.js:574`; в lite-издании там гарантированно
 есть `apps/uv` и `checksums.json` — `tools/build-lite.js:45-49`). Онлайн-фолбэк
 `astral.sh` (`nomad.ps1:168-182`) включается **всякий раз, когда `uv` не разрешился**, а
 не только когда `uv.exe` не нашёлся ни в одном из трёх корней. Вшитый uv ставится
@@ -200,7 +200,7 @@ lite-пользователя докачка проходит, а установ
    вызовы `Test-HmArtifact` / `verify_artifact_soft` — шрифт (`extension.ps1:173`,
    `extension.sh:78`).
 10. **В lite-издании staging не становится `HM_VENDOR` без манифеста.**
-    `src/main.js:1078-1083`: копирование `checksums.json` в staging обязательно, при
+    `src/main.js:1080-1085`: копирование `checksums.json` в staging обязательно, при
     неудаче — возврат с `ok: false` и текстом «второй гейт целостности не сработает».
 11. **До выпуска lite сверяются только имена, присутствующие ОДНОВРЕМЕННО в
     `gatedFiles` записи и во вшитом манифесте.** `tools/build-lite.js:186-199`:

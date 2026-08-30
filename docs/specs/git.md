@@ -3,7 +3,7 @@
 <!-- spec-id: git -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:7-20`, `scripts/windows/git.ps1`, `scripts/macos/git.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:569-573`, `src/main.js:701-723`, `src/main.js:742`, `src/main.js:628-651`, `src/main.js:955-1164`, `remote-components.json`, `mac-arch-support.json`, `vendor/checksums.json`, `tools/fetch-vendor.ps1`, `tools/fetch-vendor-mac.sh`
+- **Код:** `components.json:7-20`, `scripts/windows/git.ps1`, `scripts/macos/git.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:571-575`, `src/main.js:703-725`, `src/main.js:744`, `src/main.js:630-653`, `src/main.js:957-1166`, `remote-components.json`, `mac-arch-support.json`, `vendor/checksums.json`, `tools/fetch-vendor.ps1`, `tools/fetch-vendor-mac.sh`
 - **Тесты:** «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «enableWithDeps: selecting "config" pulls in git+node», «disableDependents: turning off git turns off config+pydeps», «scripts/macos/*.sh: НЕТ строковой формы admin_run "..." и НЕТ osascript вне _lib.sh (инвариант против инъекции путей)», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json», «tools/fetch-vendor-mac.sh: у каждого perArch-артефакта гейт на ОБЕ арх», «components.json → декларация: НИ ОДИН darwin-компонент не забыт»
 
 ## Что обещает человеку
@@ -23,25 +23,25 @@
 
 ## Как работает
 
-Оркестрация одинакова для всех компонентов. `scriptFor(id)` (`src/main.js:569-573`) собирает
+Оркестрация одинакова для всех компонентов. `scriptFor(id)` (`src/main.js:571-575`) собирает
 путь `scripts/windows/git.ps1` на win32 и `scripts/macos/git.sh` на остальных платформах;
-скрипту передаются `HM_VENDOR` (`src/main.js:1135`) и, в холостом прогоне, `HM_DRY_RUN='1'`
-(`src/main.js:1164`). На Windows установщик запущен от администратора —
+скрипту передаются `HM_VENDOR` (`src/main.js:1137`) и, в холостом прогоне, `HM_DRY_RUN='1'`
+(`src/main.js:1166`). На Windows установщик запущен от администратора —
 `package.json:115` задаёт `"requestedExecutionLevel": "requireAdministrator"`, и весь разбор
 безопасности в `git.ps1` исходит именно из этого.
 
 **Откуда берутся байты.** `COMPONENT_VENDOR_ARTIFACT.git = 'apps/git-setup.exe'`
-(`src/main.js:702`). Если этот файл лежит во вшитом vendor или издание помечено офлайновым, то
-`useBundled` истинно (`src/main.js:987`) и докачка не запускается вовсе. В lite-издании
-`loadRemoteMaps` (`src/main.js:638-647`) автоматически считает git remote-компонентом по записи
+(`src/main.js:704`). Если этот файл лежит во вшитом vendor или издание помечено офлайновым, то
+`useBundled` истинно (`src/main.js:989`) и докачка не запускается вовсе. В lite-издании
+`loadRemoteMaps` (`src/main.js:640-649`) автоматически считает git remote-компонентом по записи
 в реестре, и main скачивает архив из `remote-components.json`: для win32 — запись `"remoteId":
 "git"` с `installRelPath: scripts/windows/git.ps1` и `gatedFiles: { "git-setup.exe": "af12577d…" }`,
 для darwin — `"Git for macOS (dugite, arm64+x64)"` с двумя gated-файлами
 `git-macos-arm64.tar.gz` и `git-macos-x64.tar.gz` и `installRelPath: scripts/macos/git.sh`.
 Скачанный staging становится `HM_VENDOR`, и туда же копируется вшитый `checksums.json`
-(`src/main.js:1079`, внутри try на 1078 с fail-closed catch 1080-1083) — иначе второй гейт
+(`src/main.js:1081`, внутри try на 1078 с fail-closed catch 1080-1083) — иначе второй гейт
 целостности внутри скрипта не сработал бы.
-Git входит в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`): провал докачки не роняет компонент
+Git входит в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:744`): провал докачки не роняет компонент
 сразу, а пускает скрипт с пустым vendor, чтобы тот ушёл в winget/прямую загрузку; при этом
 `fetchFellBack` помнит причину, и «нечего ставить» уже не будет засчитано как успех.
 
@@ -223,8 +223,8 @@ Git входит в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`): провал �
     «enableWithDeps: selecting "config" pulls in git+node» и
     «disableDependents: turning off git turns off config+pydeps».
 18. **Провал докачки git не превращается в тихий «пропущено».** `SCRIPT_ONLINE_FALLBACK`
-    содержит `git` (`src/main.js:742`), и `fetchFellBack` (объявлен `src/main.js:966`,
-    присваивается `src/main.js:1061`) не даёт засчитать graceful-skip за успех.
+    содержит `git` (`src/main.js:744`), и `fetchFellBack` (объявлен `src/main.js:968`,
+    присваивается `src/main.js:1063`) не даёт засчитать graceful-skip за успех.
 
 ## Что ломается, если инвариант нарушить
 
@@ -270,7 +270,7 @@ Git входит в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`): провал �
     диагностика. Исходный случай — 07.08.2026, «Готово 1 · Ошибок 4 · Пропущено 2»
     (и дата, и сводка — из комментария `_lib.sh:72`).
 15. В lite-издании компонент нечем скачать: `pickEntry` вернёт `null`, и main отдаст
-    «Нет сборки „git“ для платформы …» (`src/main.js:997`) — конфиг и pydeps не поставятся вслед.
+    «Нет сборки „git“ для платформы …» (`src/main.js:999`) — конфиг и pydeps не поставятся вслед.
 16. Скачанный по реестру архив пройдёт первый гейт (sha всего zip), но второй
     (`Confirm-HmArtifact` по `checksums.json`) отвергнет содержимое, и компонент упадёт на
     ровном месте с текстом про подмену.

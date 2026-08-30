@@ -3,7 +3,7 @@
 <!-- spec-id: progress-dokachki-v-megabaytah -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/renderer/app.js:1767-1788`, `src/renderer/app.js:1606-1613`, `src/renderer/app.js:1371-1402`, `src/renderer/app.js:1436-1441`, `src/preload.js:18-23`, `src/main.js:725-731`, `src/main.js:1036-1045`, `src/main.js:943-948`, `src/remote-fetch.js:603-744`, `src/remote-fetch.js:897-990`, `remote-components.json`
+- **Код:** `src/renderer/app.js:1767-1788`, `src/renderer/app.js:1606-1613`, `src/renderer/app.js:1371-1402`, `src/renderer/app.js:1436-1441`, `src/preload.js:18-23`, `src/main.js:727-733`, `src/main.js:1038-1047`, `src/main.js:945-950`, `src/remote-fetch.js:603-744`, `src/remote-fetch.js:897-990`, `remote-components.json`
 - **Тесты:** «докачка дошла до конца → подпись БЕЗ «Скачиваю», часы продолжают тикать», «E2E: «докачка стартовала» доказывается ПРОЦЕНТАМИ, а не подписью до обращения к сети», «каждая запись реестра докачки корректна (sha256/size/mirrors)»
 
 ## Что обещает человеку
@@ -28,10 +28,10 @@
    `expectedSize = Number(entry.sizeBytes || 0)` (`src/remote-fetch.js:916`).
 
 2. **Дедлайн считается от размера.** `downloadDeadlineFor(sizeBytes)`
-   (`src/main.js:727-731`) даёт
+   (`src/main.js:729-733`) даёт
    `Math.max(20*60*1000, ceil(sz / (300*1024) * 1000 * 1.3))` — то есть исходит из
    ~300 КБ/с плюс 30 % запаса, но не меньше 20 минут. Результат уходит в
-   `fetchRemote` как `downloadDeadlineMs` (`src/main.js:1040`). Внутри `fetchRemote`
+   `fetchRemote` как `downloadDeadlineMs` (`src/main.js:1042`). Внутри `fetchRemote`
    дедлайн назначается **на каждое зеркало заново**:
    `const deadlineAt = Date.now() + dlDeadline` стоит внутри цикла по зеркалам
    (`src/remote-fetch.js:966-967`). Если `downloadDeadlineMs` не передан, работает
@@ -56,8 +56,8 @@
 
 4. **Main пересылает событие в окно.** Колбэк
    `onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total })`
-   (`src/main.js:1041`); `sendChannel` перед отправкой проверяет, что окно и его
-   `webContents` живы (`src/main.js:943-948`).
+   (`src/main.js:1043`); `sendChannel` перед отправкой проверяет, что окно и его
+   `webContents` живы (`src/main.js:945-950`).
 
 5. **Preload отдаёт подписку.** `onRemoteProgress(cb)` вешает слушатель на канал
    `remote-progress` и возвращает функцию отписки (`src/preload.js:19-23`).
@@ -91,10 +91,10 @@
 **Ветвления, где прогресса нет вовсе.** В `run-component` докачка вообще не
 запускается, если это dry-run, если артефакт уже вшит в bundled vendor
 (`vendorHasArtifact`) или это офлайн-издание (`isOfflineEdition`) —
-`src/main.js:987-994` (`const useBundled = vendorHasArtifact || isOfflineEdition();`
+`src/main.js:989-996` (`const useBundled = vendorHasArtifact || isOfflineEdition();`
 и три ветки `if (declared && isDryRun)` / `else if (declared && useBundled)` /
 `else if (declared)`). В офлайн-издании `compRemote` при этом пуст, поэтому
-`remoteSizesForRenderer()` возвращает пустую карту (`src/main.js:653-668`), и
+`remoteSizesForRenderer()` возвращает пустую карту (`src/main.js:655-670`), и
 renderer не считает компонент remote — подписи «Скачиваю…» не будет.
 
 ## Инварианты
@@ -119,7 +119,7 @@ renderer не считает компонент remote — подписи «Ск
    «превышен ожидаемый размер» (`src/remote-fetch.js:712`).
 6. **Дедлайн скачивания никогда не меньше 20 минут и растёт вместе с размером.**
    `Math.max(20 * 60 * 1000, est)` в `downloadDeadlineFor`
-   (`src/main.js:727-731`). Порог, с которого пол в 20 минут перестаёт быть
+   (`src/main.js:729-733`). Порог, с которого пол в 20 минут перестаёт быть
    действующим, — 283 569 231 байт (при 300 КБ/с × 1,3). Это **270,4 МиБ** —
    в тех же единицах, в которых подпись показывает «МБ» (см. «Границы»);
    числом 283,6 он выглядит только в десятичных мегабайтах. Ближайшая к порогу
@@ -131,7 +131,7 @@ renderer не считает компонент remote — подписи «Ск
    (`test/run-tests.js:181-189`); именно из него берутся и `total` для подписи, и
    аргумент дедлайна.
 8. **Отправка в окно не падает на закрытом окне.** `sendChannel` проверяет
-   `mainWindow`/`webContents` на `isDestroyed()` (`src/main.js:943-948`).
+   `mainWindow`/`webContents` на `isDestroyed()` (`src/main.js:945-950`).
 9. **Подписка на прогресс снимается по завершении шага.** `offP()` в
    `src/renderer/app.js:1643`; `onRemoteProgress` для этого и возвращает
    `removeListener` (`src/preload.js:22`).
@@ -154,23 +154,23 @@ renderer не считает компонент remote — подписи «Ск
    жмёт отмену на исправной загрузке.
 6. Без пола в 20 минут короткая загрузка на медленном канале обрывается по
    дедлайну. Последствие зависит от компонента: `git`, `node`, `vscode`,
-   `cursor` и `config` входят в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`) —
+   `cursor` и `config` входят в `SCRIPT_ONLINE_FALLBACK` (`src/main.js:744`) —
    для них провал докачки результат НЕ возвращает, а ставит `fetchFellBack`,
    печатает «пробую системный установщик компонента (winget/прямая загрузка)» и
-   проваливается дальше к spawn (`src/main.js:1055-1063`). `stage:'fetch'`
+   проваливается дальше к spawn (`src/main.js:1057-1065`). `stage:'fetch'`
    достаётся остальным declared-remote компонентам, и их **шесть**: claude,
    mascot, nomad, pydeps, extension, handy (ветка `else`,
-   `src/main.js:1064-1070`). `uv` в этот список НЕ входит: он объявлен
-   `BUNDLED_ONLY` (`const BUNDLED_ONLY = new Set(['uv']);`, `src/main.js:639`) и
-   потому исключён из lite-авто-remote (`src/main.js:645-646`), а второй и
+   `src/main.js:1066-1072`). `uv` в этот список НЕ входит: он объявлен
+   `BUNDLED_ONLY` (`const BUNDLED_ONLY = new Set(['uv']);`, `src/main.js:641`) и
+   потому исключён из lite-авто-remote (`src/main.js:647-648`), а второй и
    единственный оставшийся путь попасть в `compRemote` — явный флаг
-   `c.remote && c.remoteId` (`src/main.js:643`) — для него закрыт: слова
+   `c.remote && c.remoteId` (`src/main.js:645`) — для него закрыт: слова
    «remote» в `components.json` нет ни разу (и в собранной копии
    `release/win-unpacked/resources/components.json` тоже). Значит
-   `const declared = compRemote.get(id)` (`src/main.js:969`) для `uv` всегда
-   `undefined`, и все три ветки докачки (`src/main.js:988` / `990` / `994`) для
+   `const declared = compRemote.get(id)` (`src/main.js:971`) для `uv` всегда
+   `undefined`, и все три ветки докачки (`src/main.js:990` / `990` / `994`) для
    него недостижимы. То же говорит комментарий кода — «uv — BUNDLED_ONLY, не
-   докачивается ниоткуда» (`src/main.js:119`) — и описание компонента в
+   докачивается ниоткуда» (`src/main.js:121`) — и описание компонента в
    `components.json`: «Вшит в установщик — ставится офлайн, интернет не нужен».
    Счёт шестёрки: реестр несёт 12 уникальных `remoteId` (uv, git, node, vscode,
    cursor, claude, mascot, nomad, config, pydeps, extension, handy), минус `uv`
@@ -207,7 +207,7 @@ renderer не считает компонент remote — подписи «Ск
 - Прогресс есть **только у докачки из облака**. Внутри install-скриптов
   (распаковка, установка, `npm i`) прогресса нет — там идут часы «идёт М:СС».
 - Прогресса нет в офлайн-издании, в dry-run и когда артефакт уже вшит в vendor:
-  докачка просто не запускается (`src/main.js:987-994`).
+  докачка просто не запускается (`src/main.js:989-996`).
 - Подпись показывает **округлённые до целого «МБ»** значения, посчитанные делением
   на 1024×1024, то есть фактически мебибайты. На малых объёмах это даёт «0 из 20 МБ»
   на старте.
@@ -240,7 +240,7 @@ renderer не считает компонент remote — подписи «Ск
    `fetchRemote` в тесте про уборку `.part`. Числа 300 КБ/с, 1.3 и пол в 20 минут
    не защищены ничем — их можно изменить, и ни один тест не покраснеет.
 3. **Комментарий над `downloadDeadlineFor` разошёлся с реестром.**
-   `src/main.js:726` говорит «786МБ npm-cache в дефолтные 20 мин не лезет», а
+   `src/main.js:728` говорит «786МБ npm-cache в дефолтные 20 мин не лезет», а
    `remote-components.json` даёт `claude` win32 = 1 051 595 315 байт (≈1002,9 МиБ).
    На поведение не влияет — формула размер берёт из реестра, — но цифра в
    комментарии уже неверна.

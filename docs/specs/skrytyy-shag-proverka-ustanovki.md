@@ -3,7 +3,7 @@
 <!-- spec-id: skrytyy-shag-proverka-ustanovki -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1:261-324`, `src/main.js:568-573`, `src/main.js:1321-1366`, `src/main.js:2757-2766`, `src/main.js:3251-3259`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
+- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1:261-324`, `src/main.js:570-575`, `src/main.js:1323-1368`, `src/main.js:2669-2678`, `src/main.js:3163-3171`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
 - **Тесты:** «P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен»
 
 ## Что обещает человеку
@@ -48,14 +48,14 @@
   hidden (`src/renderer/app.js:919`, комментарий 904-906: «Служебные (hidden, напр. verify) не
   показываем»);
 * детекция «уже установлено» его не видит — `detect-state` пропускает hidden
-  (`src/main.js:2765`), поэтому автоснятие уже установленного его не касается
+  (`src/main.js:2677`), поэтому автоснятие уже установленного его не касается
   (`src/renderer/app.js:232` требует `!c.hidden`);
 * жёлтый баннер «часть компонентов уже установлена» не считает hidden установленными —
   `renderInstalledBanner` требует `!STATE.byId[id].hidden` (`src/renderer/app.js:248`);
 * маркер установки и запись в `installed.json` для него не пишутся
-  (`src/main.js:1335` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
+  (`src/main.js:1337` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
   а `uninstall-component` для hidden отвечает отказом «Служебный компонент … не деинсталлируется»
-  (`src/main.js:3257-3259`).
+  (`src/main.js:3169-3171`).
 
 В списке шагов на экране установки он **виден** — `buildSteps` рисует все id прогона по
 `STATE.byId[id].name` (`src/renderer/app.js:1445-1455`), то есть человек видит строку
@@ -68,7 +68,7 @@
 не было; дубликат снимает та же фильтрация.
 
 **3. Запуск.** Скрипт выбирается по платформе: `scriptFor(id)` строит
-`scripts/windows/verify.ps1` или `scripts/macos/verify.sh` (`src/main.js:568-573`). На Windows
+`scripts/windows/verify.ps1` или `scripts/macos/verify.sh` (`src/main.js:570-575`). На Windows
 процесс установщика запущен elevated (`package.json` → `build.win.requestedExecutionLevel:
 "requireAdministrator"`), поэтому verify.ps1 исполняется под админом — из этого растут его
 ограничения (см. инвариант 5).
@@ -158,8 +158,8 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 10. **Крест чек-листа ломает «Готово!».** `okAll` включает `!checkFailed`
     (`src/renderer/app.js:1927-1931`).
 11. **Служебный компонент не удаляется и не числится установленным.** hidden отсекается в
-    `detect-state` (`src/main.js:2765`), в записи маркера (`src/main.js:1335`) и в
-    `uninstall-component` (`src/main.js:3257-3259`).
+    `detect-state` (`src/main.js:2677`), в записи маркера (`src/main.js:1337`) и в
+    `uninstall-component` (`src/main.js:3169-3171`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -276,6 +276,6 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 9. **TODO в перечисленных файлах есть, но это перекрёстные ссылки, а не маркеры незавершённой
    работы.** Совпадений два, оба вне процитированных диапазонов строк:
    `src/renderer/app.js:687` («интерактивный (детект в main.js; на Windows пока пусто — см. TODO
-   там)») и `src/main.js:1532` («Известное ограничение (как у всей установки, см. TODO про
+   там)») и `src/main.js:1534` («Известное ограничение (как у всей установки, см. TODO про
    cross-user»). FIXME нет ни одного. Отдельная мелочь: TODO, на который ссылается
    `app.js:687`, в `src/main.js` поиском не находится вовсе — ссылка ведёт в пустоту.

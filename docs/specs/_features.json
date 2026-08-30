@@ -279,8 +279,8 @@
           "lines": "2313-2320"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "uv-tolko-vshityy",
@@ -794,8 +794,8 @@
           "lines": "178-185"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "maskot-omleton-v-interfeyse",
@@ -814,8 +814,8 @@
           "lines": "282-293,1905-1908"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "finishnyy-ekran-tri-shaga",
@@ -899,8 +899,8 @@
           "lines": "2414-2434"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "knopki-zapuska-posle-ustanovki",
@@ -949,8 +949,8 @@
           "lines": "513-559"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "kaskad-propuscheno-iz-za-zavisimosti",

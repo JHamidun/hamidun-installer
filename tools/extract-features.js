@@ -152,7 +152,7 @@ function parse() {
 // звёздочек засчитывал его покрытым. На этом я и споткнулся при первом пересчёте.
 const SECTION_COUNTS = /^##\s+(.+?)\s*\((\d+);\s*(?:тестами\s+)?покрыто\s+(\d+)\)\s*$/;
 const TOTAL_LINE = /\*\*Всего фич:\s*(\d+)\.\s*Покрыто тестами:\s*(\d+)\s*\((\d+)%\)\.\*\*/;
-const UNCOVERED_LINE = /^Не покрыто (\d+): одна с явным «нет».*? и (\d+),/;
+const UNCOVERED_LINE = /^\*\*Не покрыто (\d+)\.\*\* Явное «нет» — (\d+)\. Теста не нашлось — (\d+)\./;
 
 function verifyCounts(features) {
   const md = fs.readFileSync(INVENTORY, 'utf8');
@@ -198,16 +198,19 @@ function verifyCounts(features) {
   }
 
   const u = md.split(/\r?\n/).map((l) => UNCOVERED_LINE.exec(l)).find(Boolean);
-  if (!u) problems.push('не нашёл строку «Не покрыто N: одна с явным «нет» … и M,»');
-  else {
+  if (!u) {
+    problems.push('не нашёл строку «**Не покрыто N.** Явное «нет» — A. Теста не нашлось — B.»');
+  } else {
+    // Три числа, а не два: «решили не писать тест» и «теста не нашли» — разные
+    // состояния, и слияние их в одно уже пряталo реальный пробел за решением.
     if (Number(u[1]) !== explicitNo + unknown) {
       problems.push('«не покрыто»: в шапке ' + u[1] + ', по таблице ' + (explicitNo + unknown));
     }
-    if (Number(u[2]) !== unknown) {
-      problems.push('«теста найти не удалось»: в шапке ' + u[2] + ', по таблице ' + unknown);
+    if (Number(u[2]) !== explicitNo) {
+      problems.push('«явное нет»: в шапке ' + u[2] + ', по таблице ' + explicitNo);
     }
-    if (explicitNo !== 1) {
-      problems.push('строка шапки говорит про ОДНУ фичу с явным «нет», а их ' + explicitNo);
+    if (Number(u[3]) !== unknown) {
+      problems.push('«теста не нашлось»: в шапке ' + u[3] + ', по таблице ' + unknown);
     }
   }
 

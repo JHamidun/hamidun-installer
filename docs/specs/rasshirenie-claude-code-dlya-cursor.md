@@ -3,7 +3,7 @@
 <!-- spec-id: rasshirenie-claude-code-dlya-cursor -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:81-96`, `scripts/windows/extension.ps1`, `scripts/macos/extension.sh`, `scripts/windows/_verify.ps1:64-118`, `scripts/windows/_deelev.ps1:59-72`, `scripts/windows/_deelev.ps1:524`, `scripts/windows/verify.ps1:214-241`, `src/main.js:569-573`, `src/main.js:2601-2611`, `src/renderer/app.js:1283`, `config.json:36`
+- **Код:** `components.json:81-96`, `scripts/windows/extension.ps1`, `scripts/macos/extension.sh`, `scripts/windows/_verify.ps1:64-118`, `scripts/windows/_deelev.ps1:59-72`, `scripts/windows/_deelev.ps1:524`, `scripts/windows/verify.ps1:214-241`, `src/main.js:571-575`, `src/main.js:2513-2523`, `src/renderer/app.js:1283`, `config.json:36`
 - **Тесты:** «P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «extension.ps1: уборка vsix-темпа достижима перед КАЖДЫМ exit (та же схема, что и vscode.ps1)», «components: extension требует vscode (не cursor) — дефолт-набор без cursor когерентен», «deps: дефолт включает vscode+extension, но НЕ cursor; extension тянет vscode (не cursor)», «components.json парсится и граф зависимостей цел (vscode/cursor/extension)»
 
 ## Что обещает человеку
@@ -14,7 +14,7 @@
 
 ## Как работает
 
-**Что запускает шаг.** Компонент `extension` (`components.json:81-96`, `requires: ["vscode"]`) на Windows отображается в скрипт `scripts/windows/extension.ps1`, на macOS — в `scripts/macos/extension.sh` (`src/main.js:569-573`, `scriptFor`). Идентификатор расширения приходит из `config.json:36` (`claudeCodeExtensionId`) в переменной окружения `HM_CLAUDE_EXT_ID` (`src/renderer/app.js:1283`); скрипт читает её с запасным значением `anthropic.claude-code` (`extension.ps1:30`). Установщик собран с `requestedExecutionLevel: requireAdministrator` (`package.json:115`, единственное вхождение в файле), поэтому скрипт исполняется elevated — отсюда всё остальное устройство.
+**Что запускает шаг.** Компонент `extension` (`components.json:81-96`, `requires: ["vscode"]`) на Windows отображается в скрипт `scripts/windows/extension.ps1`, на macOS — в `scripts/macos/extension.sh` (`src/main.js:571-575`, `scriptFor`). Идентификатор расширения приходит из `config.json:36` (`claudeCodeExtensionId`) в переменной окружения `HM_CLAUDE_EXT_ID` (`src/renderer/app.js:1283`); скрипт читает её с запасным значением `anthropic.claude-code` (`extension.ps1:30`). Установщик собран с `requestedExecutionLevel: requireAdministrator` (`package.json:115`, единственное вхождение в файле), поэтому скрипт исполняется elevated — отсюда всё остальное устройство.
 
 **Windows, `scripts/windows/extension.ps1`, по шагам:**
 
@@ -34,7 +34,7 @@
 
 **macOS, `scripts/macos/extension.sh` — путь другой:** vsix арх-специфичный (`apps/claude-code-<arch>.vsix`, строки 11-13), проверка `verify_artifact`; отсутствие копии под архитектуру честно объявляется и уводит в Marketplace (строки 14-18). CLI ищется и в `/Applications`, и в `~/Applications` (`hm_cli`, строки 56-62). Установка идёт **и в Cursor, и в VS Code** (строки 64-74), успех считается по `--list-extensions` (`ext_present`, строки 24-35) — запускать редакторный CLI здесь допустимо, потому что весь путь неэлевированный. Шрифт кладётся в `~/Library/Fonts`, `settings.json` — в `~/Library/Application Support/Cursor/User/`. Выход `0`, если встало хотя бы в один редактор.
 
-**Проверка на финише** — не в этом скрипте: `scripts/windows/verify.ps1:214-241` смотрит те же каталоги (`.vscode`, `.vscode-oss`, `.cursor`) по тому же регулярному выражению и печатает `CHECK ok/fail Расширение`, а `src/main.js:2601-2611` при старте установщика помечает компонент установленным, если расширение найдено в любом из трёх каталогов (`extDirs` — строки 2604-2608, `const found = extDirs.some(...)` — 2609, присваивание `out.extension` — 2610).
+**Проверка на финише** — не в этом скрипте: `scripts/windows/verify.ps1:214-241` смотрит те же каталоги (`.vscode`, `.vscode-oss`, `.cursor`) по тому же регулярному выражению и печатает `CHECK ok/fail Расширение`, а `src/main.js:2513-2523` при старте установщика помечает компонент установленным, если расширение найдено в любом из трёх каталогов (`extDirs` — строки 2604-2608, `const found = extDirs.some(...)` — 2609, присваивание `out.extension` — 2610).
 
 ## Инварианты
 
@@ -76,7 +76,7 @@
 - Уступка ради читаемости: проверенный vsix копируется туда, где его может прочитать пользователь. Комментарий (строки 45-47) обосновывает это тем, что vsix и так исполняется редактором при medium integrity, а целостность подтверждена до копирования.
 - Ветка «мы сами запустили Cursor» опирается на `HM_CURSOR_AUTOSTARTED`; присваивания этой переменной нет ни в одном файле репозитория — она только читается (`extension.ps1:89`, комментарий `extension.ps1:83`). Вхождения при этом есть и за пределами `extension.ps1`, и ни одно значение не выставляет: `test/run-tests.js:6052` (`delete env.HM_CURSOR_AUTOSTARTED` — тест чистит окружение песочницы), `release/win-unpacked/resources/scripts/windows/extension.ps1:83` и `:89` (сборочная копия того же скрипта), плюс упоминание в `docs/specs/cursor-opcionalno.md:87`. Комментарий это признаёт формулировкой «если такой будет», то есть ветка задел на будущее, а не действующий путь.
 - Запасной поиск CLI через `Get-Command cursor` работает по PATH, собранному `Update-Path`, то есть только по машинной ветке. Cursor ставится per-user, и его PATH-запись обычно пользовательская — практически этот запасной путь помогает лишь при машинной установке. Тест на это не найден.
-- Компонент считается уже установленным, если расширение найдено в `.cursor`, `.vscode` ИЛИ `.vscode-oss` (`src/main.js:2601-2611`), а установленное по умолчанию снимается с галки (`src/renderer/app.js:230-235`). Следствие: у человека с панелью Claude в VS Code и свежим Cursor компонент по умолчанию выключен, и Cursor панель не получит, пока галку не вернуть руками.
+- Компонент считается уже установленным, если расширение найдено в `.cursor`, `.vscode` ИЛИ `.vscode-oss` (`src/main.js:2513-2523`), а установленное по умолчанию снимается с галки (`src/renderer/app.js:230-235`). Следствие: у человека с панелью Claude в VS Code и свежим Cursor компонент по умолчанию выключен, и Cursor панель не получит, пока галку не вернуть руками.
 
 ## Риски и открытые вопросы
 

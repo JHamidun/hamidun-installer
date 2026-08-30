@@ -3,8 +3,8 @@
 <!-- spec-id: karusel-podskazok -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/renderer/app.js:1806-1847` — комментарий, массив TIPS (16 строк), TIPS_TIMER, startTips, stopTips; `src/renderer/app.js:1884` — запуск карусели из startInstall; `src/renderer/app.js:1905` — запуск из retryFailed; `src/renderer/app.js:1912` — остановка первой строкой finishInstall; `src/renderer/app.js:283-296` — setupMascots, вешает клик-пасхалку в том числе на .tips-mascot; `src/renderer/index.html:145` — main id="view-progress", внутри которого живёт секция; `src/renderer/index.html:178-184` — разметка секции tips (маскот, подпись, tips-text); `src/renderer/styles.css:531-549` — стили секции и анимация появления tipsIn; `src/renderer/styles.css:58` — класс hidden, которым секция гасится; `src/renderer/mascot/thinking.webp` — картинка в секции.
-- **Тесты:** НЕТ
+- **Код:** `test/dom-harness.js`, `src/renderer/app.js:1806-1847` — комментарий, массив TIPS (16 строк), TIPS_TIMER, startTips, stopTips; `src/renderer/app.js:1884` — запуск карусели из startInstall; `src/renderer/app.js:1905` — запуск из retryFailed; `src/renderer/app.js:1912` — остановка первой строкой finishInstall; `src/renderer/app.js:283-296` — setupMascots, вешает клик-пасхалку в том числе на .tips-mascot; `src/renderer/index.html:145` — main id="view-progress", внутри которого живёт секция; `src/renderer/index.html:178-184` — разметка секции tips (маскот, подпись, tips-text); `src/renderer/styles.css:531-549` — стили секции и анимация появления tipsIn; `src/renderer/styles.css:58` — класс hidden, которым секция гасится; `src/renderer/mascot/thinking.webp` — картинка в секции.
+- **Тесты:** «карусель советов: старт показывает совет из списка, стоп гасит таймер, двойной старт не течёт», «карусель советов: без разметки — молча выходит, таймер не заводит»
 
 ## Что обещает человеку
 
