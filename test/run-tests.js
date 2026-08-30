@@ -327,7 +327,9 @@ ok('#6 winSystemRoot: lstat isFile + reject reparse (не existsSync)', () => {
 // #6 (win32, функционально): кандидат, где kernel32.dll — КАТАЛОГ (не файл), не
 // принимается за System root; функция всё ещё находит настоящий C:\Windows.
 ok('#6 winSystemRoot: каталог kernel32.dll не проходит (kernel32 обязан быть файлом)', () => {
-  if (process.platform !== 'win32') return; // Windows-специфично
+  // Не `return`: ok() считает возврат из колбэка УСПЕХОМ и печатает ✅, не
+  // выполнив ни одного ассерта. На macOS-раннере тест был бы «зелёным».
+  if (process.platform !== 'win32') SKIP('Windows-специфично, платформа ' + process.platform);
   const rf = require(path.join(ROOT, 'src', 'remote-fetch.js'));
   const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-sysroot-'));
   fs.mkdirSync(path.join(fake, 'System32', 'kernel32.dll'), { recursive: true }); // ДИРЕКТОРИЯ вместо файла
@@ -1406,6 +1408,15 @@ if (powershellAvailable()) {
       { encoding: 'utf8', timeout: 60000, env });
     const got = /HMSECDIR::([\s\S]+?)::END/.test(String(r.stdout || ''));
     const err = String(r.stderr || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    // Тест создаёт НАСТОЯЩИЙ каталог под %ProgramData% этой машины. Права туда есть
+    // не у всех: обычный пользователь на корпоративной машине, ужатые ACL,
+    // перенаправленный ProgramData. Там ассерт «каталог создан» краснел бы по
+    // причине СРЕДЫ, а проверяем мы совсем другое — что создание не тянет за собой
+    // модуль Security. Отказ по правам — честный пропуск, отказ по модулю — провал.
+    if (!got && /Access is denied|Отказано в доступе|UnauthorizedAccess|PermissionDenied/i.test(err)) {
+      SKIP('нет прав на запись в ' + pd + ' — проверка НЕ выполнена (' + err.slice(0, 70) + ')');
+    }
+    if (r.status === null) SKIP('powershell убит по таймауту 60 с — проверка НЕ выполнена');
     assert(got, 'staging-каталог создан при PSModulePath от pwsh 7 (stderr: ' + err.slice(0, 200) + ')');
     assert(!/Microsoft\.PowerShell\.Security/.test(err), 'нет зависимости от модуля Security: ' + err.slice(0, 200));
   });
@@ -1776,6 +1787,22 @@ if (bashAvailable()) {
     const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 30000 });
     try { fs.rmSync(marker, { force: true }); } catch (e) { /* ignore */ }
     try { fs.rmSync(bashEnvFile, { force: true }); } catch (e) { /* ignore */ }
+    // ПОЗИТИВНЫЙ КОНТРОЛЬ обязателен: ассерт ниже проверяет ОТСУТСТВИЕ маркера, а
+    // отсутствие бывает по двум совершенно разным причинам — барьер сработал (то,
+    // что проверяем) и скрипт вообще не выполнился (bash не запустился, упал на
+    // синтаксисе, вышел по таймауту 30 с). Во втором случае stdout пуст, маркера в
+    // нём нет, и тест печатал бы ✅, не проверив НИЧЕГО.
+    //
+    // Последняя строка скрипта — `echo OK`, то есть доказательство «дошли до конца»
+    // уже было под рукой; его просто не проверяли.
+    if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+    if (r.status === null) SKIP('bash убит по таймауту 30 с — проверка НЕ выполнена');
+    assert.strictEqual(r.status, 0,
+      'скрипт дошёл до конца (иначе отсутствие маркера ничего не доказывает): код ' +
+      r.status + '; ' + (r.stdout || '') + (r.stderr || ''));
+    assert(/\bOK\b/.test(r.stdout || ''),
+      'позитивный контроль: напечатано `OK` из последней строки — значит дошли до конца, ' +
+      'а не оборвались молча: ' + (r.stdout || ''));
     assert(!/ENV-HIJACK EXECUTED/.test(r.stdout || ''), 'враждебное окружение НЕ выполнилось под env -i барьером: ' + (r.stdout || '') + (r.stderr || ''));
   });
 }
@@ -9106,7 +9133,9 @@ ok('config.json в репозитории без сборочных маркер
     // Зашитый win32-x64 вычистил бы на macOS ровно darwin-arm64/darwin-x64 — то
     // единственное, ради чего там кеш и нужен. Проверяем на реальном кеше проекта.
     const cache = prune.readCache(prune.DEFAULT_CACHE);
-    if (!cache.exists) return; // кеша нет (чистое дерево) — проверять нечего
+    // Голый return печатал ✅ без единого ассерта. В CI это происходит ВСЕГДА:
+    // vendor/npm-cache в .gitignore, а fetch:vendor в unit-tests.yml не запускается.
+    if (!cache.exists) SKIP('кеша нет (' + prune.DEFAULT_CACHE + ') — проверять нечего');
     const { keep, rootVersion } = prune.resolveKeep(cache, {});
     assert(rootVersion, 'нужная версия должна вычисляться из dist-tags закешированного packument\'а');
     const names = Object.keys(keep);
@@ -9120,7 +9149,7 @@ ok('config.json в репозитории без сборочных маркер
 
   ok('прунер удаляет ТОЛЬКО архивы: packument\'ы (в т.ч. чужих платформ) неприкосновенны', () => {
     const cache = prune.readCache(prune.DEFAULT_CACHE);
-    if (!cache.exists) return;
+    if (!cache.exists) SKIP('кеша нет (' + prune.DEFAULT_CACHE + ') — проверять нечего');
     const plan = prune.planPrune(cache, {});
     for (const e of plan.removeEntries) {
       assert(e.tarball, 'под удаление попала НЕ-архивная запись (' + e.key + ') — packument\'ы трогать нельзя');
@@ -9131,10 +9160,10 @@ ok('config.json в репозитории без сборочных маркер
     // Молча удалить 12 версий и оставить тринадцатую, которой физически нет, — это
     // отказ офлайн-установки НА МАШИНЕ ПОЛЬЗОВАТЕЛЯ. Лучше не почистить.
     const cache = prune.readCache(prune.DEFAULT_CACHE);
-    if (!cache.exists) return;
+    if (!cache.exists) SKIP('кеша нет (' + prune.DEFAULT_CACHE + ') — проверять нечего');
     const name = prune.ROOT_PKG + '-win32-x64';
     const versions = Object.keys(cache.tarballs[name] || {});
-    if (!versions.length) return;
+    if (!versions.length) SKIP('в кеше нет версий ' + name + ' — синтетику не на чем строить');
     // Синтетика: подкладываем вторую (несуществующую) версию + ломаем блоб оставляемой.
     const fake = JSON.parse(JSON.stringify(cache));
     fake.tarballs = Object.assign({}, cache.tarballs);
@@ -10004,7 +10033,19 @@ ok('config.json в репозитории без сборочных маркер
   ok('ключи визарда: замена НА МЕСТЕ, порядок цел, доллар в значении не толкуется', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-creds-'));
     const F = path.join(base, '.claude', '.credentials.master.env');
-    const save = (o) => creds.saveCredentials(o, { file: F });
+    // Ответ saveCredentials проверяем ОБЯЗАТЕЛЬНО: при отказе она НЕ бросает, а
+    // возвращает {ok:false, error} (src/credentials-merge.js:87). Раньше ответ
+    // выбрасывался молча, и сбой записи всплывал позже — на ассерте про содержимое
+    // файла, то есть под ЧУЖИМ именем. Ровно это и случилось 31.08: прогон упал с
+    // «значение с $ записано буквально», хотя доллар был ни при чём, а тот же
+    // модуль в изоляции отработал верно. Теперь причина называется сразу.
+    const save = (o) => {
+      const r = creds.saveCredentials(o, { file: F });
+      assert(r && r.ok === true,
+        'saveCredentials(' + Object.keys(o).join(',') + ') отказала: ' +
+        ((r && r.error) || JSON.stringify(r)));
+      return r;
+    };
     try {
       save({ ANTHROPIC_API_KEY: 'sk-ant-111' });
       save({ OPENAI_API_KEY: 'sk-oai-222' });
