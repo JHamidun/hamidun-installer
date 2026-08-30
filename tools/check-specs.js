@@ -253,7 +253,16 @@ function main() {
       for (const t of titles) {
         checkedTests++;
         if (testsSrc.indexOf(t) === -1) {
-          add(f.id, 'теста нет', '«' + t.slice(0, 80) + (t.length > 80 ? '…' : '') + '» не найден в test/run-tests.js');
+          // Сверка идёт с ИСХОДНЫМ ТЕКСТОМ файла, а не с тем, что печатает раннер.
+          // Значит в заголовке с обратным слешем цитировать надо экранированный вид
+          // (`…\\w`, как в коде), иначе совпадения не будет. Ловушка не теоретическая:
+          // на ней потерян проход при добавлении теста про уборку staging.
+          const doubled = t.replace(/\\/g, '\\\\');
+          const hint = (t.includes('\\') && testsSrc.indexOf(doubled) !== -1)
+            ? ' — но нашёлся с удвоенным слешем: сверка идёт с ИСХОДНИКОМ, цитируй «' + doubled.slice(0, 60) + '…»'
+            : '';
+          add(f.id, 'теста нет',
+            '«' + t.slice(0, 80) + (t.length > 80 ? '…' : '') + '» не найден в test/run-tests.js' + hint);
         }
       }
       for (const p of files) {

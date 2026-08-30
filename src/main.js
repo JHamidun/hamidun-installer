@@ -13,6 +13,7 @@ const installMode = require('./install-mode');  // P0-1: авторитетны�
 const receipts = require('./install-receipts'); // installed-маркеры (гейт «Удалить»; целей удаления НЕ задают)
 const uninstallTargets = require('./uninstall-targets'); // зашитый per-component аллоулист целей удаления
 const uninstallExec = require('./uninstall-exec');       // guard (fail-closed) + исполнители удаления в JS
+const { rmStagingTree } = require('./staging-paths'); // снос staging — только по имени HmDeElev-<hex>
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -302,8 +303,8 @@ function cleanupAllSecureDirs() {
     // ВНЕШНИЙ каталог, а не рабочий подкаталог «w»: staging двухуровневый, и
     // удаление только «w» оставляло в %ProgramData% запертый Admins-only
     // HmDeElev-*, который пользователь не может стереть сам. Ровно для этого
-    // и заведён stagingRootOf — здесь его забыли применить.
-    try { fs.rmSync(stagingRootOf(d), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    // и заведён rmStagingTree — здесь его когда-то забыли применить.
+    rmStagingTree(d);   // fail-closed по имени HmDeElev-<32 hex>, см. src/staging-paths.js
   }
   SECURE_DIRS.clear();
 }
@@ -956,7 +957,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   let secureCacheDir = '';
   const cleanupSecureCache = () => {
     if (!secureCacheDir) return;
-    try { fs.rmSync(stagingRootOf(secureCacheDir), { recursive: true, force: true }); } catch (e) { /* best-effort */ }
+    rmStagingTree(secureCacheDir);
     for (const [rid, d] of SECURE_DIRS) { if (d === secureCacheDir) SECURE_DIRS.delete(rid); }
     secureCacheDir = '';
   };
@@ -1635,16 +1636,10 @@ function winDeElevScript() {
 // стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
 let lastSecureDirError = '';
 
-// Защищённый staging = ПАРА каталогов: внешний HmDeElev-<rnd> (заперт) и рабочий `w`
-// внутри него (наружу отдаётся именно рабочий — см. New-HmSecureStagingDir). Убирать
-// надо ВНЕШНИЙ, иначе в ProgramData копятся пустые запертые каталоги.
-function stagingRootOf(p) {
-  try {
-    const s = String(p || '');
-    if (!s) return s;
-    return path.basename(s) === 'w' ? path.dirname(s) : s;
-  } catch (e) { return p; }
-}
+// Вычисление пути для сноса staging и сам снос живут в src/staging-paths.js:
+// это код с ценой ошибки «стёрли чужой каталог под админом», и он обязан
+// проверяться тестом напрямую, а не через выковыривание функции из этого файла.
+// Гейт по имени HmDeElev-<32 hex> — там же (зеркало Remove-HmSecureStagingDir).
 
 async function winMakeSecureDir() {
   // Сбрасываем на КАЖДОМ входе. Иначе причина от прошлого отказа доживает до следующего
@@ -1732,11 +1727,21 @@ async function winMakeSecureDir() {
     }
     const dir = m[1].trim();
     if (!dir) return null;
-    const rm = () => { try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ } };
+    const rm = () => rmStagingTree(dir);
     // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
     // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
     const root = path.resolve(pd);
-    if (!path.resolve(dir).startsWith(root + path.sep)) { rm(); return null; }
+    // Путь ВНЕ ProgramData — отказываемся и НИЧЕГО не трогаем.
+    //
+    // Здесь стоял `rm()`, и это было наоборот: ветка, которая обнаружила путь не там,
+    // где ему положено быть, отвечала на находку РЕКУРСИВНЫМ УДАЛЕНИЕМ этого пути под
+    // админом. Проверка на выход за границу превращалась в примитив «снести каталог,
+    // оказавшийся не нашим» — то есть страховка работала ровно против своей цели.
+    // Правильный ответ на «путь не наш» — не удалять его, а отказаться.
+    if (!path.resolve(dir).startsWith(root + path.sep)) {
+      lastSecureDirError = 'примитив вернул путь вне %ProgramData% — каталог не тронут';
+      return null;
+    }
     if (!fs.existsSync(dir)) return null;
     if (!remoteFetch.verifyDirSecureWin(dir)) { rm(); return null; }   // owner=Admins, посторонних ACE нет
     return dir;
@@ -1798,7 +1803,7 @@ async function winLaunchDeElevated(exe, folderArg) {
   }
   const cleanup = () => {
     try { runSchtasks(['/Delete', '/TN', tag, '/F']); } catch (e) { /* */ }
-    try { fs.rmSync(stagingRootOf(dir), { recursive: true, force: true }); } catch (e) { /* */ }
+    rmStagingTree(dir);
   };
 
   // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без

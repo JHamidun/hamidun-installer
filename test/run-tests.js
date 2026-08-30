@@ -7072,6 +7072,91 @@ asyncTests().then(() => {
     });
   }
 
+  // ЗЕРКАЛО ТОГО ЖЕ ГЕЙТА В JS. Тест выше сторожил только PowerShell, а main.js
+  // называл в комментарии «образцом» — хотя образец был как раз слабее копии:
+  // подъём от `w` к родителю шёл БЕЗ проверки имени, и все потребители сносили
+  // результат через `fs.rmSync(…, {recursive, force})` под админом. Тест зовёт
+  // НАСТОЯЩИЙ модуль и работает на настоящем дереве, а не ищет подстроки.
+  ok('staging-paths: rmStagingTree сносит ВНЕШНИЙ HmDeElev-<hex>; чужое имя цело (fail-closed)', () => {
+    const M = require(path.join(ROOT, 'src', 'staging-paths.js'));
+
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-jsstage-'));
+    try {
+      const hex = crypto.randomBytes(16).toString('hex');
+      const outer = path.join(base, 'HmDeElev-' + hex);
+      const work = path.join(outer, 'w');
+      fs.mkdirSync(work, { recursive: true });
+      fs.writeFileSync(path.join(work, 'task.xml'), 'x');       // непустой — как в бою
+
+      // Подлог 1: та же структура «…\w», но имя родителя чужое.
+      const alien = path.join(base, 'NotMine-' + hex);
+      fs.mkdirSync(path.join(alien, 'w'), { recursive: true });
+      // Подлог 2: боевой путь, который и вскрыл дефект, — `%ProgramData%\w`.
+      const bare = path.join(base, 'ProgramDataLike');
+      fs.mkdirSync(path.join(bare, 'w'), { recursive: true });
+      fs.writeFileSync(path.join(bare, 'ценное.txt'), 'не трогать');
+      // Подлог 3: имя почти похоже — 31 hex вместо 32, и заглавные буквы.
+      //
+      // Для верхнего регистра берём ДРУГОЙ hex, а не тот же заглавными: Windows не
+      // различает регистр в именах, и `HmDeElev-<HEX>` был бы ТЕМ ЖЕ каталогом, что
+      // и свой staging, снесённый строкой выше. Тест тогда падал бы на оснастке,
+      // а не на коде — так и случилось при первом прогоне.
+      const near1 = path.join(base, 'HmDeElev-' + hex.slice(0, 31));
+      const near2 = path.join(base, 'HmDeElev-' + crypto.randomBytes(16).toString('hex').toUpperCase());
+      fs.mkdirSync(path.join(near1, 'w'), { recursive: true });
+      fs.mkdirSync(path.join(near2, 'w'), { recursive: true });
+
+      // Подъём к родителю разрешён ТОЛЬКО для настоящего staging.
+      assert(M.stagingRootOf(work) === outer, 'от w поднимается к HmDeElev-<hex>');
+      assert(M.stagingRootOf(path.join(bare, 'w')) === path.join(bare, 'w'),
+        'от `<чужое>\\w` НЕ поднимается — иначе снёс бы родителя целиком');
+      assert(M.stagingRootOf(outer) === outer, 'сам staging остаётся собой');
+      assert(M.stagingRootOf('') === '' && M.stagingRootOf(null) === '', 'пустой вход безопасен');
+
+      assert(M.rmStagingTree(work) === true, 'снос настоящего staging отработал');
+      assert(!fs.existsSync(outer), 'ВНЕШНИЙ каталог исчез целиком, не только w');
+
+      for (const [label, victim] of [['чужое имя', alien], ['голый родитель', bare],
+        ['31 hex', near1], ['ЗАГЛАВНЫЕ hex', near2]]) {
+        assert(M.rmStagingTree(path.join(victim, 'w')) === false, label + ': снос отклонён');
+        assert(fs.existsSync(victim), label + ': каталог цел (fail-closed)');
+      }
+      assert(fs.readFileSync(path.join(bare, 'ценное.txt'), 'utf8') === 'не трогать',
+        'содержимое чужого каталога не пострадало');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  // Ни одного сноса staging в обход помощника: голый rmSync(stagingRootOf(...)) —
+  // это ровно тот код, который удалял каталог без проверки имени.
+  ok('main.js: все сносы staging идут через rmStagingTree, голого rmSync(stagingRootOf) нет', () => {
+    const src = EG_MAIN();
+    assert(!/rmSync\(\s*stagingRootOf\(/.test(src),
+      'не осталось fs.rmSync(stagingRootOf(...)) в обход fail-closed гейта');
+    assert(/require\('\.\/staging-paths'\)/.test(src), 'main.js берёт помощник из модуля, а не держит копию');
+    assert(!/function\s+stagingRootOf/.test(src), 'копии stagingRootOf в main.js не осталось (единственный источник — модуль)');
+    // Потребителей ЧЕТЫРЕ (замерено, не по памяти): cleanupAllSecureDirs,
+    // cleanupSecureCache, rm() внутри winMakeSecureDir и cleanup() внутри
+    // winLaunchDeElevated. Порог, а не точное число: пятый потребитель — нормальное
+    // развитие, а вот исчезновение вызовов означало бы возврат обхода.
+    const calls = (src.match(/rmStagingTree\(/g) || []).length;
+    assert(calls >= 4, 'помощник используется всеми четырьмя потребителями (найдено вызовов ' + calls + ')');
+  });
+
+  // Ветка «путь вне %ProgramData%» обязана ОТКАЗАТЬ, а не удалять. Раньше она
+  // отвечала на подозрительный путь рекурсивным сносом под админом — то есть
+  // проверка границы сама была примитивом удаления.
+  ok('main.js: путь вне %ProgramData% -> отказ БЕЗ удаления', () => {
+    const src = EG_MAIN();
+    const i = src.indexOf('function winMakeSecureDir(');
+    const body = src.slice(i, src.indexOf('function winLaunchDeElevated('));
+    const m = /if \(!path\.resolve\(dir\)\.startsWith\(root \+ path\.sep\)\) \{([\s\S]{0,400}?)\n    \}/.exec(body);
+    assert(m, 'ветка проверки границы %ProgramData% найдена');
+    assert(!/\brm\(\)/.test(m[1]) && !/rmStagingTree/.test(m[1]) && !/rmSync/.test(m[1]),
+      'в ветке НЕТ удаления — только отказ: ' + m[1].trim().slice(0, 120));
+    assert(/return null/.test(m[1]), 'ветка отказывает (return null)');
+    assert(/lastSecureDirError/.test(m[1]), 'причина отказа уходит человеку, а не молчит');
+  });
+
   // Задача 2: classifyRegQuery / REG_NOTFOUND_RE / REG_DENIED_RE удалены — main.js
   // читает реестр сам (.NET Registry через winPsPayload), вызовов в репозитории нет.
   // Живые экспорты (launchctl-классификаторы, verifyPostconditions) — на месте.

@@ -126,13 +126,92 @@ function parse() {
       what,
       codeRefs: parseCodeRefs(code),
       // «есть» / «не найден» / «**нет**» — нормализуем в три состояния.
+      //
+      // Без `\b`, и это НАМЕРЕННО. В JavaScript `\b` строится на латинском `\w`,
+      // поэтому «т» для него не буква, и `/нет\b/` НЕ совпадает с «нет» в конце
+      // строки. Маяк курса помечен `**нет**` и полгода числился не «явное нет», а
+      // «теста найти не удалось» — то есть инвентарь тихо путал «решили не писать»
+      // с «не нашли». Ровно тот же дефект уже ловили в гейте спек (ADR-008,
+      // раздел про честное «НЕТ»); здесь он жил незамеченным, пока не появилась
+      // сверка счётчиков.
       tested: /^\*?\*?есть/.test(test) ? 'yes'
-        : /нет\b/.test(test.replace(/\*/g, '')) && !/не найден/.test(test) ? 'no'
+        : /^нет(?:$|[\s.,;:—–-])/.test(test.replace(/\*/g, '').trim()) ? 'no'
           : 'unknown',
       testRaw: test.replace(/\*/g, ''),
     });
   }
   return features;
+}
+
+// Счётчики в шапках инвентаря («61 фича, покрыто 55», «Экраны (18; покрыто 14)»)
+// правятся РУКАМИ, и потому обязаны проверяться машиной — иначе повторится то, что
+// уже было: инвентарь месяц занижал покрытие на восемь фич, и по этой цифре
+// планировали, что писать дальше. Считаем по строкам таблицы и сверяем.
+//
+// Разметку в ячейке снимаем: маяк курса помечен `**нет**`, и счётчик без снятия
+// звёздочек засчитывал его покрытым. На этом я и споткнулся при первом пересчёте.
+const SECTION_COUNTS = /^##\s+(.+?)\s*\((\d+);\s*(?:тестами\s+)?покрыто\s+(\d+)\)\s*$/;
+const TOTAL_LINE = /\*\*Всего фич:\s*(\d+)\.\s*Покрыто тестами:\s*(\d+)\s*\((\d+)%\)\.\*\*/;
+const UNCOVERED_LINE = /^Не покрыто (\d+): одна с явным «нет».*? и (\d+),/;
+
+function verifyCounts(features) {
+  const md = fs.readFileSync(INVENTORY, 'utf8');
+  const problems = [];
+
+  const actual = new Map(); // раздел без чисел -> [всего, покрыто]
+  for (const f of features) {
+    const cur = actual.get(f.section) || [0, 0];
+    cur[0] += 1;
+    if (f.tested === 'yes') cur[1] += 1;
+    actual.set(f.section, cur);
+  }
+
+  const seen = new Set();
+  for (const line of md.split(/\r?\n/)) {
+    const m = SECTION_COUNTS.exec(line);
+    if (!m) continue;
+    const [, name, declTotal, declTested] = m;
+    seen.add(name);
+    const got = actual.get(name);
+    if (!got) { problems.push('шапка «' + name + '» есть, а строк таблицы под ней нет'); continue; }
+    if (Number(declTotal) !== got[0] || Number(declTested) !== got[1]) {
+      problems.push('«' + name + '»: в шапке ' + declTotal + '/' + declTested
+        + ', по строкам таблицы ' + got[0] + '/' + got[1]);
+    }
+  }
+  for (const name of actual.keys()) {
+    if (!seen.has(name)) problems.push('у раздела «' + name + '» в шапке нет счётчика (N; покрыто M)');
+  }
+
+  const total = features.length;
+  const tested = features.filter((f) => f.tested === 'yes').length;
+  const explicitNo = features.filter((f) => f.tested === 'no').length;
+  const unknown = features.filter((f) => f.tested === 'unknown').length;
+
+  const t = TOTAL_LINE.exec(md);
+  if (!t) problems.push('не нашёл строку «Всего фич: N. Покрыто тестами: M (P%)»');
+  else {
+    if (Number(t[1]) !== total) problems.push('итог «всего фич»: в шапке ' + t[1] + ', по таблице ' + total);
+    if (Number(t[2]) !== tested) problems.push('итог «покрыто»: в шапке ' + t[2] + ', по таблице ' + tested);
+    const pct = Math.round((tested / total) * 100);
+    if (Number(t[3]) !== pct) problems.push('процент покрытия: в шапке ' + t[3] + '%, по таблице ' + pct + '%');
+  }
+
+  const u = md.split(/\r?\n/).map((l) => UNCOVERED_LINE.exec(l)).find(Boolean);
+  if (!u) problems.push('не нашёл строку «Не покрыто N: одна с явным «нет» … и M,»');
+  else {
+    if (Number(u[1]) !== explicitNo + unknown) {
+      problems.push('«не покрыто»: в шапке ' + u[1] + ', по таблице ' + (explicitNo + unknown));
+    }
+    if (Number(u[2]) !== unknown) {
+      problems.push('«теста найти не удалось»: в шапке ' + u[2] + ', по таблице ' + unknown);
+    }
+    if (explicitNo !== 1) {
+      problems.push('строка шапки говорит про ОДНУ фичу с явным «нет», а их ' + explicitNo);
+    }
+  }
+
+  return problems;
 }
 
 // Указатель по спекам ГЕНЕРИРУЕТСЯ, а не пишется руками — по той же причине, по
@@ -185,6 +264,16 @@ function main(argv) {
     return 1;
   }
 
+  // Сверка счётчиков — до записи: расхождение шапки с таблицей означает, что
+  // инвентарь врёт, и генерировать из него спеки уже нельзя.
+  const countProblems = verifyCounts(features);
+  if (countProblems.length) {
+    console.error('FATAL: счётчики в шапках INVENTORY.md разошлись с самой таблицей:');
+    for (const p of countProblems) console.error('  - ' + p);
+    console.error('Числа в шапках правятся руками; пересчитай по строкам таблицы, а не «на глаз».');
+    return 1;
+  }
+
   const payload = JSON.stringify({ generatedFrom: 'docs/INVENTORY.md', count: features.length, features }, null, 2) + '\n';
   const index = renderIndex(features);
   const check = argv.includes('--check');
@@ -215,5 +304,5 @@ function main(argv) {
   return 0;
 }
 
-module.exports = { parse, toId, parseCodeRefs };
+module.exports = { parse, toId, parseCodeRefs, verifyCounts };
 if (require.main === module) process.exit(main(process.argv.slice(2)));

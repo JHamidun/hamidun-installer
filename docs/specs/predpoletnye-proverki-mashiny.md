@@ -169,8 +169,9 @@ class="hero">`). Если такого узла в разметке нет, вс
    поиск по всему репозиторию (без `node_modules`) даёт единственное вхождение имён
    `osRelease` / `os.release` — это самое место. `src/renderer/app.js` его не присваивает
    в `STATE`, телеметрия (`ipcMain.handle('send-telemetry', …)`, `src/main.js:1444-1496`)
-   отправляет `platform`, `uid`, `edition`, `ok`, `failed`, `skipped`, `selected`,
-   `errors`, `duration_sec` — и не `osRelease`. То есть половина фичи, заявленная в
+   отправляет десять полей — `event`, `platform`, `uid`, `edition`, `ok`, `failed`,
+   `skipped`, `selected`, `errors`, `duration_sec` (тело `JSON.stringify({…})`,
+   `src/main.js:1466-1489`) — и не `osRelease`. То есть половина фичи, заявленная в
    инвентаре как «версия ОС до старта», в коде существует только как передача мёртвого
    поля. Открытый вопрос: доделать потребителя или убрать поле.
 2. **Тестов нет — ни одного.** Поиск по `test/run-tests.js`, `test/e2e-gui.js` и

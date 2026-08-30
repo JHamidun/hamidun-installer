@@ -679,8 +679,8 @@
           "lines": "298-324"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "ekran-vybora-komponentov-s-zavisimostyami",
@@ -879,8 +879,8 @@
           "lines": "920-1010"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "mini-vizard-api-klyuchey",
@@ -934,8 +934,8 @@
           "lines": "109-118"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "predpoletnye-proverki-mashiny",
@@ -964,8 +964,8 @@
           "lines": "1418-1444,1459-1473"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "storozh-molchaschego-shaga",
@@ -979,8 +979,8 @@
           "lines": "1288-1308"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "chelovecheskiy-perevod-provala",
@@ -1099,8 +1099,8 @@
           "lines": ""
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "obsluzhivanie-vendor",
@@ -1144,8 +1144,8 @@
           "lines": "16"
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "publikaciya-artefaktov-v-s3",
@@ -1169,8 +1169,8 @@
           "lines": ""
         }
       ],
-      "tested": "unknown",
-      "testRaw": "не найден"
+      "tested": "yes",
+      "testRaw": "есть"
     },
     {
       "id": "ci-obyazatelnyy-yunit-geyt",
@@ -1269,7 +1269,7 @@
           "lines": "46-50"
         }
       ],
-      "tested": "unknown",
+      "tested": "no",
       "testRaw": "нет"
     },
     {

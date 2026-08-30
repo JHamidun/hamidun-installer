@@ -10,7 +10,7 @@
 
 Продукт целиком и сквозные инварианты — [PRD](../PRD.md).
 
-**Фич: 61. Из них с подтверждённым тестом: 47.**
+**Фич: 61. Из них с подтверждённым тестом: 55.**
 
 ## Установка компонентов — 22 (с тестом 21)
 
@@ -47,9 +47,9 @@
 - [Проба сервера докачки (preflight lite)](proba-servera-dokachki-preflight-lite.md)
 - [Один экземпляр + уборка за собой](odin-ekzemplyar-uborka-za-soboy.md)
 
-## Экраны и сценарий ученика — 18 (с тестом 9)
+## Экраны и сценарий ученика — 18 (с тестом 14)
 
-- [Экран приветствия](ekran-privetstviya.md) — ⚠ тест не подтверждён
+- [Экран приветствия](ekran-privetstviya.md)
 - [Экран выбора компонентов с зависимостями](ekran-vybora-komponentov-s-zavisimostyami.md)
 - [Попап «что попадёт / что скачается»](popap-chto-popadet-chto-skachaetsya.md)
 - [Экран прогресса](ekran-progressa.md)
@@ -58,24 +58,24 @@
 - [Маскот Омлетон в интерфейсе](maskot-omleton-v-interfeyse.md) — ⚠ тест не подтверждён
 - [Финишный экран «три шага»](finishnyy-ekran-tri-shaga.md)
 - [CTA бота с deep-link по результату](cta-bota-s-deep-link-po-rezultatu.md)
-- [Памятка «Что дальше» офлайн](pamyatka-chto-dalshe-oflayn.md) — ⚠ тест не подтверждён
+- [Памятка «Что дальше» офлайн](pamyatka-chto-dalshe-oflayn.md)
 - [Мини-визард API-ключей](mini-vizard-api-klyuchey.md) — ⚠ тест не подтверждён
 - [Кнопки запуска после установки](knopki-zapuska-posle-ustanovki.md)
-- [Предупреждение «запущен под другой учёткой»](preduprezhdenie-zapuschen-pod-drugoy-uchetkoy.md) — ⚠ тест не подтверждён
+- [Предупреждение «запущен под другой учёткой»](preduprezhdenie-zapuschen-pod-drugoy-uchetkoy.md)
 - [Предполётные проверки машины](predpoletnye-proverki-mashiny.md) — ⚠ тест не подтверждён
-- [Каскад «пропущено из-за зависимости»](kaskad-propuscheno-iz-za-zavisimosti.md) — ⚠ тест не подтверждён
-- [Сторож молчащего шага](storozh-molchaschego-shaga.md) — ⚠ тест не подтверждён
+- [Каскад «пропущено из-за зависимости»](kaskad-propuscheno-iz-za-zavisimosti.md)
+- [Сторож молчащего шага](storozh-molchaschego-shaga.md)
 - [Человеческий перевод провала](chelovecheskiy-perevod-provala.md)
 - [macOS: самолечение карантина и транслокации](macos-samolechenie-karantina-i-translokacii.md)
 
-## Публикация и издания — 8 (с тестом 5)
+## Публикация и издания — 8 (с тестом 8)
 
 - [Два издания: офлайн и лёгкое](dva-izdaniya-oflayn-i-legkoe.md)
 - [Докачка тяжёлых компонентов из CDN](dokachka-tyazhelyh-komponentov-iz-cdn.md)
-- [Предполётные гейты сборки](predpoletnye-geyty-sborki.md) — ⚠ тест не подтверждён
+- [Предполётные гейты сборки](predpoletnye-geyty-sborki.md)
 - [Обслуживание vendor](obsluzhivanie-vendor.md)
-- [Единый предрелизный вердикт GO/NO-GO](edinyy-predreliznyy-verdikt-go-no-go.md) — ⚠ тест не подтверждён
-- [Публикация артефактов в S3](publikaciya-artefaktov-v-s3.md) — ⚠ тест не подтверждён
+- [Единый предрелизный вердикт GO/NO-GO](edinyy-predreliznyy-verdikt-go-no-go.md)
+- [Публикация артефактов в S3](publikaciya-artefaktov-v-s3.md)
 - [CI: обязательный юнит-гейт](ci-obyazatelnyy-yunit-geyt.md)
 - [E2E-прогон настоящего GUI](e2e-progon-nastoyaschego-gui.md)
 

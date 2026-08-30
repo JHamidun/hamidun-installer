@@ -3,7 +3,7 @@
 <!-- spec-id: dva-izdaniya-oflayn-i-legkoe -->
 
 - **Раздел:** Публикация и издания
-- **Код:** `tools/build-lite.js`, `config.json`, `src/main.js:89-101,122-132,143-152,531,628-651,657-668,676-694,968-1086,1472`, `src/renderer/app.js:27-28,77-80,169-186,1166-1226`, `package.json:17-21`, `tools/assert-clean.js:39-81`, `tools/preflight-build.js:390-413`, `tools/before-pack.js:12-16`, `tools/fetch-vendor.ps1:612-636`, `tools/fetch-vendor-mac.sh:701-724`, `src/remote-fetch.js:897-1015`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:235-340`
+- **Код:** `tools/build-lite.js`, `config.json`, `src/main.js:89-101,122-132,143-152,531,628-651,657-668,676-694,968-1086,1472`, `src/renderer/app.js:27-28,77-80,169-186,1166-1226`, `package.json:17-21`, `tools/assert-clean.js:39-81`, `tools/preflight-build.js:390-413`, `tools/before-pack.js:12-16`, `tools/fetch-vendor.ps1:618-642`, `tools/fetch-vendor-mac.sh:701-724`, `src/remote-fetch.js:897-1015`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:235-340`
 - **Тесты:** «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «config.json в репозитории без сборочных маркеров», «lite (macOS): том dmg БЕЗ config-pack считается «сиблинг на месте» — ложной плашки нет», «lite (macOS): .app перетащили в «Программы» → сиблинга нет → плашка ОБЯЗАНА гореть», «lite (macOS): неполный сиблинг (нет checksums.json / нет uv / нет курса) → плашка горит», «МУТАЦИЯ: вернуть проверку config-pack в lite-ветку → тест краснеет (фикс не косметический)», «bootstrap отдаёт renderer editionVendorPresent, а не vendorAvailable; текст плашки верен для ОБОИХ изданий», «окно «что попадёт на мой ПК»: единица измерения названа словами, заголовок честен в офлайне», «CI: build-mac-lite больше НЕ удаляет опубликованный dmg перед заливкой (404-окно)»
 
 ## Что обещает человеку
@@ -29,11 +29,11 @@
 читает `git show HEAD:config.json` и требует отсутствия и `edition`, и `offlineEdition`).
 Поля появляются на сборке:
 
-* `tools/fetch-vendor.ps1:612-636` (и симметрично `tools/fetch-vendor-mac.sh:701-724`) пишет
+* `tools/fetch-vendor.ps1:618-642` (и симметрично `tools/fetch-vendor-mac.sh:701-724`) пишет
   `offlineEdition = true`, **только** если его же проверка полноты vendor прошла без пропусков
   (`$missing` пуст); иначе честно пишет `false` и печатает WARNING, но сборку не валит.
-  Вставка текстовая — регексом после первой `{`, поэтому в готовом артефакте ключ стоит
-  строкой 2 (проверено на `release/win-unpacked/resources/config.json`).
+  Вставка текстовая — регексом после первой `{` (строка 637), поэтому в готовом артефакте ключ
+  стоит строкой 2 (проверено на `release/win-unpacked/resources/config.json`).
 * `tools/build-lite.js` в `main()` (шаг 1, строки 317-327) ставит `edition = 'lite'`,
   `offlineEdition = false` и `configRepoBranch = 'main'` (запасной клон-путь конфига; в
   комментарии там же сказано, что прежнее значение `'v38'` указывало на несуществующую ветку).
@@ -87,7 +87,8 @@
   `BUNDLED_ONLY = {'uv'}`. В `components.json` сейчас нет ни одного явного `remote`-флага
   (проверено чтением файла), значит в офлайн-издании карта `compRemote` пуста, и докачка не
   включается ни для одного компонента.
-* **Качать или нет.** В обработчике `run-component` (968-1078): `vendorHasArtifact` —
+* **Качать или нет.** В обработчике `run-component` (объявлен `ipcMain.handle('run-component', …)`
+  на 875; блок докачки — 968-1086): `vendorHasArtifact` —
   существует ли основной артефакт компонента по карте `COMPONENT_VENDOR_ARTIFACT` в bundled
   vendor; `useBundled = vendorHasArtifact || isOfflineEdition()`. При `useBundled` печатается
   «[локально] … докачка не нужна» и сеть не трогается. Иначе `remoteFetch.pickEntry` выбирает
@@ -95,8 +96,8 @@
   `remoteFetch.fetchRemote` (`src/remote-fetch.js:897-1015`) качает с зеркал по возрастанию
   латентности с обязательной проверкой sha256. После успеха в staging копируется вшитый
   `checksums.json` (не удалось — компонент отклоняется со стадией `fetch`), `HM_VENDOR`
-  указывает на staging, а конкретные пути резолвятся через `vendorPick()` (1101-1107): есть в
-  staging — оттуда, иначе из bundled vendor. Отдельная ветка (1116-1126) докладывает вшитый
+  указывает на staging, а конкретные пути резолвятся через `vendorPick()` (1109-1115): есть в
+  staging — оттуда, иначе из bundled vendor. Отдельная ветка (1124-1134) докладывает вшитый
   `uv` в staging компонента `nomad`.
 * **Что видит renderer.** `bootstrap` (513-559) отдаёт `edition: isLiteEdition() ? 'lite' : 'offline'`,
   карту `remoteSizes` (`remoteSizesForRenderer()`, 657-668 — точные `sizeBytes` из реестра) и
@@ -137,19 +138,24 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 ## Инварианты
 
 1. **Офлайн-издание не ходит в сеть за компонентами.** `useBundled = vendorHasArtifact || isOfflineEdition()`
-   (`src/main.js:979`), и при истине ветка 982-985 печатает «докачка не нужна» вместо
+   (`src/main.js:987`), и при истине ветка 990-993 печатает «докачка не нужна» вместо
    `fetchRemote`. Плюс в офлайне `compRemote` пуста, потому что в `components.json` нет явных
    `remote`-флагов (проверено чтением файла).
 2. **`uv` в lite никогда не докачивается.** `BUNDLED_ONLY = new Set(['uv'])` в `loadRemoteMaps`
    (`src/main.js:639`) исключает его из авто-remote; он вшит списком `LITE_KEEP_WIN` /
-   `LITE_KEEP_MAC` (`tools/build-lite.js:45-60`). Данные под этим держит тест
-   «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only».
+   `LITE_KEEP_MAC` (`tools/build-lite.js:45-60`). Тест
+   «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only» под этим держит только
+   данные про тяжёлые компоненты: его тело (`test/run-tests.js:281-290`) сверяет два списка id
+   с реестром, а `uv` не фигурирует ни в одном ассерте — заголовок обещает больше, чем делает
+   тело. Bundled-only-статус `uv` фиксирует другой тест — «release-check загружается и знает
+   про законные исключения реестра (uv/course)» (`test/run-tests.js:8858-8863`), и проверяет он
+   список `NO_REGISTRY_OK` в `tools/release-check.js`, а не `BUNDLED_ONLY` в `src/main.js`.
 3. **Ни один докачанный архив не распаковывается без совпадения sha256 из реестра.**
    `fetchRemote` отвергает запись без валидного sha (`src/remote-fetch.js:911-916`) и удаляет
    файл при несовпадении, переходя к следующему зеркалу (989-996).
 4. **Второй гейт целостности едет вместе со staging.** После успешной докачки в каталог
    staging копируется вшитый `checksums.json`; не скопировался — компонент отклоняется со
-   стадией `fetch` (`src/main.js:1070-1075`).
+   стадией `fetch` (`src/main.js:1078-1083`).
 5. **Лёгкий артефакт не превышает потолок своей платформы.** 320 МиБ win / 400 МиБ mac —
    `TARGETS[*].maxBytes` и проверка после сборки (`tools/build-lite.js:71,82,348-353`).
 6. **Lite не собирается, если вшиваемый `checksums.json` разошёлся с опубликованными
@@ -182,7 +188,7 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
     показываем); в офлайне только из `components.json`. Держит тест «окно «что попадёт на мой
     ПК»: единица измерения названа словами, заголовок честен в офлайне».
 14. **В lite пути к файлам чужого компонента не теряются за staging.** `vendorPick()`
-    (`src/main.js:1101-1107`) резолвит по факту существования: staging → bundled vendor.
+    (`src/main.js:1109-1115`) резолвит по факту существования: staging → bundled vendor.
 15. **macOS lite-dmg не выпускается из не-lite `.app`.** Python-гейт в шаге «Assemble final
     lite dmg» падает, если во вшитом `config.json` не `edition=lite` и `offlineEdition=false`
     (`.github/workflows/build-mac-lite.yml:270-275`).
@@ -194,7 +200,8 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 2. `uv` — единственный менеджер окружения для Nomad и pydeps. Уйдя в докачку, он бы качался
    там, где для него нет записи-источника, а в ветке `nomad` установка свалилась бы в
    `irm https://astral.sh/uv/install.ps1 | iex` под админом (об этом прямо сказано в
-   комментарии `src/main.js:1108-1115`) — то есть исполнение скачанного скрипта с правами
+   комментарии «LITE-ГОЧА №2 (nomad)» — `src/main.js:1116-1123`, URL на 1118) — то есть
+   исполнение скачанного скрипта с правами
    администратора вместо байтов, лежащих внутри установщика.
 3. Подменённый на зеркале архив был бы распакован и запущен под админскими правами — это
    компрометация машины ученика, а не «ошибка установки».
@@ -229,8 +236,11 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 ## Границы
 
 * Лёгкое издание **не** уменьшает то, что в итоге окажется на машине. Оно уменьшает только
-  размер дистрибутива; распакованное ПО занимает столько же. Об этом прямо сказано в подписи
-  бейджа (`src/renderer/app.js:1180-1184`).
+  размер дистрибутива; распакованное ПО занимает столько же. В коде это сказано в комментарии
+  над `componentSizeBytes` (`src/renderer/app.js:1157-1159`) и в подсказке бейджа
+  офлайн-издания («на диске после установки будет больше», `src/renderer/app.js:1184`);
+  lite-ветка того же тернарника (1183) говорит только «Столько скачается с сервера во время
+  установки» и про место на диске молчит — человеку в lite эту границу интерфейс не проговаривает.
 * В lite **не вшит конфиг-пак**: `LITE_KEEP_WIN` / `LITE_KEEP_MAC` — это `checksums.json`,
   `uv` и курс, и ничего больше. Конфиг едет обычным remote-компонентом (`config` в
   `remote-components.json`: win32 129 076 529 Б, darwin 132 113 970 Б). Подтверждено составом
@@ -255,19 +265,16 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 ## Риски и открытые вопросы
 
 * **Сам сборщик изданий не покрыт ни одним тестом.** Поиск по `test/run-tests.js` находит
-  `build-lite.js` только в комментариях (строки 7998, 7999, 8819), а `assert-clean.js` и
-  `vendor-lite` не упоминаются вовсе. То есть size-assert, сверка реестра с вшитым
+  `build-lite.js` трижды: дважды в комментариях (строки 8041, 8042) и один раз в тексте живого
+  `assert` (8862) в тесте «release-check загружается и знает про законные исключения реестра
+  (uv/course)» — то есть проверяется факт из `LITE_KEEP_*`, а не код сборщика. `assert-clean.js`
+  и `vendor-lite` не упоминаются вовсе. То есть size-assert, сверка реестра с вшитым
   манифестом, мутация `package.json`/`config.json` и восстановление в `finally` проверяются
   только живым прогоном сборки. Тесты, процитированные в шапке, покрывают рантайм-сторону
   (кто remote, что показывает renderer, когда горит плашка) — но не сборочную.
 * **Устаревший комментарий про `prep-lite.js`.** `src/main.js:94-97` утверждает, что маркер
   `edition:'lite'` ставит `prep-lite.js`. Такого файла в `tools/` нет (проверено листингом);
   маркер ставит `tools/build-lite.js:319`.
-* **Устаревший комментарий про отсутствие darwin в реестре.** `src/main.js:976-977` говорит
-  «darwin-записей в реестре пока нет». В `remote-components.json` их одиннадцать: `git`,
-  `node`, `vscode`, `cursor`, `claude`, `mascot`, `nomad`, `config`, `pydeps`, `extension`,
-  `handy`. На поведение это не влияет (ветка гейтится по `isOfflineEdition()`), но
-  обоснование в комментарии больше неверно.
 * **Ветка «источник истины» в mac-workflow практически мертва.** Шаг «Assemble final lite
   dmg» сначала ищет каталог `vendor-lite` / `vendor-lite-mac`
   (`.github/workflows/build-mac-lite.yml:286-292`), но `tools/build-lite.js` удаляет

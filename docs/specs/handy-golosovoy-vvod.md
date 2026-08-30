@@ -76,8 +76,7 @@ universal, `mac-arch-support.json:40-47`). В `src/main.js:701-723` компон
 `src/main.js:717-721` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
 offlineEdition, полезло бы в сеть за тем, что уже лежит рядом»), на macOS остаётся
 открытой: mac-сборка с вшитыми dmg, но без маркера `offlineEdition`, пойдёт в сеть.
-Lite-издание качает
-по двум записям `remote-components.json:459-503`
+Lite-издание качает по двум записям `remote-components.json:459-503`
 (win32 и darwin, зеркала regru + yandex, хеши вложенных файлов в `gatedFiles`). В
 `SCRIPT_ONLINE_FALLBACK` (`src/main.js:742`) handy **не входит** — провал докачки не
 прощается и не выдаётся за успех.
