@@ -190,11 +190,20 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
    «#6 main.js: no short-name fallback…».
 8. **Обе точки выхода убирают за собой.** `window-all-closed` и `before-quit` вызывают
    `killChildren()` и `cleanupAllSecureDirs()` (`src/main.js:381-387`).
-9. **Сносится ВНЕШНИЙ каталог staging-пары, а не рабочий подкаталог `w`.**
-   `stagingRootOf()` (`src/main.js:1643-1649`) вызывается в файле ровно четыре раза: в
-   `cleanupAllSecureDirs` (`src/main.js:308`), в `cleanupSecureCache` (`src/main.js:961`), в
-   локальном хелпере `rm` внутри `winMakeSecureDir` (`src/main.js:1737`) и в замыкании
-   `cleanup` внутри `winLaunchDeElevated` (`src/main.js:1803`).
+9. **Сносится ВНЕШНИЙ каталог staging-пары, а не рабочий подкаталог `w` — и только
+   если имя внешнего совпало с `^HmDeElev-[0-9a-f]{32}$`.** Обе половины живут в
+   `src/staging-paths.js`: `stagingRootOf()` поднимается от `w` к родителю лишь
+   когда родитель действительно наш staging, а `rmStagingTree()` сверяет имя и
+   возвращает `false`, ничего не тронув, при любом несовпадении. Потребителей в
+   `src/main.js` четыре: `cleanupAllSecureDirs` (`src/main.js:307`),
+   `cleanupSecureCache` (`src/main.js:960`), локальный `rm` внутри
+   `winMakeSecureDir` (`src/main.js:1730`) и замыкание `cleanup` внутри
+   `winLaunchDeElevated` (`src/main.js:1806`). Голого
+   `fs.rmSync(stagingRootOf(…))` в `main.js` не осталось — это сторожит тест.
+
+   До 30.08 обе функции лежали прямо в `main.js`, и гейта по имени у них не было:
+   `<любой каталог>\w` превращался в рекурсивное удаление этого каталога под
+   администратором. Разбор — в [спеке де-элевации](de-elevaciya.md), инвариант 9.
 10. **Мусор прошлых запусков удаляется только при совпадении всех четырёх гейтов.**
     `src/main.js:319-341`: строгое имя `^HmDeElev-[0-9a-f]{32}$`, каталог и не симлинк
     (`src/main.js:330` — `!st.isDirectory() || st.isSymbolicLink()`; отдельной проверки
