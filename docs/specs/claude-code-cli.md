@@ -3,7 +3,7 @@
 <!-- spec-id: claude-code-cli -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:64-80`, `scripts/windows/claude.ps1:1-324`, `scripts/macos/claude.sh:1-117`, `scripts/windows/_deelev.ps1:524-687`, `scripts/macos/_lib.sh:138-142`, `scripts/windows/verify.ps1:97-127`, `scripts/macos/verify.sh:56-69`, `src/main.js:569-573`, `src/renderer/deps.js:26-39`, `remote-components.json`, `tools/fetch-vendor.ps1:68-88`, `tools/fetch-vendor-mac.sh:73-128`, `tools/prune-npm-cache.js`
+- **Код:** `components.json:64-80`, `scripts/windows/claude.ps1:1-324`, `scripts/macos/claude.sh:1-117`, `scripts/windows/_deelev.ps1:524-687`, `scripts/macos/_lib.sh:138-142`, `scripts/windows/verify.ps1:97-127`, `scripts/macos/verify.sh:56-69`, `src/main.js:571-575`, `src/renderer/deps.js:26-39`, `remote-components.json`, `tools/fetch-vendor.ps1:68-88`, `tools/fetch-vendor-mac.sh:73-128`, `tools/prune-npm-cache.js`
 - **Тесты:** «claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken», «claude.ps1 (прогон PS 5.1): Test-HmClaudeRuns отличает рабочий бинарь от обёртки; Remove-HmBrokenClaude сносит шимы и пакет», «структура: сентинел-гейт ДО вердикта broken; уборка зовётся только при broken; чужой сломанный claude на финале -> unverified», «ДЕФЕКТ 1 (прогон PS 5.1): каждый сентинел планировщика -> unverified (НЕ broken); 0 -> works; 1 -> broken; мутант без гейта пойман», «claude.ps1: рабочий claude не трогаем (снимок $preExisting)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «bash -n: claude.sh и config.sh синтаксически валидны», «claude.sh (поведение): нерабочая обёртка проваливает гейт и УДАЛЯЕТСЯ вместе с пакетом», «claude.sh (поведение): работающий claude проходит гейт и НЕ трогается», «claude.sh (поведение): claude нет вовсе → гейт красный (без ложного OK)», «claude.sh: ЕДИНЫЙ гейт стоит на ВСЕХ путях — офлайн, curl, npm-фолбэк, финал», «tools/fetch-vendor-mac.sh: npm-кеш гейтится по АРХИВУ платформенного пакета обеих арх», «размеры: каталожные компоненты (npm-cache, config-pack, nomad-src…) сходятся с vendor»
 
 ## Что обещает человеку
@@ -14,7 +14,7 @@
 
 ## Как работает
 
-Главный процесс подбирает скрипт по id компонента: `scripts/<windows|macos>/claude.<ps1|sh>` (`src/main.js:569-573`) и передаёт ему `HM_VENDOR` — корень вшитого vendor либо sha-проверенный staging докачки в lite-издании (`src/main.js:1101` — вычисление `vroot`, `src/main.js:1135` — сама передача `childEnv.HM_VENDOR = vroot`). Порядок установки топологический, поэтому `node` встаёт раньше `claude` (`src/renderer/deps.js:26-39`).
+Главный процесс подбирает скрипт по id компонента: `scripts/<windows|macos>/claude.<ps1|sh>` (`src/main.js:571-575`) и передаёт ему `HM_VENDOR` — корень вшитого vendor либо sha-проверенный staging докачки в lite-издании (`src/main.js:1103` — вычисление `vroot`, `src/main.js:1137` — сама передача `childEnv.HM_VENDOR = vroot`). Порядок установки топологический, поэтому `node` встаёт раньше `claude` (`src/renderer/deps.js:26-39`).
 
 ### Windows (`scripts/windows/claude.ps1`)
 
@@ -42,7 +42,7 @@
 
 Сборкой: `tools/fetch-vendor.ps1:68-88` делает `npm install '@anthropic-ai/claude-code' --prefix <tmp> --cache vendor\npm-cache` и затем обязательный `tools/prune-npm-cache.js` — без чистки каждый релиз оставлял в кеше предыдущий архив (~80 МиБ), и к 11.08.2026 накопилось 13 версий = 1005 МиБ. На маке (`tools/fetch-vendor-mac.sh:73-128`) дополнительно докладываются платформенные пакеты **обеих** архитектур через `npm cache add`, потому что раннер `macos-latest` — Apple Silicon и `npm install` кеширует .tgz только своей платформы.
 
-В lite-издании кеш не вшит: компонент авто-становится remote по наличию записи в реестре (`src/main.js:634-647`), архив качается с зеркал с обязательной проверкой sha256, а `HM_VENDOR` указывает на проверенный staging: `stagingVendor = fr.path` (`src/main.js:1084`) → `const vroot = stagingVendor || bundledVendorEarly` (`1101`) → `childEnv.HM_VENDOR = vroot` (`1135`).
+В lite-издании кеш не вшит: компонент авто-становится remote по наличию записи в реестре (`src/main.js:636-649`), архив качается с зеркал с обязательной проверкой sha256, а `HM_VENDOR` указывает на проверенный staging: `stagingVendor = fr.path` (`src/main.js:1086`) → `const vroot = stagingVendor || bundledVendorEarly` (`1101`) → `childEnv.HM_VENDOR = vroot` (`1135`).
 
 ## Инварианты
 
@@ -57,7 +57,7 @@
 9. **Правка User PATH сохраняет тип `REG_EXPAND_SZ` и не задваивает каталог.** Читается сырое значение с `DoNotExpandEnvironmentNames`, сверка идёт по развёрнутой копии (`scripts/windows/claude.ps1:62-81`).
 10. **Node ставится раньше claude.** `requires: ["node"]` + топологический порядок (`components.json:71-73`; `src/renderer/deps.js:26-39`).
 11. **На macOS офлайн-ветка запускается только при наличии .tgz платформенного пакета текущей архитектуры** (`scripts/macos/claude.sh:41-53`; `scripts/macos/_lib.sh:138-142`).
-12. **Офлайн-кеш адресуется только через `$HM_VENDOR`, относительных путей нет** (`scripts/windows/claude.ps1:184`; `scripts/macos/claude.sh:43, 62`). Саму переменную главный процесс выставляет одним местом: `const vroot = stagingVendor || bundledVendorEarly` (`src/main.js:1101`) и `childEnv.HM_VENDOR = vroot` (`src/main.js:1135`).
+12. **Офлайн-кеш адресуется только через `$HM_VENDOR`, относительных путей нет** (`scripts/windows/claude.ps1:184`; `scripts/macos/claude.sh:43, 62`). Саму переменную главный процесс выставляет одним местом: `const vroot = stagingVendor || bundledVendorEarly` (`src/main.js:1103`) и `childEnv.HM_VENDOR = vroot` (`src/main.js:1137`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -89,7 +89,7 @@
 ## Риски и открытые вопросы
 
 1. **`irm | iex` под администратором.** `Invoke-RestMethod "https://claude.ai/install.ps1" | Invoke-Expression` (`claude.ps1:240`) — единственное место фичи, где elevated-процесс исполняет код, не сверенный ни с sha, ни с подписью. Комментарий это признаёт прямо («Своего SHA-256 для него нет»). Для остальных вшитых артефактов проект держит fail-closed sha-гейт, здесь его нет по объективной причине (плавающая версия), но риск остаётся.
-2. **Комментарий в `src/main.js:733-742` расходится с кодом скриптов.** Там сказано: «Компоненты БЕЗ такого фолбэка (nomad/pydeps/extension/claude) остаются fail-closed», и `claude` не входит в `SCRIPT_ONLINE_FALLBACK`. Но собственный онлайн-фолбэк у claude есть — `claude.ps1:236-252` и `claude.sh:84-102`. Следствие для lite: если докачка архива не удалась, компонент краснеет со `stage:'fetch'`, а скрипт, который мог бы поставить claude из интернета, не запускается вовсе. Возможно, это осознанное решение (не тратить трафик дважды), но обоснование в комментарии фактически неверно.
+2. **Комментарий в `src/main.js:735-744` расходится с кодом скриптов.** Там сказано: «Компоненты БЕЗ такого фолбэка (nomad/pydeps/extension/claude) остаются fail-closed», и `claude` не входит в `SCRIPT_ONLINE_FALLBACK`. Но собственный онлайн-фолбэк у claude есть — `claude.ps1:236-252` и `claude.sh:84-102`. Следствие для lite: если докачка архива не удалась, компонент краснеет со `stage:'fetch'`, а скрипт, который мог бы поставить claude из интернета, не запускается вовсе. Возможно, это осознанное решение (не тратить трафик дважды), но обоснование в комментарии фактически неверно.
 3. **Размер опубликованной записи докачки не сходится с текущим кешем.** `remote-components.json` для `claude/win32` объявляет 1 051 595 315 байт, а `vendor/npm-cache` на диске сегодня — 108 433 729 байт (ровно `sizeBytes` из `components.json:77`). Цифра ~1 ГБ совпадает с описанным в `tools/fetch-vendor.ps1:75-83` накоплением 13 версий, а `tools/build-lite.js:172` прямо называет запись «claude (npm-кеш, ~1 ГБ)». Похоже, компонент опубликован до чистки кеша, и lite-пользователь Windows качает в десять раз больше нужного. **Не подтверждено:** содержимое опубликованного архива без скачивания проверить нельзя.
 4. **`gatedFiles: {}` у обеих записей claude.** Второй рубеж целостности (`Confirm-HmArtifact` по basename) для этого компонента не проверяет ни одного файла — у компонентов-каталогов представителя в манифесте нет. `tools/build-lite.js:171-178` это фиксирует предупреждением, а не отказом: остаётся только sha архива в реестре, которая ловит порчу, но не устаревшую публикацию.
 5. **Асимметрия чек-листа между платформами.** `scripts/macos/verify.sh:56-69` печатает `CHECK ok Claude CLI` по факту наличия исполняемого файла, без вердикта запуска, — тогда как Windows переносит вердикт из `checks.json`. Сломанный claude вне `~/.local` (например, из brew) даст на маке зелёную строку в чек-листе, хотя сам шаг завершился ошибкой. Это ровно тот класс ложной галочки, который на Windows уже закрыт.

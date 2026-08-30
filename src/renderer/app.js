@@ -1827,6 +1827,11 @@ let TIPS_TIMER = null;
 function startTips() {
   const box = $('#tips'), txt = $('#tips-text');
   if (!box || !txt) return;
+  // Второй старт без стопа затирал бы дескриптор, и первый setInterval остался бы
+  // крутиться навсегда: stopTips гасит только последний. Сегодня пути двойного
+  // старта нет (start/stop парные), но цена страховки — одна строка, а цена
+  // осиротевшего таймера — советы, мигающие вдвое быстрее до конца установки.
+  if (TIPS_TIMER) { clearInterval(TIPS_TIMER); TIPS_TIMER = null; }
   let i = Math.floor(Math.random() * TIPS.length);
   const show = () => {
     txt.classList.remove('tips-in');

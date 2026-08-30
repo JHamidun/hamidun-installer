@@ -3,7 +3,7 @@
 <!-- spec-id: de-elevaciya -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `scripts/windows/_deelev.ps1`, `src/staging-paths.js`, `src/main.js:1591-1944`, `src/main.js:300-341`, `src/main.js:995-1024`, `src/main.js:2164-2186`, `src/remote-fetch.js:296-331`, `scripts/windows/vscode.ps1:124-211`, `scripts/windows/extension.ps1:111-150`, `scripts/windows/bridge.ps1:60-160`, `scripts/windows/handy.ps1:43-100`, `scripts/windows/claude.ps1:88-110`, `scripts/windows/cursor.ps1:52-95`, `scripts/windows/git.ps1:74-105`, `scripts/windows/node.ps1:117-150`, `scripts/windows/pydeps.ps1:63-95`, `scripts/windows/claude-desktop.ps1:196-215`, `scripts/macos/_lib.sh`, `.github/workflows/staging-primitive.yml`, `test/staging-primitive.ps1`, `package.json`
+- **Код:** `scripts/windows/_deelev.ps1`, `src/staging-paths.js`, `src/main.js:1593-1946`, `src/main.js:302-343`, `src/main.js:997-1026`, `src/main.js:2124-2146`, `src/remote-fetch.js:296-331`, `scripts/windows/vscode.ps1:124-211`, `scripts/windows/extension.ps1:111-150`, `scripts/windows/bridge.ps1:60-160`, `scripts/windows/handy.ps1:43-100`, `scripts/windows/claude.ps1:88-110`, `scripts/windows/cursor.ps1:52-95`, `scripts/windows/git.ps1:74-105`, `scripts/windows/node.ps1:117-150`, `scripts/windows/pydeps.ps1:63-95`, `scripts/windows/claude-desktop.ps1:196-215`, `scripts/macos/_lib.sh`, `.github/workflows/staging-primitive.yml`, `test/staging-primitive.ps1`, `package.json`
 - **Тесты:** «_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE staging; env-литералы до cmdlet; абс. whoami; gate; Last Result; fail-closed», «_deelev.ps1: round-trip — де-элевирует команду на MEDIUM (маркер содержит S-1-16-8192), Gate=medium; либо fail-closed $null», «_deelev.ps1: Test-HmExtInstalled — ^${extId}-<цифра> + Directory-only (helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит)», «P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%); env-литералы; абс. whoami; gate; Last Result аттестация; folder-fallback; quoting пробела», «P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::CreateDirectory($dir,$sd) + main.js делегирует, нет fs.mkdirSync+icacls)», «P0 regate#4 (round-trip): New-HmSecureStagingDir -> каталог PROTECTED (наследование снято) без посторонних ACE; либо fail-closed $null», «P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)», «P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed», «P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed», «ИНВАРИАНТ: нет user-writable control/attestation-файлов в trust-пути (_deelev.ps1 + main.js launch)», «_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)», «_deelev.ps1: объявления ДО первого использования; авто-уборка стоит ПОСЛЕДНЕЙ», «_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe», «_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы», «_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)», «PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)», «staging-paths: rmStagingTree сносит ВНЕШНИЙ HmDeElev-<hex>; чужое имя цело (fail-closed)», «main.js: все сносы staging идут через rmStagingTree, голого rmSync(stagingRootOf) нет», «main.js: путь вне %ProgramData% -> отказ БЕЗ удаления», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)», «claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken», «долгие шаги не выглядят зависшими: де-элевированная установка печатает отсчёт, сторож не обвиняет MSI», «причина отказа staging-каталога приходит в UTF-8», «_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0700), verify+install на STAGED, позиционные $N, fail-closed; verify_pkg_team_id удалён»
 
 ## Что обещает человеку
@@ -119,7 +119,7 @@
 вшитый `_deelev.ps1` (путь из `winDeElevScript()` → `resourceRoot()`) и зовёт
 `New-HmSecureStagingDir -Elevated $true`, читая путь из маркера `HMSECDIR::…::END`.
 Запуск асинхронный (`spawn`, таймаут 20 с), окружение — `detectSpawnEnv()`
-(`src/main.js:2171`), а не унаследованное; stderr читается ради причины отказа
+(`src/main.js:2131`), а не унаследованное; stderr читается ради причины отказа
 (`HMSECFAIL`), которая попадает в `lastSecureDirError` и в текст ошибки шага.
 После возврата JS перепроверяет независимо: путь строго под ProgramData и
 `remoteFetch.verifyDirSecureWin(dir)` (SID-based owner + DACL, `src/remote-fetch.js:303`).
@@ -171,7 +171,7 @@
 ### macOS: инверсия вместо де-элевации
 
 На macOS компонентные скрипты запускаются `/bin/bash <script>` из процесса Electron
-(`src/main.js:1223`), который сам **не** повышен. Де-элевировать нечего: по умолчанию
+(`src/main.js:1225`), который сам **не** повышен. Де-элевировать нечего: по умолчанию
 всё уже идёт от пользователя, а привилегии берутся точечно через `admin_run`
 (`scripts/macos/_lib.sh:38`) — `osascript … "do shell script … with administrator
 privileges"`. Каждый argv-элемент квотируется (`shell_quote_arg`), затем строка
@@ -208,10 +208,10 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
 2. **Ни одного control- или attestation-файла в общем `%TEMP%`.** Тело обёртки —
    целиком в `-EncodedCommand`; единственный транзиентный файл `task.xml` лежит в
    `%ProgramData%\HmDeElev-<hex>\w` и удаляется сразу после `/Create`
-   (`_deelev.ps1`; `src/main.js:1792, 1861`).
+   (`_deelev.ps1`; `src/main.js:1794, 1861`).
 3. **Результат берётся только из БД планировщика.** Признак успеха — поле №6
    «Last Result» из `schtasks /Query … /HRESULT /FO CSV /NH /V`, а не файл и не
-   stdout бинаря (`_deelev.ps1`; `readLastResult()` в `src/main.js:1844`).
+   stdout бинаря (`_deelev.ps1`; `readLastResult()` в `src/main.js:1846`).
 4. **Staging-каталог рождается атомарно защищённым.** DACL `{S-1-5-18, S-1-5-32-544}`
    + `SetAccessRuleProtection($true,$false)` + владелец в SD при elevated —
    одной операцией `[System.IO.Directory]::CreateDirectory($dir, $sd)`
@@ -230,13 +230,13 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
 7. **Окружение привилегированных вызовов доверенное, не унаследованное — но не
    у всех вызовов.** `env: detectSpawnEnv()` получают три точки: `spawn` примитива
    staging, `execFileSync` для `schtasks /Create|/Run|/Delete` и `execFileSync` для
-   `schtasks /Query` (`src/main.js:1710, 1796, 1847`). Внутри самого примитива
+   `schtasks /Query` (`src/main.js:1712, 1796, 1847`). Внутри самого примитива
    `PATH`/`PSModulePath` перебиты литералами и восстановлены в `finally`.
    Квантор «все» здесь НЕ выполняется: в том же `winLaunchDeElevated`
    `folderFallback` запускает explorer с полностью унаследованным окружением —
    `spawn(exp, [String(folderArg)], { detached: true, stdio: 'ignore',
-   windowsHide: true })` (`src/main.js:1772`, поля `env` нет). Вторая такая точка —
-   `spawnSync('explorer.exe', [dir])` в `launchVsCodeOn` (`src/main.js:1916`, см.
+   windowsHide: true })` (`src/main.js:1774`, поля `env` нет). Вторая такая точка —
+   `spawnSync('explorer.exe', [dir])` в `launchVsCodeOn` (`src/main.js:1918`, см.
    «Риски» №1). Отдельно: `verifyDirSecureWin`, на которую опирается независимая
    перепроверка каталога, собирает окружение своим `trustedEnv()`, а не
    `detectSpawnEnv()` (`src/remote-fetch.js:324`).
@@ -272,7 +272,7 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
     ровно против своей цели. Правильный ответ на «путь не наш» — не удалять его.
 
 11. **Удаление чужих каталогов невозможно.** `pruneStaleSecureDirs()`
-    (`src/main.js:318`) требует одновременно: имя `^HmDeElev-[0-9a-f]{32}$`,
+    (`src/main.js:320`) требует одновременно: имя `^HmDeElev-[0-9a-f]{32}$`,
     не symlink, «остыл» ≥ 6 часов и `verifyDirSecureWin(dir)` = true. Свою копию
     шаблона (с флагом `/i`) она держит намеренно — это подметание мусора ПРОШЛЫХ
     запусков, а не уборка своего staging, и защищено оно ещё тремя условиями.
@@ -323,11 +323,11 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
 9. **Уборка сносит только `w`.** В `%ProgramData%` остаются пустые каталоги
    `HmDeElev-*` с правами «только администраторы» — сам обычный пользователь удалить
    их не может. Накопления, однако, не происходит: их подметает
-   `pruneStaleSecureDirs()` (`src/main.js:318-341`) — имя
+   `pruneStaleSecureDirs()` (`src/main.js:320-343`) — имя
    `^HmDeElev-[0-9a-f]{32}$` (`:325`), не symlink (`:329`), ничего не менялось ≥ 6
    часов (`:323, :336`), `verifyDirSecureWin(dir)` = true (`:337`) →
    `fs.rmSync(dir, { recursive: true, force: true })` (`:338`), и вызывается она на
-   КАЖДОМ запуске установщика (`src/main.js:369`). Пустой каталог с
+   КАЖДОМ запуске установщика (`src/main.js:371`). Пустой каталог с
    owner = `S-1-5-32-544` и ACE только `{S-1-5-18, S-1-5-32-544}` эту проверку
    проходит по построению (`src/remote-fetch.js:309, 318-322`). Не подметётся лишь
    каталог, рождённый при `-Elevated $false`: там в DACL намеренно добавлен SID
@@ -369,7 +369,7 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
   (сам `.cmd` лежит в пользовательской папке и исполняется в пользовательском
   контексте), но и гарантии «исполнилось ровно наше содержимое» здесь нет.
 - **`folderFallback` тоже опирается на поведение explorer**, а не на проверку:
-  комментарий в `src/main.js:1767` утверждает, что explorer наследует токен
+  комментарий в `src/main.js:1769` утверждает, что explorer наследует токен
   оболочки (medium). Кодом это не подтверждается — гейта на уровень там нет. Мера
   предосторожности другая: в fallback открывается **только папка**, exe не
   передаётся никогда.
@@ -421,12 +421,12 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
 ## Риски и открытые вопросы
 
 1. **`launchVsCodeOn` запускает `explorer.exe` по короткому имени.**
-   `src/main.js:1916`: `spawnSync('explorer.exe', [dir], { stdio: 'ignore', timeout: 10000 })`
+   `src/main.js:1918`: `spawnSync('explorer.exe', [dir], { stdio: 'ignore', timeout: 10000 })`
    — без абсолютного пути и без `detectSpawnEnv()`, то есть с унаследованным `PATH`
    в elevated-процессе. Соседний `folderFallback` в том же файле
-   (`src/main.js:1768-1776`) делает обратное только в части пути:
+   (`src/main.js:1770-1778`) делает обратное только в части пути:
    `path.join(sysRoot, 'explorer.exe')` — абсолютный, но `env` там тоже нет
-   (`src/main.js:1772`, см. инвариант 7). Ветка достижима, когда
+   (`src/main.js:1774`, см. инвариант 7). Ветка достижима, когда
    не найден ни `Code.exe`, ни `Cursor.exe`. Тест «P0-D/P1-1 launch (main.js): …»
    проверяет абсолютный explorer только внутри среза `winLaunchDeElevated` (до
    комментария «Открыть VS Code НА ПАПКЕ»), а срез `lvh` для `launchVsCodeOn`

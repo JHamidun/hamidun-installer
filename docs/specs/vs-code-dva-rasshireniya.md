@@ -3,7 +3,7 @@
 <!-- spec-id: vs-code-dva-rasshireniya -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:35-49`, `scripts/windows/vscode.ps1`, `scripts/macos/vscode.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:59-72`, `scripts/macos/_lib.sh:219-246`, `src/main.js:569-573`, `src/main.js:2483-2502`, `src/main.js:2588-2595`, `package.json:114-125`, `config.json`, `tools/fetch-vendor.ps1`, `tools/fetch-vendor-mac.sh`
+- **Код:** `components.json:35-49`, `scripts/windows/vscode.ps1`, `scripts/macos/vscode.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:59-72`, `scripts/macos/_lib.sh:219-246`, `src/main.js:571-575`, `src/main.js:2395-2414`, `src/main.js:2500-2507`, `package.json:114-125`, `config.json`, `tools/fetch-vendor.ps1`, `tools/fetch-vendor-mac.sh`
 - **Тесты:** «components: vscode есть, recommended+default, без platforms-гейта (win32 и darwin)», «components: extension требует vscode (не cursor) — дефолт-набор без cursor когерентен», «vscode.ps1: UTF-8 BOM (кириллица)», «vscode.ps1: ставит ОБА расширения; no-vendor → exit 120; идемпотентно; тихая установка; fail-closed», «vscode.sh: ставит ОБА расширения; no-vendor → exit 120; установка через HM_VSCODE_INSTALL_SH (root-staging); идемпотентно; fail-closed», «P1 (vscode.ps1): успех только при обоих расширениях ($okClaude -and $okCodex); называет отсутствующее», «vscode.sh: успех по обязательному Claude; отсутствие опционального Codex — предупреждение, не exit 1», «P1 (main.js): detectComponents.vscode = приложение И оба расширения в VS Code (vsCodeHasExt)», «P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «fetch-vendor.ps1: вшивает vscode-setup.exe + chatgpt.vsix (claude-code.vsix сохранён)», «fetch-vendor-mac.sh: вшивает vscode.zip + Codex/Claude vsix (arch-specific, оба arch)»
 
 ## Что обещает человеку
@@ -14,7 +14,7 @@
 
 ## Как работает
 
-Компонент запускается по имени: `scriptFor(id)` в `src/main.js:569-573` собирает путь `scripts/windows/vscode.ps1` (Windows) или `scripts/macos/vscode.sh` (macOS). Дальше пути расходятся.
+Компонент запускается по имени: `scriptFor(id)` в `src/main.js:571-575` собирает путь `scripts/windows/vscode.ps1` (Windows) или `scripts/macos/vscode.sh` (macOS). Дальше пути расходятся.
 
 ### Windows — `scripts/windows/vscode.ps1`
 
@@ -52,7 +52,7 @@
 
 ### Как компонент считается установленным
 
-`src/main.js:2588-2595`: `out.vscode = { installed: !!appPresent && bothExts, … }` (присваивание — строка 2594), где `bothExts` (строка 2593) — оба расширения (`anthropic.claude-code` из `config.json:36` и `openai.chatgpt`) в папках `~/.vscode/extensions` или `~/.vscode-oss/extensions`. Проверка каталога (`dirHasChildStarting`, `src/main.js:2496-2502`) требует **подкаталог** вида `<extId>-<цифра>`, поэтому `anthropic.claude-code-helper-1.0` ложным срабатыванием не будет.
+`src/main.js:2500-2507`: `out.vscode = { installed: !!appPresent && bothExts, … }` (присваивание — строка 2594), где `bothExts` (строка 2593) — оба расширения (`anthropic.claude-code` из `config.json:36` и `openai.chatgpt`) в папках `~/.vscode/extensions` или `~/.vscode-oss/extensions`. Проверка каталога (`dirHasChildStarting`, `src/main.js:2408-2414`) требует **подкаталог** вида `<extId>-<цифра>`, поэтому `anthropic.claude-code-helper-1.0` ложным срабатыванием не будет.
 
 ## Инварианты
 
@@ -69,7 +69,7 @@
 11. **PATH для elevated-скрипта собирается без пользовательской ветки реестра.** `Update-Path` в `vscode.ps1:5-22` читает только `Path` уровня `Machine`.
 12. **Успех Windows-шага требует обоих расширений — кроме случая, когда переменная `$codexVsix` пуста.** `vscode.ps1:253` и ветка `vscode.ps1:259-263`, условие которой — `if ($okClaude -and -not $okCodex -and -not $codexVsix)`. Гейт стоит на **пустой переменной**, а не на факте «vsix не вшит», а `Get-Vsix` (`vscode.ps1:130-153`) возвращает `''` в трёх случаях: не задан `$env:HM_VENDOR` (строка 131); файла нет (строка 133); файл **есть** и SHA-256 подтверждён (строка 135), но `Copy-Item` во временный файл или `OpenRead` упали — диск, антивирус, права (строки 149-152). В третьем случае `chatgpt.vsix` в сборке есть и Codex не встал, но скрипт всё равно печатает «Codex не вошёл в эту сборку» (строка 260) и делает `exit 0` (строка 262).
 13. **Успех macOS-шага требует расширения Claude; Codex его не гейтит.** `vscode.sh:162` (`exit 0` по `EXT_OK_CLAUDE`) и `vscode.sh:159-161` (предупреждение вместо ошибки).
-14. **Компонент считается установленным только при наличии приложения И обоих расширений.** `src/main.js:2593-2594` (`bothExts` и присваивание `out.vscode`); строки 2582-2586 — только комментарий об этом решении.
+14. **Компонент считается установленным только при наличии приложения И обоих расширений.** `src/main.js:2505-2506` (`bothExts` и присваивание `out.vscode`); строки 2582-2586 — только комментарий об этом решении.
 
 ## Что ломается, если инвариант нарушить
 
@@ -104,9 +104,9 @@
 
 - **Инвентарь противоречит коду.** Описание фичи в `_features.json` («Успех засчитывается только при обоих расширениях») верно лишь для Windows, и то с исключением: при отсутствующем `chatgpt.vsix` Windows завершается успехом с одной панелью Claude (`vscode.ps1:259-263`), а macOS **никогда** не гейтит успех по Codex (`vscode.sh:159-162`). Это ровно тот класс расхождения, ради которого заведён `tools/check-specs.js`.
 - **Тест не покрывает ветку исключения.** Тест «P1 (vscode.ps1): успех только при обоих расширениях…» проверяет наличие строки `if ($okClaude -and $okCodex) { exit 0 }` и отсутствие старого `if ($okClaude) { exit 0 }`, но про ветку `vscode.ps1:259-263` не знает. Заголовок теста утверждает больше, чем тест проверяет.
-- **Успешный шаг на macOS даёт незелёный детект.** `vscode.sh` завершается кодом 0 без Codex, а `detectComponents` требует оба расширения (`src/main.js:2593-2594`). При повторном запуске установщика компонент выглядит неустановленным, хотя шаг прошёл. В коде это осознанно (комментарий `src/main.js:2582-2586`), но для человека противоречиво.
+- **Успешный шаг на macOS даёт незелёный детект.** `vscode.sh` завершается кодом 0 без Codex, а `detectComponents` требует оба расширения (`src/main.js:2505-2506`). При повторном запуске установщика компонент выглядит неустановленным, хотя шаг прошёл. В коде это осознанно (комментарий `src/main.js:2494-2498`), но для человека противоречиво.
 - **Сообщение может соврать о причине.** `$codexVsix` пуст и когда vsix не вшит, и когда не удалось сделать читаемую временную копию (`vscode.ps1:149-152`). В обоих случаях печатается «Codex не вошёл в эту сборку» — во втором случае это неправда.
-- **Идентификатор расширения задан в двух местах.** `vscode.ps1` и `vscode.sh` хардкодят `anthropic.claude-code`, а `src/main.js:2592`, `src/renderer/app.js:1283` и — транзитом через `HM_CLAUDE_EXT_ID` — `scripts/windows/verify.ps1:221` читают `config.json.claudeCodeExtensionId`. Сейчас значения совпадают (`config.json:36` = `anthropic.claude-code`), но изменение конфига разведёт установку и проверку.
+- **Идентификатор расширения задан в двух местах.** `vscode.ps1` и `vscode.sh` хардкодят `anthropic.claude-code`, а `src/main.js:2504`, `src/renderer/app.js:1283` и — транзитом через `HM_CLAUDE_EXT_ID` — `scripts/windows/verify.ps1:221` читают `config.json.claudeCodeExtensionId`. Сейчас значения совпадают (`config.json:36` = `anthropic.claude-code`), но изменение конфига разведёт установку и проверку.
 - **`TODO-verify` в коде.** `scripts/macos/vscode.sh:48`: смена Microsoft Team ID приведёт к fail-closed остановке установки, и `VSCODE_TEAM_ID` придётся обновлять руками. Дата подтверждения Team ID в комментарии — 2026-07.
 - **Ветка «редактор не подтвердил установку» продолжает работу.** `vscode.ps1:87-89` и `vscode.sh:82-84`: если приложение не появилось, скрипт всё равно идёт ставить расширения, и код выхода определяется уже только ими. Обработки «редактора нет, но расширение как-то встало» не предусмотрено.
 - **`Gate='unknown'` даёт `exit 1` при, возможно, идущей установке.** `vscode.ps1:205-207` честно пишет об этом человеку, но компонент при этом красный, а установка может завершиться успешно через минуту.

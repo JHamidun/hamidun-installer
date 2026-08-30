@@ -14,6 +14,8 @@ const receipts = require('./install-receipts'); // installed-маркеры (г�
 const uninstallTargets = require('./uninstall-targets'); // зашитый per-component аллоулист целей удаления
 const uninstallExec = require('./uninstall-exec');       // guard (fail-closed) + исполнители удаления в JS
 const { rmStagingTree } = require('./staging-paths'); // снос staging — только по имени HmDeElev-<hex>
+const nomadKey = require('./nomad-key');             // запись ключа Nomad в config.yaml
+const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -1960,53 +1962,11 @@ ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'Ha
 //
 // Пишем ровно тот же управляемый блок и теми же тремя регулярками, что и nomad.ps1:275
 // — иначе повторный прогон установщика получит два блока model: и YAML-парсер возьмёт
-// последний.
-function nomadConfigPath() {
-  const hh = process.env.HERMES_HOME ||
-    (process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
-      : path.join(os.homedir(), '.hermes'));
-  return path.join(hh, 'config.yaml');
-}
-
-ipcMain.handle('nomad-set-key', (_e, key) => {
-  try {
-    const raw = String(key == null ? '' : key).trim();
-    if (!raw) return { ok: false, reason: 'empty' };
-    // Ключ уходит в YAML в двойных кавычках — кавычки и переводы строк сломали бы файл.
-    const keySan = raw.replace(/["\r\n]/g, '');
-    // Не «валидируем» формат строго: у кабинета он может смениться, а ложный отказ
-    // хуже, чем попытка. Ловим только явный промах — вставили не то поле целиком.
-    if (keySan.length < 8 || /\s/.test(keySan)) return { ok: false, reason: 'malformed' };
-
-    const cfg = readJson('config.json', {});
-    const cloud = (cfg.nomad && cfg.nomad.cloud) || {};
-    const url = String(cloud.baseUrl || 'https://cp.nomadnet.ai/v1').replace(/["\r\n]/g, '');
-    // Ключ в config.json называется defaultModel (не model) — зеркалит nomad.ps1:284.
-    const model = String(cloud.defaultModel || 'claude-opus-4-6').replace(/["\r\n]/g, '');
-
-    const cfgY = nomadConfigPath();
-    fs.mkdirSync(path.dirname(cfgY), { recursive: true });
-    let text = '';
-    try { text = fs.readFileSync(cfgY, 'utf8'); } catch (e) { /* файла ещё нет — создадим */ }
-    text = text.replace(/^# >>> nomad-cloud[\s\S]*?# <<< nomad-cloud <<<\r?\n?/m, '');
-    text = text.replace(/^model:[ \t]*\r?\n(?:(?:[ \t].*\r?\n)|(?:[ \t]*\r?\n))*/m, '');
-    const nl = process.platform === 'win32' ? '\r\n' : '\n';
-    const block =
-      '# >>> nomad-cloud (managed by installer -- do not edit inside markers) >>>' + nl +
-      'model:' + nl +
-      '  provider: "custom"' + nl +
-      '  base_url: "' + url + '"' + nl +
-      '  api_key: "' + keySan + '"' + nl +
-      '  default: "' + model + '"' + nl +
-      '# <<< nomad-cloud <<<' + nl;
-    // Без BOM: BOM ломает YAML-парсер (тот же вывод, что в nomad.ps1:311).
-    fs.writeFileSync(cfgY, block + text, { encoding: 'utf8' });
-    return { ok: true, path: cfgY, model };
-  } catch (e) {
-    return { ok: false, reason: 'io', message: String((e && e.message) || e) };
-  }
-});
+// последний. Сама запись живёт в `src/nomad-key.js`: отсюда её было не позвать тестом
+// (main.js требует electron), и фича годами оставалась без единой проверки — это
+// отдельная строка в реестре рисков (4.2).
+ipcMain.handle('nomad-set-key', (_e, key) =>
+  nomadKey.writeNomadKey(key, { config: readJson('config.json', {}) }));
 
 // Explicit «open the course-simulator» — NOT auto-opened; the finish screen
 // offers it as a labelled choice. Opens the course folder in VS Code so Claude
@@ -2261,59 +2221,11 @@ ipcMain.handle('open-claude-terminal', async () => {
 });
 
 // ---- мини-визард ключей: merge в ~/.claude/.credentials.master.env ----
-// Replaces existing `KEY=...` lines in place, appends missing ones at the
-// end. Never deletes or reorders anything else in the file.
-ipcMain.handle('save-credentials', (_e, obj) => {
-  try {
-    const dir = path.join(os.homedir(), '.claude');
-    const file = path.join(dir, '.credentials.master.env');
-    fs.mkdirSync(dir, { recursive: true });
-    let text = '';
-    try {
-      text = fs.readFileSync(file, 'utf8');
-    } catch (e) {
-      // ENOENT — файла ещё нет, это норма (создадим). ЛЮБАЯ другая ошибка чтения
-      // (EBUSY/EACCES/EIO/ELOOP/EMFILE, cloud-placeholder OneDrive) означает «файл,
-      // возможно, ЕСТЬ, но мы его не прочитали» → писать НЕЛЬЗЯ: writeFileSync ниже
-      // затёр бы все ранее сохранённые ключи одной новой строкой (необратимо, без
-      // бэкапа, да ещё под {ok:true}). Fail-closed — как probePath в install-mode.js.
-      if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) {
-        return { ok: false, error: 'Не удалось прочитать существующий файл ключей (' +
-          ((e && e.code) || String(e)) + '). Ключи НЕ сохранены, чтобы не потерять уже записанные.' };
-      }
-      text = '';
-    }
-    const saved = [];
-    for (const key of Object.keys(obj || {})) {
-      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) continue; // sane env-var names only
-      const raw = obj[key];
-      if (typeof raw !== 'string') continue;
-      const val = raw.trim().replace(/[\r\n]+/g, '');
-      if (!val) continue; // пустые поля игнорируем
-      const line = key + '=' + val;
-      const re = new RegExp('^' + key + '=.*$', 'm');
-      if (re.test(text)) {
-        text = text.replace(re, () => line); // fn-replacement: `$` в значении не трогаем
-      } else {
-        if (text.length && !text.endsWith('\n')) text += '\n';
-        text += line + '\n';
-      }
-      saved.push(key);
-    }
-    if (saved.length) {
-      // Атомарная замена: без tmp+rename падение посреди writeFileSync (диск полон,
-      // антивирус) оставило бы ОБРЕЗАННЫЙ файл ключей. rename в пределах того же
-      // каталога атомарен и переживает такой сбой.
-      const tmp = file + '.tmp-' + process.pid;
-      fs.writeFileSync(tmp, text, 'utf8');
-      try { fs.renameSync(tmp, file); }
-      catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } throw e; }
-    }
-    return { ok: true, saved, path: file };
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-});
+// Существующие `KEY=…` заменяются НА МЕСТЕ, недостающие дописываются в конец;
+// ничего другого не удаляется и не переставляется. Само слияние живёт в
+// `src/credentials-merge.js` — здесь его было не позвать тестом, а цена ошибки
+// тут все ключи человека разом, без бэкапа.
+ipcMain.handle('save-credentials', (_e, obj) => credentialsMerge.saveCredentials(obj));
 
 // ---- Фаза 2: детекция состояния компонентов (ГРУНД-ТРУТ) --------------
 // «Установлен ли X?» решаем ЖИВОЙ проверкой (fs.existsSync / запуск бинаря),

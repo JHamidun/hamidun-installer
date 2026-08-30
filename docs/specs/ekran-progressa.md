@@ -3,7 +3,7 @@
 <!-- spec-id: ekran-progressa -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/renderer/index.html:145-192`, `src/renderer/app.js:1311-1455`, `src/renderer/app.js:1526-1739`, `src/renderer/app.js:1767-1804`, `src/renderer/app.js:1806-1909`, `src/renderer/finish-link.js:46-56`, `src/renderer/styles.css:221-267`, `src/renderer/styles.css:717-729`, `src/preload.js:13-23`, `src/main.js:1266-1291`, `src/main.js:169-181`
+- **Код:** `src/renderer/index.html:145-192`, `src/renderer/app.js:1311-1455`, `src/renderer/app.js:1526-1739`, `src/renderer/app.js:1767-1804`, `src/renderer/app.js:1806-1909`, `src/renderer/finish-link.js:46-56`, `src/renderer/styles.css:221-267`, `src/renderer/styles.css:717-729`, `src/preload.js:13-23`, `src/main.js:1268-1293`, `src/main.js:171-183`
 - **Тесты:** «прогресс: полоса в ПРОЦЕНТАХ по прогону, проценты настоящие», «прогресс: на идущем шаге тикают часы (спиннер не отличить от зависания)», «докачка дошла до конца → подпись БЕЗ «Скачиваю», часы продолжают тикать», «журнал в интерфейсе: кольцо строк, одна перерисовка на кадр», «журнал: строка с возвратом каретки не стирает предыдущую»
 
 ## Что обещает человеку

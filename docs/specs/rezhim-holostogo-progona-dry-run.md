@@ -3,7 +3,7 @@
 <!-- spec-id: rezhim-holostogo-progona-dry-run -->
 
 - **Раздел:** Сопутствующее
-- **Код:** `src/main.js:181-191`, `src/main.js:928-935`, `src/main.js:988-989`, `src/main.js:1162-1164`, `src/main.js:1330-1366`, `src/main.js:1452-1504`, `src/main.js:3126-3141`, `src/main.js:3274-3310`, `src/install-receipts.js:30-38`, `src/install-receipts.js:124-128`, `src/install-manifest.js:74-110`, `src/install-env.js:21-30`, `src/uninstall-exec.js:525-563`, `src/renderer/app.js:1264-1309`, `test/clean-machine-test.ps1:6-9`, `scripts/windows/uv.ps1:17-23`, `scripts/windows/config.ps1:24-71`, `scripts/windows/git.ps1:26-114`, `scripts/windows/node.ps1:91-158`, `scripts/windows/nomad.ps1:66-317`, `scripts/windows/mascot.ps1:4-17`, `scripts/windows/bridge.ps1`, `scripts/windows/chatgpt-desktop.ps1`, `scripts/windows/claude-desktop.ps1`, `scripts/windows/claude.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/pydeps.ps1`, `scripts/windows/vscode.ps1`, `scripts/macos/config.sh:41-56`, `scripts/macos/uv.sh:17-24`, `scripts/macos/nomad.sh:6-222`, `scripts/macos/mascot.sh:9-80`, `scripts/macos/bridge.sh`, `scripts/macos/chatgpt-desktop.sh`, `scripts/macos/claude-desktop.sh`, `scripts/macos/course.sh`, `scripts/macos/handy.sh`, `scripts/macos/vscode.sh`, `scripts/macos/claude.sh`, `scripts/macos/cursor.sh`, `scripts/macos/extension.sh`, `scripts/macos/git.sh`, `scripts/macos/node.sh`, `scripts/macos/pydeps.sh`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`
+- **Код:** `src/main.js:183-193`, `src/main.js:930-937`, `src/main.js:990-991`, `src/main.js:1164-1166`, `src/main.js:1332-1368`, `src/main.js:1454-1506`, `src/main.js:3038-3053`, `src/main.js:3186-3222`, `src/install-receipts.js:30-38`, `src/install-receipts.js:124-128`, `src/install-manifest.js:74-110`, `src/install-env.js:21-30`, `src/uninstall-exec.js:525-563`, `src/renderer/app.js:1264-1309`, `test/clean-machine-test.ps1:6-9`, `scripts/windows/uv.ps1:17-23`, `scripts/windows/config.ps1:24-71`, `scripts/windows/git.ps1:26-114`, `scripts/windows/node.ps1:91-158`, `scripts/windows/nomad.ps1:66-317`, `scripts/windows/mascot.ps1:4-17`, `scripts/windows/bridge.ps1`, `scripts/windows/chatgpt-desktop.ps1`, `scripts/windows/claude-desktop.ps1`, `scripts/windows/claude.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/pydeps.ps1`, `scripts/windows/vscode.ps1`, `scripts/macos/config.sh:41-56`, `scripts/macos/uv.sh:17-24`, `scripts/macos/nomad.sh:6-222`, `scripts/macos/mascot.sh:9-80`, `scripts/macos/bridge.sh`, `scripts/macos/chatgpt-desktop.sh`, `scripts/macos/claude-desktop.sh`, `scripts/macos/course.sh`, `scripts/macos/handy.sh`, `scripts/macos/vscode.sh`, `scripts/macos/claude.sh`, `scripts/macos/cursor.sh`, `scripts/macos/extension.sh`, `scripts/macos/git.sh`, `scripts/macos/node.sh`, `scripts/macos/pydeps.sh`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`
 - **Тесты:** «main.js (source): HM_DRY_RUN авторитетно из process.env И payload; в dry-run — ни деактивации, ни целей, ни лога», «P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи install.log», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «config.sh: dry-run БЕЗ bundled → никакого clone, ~/.claude НЕ создан, exit 0», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «manifest: dryRun ничего не пишет на диск», «receipts: маркер {id, version, installedAt} БЕЗ artifacts; round-trip; битый/чужой id → null», «Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, цели авторитетно из main», «restoreHookUrl: подлоги отбиты — чужой путь, symlink, битый JSON; dry-run не пишет»
 
 ## Что обещает человеку
@@ -38,22 +38,22 @@ lite/частичном издании `mascot.ps1:8` и `vscode.ps1:59-64` в �
 
 ## Как работает
 
-**Определение режима.** Оба IPC-хендлера — установка (`src/main.js:933`) и
-деинсталляция (`src/main.js:3276`) — вычисляют флаг одинаково:
+**Определение режима.** Оба IPC-хендлера — установка (`src/main.js:935`) и
+деинсталляция (`src/main.js:3188`) — вычисляют флаг одинаково:
 `process.env.HM_DRY_RUN || rendererEnv.HM_DRY_RUN`. Комментарий в коде объясняет,
 почему источника два: запуск `.exe` с переменной в окружении обязан быть холостым
 прогоном целиком, а раньше `process.env` игнорировался. Renderer-половина условия
 в поставляемом продукте недостижима (см. выше), но остаётся вторым входом.
 
 **Установка, шаг 1 — журнал.** `logLine` в обоих хендлерах определён как
-`(line) => { if (!isDryRun) logToFile(id, line); }` (`src/main.js:935`, `3278`).
+`(line) => { if (!isDryRun) logToFile(id, line); }` (`src/main.js:937`, `3278`).
 Это единственные два места, откуда вызывается `logToFile`; сама функция
-(`src/main.js:181-191`) создаёт каталог `~/.hamidun-setup` и открывает `install.log`
+(`src/main.js:183-193`) создаёт каталог `~/.hamidun-setup` и открывает `install.log`
 ЛЕНИВО, при первой записи. Значит в холостом прогоне ни каталог, ни файл не рождаются.
 Строки при этом по-прежнему уходят в UI через `send` — человек всё видит на экране.
 
 **Установка, шаг 2 — докачка.** Ветвление стоит ДО любого сетевого действия
-(`src/main.js:988-989`): при `declared && isDryRun` печатается
+(`src/main.js:990-991`): при `declared && isDryRun` печатается
 `[dry-run] Докачка «…» пропущена — ничего не скачиваем.` и управление идёт мимо
 `remoteFetch.pickEntry`, `winMakeSecureDir` и `remoteFetch.fetchRemote`. Защищённый
 каталог кэша не создаётся, `checksums.json` в staging не копируется, `stagingVendor`
@@ -62,7 +62,7 @@ lite/частичном издании `mascot.ps1:8` и `vscode.ps1:59-64` в �
 **Установка, шаг 3 — передача флага скрипту.** `buildInstallEnv` пропускает из
 renderer-env только ключи из явного аллоулиста, и `hm_dry_run` в нём отсутствует
 (`src/install-env.js:21-30`). Поэтому main выставляет переменную сам и после
-фильтрации: `if (isDryRun) childEnv.HM_DRY_RUN = '1';` (`src/main.js:1164`). Дальше
+фильтрации: `if (isDryRun) childEnv.HM_DRY_RUN = '1';` (`src/main.js:1166`). Дальше
 скрипт запускается обычным `spawn` — режим исполняется внутри скрипта, а не подменой
 запуска.
 
@@ -96,22 +96,22 @@ renderer-env только ключи из явного аллоулиста, и 
 **Установка, шаг 5 — учёт.** По закрытию процесса решение о записи принимает чистая
 функция: `shouldRecordInstall(code, isDryRun, hidden)` возвращает
 `code === 0 && !isDryRun && !hidden` (`src/install-receipts.js:36-38`). Вызов —
-`src/main.js:1335`. Пока она ложна, не выполняется ни `manifest.recordInstall`
+`src/main.js:1337`. Пока она ложна, не выполняется ни `manifest.recordInstall`
 (`installed.json`), ни `receipts.writeReceipt` (маркер `~/.hamidun-setup/receipts/<id>.json`).
-Ветка `else if (skipped && !isDryRun)` (`src/main.js:1364`) гасит и объясняющую запись
+Ветка `else if (skipped && !isDryRun)` (`src/main.js:1366`) гасит и объясняющую запись
 в журнал.
 
-**Деинсталляция.** Порядок проверок в `uninstall-component` (`src/main.js:3251-3310`)
+**Деинсталляция.** Порядок проверок в `uninstall-component` (`src/main.js:3163-3222`)
 такой: неизвестный id → служебный (`hidden`) компонент → платформенный гейт →
 компонент из `UNINSTALL_DISABLED` → наличие отметки установки → построение плана из
 вшитого аллоулиста `uninstallTargets`. И только после всего этого — ветка dry-run
-(`src/main.js:3306-3310`): для каждой цели плана печатается
+(`src/main.js:3218-3222`): для каждой цели плана печатается
 `  [dry-run] WOULD: ` + `describeTarget(t)`, для каждой записи `plan.preserve` —
 `  [dry-run] KEEP: `, и возвращается `{ id, ok: true, code: 0, dryRun: true }`.
-`describeTarget` (`src/main.js:3126-3141`) переводит машинную цель в человеческую
+`describeTarget` (`src/main.js:3038-3053`) переводит машинную цель в человеческую
 строку по типу: `файл …`, `дерево …`, `реестр HKCU\… → …`, `точная строка «…» из …`,
 `LaunchAgent …`, `.app … (при совпадении идентичности)` и так далее. Важно, что
-возврат стоит ПЕРЕД `receipts.deactivateReceipt` (`src/main.js:3313`) — маркер не
+возврат стоит ПЕРЕД `receipts.deactivateReceipt` (`src/main.js:3225`) — маркер не
 переименовывается в tombstone, и ни один `executeUninstallTarget` не вызывается.
 
 **Второй, не подключённый механизм.** В чистых модулях есть собственная опция
@@ -120,8 +120,8 @@ renderer-env только ключи из явного аллоулиста, и 
 записи, а `restoreHookUrl` принимает пятым аргументом `dry` и при нём возвращает
 `[dry-run] WOULD вернуть hook-url к плейсхолдеру пака` (`src/uninstall-exec.js:525-563`).
 Из `main.js` ни одна из этих опций не передаётся: `manifest.recordInstall` вызывается
-четырьмя аргументами (`src/main.js:1357`), `receipts.writeReceipt` — тремя
-(`src/main.js:1362`), `restoreHookUrl` — четырьмя (`src/main.js:3165`). Защита в
+четырьмя аргументами (`src/main.js:1359`), `receipts.writeReceipt` — тремя
+(`src/main.js:1364`), `restoreHookUrl` — четырьмя (`src/main.js:3077`). Защита в
 проде держится на ранних гейтах, описанных выше; модульные опции живут для тестов.
 
 **Отдельный вход для Windows.** `test/clean-machine-test.ps1` при `-DryRun`
@@ -133,31 +133,31 @@ renderer-env только ключи из явного аллоулиста, и 
 
 1. **Флаг авторитетно берётся из двух источников.** `isDryRun` вычисляется как
    `process.env.HM_DRY_RUN || rendererEnv.HM_DRY_RUN` в ОБОИХ хендлерах —
-   `src/main.js:933` (установка) и `src/main.js:3276` (удаление).
+   `src/main.js:935` (установка) и `src/main.js:3188` (удаление).
 2. **В холостом прогоне `install.log` не пишется и не создаётся.** `logToFile`
-   вызывается только из `logLine`, а тот в dry-run — no-op (`src/main.js:935`,
-   `src/main.js:3278`); каталог и файл открываются лениво внутри `logToFile`
-   (`src/main.js:183-184`).
+   вызывается только из `logLine`, а тот в dry-run — no-op (`src/main.js:937`,
+   `src/main.js:3190`); каталог и файл открываются лениво внутри `logToFile`
+   (`src/main.js:185-186`).
 3. **Докачка не выполняется.** Проверка `if (declared && isDryRun)` стоит ДО выбора
    записи реестра, до создания защищённого каталога и до `fetchRemote`
-   (`src/main.js:988-989` — против `pickEntry` на `:995`, `winMakeSecureDir` на `:1021`
+   (`src/main.js:990-991` — против `pickEntry` на `:995`, `winMakeSecureDir` на `:1021`
    и `fetchRemote` на `:1036`).
 4. **Флаг доезжает до install-скрипта после фильтрации env.** `childEnv.HM_DRY_RUN = '1'`
-   ставится строкой `src/main.js:1164`, то есть после `buildInstallEnv`
-   (`src/main.js:1090`) и до `spawn` (`src/main.js:1247`), потому что
+   ставится строкой `src/main.js:1166`, то есть после `buildInstallEnv`
+   (`src/main.js:1092`) и до `spawn` (`src/main.js:1249`), потому что
    аллоулист `RENDERER_ENV_ALLOW` ключа `hm_dry_run` не содержит
    (`src/install-env.js:21-30`).
 5. **Ни маркер установки, ни манифест версий не пишутся.**
    `shouldRecordInstall(code, isDryRun, hidden)` даёт `false` при истинном `isDryRun`
    (`src/install-receipts.js:36-38`), и весь блок записи под этим условием
-   (`src/main.js:1335-1366`).
+   (`src/main.js:1337-1368`).
 6. **Деинсталляция в dry-run возвращается ДО деактивации отметки.** Ветка
-   `if (isDryRun)` (`src/main.js:3306`) заканчивается `return` раньше, чем
-   `receipts.deactivateReceipt` (`src/main.js:3313`) и раньше цикла
-   `executeUninstallTarget` (`src/main.js:3320-3327`).
+   `if (isDryRun)` (`src/main.js:3218`) заканчивается `return` раньше, чем
+   `receipts.deactivateReceipt` (`src/main.js:3225`) и раньше цикла
+   `executeUninstallTarget` (`src/main.js:3232-3239`).
 7. **Показанный план — тот же самый, что был бы исполнен.** И `WOULD`, и реальное
    исполнение читают один объект `plan`, построенный `uninstallTargets.uninstallTargets`
-   из вшитого аллоулиста (`src/main.js:3297`); квитанция целей не задаёт.
+   из вшитого аллоулиста (`src/main.js:3209`); квитанция целей не задаёт.
 8. **На Windows каждый устанавливающий скрипт умеет холостой прогон.** Все 16
    компонентных `.ps1` (кроме библиотек `_deelev.ps1`/`_verify.ps1` и read-only
    `verify.ps1`) объявляют `$DRY = [bool]$env:HM_DRY_RUN` и ветвятся до записи.
@@ -174,7 +174,7 @@ renderer-env только ключи из явного аллоулиста, и 
 1. **Источник флага сузили до renderer.** Запуск `.exe` с `HM_DRY_RUN=1` в окружении
    перестаёт быть холостым: человек, попросивший «покажи, что сделаешь», получает
    настоящую установку — перезаписанный `~/.claude`, поставленные программы, тронутый
-   PATH. Именно этот случай и назван в комментарии `src/main.js:930-932` как
+   PATH. Именно этот случай и назван в комментарии `src/main.js:932-934` как
    исправленный дефект.
 2. **`logLine` перестал гаситься.** На машине появляется `~/.hamidun-setup/install.log`
    и сам каталог, которых до прогона не было. Для человека, который «просто посмотрел»,
@@ -188,7 +188,7 @@ renderer-env только ключи из явного аллоулиста, и 
    PowerShell-скрипт про режим не знает и ставит компонент по-настоящему. Худший из
    исходов: изменения на диске есть, а отметки установки и журнала — нет, потому что
    main их подавил. Кнопка «Удалить» для такого компонента не появится (гейт —
-   `receipts.hasReceipt`, `src/main.js:3288`), и убирать придётся руками.
+   `receipts.hasReceipt`, `src/main.js:3200`), и убирать придётся руками.
 5. **`shouldRecordInstall` перестала учитывать dry-run.** После холостого прогона в
    `installed.json` окажутся версии несуществующих установок, а в
    `~/.hamidun-setup/receipts/` — маркеры. Дальше UI покажет компонент установленным и
@@ -231,7 +231,7 @@ renderer-env только ключи из явного аллоулиста, и 
   прогоне на чистой машине он честно покажет крестики «не установлено» — это состояние
   машины, а не сбой режима.
 * **Удаление в dry-run требует отметки установки.** Гейт `receipts.hasReceipt`
-  (`src/main.js:3288`) стоит ВЫШЕ ветки dry-run, поэтому посмотреть план удаления для
+  (`src/main.js:3200`) стоит ВЫШЕ ветки dry-run, поэтому посмотреть план удаления для
   компонента, который ставил не этот установщик, нельзя — вернётся отказ, а не план.
   Так же выше стоят гейты платформы и `UNINSTALL_DISABLED` (Nomad): для них
   предпросмотра не будет вовсе.
@@ -254,7 +254,7 @@ renderer-env только ключи из явного аллоулиста, и 
    журнала и без отметки установки, то есть самый плохой из возможных исходов
    (см. «Что ломается», пункт 4). На Windows этой дыры нет: там `$DRY` есть во всех 16.
 2. **Телеметрия в холостом прогоне не отключена.** Хендлер `send-telemetry`
-   (`src/main.js:1452-1504`) не читает `isDryRun` ни в каком виде, а renderer шлёт
+   (`src/main.js:1454-1506`) не читает `isDryRun` ни в каком виде, а renderer шлёт
    события `install_started` (`src/renderer/app.js:2002`) и `installed`
    (`src/renderer/app.js:1982`) по обычным правилам. Значит холостой прогон уходит
    наружу POST-запросом как настоящая установка, с uid, платформой, изданием и списком
@@ -275,11 +275,11 @@ renderer-env только ключи из явного аллоулиста, и 
    молча.
 5. **Параметр `dry` у `restoreHookUrl` в проде мёртв.** Функция объявлена как
    `restoreHookUrl(settingsFile, from, to, opts, dry)` (`src/uninstall-exec.js:525`), а
-   вызывается четырьмя аргументами (`src/main.js:3165`) — пятый всегда `undefined`.
+   вызывается четырьмя аргументами (`src/main.js:3077`) — пятый всегда `undefined`.
    Сегодня это безвредно (до исполнения целей dry-run не доходит), но выглядит как
    работающая защита и может быть принято за неё при следующей правке.
 6. **Renderer-половина условия недостижима.** `rendererEnv.HM_DRY_RUN` в
-   `src/main.js:933` и `:3276` не может стать истинной в поставляемом приложении:
+   `src/main.js:935` и `:3276` не может стать истинной в поставляемом приложении:
    `envForRun` такого ключа не формирует. Ветка не вредна, но её наличие создаёт
    впечатление, что режим включается из интерфейса.
 7. **Открытый вопрос: где документирован способ запуска.** В коде и тестах способ

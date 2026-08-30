@@ -9675,3 +9675,329 @@ ok('config.json в репозитории без сборочных маркер
     }
   });
 })();
+
+// ===========================================================================
+// Тестовый долг риска 4.1: пять фич не имели НИ ОДНОГО теста, и все пять —
+// в renderer или в IPC-обработчиках `main.js`. Причина была общая и техническая:
+// `app.js` — browser-скрипт (require его не берёт), а `main.js` требует
+// `electron`. То есть код было не с чего позвать, и вместо тестов его описывали
+// словами. Здесь это закрыто: renderer гоняется целиком в `test/dom-harness.js`,
+// а две записи на диск вынесены в модули (`src/nomad-key.js`,
+// `src/credentials-merge.js`) и проверяются на настоящей ФС.
+// ===========================================================================
+(function uncoveredScreensTests() {
+  console.log('== Экраны и записи на диск: пять фич, у которых не было тестов ==');
+
+  const { loadRenderer } = require(path.join(ROOT, 'test', 'dom-harness.js'));
+
+  // DOM ровно тот, которого касаются проверяемые функции.
+  const build = (doc, mk) => {
+    const add = (parent, tag, id, cls) => {
+      const el = mk(tag);
+      if (id) el.id = id;
+      if (cls) { el.className = cls; cls.split(' ').forEach((c) => el.classList.add(c)); }
+      parent.appendChild(el);
+      return el;
+    };
+    const vs = add(doc.body, 'section', 'view-select');
+    add(vs, 'div', 'hero-block', 'hero');
+    const vp = add(doc.body, 'section', 'view-progress');
+    const tips = add(vp, 'div', 'tips');
+    tips.classList.add('hidden');
+    add(tips, 'div', 'tips-text');
+    add(vp, 'img', 'mascot-progress', 'mascot').src = 'mascot/loading.webp';
+    add(tips, 'img', 'mascot-tips', 'tips-mascot').src = 'mascot/watching.webp';
+  };
+
+  // ---- 1. Предполётные проверки машины -------------------------------------
+  ok('предполётное: предупреждение о месте только НИЖЕ 4 ГБ и ровно с этой цифрой', () => {
+    const H = loadRenderer({ build });
+    try {
+      const warn = (gb) => {
+        const old = H.document.getElementById('preflight-warn');
+        if (old) old.remove();
+        H.run('STATE.freeGB = ' + JSON.stringify(gb) + '; renderPreflight();');
+        const el = H.document.getElementById('preflight-warn');
+        return el ? el.innerHTML : null;
+      };
+      // null — «не смогли измерить». Пугать человека на догадке нельзя.
+      assert.strictEqual(warn(null), null, 'при неизвестном объёме предупреждения быть не должно');
+      assert.strictEqual(warn(120), null, 'при 120 ГБ предупреждения быть не должно');
+      assert.strictEqual(warn(4), null, 'порог не строгий: ровно 4 ГБ — молчим');
+      const w = warn(3.9);
+      assert(w && w.includes('3.9'), 'при 3.9 ГБ — предупреждение с этой же цифрой, получено: ' + w);
+      assert(warn(0) !== null, 'при нуле — предупреждение');
+      // Идемпотентность: экран перерисовывается не раз, три баннера подряд —
+      // это то, что человек увидит как поломку.
+      H.run('renderPreflight(); renderPreflight();');
+      const all = H.document.querySelectorAll('#view-select .preflight-warn');
+      assert.strictEqual(all.length, 1, 'повторные вызовы плодят баннеры: ' + all.length);
+    } finally { H.dispose(); }
+  });
+
+  // ---- 2. Карусель подсказок ----------------------------------------------
+  ok('карусель советов: старт показывает совет из списка, стоп гасит таймер, двойной старт не течёт', () => {
+    const H = loadRenderer({ build });
+    try {
+      const box = H.document.getElementById('tips');
+      const txt = H.document.getElementById('tips-text');
+      assert(box.classList.contains('hidden'), 'до старта карусель скрыта');
+
+      H.run('startTips();');
+      assert(!box.classList.contains('hidden'), 'старт показывает карусель');
+      const TIPS = H.run('TIPS');
+      assert(Array.isArray(TIPS) && TIPS.length >= 10, 'советов должно быть много, их ' + TIPS.length);
+      assert(TIPS.includes(txt.innerHTML), 'показан текст ВНЕ списка: ' + txt.innerHTML.slice(0, 60));
+      assert(H.run('TIPS_TIMER') !== null, 'таймер заведён');
+
+      // Двойной старт: дескриптор один, а интервалов не два. Иначе первый
+      // таймер осиротеет навсегда — stopTips гасит только последний, и советы
+      // до конца установки будут мигать вдвое быстрее.
+      H.run('startTips();');
+      assert.strictEqual(H.timers.intervals.size, 1,
+        'после двух стартов живых интервалов: ' + H.timers.intervals.size + ' (осиротевший таймер)');
+
+      H.run('stopTips();');
+      assert.strictEqual(H.run('TIPS_TIMER'), null, 'стоп обнуляет дескриптор');
+      assert.strictEqual(H.timers.intervals.size, 0, 'стоп гасит ВСЕ интервалы карусели');
+      assert(box.classList.contains('hidden'), 'стоп прячет карусель');
+      H.run('stopTips(); stopTips();');   // повторный стоп безопасен
+    } finally { H.dispose(); }
+  });
+
+  ok('карусель советов: без разметки — молча выходит, таймер не заводит', () => {
+    const H = loadRenderer({ build: () => {} });
+    try {
+      H.run('startTips();');   // не должно бросить
+      assert.strictEqual(H.run('TIPS_TIMER'), null, 'без #tips таймер заводиться не должен');
+      assert.strictEqual(H.timers.intervals.size, 0, 'и живых интервалов быть не должно');
+    } finally { H.dispose(); }
+  });
+
+  // ---- 3. Маскот Омлетон ---------------------------------------------------
+  ok('маскот: клик листает четыре позы по кругу, все .webp существуют', () => {
+    const H = loadRenderer({ build });
+    try {
+      const m = H.document.getElementById('mascot-progress');
+      H.run('setupMascots();');
+      assert.strictEqual(m.style.cursor, 'pointer', 'маскот выглядит кликабельным');
+      assert.strictEqual(m.title, 'Омлетон', 'подпись проставлена');
+
+      const POSES = ['watching', 'thinking', 'success', 'loading'];
+      const poseOf = () => (m.src || '').replace(/.*\/(\w+)\.webp/, '$1');
+      const seen = [];
+      for (let i = 0; i < 5; i++) { m.click(); seen.push(poseOf()); }
+      assert(seen.every((p) => POSES.includes(p)), 'встретилась неизвестная поза: ' + seen.join(','));
+      assert.strictEqual(new Set(seen).size, 4, 'за пять кликов должны пройти все четыре позы: ' + seen.join(','));
+      assert.strictEqual(seen[0], seen[4], 'на пятом клике круг замыкается: ' + seen.join(','));
+      assert(m.classList.contains('jump'), 'клик запускает прыжок');
+      m.fire('animationend');
+      assert(!m.classList.contains('jump'), 'класс прыжка снимается по окончании анимации');
+
+      // Битая картинка на клике — это то, что видит человек. Файлы обязаны быть.
+      const missing = POSES.filter((p) => !fs.existsSync(
+        path.join(ROOT, 'src', 'renderer', 'mascot', p + '.webp')));
+      assert.deepStrictEqual(missing, [], 'нет файлов поз: ' + missing.join(', '));
+    } finally { H.dispose(); }
+  });
+
+  // ---- 4. Поле ключа Nomad на финише (риск 4.2) ----------------------------
+  const nomad = require(path.join(ROOT, 'src', 'nomad-key.js'));
+
+  ok('ключ Nomad: отказы без записи на диск', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nomad-'));
+    const F = path.join(base, 'hermes', 'config.yaml');
+    try {
+      const w = (k) => nomad.writeNomadKey(k, { config: {}, file: F, newline: '\n' });
+      assert.strictEqual(w('').reason, 'empty');
+      assert.strictEqual(w('   ').reason, 'empty');
+      assert.strictEqual(w(null).reason, 'empty');
+      assert.strictEqual(w('nmd_1').reason, 'malformed', 'слишком короткий — явно не ключ');
+      assert.strictEqual(w('nmd_abc def123').reason, 'malformed', 'пробел внутри — вставили не то');
+      assert(!fs.existsSync(F), 'ни один отказ не должен создавать файл');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ключ Nomad: повтор ЗАМЕНЯЕТ управляемый блок, а не добавляет второй model:', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nomad-'));
+    const F = path.join(base, 'hermes', 'config.yaml');
+    const CFG = { nomad: { cloud: { baseUrl: 'https://cp.nomadnet.ai/v1', defaultModel: 'claude-opus-4-6' } } };
+    const w = (k) => nomad.writeNomadKey(k, { config: CFG, file: F, newline: '\n' });
+    try {
+      assert(w('nmd_live_0123456789abcdef').ok, 'валидный ключ принят');
+      let t = fs.readFileSync(F, 'utf8');
+      assert(t.includes('api_key: "nmd_live_0123456789abcdef"'), 'ключ в файле');
+      assert(t.includes('base_url: "https://cp.nomadnet.ai/v1"'), 'base_url из config.json');
+      assert(t.includes('default: "claude-opus-4-6"'), 'поле называется defaultModel, а пишется в default');
+      assert(!t.startsWith('﻿'), 'BOM ломает YAML-парсер — его быть не должно');
+
+      // Два блока model: — валидный YAML, в котором парсер возьмёт ПОСЛЕДНИЙ.
+      // То есть старый ключ молча победил бы новый, а человек увидел бы
+      // «неверный ключ» на верном ключе.
+      w('nmd_live_ffffffffffffffff');
+      t = fs.readFileSync(F, 'utf8');
+      assert.strictEqual((t.match(/# >>> nomad-cloud/g) || []).length, 1, 'управляемых блоков должно быть 1');
+      assert.strictEqual((t.match(/^model:/gm) || []).length, 1, 'ключей model: должно быть 1');
+      assert(t.includes('ffffffffffffffff') && !t.includes('0123456789abcdef'), 'победил новый ключ');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ключ Nomad: чужие настройки и ручной model: — соседей не теряем, дубль убираем', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nomad-'));
+    const F = path.join(base, 'hermes', 'config.yaml');
+    fs.mkdirSync(path.dirname(F), { recursive: true });
+    const w = (k) => nomad.writeNomadKey(k, { config: {}, file: F, newline: '\n' });
+    try {
+      fs.writeFileSync(F, 'agent:\n  name: "мой агент"\ntools:\n  - bash\n', 'utf8');
+      w('nmd_live_aaaaaaaaaaaaaaaa');
+      let t = fs.readFileSync(F, 'utf8');
+      assert(t.includes('name: "мой агент"') && t.includes('- bash'), 'чужие ключи целы');
+      assert.strictEqual(t.indexOf('# >>> nomad-cloud'), 0, 'блок пишется в начало файла');
+
+      // Человек мог вписать model: руками до нас — иначе получится два.
+      fs.writeFileSync(F, 'model:\n  provider: "старое"\n  api_key: "старый"\nagent:\n  name: "x"\n', 'utf8');
+      w('nmd_live_bbbbbbbbbbbbbbbb');
+      t = fs.readFileSync(F, 'utf8');
+      assert(!t.includes('"старое"') && !t.includes('"старый"'), 'прежний ручной model: вычищен');
+      assert.strictEqual((t.match(/^model:/gm) || []).length, 1, 'model: остался один');
+      assert(t.includes('name: "x"'), 'соседний ключ не пострадал');
+
+      // Кавычки в ключе сломали бы YAML — вырезаются.
+      fs.rmSync(F, { force: true });
+      assert(w('nmd_"live"_cccccccccc').ok);
+      t = fs.readFileSync(F, 'utf8');
+      assert(t.includes('api_key: "nmd_live_cccccccccc"'), 'кавычки вырезаны: ' + t.split('\n')[4]);
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ключ Nomad: маркеры блока совпадают с nomad.ps1 (иначе повторный прогон даст два блока)', () => {
+    const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+    const block = nomad.buildBlock('K', 'https://u', 'M', '\n');
+    for (const marker of ['# >>> nomad-cloud', '# <<< nomad-cloud <<<']) {
+      assert(block.includes(marker), 'модуль пишет маркер ' + marker);
+      assert(ps.includes(marker), 'nomad.ps1 знает маркер ' + marker);
+    }
+    assert(nomad.MANAGED_BLOCK.test(block), 'собственный блок обязан распознаваться своей же регуляркой');
+  });
+
+  // ---- 5. Мини-визард API-ключей -------------------------------------------
+  const creds = require(path.join(ROOT, 'src', 'credentials-merge.js'));
+
+  ok('ключи визарда: замена НА МЕСТЕ, порядок цел, доллар в значении не толкуется', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-creds-'));
+    const F = path.join(base, '.claude', '.credentials.master.env');
+    const save = (o) => creds.saveCredentials(o, { file: F });
+    try {
+      save({ ANTHROPIC_API_KEY: 'sk-ant-111' });
+      save({ OPENAI_API_KEY: 'sk-oai-222' });
+      assert.strictEqual(fs.readFileSync(F, 'utf8'),
+        'ANTHROPIC_API_KEY=sk-ant-111\nOPENAI_API_KEY=sk-oai-222\n', 'второй ключ дописан в конец');
+
+      save({ ANTHROPIC_API_KEY: 'sk-ant-NEW' });
+      assert.strictEqual(fs.readFileSync(F, 'utf8'),
+        'ANTHROPIC_API_KEY=sk-ant-NEW\nOPENAI_API_KEY=sk-oai-222\n', 'замена НА МЕСТЕ, без перестановки');
+
+      // String.replace со строкой-заменой толкует $&, $1, $' как ссылки.
+      // В API-ключах доллар встречается, поэтому замена идёт функцией.
+      save({ WEIRD_KEY: "p$&ss$1w$'rd" });
+      assert(fs.readFileSync(F, 'utf8').includes("WEIRD_KEY=p$&ss$1w$'rd"), 'значение с $ записано буквально');
+      save({ WEIRD_KEY: 'вт$&орое' });
+      const t = fs.readFileSync(F, 'utf8');
+      assert(t.includes('WEIRD_KEY=вт$&орое') && !t.includes('p$&ss'), 'и при ЗАМЕНЕ доллар буквален');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ключи визарда: мусорные имена и пустые значения отбиты, файл не тронут', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-creds-'));
+    const F = path.join(base, '.claude', '.credentials.master.env');
+    try {
+      creds.saveCredentials({ GOOD_KEY: 'v1' }, { file: F });
+      const before = fs.readFileSync(F);
+      const r = creds.saveCredentials(
+        { 'плохое имя': 'x', lowercase: 'y', '9START': 'z', EMPTY: '   ', NOTSTR: 123 }, { file: F });
+      assert(r.ok, 'ответ остаётся успешным');
+      assert.deepStrictEqual(r.saved, [], 'ни одно из них не принято: ' + JSON.stringify(r.saved));
+      assert.strictEqual(Buffer.compare(before, fs.readFileSync(F)), 0, 'файл не переписан ни на байт');
+
+      creds.saveCredentials({ MULTILINE: 'aaa\nbbb\r\nccc' }, { file: F });
+      assert(fs.readFileSync(F, 'utf8').includes('MULTILINE=aaabbbccc'),
+        'переводы строк внутри значения вырезаны — иначе ломается формат файла');
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('ключи визарда: файл не прочитан — НЕ ПИШЕМ (иначе теряются все прежние ключи)', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-creds-'));
+    // Каталог на месте файла даёт EISDIR при чтении: «файл, возможно, есть».
+    // ENOENT/ENOTDIR — норма (файла нет), всё остальное — повод отказаться:
+    // запись затёрла бы все ранее сохранённые ключи одной строкой, вернув ok.
+    const asDir = path.join(base, '.claude', '.credentials.master.env');
+    fs.mkdirSync(asDir, { recursive: true });
+    try {
+      const r = creds.saveCredentials({ SOME_KEY: 'v' }, { file: asDir });
+      assert.strictEqual(r.ok, false, 'нечитаемый файл обязан давать отказ, а не тихую перезапись');
+      assert(/НЕ сохранены/.test(r.error || ''), 'человеку сказано, что ключи НЕ сохранены: ' + r.error);
+      assert(fs.existsSync(asDir), 'ничего не снесено');
+      const leftovers = fs.readdirSync(path.dirname(asDir)).filter((n) => n.includes('.tmp-'));
+      assert.deepStrictEqual(leftovers, [], 'временных файлов не осталось: ' + leftovers.join(', '));
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  // ---- класс дефектов: `\b` рядом с кириллицей ----------------------------
+  // В JavaScript `\b` строится на латинском `\w`, поэтому «т» для него не буква,
+  // и `/нет\b/` НЕ совпадает со словом «нет» в конце строки. Дефект нашёлся ДВАЖДЫ:
+  // сперва в гейте спек (наказывал за честное «Тесты: НЕТ»), потом в
+  // классификаторе инвентаря (маяк курса полгода числился «теста не нашли»
+  // вместо «решили не писать»). Второй раз — уже класс, а не случайность.
+  ok('нигде нет `\\b` рядом с кириллицей: граница слова пишется явным перечислением', () => {
+    const dirs = ['tools', 'src', 'scripts'];
+    const files = [];
+    const walk = (d) => {
+      let entries = [];
+      try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+      for (const e of entries) {
+        const full = path.join(d, e.name);
+        if (e.isDirectory()) { walk(full); continue; }
+        if (e.isFile() && /\.(js|cjs|mjs)$/.test(e.name)) files.push(full);
+      }
+    };
+    for (const d of dirs) walk(path.join(ROOT, d));
+    assert(files.length > 10, 'нечего проверять — обход дал ' + files.length + ' файлов');
+
+    // Ищем регулярное выражение, в котором есть И кириллица, И \b.
+    const RX_LITERAL = /\/(?![/*])(?:\\.|\[(?:\\.|[^\]])*\]|[^/\\\n])+\/[gimsuy]*/g;
+    const bad = [];
+    for (const f of files) {
+      const src = fs.readFileSync(f, 'utf8');
+      const lines = src.split(/\r?\n/);
+      lines.forEach((line, i) => {
+        // Комментарии пропускаем: там про этот самый дефект и написано.
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) return;
+        for (const lit of line.match(RX_LITERAL) || []) {
+          // Ищем `\b` ВПЛОТНУЮ к кириллице, а не просто в одном выражении с ней.
+          // Первая редакция проверяла «есть кириллица И есть \b» и ловила
+          // `/\bEPERM\b|…|отказано в доступе/` — там граница стоит вокруг
+          // ЛАТИНСКИХ слов и работает как надо. Тест, который ругается на
+          // исправное, перестают читать.
+          if (/[а-яё]\\b|\\b[а-яё]/i.test(lit)) {
+            bad.push(path.relative(ROOT, f).split('\\').join('/') + ':' + (i + 1) + '  ' + lit.slice(0, 60));
+          }
+        }
+      });
+    }
+    assert.deepStrictEqual(bad, [],
+      '`\\b` не работает на кириллице — замени на (?:$|[\\s.,;:—–-]):\n    ' + bad.join('\n    '));
+  });
+
+  // Обе записи вынесены из main.js РАДИ проверяемости — сторожим, что копия туда
+  // не вернулась: иначе тесты будут зелёными на модуле, а работать будет копия.
+  ok('main.js делегирует запись ключей модулям, копий логики не осталось', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(/require\('\.\/nomad-key'\)/.test(s), 'main.js берёт запись ключа Nomad из модуля');
+    assert(/require\('\.\/credentials-merge'\)/.test(s), 'main.js берёт слияние ключей из модуля');
+    assert(!/# >>> nomad-cloud \(managed by installer/.test(s), 'текста управляемого блока в main.js быть не должно');
+    // Опознаём слияние ключей по его собственной примете — атомарной замене
+    // через `<файл>.tmp-<pid>`. Она есть ТОЛЬКО там, и её возврат в main.js
+    // означал бы вторую копию логики.
+    assert(!/\.tmp-' \+ process\.pid/.test(s), 'атомарная запись файла ключей живёт в модуле, не в main.js');
+  });
+})();

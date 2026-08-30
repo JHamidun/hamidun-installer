@@ -3,8 +3,8 @@
 <!-- spec-id: maskot-omleton-v-interfeyse -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/renderer/mascot/watching.webp`, `src/renderer/mascot/thinking.webp`, `src/renderer/mascot/loading.webp`, `src/renderer/mascot/success.webp`, `src/renderer/index.html:27`, `src/renderer/index.html:99`, `src/renderer/index.html:154`, `src/renderer/index.html:179`, `src/renderer/index.html:9`, `src/renderer/app.js:157`, `src/renderer/app.js:281-296`, `src/renderer/app.js:1901-1903`, `src/renderer/app.js:1955-1960`, `src/renderer/app.js:2488`, `src/renderer/styles.css:64-70`, `src/renderer/styles.css:537`, `src/renderer/styles.css:551-560`, `src/main.js:285`, `package.json:62-64`
-- **Тесты:** НЕТ
+- **Код:** `test/dom-harness.js`, `src/renderer/mascot/watching.webp`, `src/renderer/mascot/thinking.webp`, `src/renderer/mascot/loading.webp`, `src/renderer/mascot/success.webp`, `src/renderer/index.html:27`, `src/renderer/index.html:99`, `src/renderer/index.html:154`, `src/renderer/index.html:179`, `src/renderer/index.html:9`, `src/renderer/app.js:157`, `src/renderer/app.js:281-296`, `src/renderer/app.js:1901-1903`, `src/renderer/app.js:1955-1960`, `src/renderer/app.js:2488`, `src/renderer/styles.css:64-70`, `src/renderer/styles.css:537`, `src/renderer/styles.css:551-560`, `src/main.js:287`, `package.json:62-64`
+- **Тесты:** «маскот: клик листает четыре позы по кругу, все .webp существуют»
 
 ## Что обещает человеку
 
@@ -20,7 +20,7 @@
 
 Четыре статичных файла в `src/renderer/mascot/`: `watching.webp` (17 758 байт), `thinking.webp` (18 674), `success.webp` (18 632), `loading.webp` (19 022). Никакой покадровой анимации внутри — смена «выражения» это подмена `src` у одного и того же `<img>`.
 
-В сборку они попадают общим правилом `build.files: ["src/**/*"]` (`package.json:62-64`) — отдельной записи в `extraResources` у них нет, они едут внутри asar вместе с остальным рендерером. Окно грузится как локальный файл (`mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))`, `src/main.js:285`), поэтому относительные пути вида `mascot/loading.webp` разрешаются от каталога `src/renderer/`. CSP разрешает такую загрузку: `img-src 'self' data:` (`index.html:9`).
+В сборку они попадают общим правилом `build.files: ["src/**/*"]` (`package.json:62-64`) — отдельной записи в `extraResources` у них нет, они едут внутри asar вместе с остальным рендерером. Окно грузится как локальный файл (`mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))`, `src/main.js:287`), поэтому относительные пути вида `mascot/loading.webp` разрешаются от каталога `src/renderer/`. CSP разрешает такую загрузку: `img-src 'self' data:` (`index.html:9`).
 
 ### Разметка: четыре точки показа
 
@@ -64,7 +64,7 @@
 
 1. **Каждое имя, которое код подставляет в `src`, соответствует реально существующему файлу.** Имена берутся из трёх мест: массива `poses` (`app.js:284`), финиша (`app.js:1958`) и повтора (`app.js:1903`); плюс четыре `src` в разметке (`index.html:27,99,154,179`). Литералов в сумме одиннадцать — семь в `app.js` (четыре имени в `poses`, два на финише, одно на повторе) и четыре в разметке, — но различных значений всего **четыре**: `mascot/watching.webp`, `mascot/thinking.webp`, `mascot/success.webp`, `mascot/loading.webp`. Каждому соответствует файл в `src/renderer/mascot/`. Инвариант держится наполовину машиной, наполовину соглашением. **Машиной:** строка «- **Код:**» этой спеки перечисляет все четыре `src/renderer/mascot/*.webp`, а `tools/check-specs.js:169` требует существования каждого пути из этой строки — переименование или удаление файла валит `npm run specs:check` (`package.json:26`). Проверено прогоном: временное переименование `watching.webp` даёт «ПРОБЛЕМ: 2 / путь не существует» (две — потому что тот же файл указан и в шапке `docs/specs/ekran-privetstviya.md`). **Соглашением:** что литерал внутри `app.js` совпадает с именем файла (`poses` — `app.js:284`, финиш — `app.js:1958`, повтор — `app.js:1903`), не проверяет ничто; опечатка в самом литерале проедет молча.
 2. **Ассеты попадают в поставку.** `build.files: ["src/**/*"]` (`package.json:62-64`) забирает каталог `src/renderer/mascot/` целиком; отдельного правила, которое могло бы его исключить, в конфиге нет.
-3. **CSP не блокирует картинки.** `img-src 'self' data:` (`index.html:9`) при загрузке окна через `loadFile` (`src/main.js:285`) — относительный путь `mascot/*.webp` попадает под `'self'`.
+3. **CSP не блокирует картинки.** `img-src 'self' data:` (`index.html:9`) при загрузке окна через `loadFile` (`src/main.js:287`) — относительный путь `mascot/*.webp` попадает под `'self'`.
 4. **Пасхалка не влияет на установку.** Обработчик клика (`app.js:289-293`) меняет только `classList` и `src` конкретного `<img>`; ни `STATE`, ни `window.installer`, ни один IPC-вызов в `setupMascots` не упоминаются.
 5. **В момент финиша и повтора поза соответствует исходу.** `finishInstall` (`app.js:1958`) и `retryFailed` (`app.js:1903`) присваивают `src` безусловно, без чтения текущего значения — накликанная до этого поза затирается. На всё терминальное состояние инвариант НЕ распространяется: обработчик пасхалки после финиша не снимается и не блокируется, экран остаётся на виду, поэтому следующие клики снова листают позы (разбор — в «Взаимодействии пасхалки с исходом установки»).
 6. **Класс `jump` не залипает.** Он снимается перед каждым добавлением (`app.js:290`) и по `animationend` (`app.js:294`); длительность анимации задана в `styles.css:553` как `.5s`.
