@@ -4,7 +4,7 @@
 
 - **Раздел:** Сопутствующее
 - **Код:** `tools/audit-pack.js`, `test/audit-pack-regex.test.js`, `test/audit-pack-run.test.js`, `tools/preflight-build.js:443-474`
-- **Тесты:** `test/audit-pack-regex.test.js`, `test/audit-pack-run.test.js` — тесты этой фичи лежат ОТДЕЛЬНЫМИ файлами, а не в `test/run-tests.js`: второй гоняет сам audit-pack на заведомо зелёном и заведомо битом паке.
+- **Тесты:** «audit-pack не запускает процессов и не ходит в сеть — вердикт детерминирован паком», «preflight: СТОПы пака рушат сборку, обход только явным флагом», «preflight на битом паке останавливает сборку и называет причину», `test/audit-pack-regex.test.js`, `test/audit-pack-run.test.js` — тесты этой фичи лежат ОТДЕЛЬНЫМИ файлами, а не в `test/run-tests.js`: второй гоняет сам audit-pack на заведомо зелёном и заведомо битом паке.
 
   Оговорка нужна, потому что тесты лежат не там, где их ищут по умолчанию. Они у фичи
   есть — `test/audit-pack-regex.test.js` (50 строк) и `test/audit-pack-run.test.js`
