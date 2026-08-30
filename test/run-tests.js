@@ -10001,3 +10001,74 @@ ok('config.json в репозитории без сборочных маркер
     assert(!/\.tmp-' \+ process\.pid/.test(s), 'атомарная запись файла ключей живёт в модуле, не в main.js');
   });
 })();
+
+// ===========================================================================
+// Гейт связности конфиг-пака (риск 4.3). `audit-pack.js` — единственная проверка,
+// которая смотрит не «файлы разложились», а «конфиг у ученика РАБОТАЕТ». До 30.08
+// она печаталась и не блокировала, а обоснование в preflight звучало так:
+// «audit-pack проверяет, поднялись ли MCP-серверы, а на раннере они не подняты».
+// Довод верный по форме и неверный по факту — на нём и держалось невключение
+// единственной функциональной проверки продукта.
+// ===========================================================================
+(function packConnectivityGateTests() {
+  console.log('== Связность конфиг-пака: СТОПы блокируют сборку (риск 4.3) ==');
+
+  // Факт, на котором стоит весь гейт. Если audit-pack когда-нибудь начнёт
+  // запускать процессы или ходить в сеть, его вердикт перестанет быть
+  // детерминированным по содержимому пака — и блокировать им станет нельзя.
+  ok('audit-pack не запускает процессов и не ходит в сеть — вердикт детерминирован паком', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'tools', 'audit-pack.js'), 'utf8');
+    const forbidden = ['child_process', 'execSync', 'execFileSync', 'spawnSync',
+      'require(\'net\')', 'require(\'http', 'fetch(', 'XMLHttpRequest'];
+    const found = forbidden.filter((f) => s.includes(f));
+    assert.deepStrictEqual(found, [],
+      'audit-pack стал зависеть от окружения — блокировать его вердиктом больше нельзя: ' + found.join(', '));
+  });
+
+  ok('preflight: СТОПы пака рушат сборку, обход только явным флагом', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'tools', 'preflight-build.js'), 'utf8');
+    assert(/packBroken/.test(s), 'счётчик СТОПов пака заведён');
+    assert(/--allow-broken-pack/.test(s), 'обход существует и назван явно');
+    assert(/if \(packBroken && !args\.includes\('--allow-broken-pack'\)\) return 1;/.test(s),
+      'СТОПы пака обязаны возвращать 1 — иначе гейт снова только печатает');
+    // Ненулевой код БЕЗ СТОПов — это поломка самого аудита, и молчать о ней нельзя:
+    // «проверка не выполнена» и «проверка прошла» — разные вещи.
+    assert(/проверка связности НЕ выполнена/.test(s),
+      'падение самого audit-pack обязано быть названо, а не проглочено');
+  });
+
+  // Поведение целиком: подкладываем в пак правило со ссылкой на несуществующий
+  // скрипт и требуем, чтобы preflight остановил сборку. Пак additive не портится —
+  // файл убирается в finally.
+  ok('preflight на битом паке останавливает сборку и называет причину', () => {
+    const pack = path.join(ROOT, 'vendor', 'config-pack', '.claude', 'rules');
+    if (!fs.existsSync(pack)) SKIP('vendor/config-pack не развёрнут (чистый чекаут)');
+    const victim = path.join(pack, '_hm_gate_probe.md');
+    const args = ['tools/preflight-build.js', '--platform', 'win32', '--offline',
+      '--skip-size', '--skip-config'];
+    const run = (extra) => {
+      const r = spawnSync(process.execPath, args.concat(extra || []),
+        { cwd: ROOT, encoding: 'utf8', timeout: 300000 });
+      return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+    };
+    try {
+      const before = run();
+      assert.strictEqual(before.code, 0, 'исправный пак не должен рушить сборку: ' + before.out.slice(-300));
+
+      fs.writeFileSync(victim,
+        '# проба гейта\n\nЗапуск: `python3 ~/.claude/scripts/_hm_no_such_script.py --all`\n', 'utf8');
+      const broken = run();
+      assert.strictEqual(broken.code, 1, 'битый пак обязан рушить сборку');
+      assert(/СБОРКА ОСТАНОВЛЕНА/.test(broken.out), 'человеку сказано, что сборка остановлена');
+      assert(/_hm_no_such_script/.test(broken.out),
+        'названа КОНКРЕТНАЯ причина, а не «что-то не так»: ' + broken.out.slice(-200));
+
+      const bypass = run(['--allow-broken-pack']);
+      assert.strictEqual(bypass.code, 0, 'осознанный обход обязан работать');
+      assert(/СТОП/.test(bypass.out), 'обход не должен ПРЯТАТЬ находки — только не блокировать');
+    } finally {
+      try { fs.rmSync(victim, { force: true }); } catch (e) { /* ignore */ }
+    }
+    assert(!fs.existsSync(victim), 'подложенный файл убран, пак не изменён');
+  });
+})();
