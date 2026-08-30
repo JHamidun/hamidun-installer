@@ -22,6 +22,8 @@
     "postinstall": "electron-builder install-app-deps",
     "sizes": "node tools/sync-sizes.js",
     "sizes:check": "node tools/sync-sizes.js --check",
+    "specs": "node tools/extract-features.js",
+    "specs:check": "node tools/extract-features.js --check && node tools/check-specs.js",
     "test": "node test/run-tests.js"
   },
   "devDependencies": {

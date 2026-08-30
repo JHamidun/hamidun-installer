@@ -249,7 +249,7 @@ function seedUserData(home) {
   // chats.db — НЕПУСТАЯ история чатов (валидный SQLite-заголовок + маркер + «мясо»).
   const relDb = '.claude/chats.db';
   const db = Buffer.concat([
-    Buffer.from('SQLite format 3 ', 'binary'),
+    Buffer.from('SQLite format 3\u0000', 'binary'),
     Buffer.from('  chats history of the user, ' + marker + ' '),
     crypto.randomBytes(64 * 1024),
   ]);

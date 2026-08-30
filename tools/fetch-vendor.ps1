@@ -318,7 +318,13 @@ if ($py) {
 }
 
 Write-Host "[vendor] Скрепка Claude (маскот, локальная Windows-сборка)..."
-$mascotSrc = 'C:\Users\hamid\claude-mascot\src-tauri\target\release\claude-mascot.exe'
+# Путь к локальной сборке скрепки. РЕПОЗИТОРИЙ ПУБЛИЧНЫЙ, поэтому имени пользователя
+# здесь быть не должно: раньше стояло 'C:\Users\<имя>\claude-mascot\...' — это и
+# деанонимизация владельца, и неработающая сборка у любого другого человека.
+# $env:USERPROFILE раскрывается у каждого в своё, а HM_MASCOT_SRC позволяет держать
+# исходник где угодно, не трогая скрипт.
+$mascotSrc = if ($env:HM_MASCOT_SRC) { $env:HM_MASCOT_SRC }
+             else { Join-Path $env:USERPROFILE 'claude-mascot\src-tauri\target\release\claude-mascot.exe' }
 $mascotDir = Join-Path $apps 'claude-mascot'
 if (Test-Path $mascotSrc) {
   New-Item -ItemType Directory -Force $mascotDir | Out-Null

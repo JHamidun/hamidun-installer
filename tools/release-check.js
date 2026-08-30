@@ -36,6 +36,15 @@ const DAY = 24 * 60 * 60 * 1000;
 //   course — так же вшит в lite (tools/build-lite.js LITE_KEEP_*);
 // Всё остальное, у чего есть вшитый артефакт в vendor, обязано иметь запись: иначе в
 // lite-издании компонент недостижим НИ ОТКУДА и уходит в тихий пропуск.
+//
+// ПРО uv ОТДЕЛЬНО, чтобы не удивляться. Запись для него в реестре ЕСТЬ (win32, с
+// sha256 и двумя живыми зеркалами), просто код до неё не доходит: BUNDLED_ONLY берёт
+// вшитую копию раньше. То есть послабление написано под случай, который сегодня не
+// наступает, и это осознанно — оно страхует от обратного: darwin-записи у uv нет, и
+// без послабления гейт требовал бы опубликовать mac-сборку, которой в этой модели
+// неоткуда взяться. Опубликованный win32-объект — спящий фолбэк, мёртвый груз
+// ценой в несколько мегабайт; удалять его нельзя (content-addressed, ADR-001:
+// на него могут ссылаться уже розданные сборки). Подробности — docs/adr/003-uv-bundled-only.md.
 const NO_REGISTRY_OK = new Set(['uv', 'course']);
 
 const results = [];   // {section, level:'ok'|'warn'|'fail', msg}
@@ -320,6 +329,120 @@ function checkSize() {
   }
   const r = preflight.checkNsisLimit({});
   add(S, r.level === 'skip' ? 'warn' : r.level, r.lines.join('\n      '));
+  reportBuiltArtifacts(S);
+}
+
+// Личные данные в том, что ФИЗИЧЕСКИ доезжает до ученика.
+//
+// ЗАЧЕМ ОТДЕЛЬНАЯ ПРОВЕРКА. Утечка в репозитории — неприятность; утечка в vendor —
+// это файл на диске у каждого, кто поставил установщик, и отозвать его нельзя.
+// 29.08.2026 личный путь владельца (C:\Users\<имя>\claude-mascot\…) нашёлся
+// захардкоженным в tools/fetch-vendor.ps1 ПУБЛИЧНОГО репозитория, причём `git grep`
+// его не видел: файл считался двоичным. Нашёл только сплошной обход с перебором
+// кодировок — он здесь и повторён.
+//
+// Проверяется ровно раздаваемое: снимок конфиг-пака, зип курса, стартовый проект,
+// офлайн-памятка. Не гейт по строгости, а WARN: vendor может быть не развёрнут, и
+// падать из-за его отсутствия значило бы останавливать исправное. Но НАЙДЕННОЕ
+// валит — это уже не «нечего проверять», а факт.
+function checkShippedPrivacy() {
+  const S = 'приватность';
+  const NEEDLES = ['Users\\hamid', 'Users/hamid', 'C:\\Vibecode', 'C:/Vibecode'];
+  const TEXT_EXT = new Set(['md', 'js', 'json', 'py', 'sh', 'ps1', 'txt', 'yml', 'yaml', 'html', 'css']);
+  const hits = [];
+  let scanned = 0;
+
+  const scanBuf = (name, buf) => {
+    scanned++;
+    for (const enc of ['utf8', 'utf16le']) {
+      let t;
+      try { t = buf.toString(enc); } catch (e) { continue; }
+      for (const nd of NEEDLES) if (t.indexOf(nd) !== -1) { hits.push(name + ' → ' + nd); return; }
+      return;                       // одной кодировки достаточно: utf8 покрывает наши файлы
+    }
+  };
+  const walk = (dir, label) => {
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return false; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== '.git' && e.name !== 'node_modules') walk(p, label); continue; }
+      if (!e.isFile()) continue;
+      const ext = (e.name.split('.').pop() || '').toLowerCase();
+      if (!TEXT_EXT.has(ext)) continue;
+      let b;
+      try { b = fs.readFileSync(p); } catch (e2) { continue; }
+      if (b.length > 3 * MIB) continue;
+      scanBuf(path.relative(ROOT, p), b);
+    }
+    return true;
+  };
+
+  const targets = [
+    [path.join(ROOT, 'vendor', 'config-pack'), 'конфиг-пак'],
+    [path.join(ROOT, 'assets', 'starter-project'), 'стартовый проект'],
+    [path.join(ROOT, 'assets'), 'assets'],
+  ];
+  let any = false;
+  for (const [dir, label] of targets) if (walk(dir, label)) any = true;
+
+  if (!any || !scanned) {
+    warn(S, 'нечего проверять: vendor не развёрнут (нормально до fetch:vendor) — прогони ещё раз перед выкладкой');
+    return;
+  }
+  if (hits.length) {
+    fail(S, 'ЛИЧНЫЕ ПУТИ в раздаваемом (отозвать нельзя — файл окажется на диске у каждого):\n      ' + hits.slice(0, 10).join('\n      '));
+    return;
+  }
+  okLine(S, 'в раздаваемом нет личных путей: сверено ' + scanned + ' текстовых файлов');
+}
+
+// Фактический размер УЖЕ СОБРАННЫХ артефактов.
+//
+// ЗАЧЕМ ОТДЕЛЬНО ОТ checkNsisLimit. Тот считает ПРОГНОЗ по содержимому vendor — до
+// сборки, чтобы не выпустить заведомо битый exe. А здесь печатается то, что реально
+// лежит на диске ПОСЛЕ неё, и печатается ровно там, где человек принимает решение
+// «выкладывать или нет».
+//
+// Без этого текущий размер не зафиксирован нигде, и в репозитории живут три разных
+// числа: package.json помнит замер от 19.08 (1 253 186 377 Б), preflight — от 30.07
+// (2 045 972 046 Б), а на диске лежит 1 438 688 139 Б. Из этого разнобоя уже вырос
+// дефект: сценарий ручного теста требовал сверять с «~2.0 ГБ» — округлением
+// ОТМЕНЁННОГО замера, — и тестировщик ставил ✘ на исправном продукте.
+//
+// Не гейт, а строка отчёта: артефакта может не быть вовсе (release-check гоняют и до
+// сборки), а падать из-за отсутствия файла, который эта команда не обязана видеть, —
+// значит останавливать исправное.
+function reportBuiltArtifacts(S) {
+  const NSIS_CEILING = 2 * 1024 * MIB;   // 32-битный makensis падает на mmap около 2 ГиБ
+  const known = [
+    ['Hamidun-Setup-Windows.exe', true],
+    ['Hamidun-Setup-Windows-Lite.exe', true],
+    ['Hamidun-Setup-Mac.dmg', false],
+    ['Hamidun-Setup-Mac-Lite.dmg', false],
+  ];
+  const found = [];
+  for (const [name, nsisBound] of known) {
+    const abs = path.join(ROOT, 'release', name);
+    let st = null;
+    try { st = fs.statSync(abs); } catch (e) { continue; }
+    if (!st.isFile()) continue;
+    const when = new Date(st.mtimeMs).toISOString().slice(0, 16).replace('T', ' ');
+    let line = `${name}: ${st.size} Б (${mib(st.size)}), собран ${when}`;
+    if (nsisBound) {
+      const left = NSIS_CEILING - st.size;
+      line += left > 0
+        ? ` — до потолка makensis ${mib(left)}`
+        : ` — ПОТОЛОК makensis ПРЕВЫШЕН на ${mib(-left)}`;
+      if (left <= 0) fail(S, line);
+    }
+    found.push([line, nsisBound && st.size >= NSIS_CEILING]);
+  }
+  if (!found.length) {
+    okLine(S, 'собранных артефактов в release/ нет — размер печатать нечего (это не ошибка: проверку гоняют и до сборки)');
+    return;
+  }
+  for (const [line, bad] of found) if (!bad) okLine(S, line);
 }
 
 // --- прогон и вердикт ---------------------------------------------------------
@@ -363,6 +486,7 @@ async function main(argv) {
   checkConfigPack(network);
   const reg = checkRegistry(platforms, chk);
   checkSize();
+  checkShippedPrivacy();
   if (network) await checkMirrors(reg, platforms);
   else warn('зеркала', '--offline: живость зеркал НЕ проверена — перед выкладкой прогони с сетью.');
 
