@@ -510,6 +510,13 @@ ok('#4 allowlist: список ключей совпадает с envForRun (app
   });
   const envSrc = fs.readFileSync(path.join(ROOT, 'src', 'install-env.js'), 'utf8');
   const listed = (envSrc.match(/'hm_[a-z0-9_]+'/g) || []).map((s) => s.replace(/'/g, '').toUpperCase());
+  // Непустоту проверяем в ОБЕ стороны. Для `emitted` она стоит выше (строка с
+  // `>= 12`), а для `listed` её не было: смени в install-env.js кавычки или регистр
+  // — регулярка вернёт пустой массив, `forEach` не выполнится ни разу, и сверка
+  // «allowlist → envForRun» пройдёт, не сверив НИЧЕГО.
+  assert(listed.length >= 12,
+    'allowlist в install-env.js разобран (найдено ключей: ' + listed.length +
+    ') — иначе сверка ниже пуста и ничего не доказывает');
   listed.forEach((k) => {
     assert(emitted.indexOf(k) !== -1, k + ' разрешён allowlist-ом, но envForRun его не эмитит');
   });
@@ -7779,8 +7786,19 @@ if (process.platform === 'win32') {
 // remote-компонент вместо докачки печатает «офлайн-издание — докачка не нужна».
 // Отсутствие маркера раньше не стерёг никто — отсюда рецидив.
 ok('config.json в репозитории без сборочных маркеров', () => {
-  const raw = require('child_process')
-    .execFileSync('git', ['show', 'HEAD:config.json'], { cwd: ROOT, encoding: 'utf8' });
+  // git здесь — ИНСТРУМЕНТ проверки, а не её предмет. Соседние два теста набора
+  // это учитывают, а этот звал execFileSync без страховки: на машине без git в
+  // PATH, в распакованном архиве без `.git` или при пустом индексе он падал с
+  // криптичным ENOENT, и красная строка говорила про «сборочные маркеры», хотя
+  // проверка вообще не выполнялась.
+  const r = require('child_process')
+    .spawnSync('git', ['show', 'HEAD:config.json'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.error) SKIP('git не запустился (' + String(r.error.message || r.error).slice(0, 60) + ')');
+  if (r.status !== 0) {
+    SKIP('git show отказал (код ' + r.status + '): ' +
+      String(r.stderr || '').trim().slice(0, 80) + ' — проверка НЕ выполнена');
+  }
+  const raw = String(r.stdout || '');
   const cfg = JSON.parse(raw);
   assert(!('offlineEdition' in cfg),
     'offlineEdition — артефакт сборки, в коммите его быть не должно');
@@ -9178,14 +9196,20 @@ ok('config.json в репозитории без сборочных маркер
     assert(typeof pre.checkNpmCacheDupes === 'function', 'preflight обязан экспортировать проверку накопления');
     // Синтетический «грязный» кеш проверяем через duplicateVersions — на реальном
     // кеше дублей быть не должно, и это отдельное утверждение.
+    // Проверка дублей вынесена отдельным тестом ниже: она есть только там, где
+    // кеш развёрнут, и раньше пропускалась НЕЗАМЕТНО — строка печаталась зелёной
+    // за счёт двух соседних ассертов, хотя главного утверждения («дублей нет»)
+    // никто не проверял. В CI кеша нет всегда.
+    const src0 = fs.readFileSync(path.join(ROOT, 'tools', 'preflight-build.js'), 'utf8');
+    assert(/npm run prune:cache/.test(src0), 'предупреждение обязано называть КОМАНДУ чистки');
+  });
+
+  ok('в vendor/npm-cache не накопились дубли версий', () => {
     const cache = prune.readCache(prune.DEFAULT_CACHE);
-    if (cache.exists) {
-      const dupes = prune.duplicateVersions(cache);
-      assert.strictEqual(dupes.length, 0,
-        'в vendor/npm-cache снова накопились версии (' + dupes.map((d) => d.name + ':' + d.count).join(', ') + ') — почини: npm run prune:cache');
-    }
-    const src = fs.readFileSync(path.join(ROOT, 'tools', 'preflight-build.js'), 'utf8');
-    assert(/npm run prune:cache/.test(src), 'предупреждение обязано называть КОМАНДУ чистки, а не «почини кеш»');
+    if (!cache.exists) SKIP('кеша нет (' + prune.DEFAULT_CACHE + ') — накопление проверять не на чем');
+    const dupes = prune.duplicateVersions(cache);
+    assert.strictEqual(dupes.length, 0,
+      'в vendor/npm-cache снова накопились версии (' + dupes.map((d) => d.name + ':' + d.count).join(', ') + ') — почини: npm run prune:cache');
   });
 })();
 
