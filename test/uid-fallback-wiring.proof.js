@@ -8,12 +8,26 @@ const os = require('os');
 const path = require('path');
 const assert = require('assert');
 
-const SRC = 'C:/Vibecode/hamidun-installer/src';
+// Путь считается от САМОГО файла, а не от машины автора. Раньше здесь стоял
+// абсолютный `C:/Vibecode/hamidun-installer/src`: у любого другого человека и на
+// раннере доказательство падало бы на первом же чтении.
+const SRC = path.join(__dirname, '..', 'src');
 const orig = fs.readFileSync(path.join(SRC, 'uid-telemetry.js'), 'utf8');
 
 const ANCHOR = '  } catch (e) { /* uid необязателен: без него всё работает, просто анонимно */ }';
 assert.ok(orig.indexOf(ANCHOR) !== -1, 'якорь вставки не найден — спека устарела');
 assert.strictEqual(orig.split(ANCHOR).length - 1, 1, 'якорь встречается не один раз');
+
+// Доказательство имеет смысл, только пока вставки в боевом файле НЕТ. Она внесена
+// (риск 1.1 закрыт, модуль восстановлен и подключён), поэтому повторная вставка
+// объявляла бы `fromDownloads` дважды и падала загадочным
+// `SyntaxError: Identifier 'fromDownloads' has already been declared` — из которого
+// не видно, что доказывать уже нечего. Говорим это прямо и выходим успешно.
+if (/const fromDownloads = require\('\.\/uid-fallback'\)/.test(orig)) {
+  console.log('  ℹ️  вставка УЖЕ в src/uid-telemetry.js — доказывать нечего, риск 1.1 закрыт.');
+  console.log('     Файл оставлен как исторический след разбора; в run-tests.js он не входит.');
+  process.exit(0);
+}
 
 const PATCH = [
   '    const fromDownloads = require(\'./uid-fallback\').findDownloadedUid({ platform, env });',
