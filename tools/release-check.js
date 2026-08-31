@@ -291,15 +291,34 @@ async function checkMirrors(reg, platforms) {
   }
   const byEntry = new Map();
   const BATCH = 8;
+  // «Не ответил» и «объекта нет» — РАЗНЫЕ вещи, и раньше они смешивались.
+  //
+  // Проба одна, без повтора, восемь штук разом к двум хостам, таймаут 8 с. Любая
+  // заминка CDN (или его лимит на всплеск запросов) читалась как «зеркало мёртво»,
+  // а при обоих мёртвых гейт выдавал СТОП с советом перезалить гигабайты. Замер
+  // 31.08: три прогона подряд на одной машине дали 7, 3 и 0 «мёртвых» зеркал —
+  // то есть измеритель мерил не зеркала, а сеть в этот момент.
+  //
+  // Формы ответа `probeMirror` различимы (`src/remote-fetch.js`): сетевой отказ и
+  // таймаут дают `code` пустым или 0, а ответивший сервер — настоящий HTTP-код.
+  // Поэтому повторяем ТОЛЬКО первое: 404/403 — это ответ, его переспрашивать
+  // незачем. Повтор идёт по одной пробе, без всплеска.
+  const answered = (r) => !!r && typeof r.code === 'number' && r.code > 0;
   for (let i = 0; i < jobs.length; i += BATCH) {
     const slice = jobs.slice(i, i + BATCH);
     /* eslint-disable no-await-in-loop */
     const res = await Promise.all(slice.map((j) => remoteFetch.probeMirror(j.m.url, 8000)));
+    for (let k = 0; k < slice.length; k++) {
+      if (res[k] && res[k].ok) continue;
+      if (answered(res[k])) continue;            // сервер ответил отказом — это факт, не помеха
+      res[k] = await remoteFetch.probeMirror(slice[k].m.url, 15000);
+    }
     slice.forEach((j, k) => {
       const key = j.e.remoteId + '/' + (j.e.platform || '—');
       if (!byEntry.has(key)) byEntry.set(key, { alive: [], dead: [] });
       const r = res[k] || {};
-      (r.ok ? byEntry.get(key).alive : byEntry.get(key).dead).push(j.m.host + (r.code ? ` (HTTP ${r.code})` : ' (нет ответа)'));
+      (r.ok ? byEntry.get(key).alive : byEntry.get(key).dead).push(j.m.host +
+        (r.code ? ` (HTTP ${r.code})` : ' (не ответил дважды)'));
     });
   }
   let allAlive = 0;
