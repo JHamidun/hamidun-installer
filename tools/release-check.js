@@ -118,7 +118,21 @@ function checkSizes(platform) {
   // вшитого артефакта (verify/bridge/desktop-приложения) он честно кладёт в skipped,
   // и выдумывать им «расхождение» нельзя — у них числа и не должно быть.
   const data = sync.readComponents();
-  const res = sync.computeSizes(data, platform, { budgetMs: Number(process.env.HM_SIZES_BUDGET_MS || 60000) });
+  // Бюджет обхода: 240 с по умолчанию (было 60).
+  //
+  // 01.09 конфиг-пак вырос до 314 навыков, и в 60 с перестали укладываться пять
+  // компонентов разом — config, pydeps, nomad, uv, mascot. Гейт честно печатал
+  // «не уложились», но по факту это значит, что ПЯТЬ ЦИФР ОН НЕ СВЕРИЛ, а вердикт
+  // при этом остался GO. Предупреждение, которое видно в каждом прогоне, за неделю
+  // становится фоном — и в тот день, когда цифра действительно разойдётся, его
+  // снова пролистают.
+  //
+  // Замер после роста пака: с бюджетом 600 с обход укладывается целиком. 240 с —
+  // с запасом, но всё ещё сторож от зависания, а не «жди сколько потребуется».
+  // HM_SIZES_BUDGET_MS=0 снимает предел полностью.
+  const budgetRaw = process.env.HM_SIZES_BUDGET_MS;
+  const budgetMs = budgetRaw === undefined || budgetRaw === '' ? 240000 : Number(budgetRaw);
+  const res = sync.computeSizes(data, platform, { budgetMs });
   const bad = [];
   sync.eachComponent(data, (c) => {
     if (!res.updates.has(c.id)) return;
@@ -361,6 +375,37 @@ function checkSize() {
 // кодировок — он здесь и повторён.
 //
 // Проверяется ровно раздаваемое: снимок конфиг-пака, зип курса, стартовый проект,
+// Подпись маяка завершения курса. Проверяем НЕ config.json на диске: там поле
+// обязано быть пустым (секрет подставляет сборка, в git он не коммитится), и
+// проверка диска краснела бы ровно тогда, когда всё правильно.
+//
+// Правильный вопрос другой: СМОЖЕТ ли сборка подписать — то есть доступен ли
+// секрет в этом окружении. Без него маяк уходит неподписанным, академия помечает
+// его недоказанным, и до 01.09.2026 гейт об этом МОЛЧАЛ: вердикт был зелёным, а
+// половина продукта работала вхолостую.
+//
+// WARN, а не СТОП: собирать установщик должен уметь и тот, у кого нет доступа к
+// академии. Но молчать об этом нельзя — «не настроено» и «работает» разные вещи.
+function checkBeaconSignature() {
+  const S = 'маяк курса';
+  let fromCreds = '';
+  try { fromCreds = require('./stamp-beacon-secret.js').fromCreds('CC_BEACON_SECRET'); }
+  catch (e) { /* инструмента нет — ниже скажем честно */ }
+  const fromEnv = process.env.HM_COURSE_BEACON_SECRET || '';
+  const secret = fromEnv || fromCreds;
+
+  if (secret) {
+    add(S, 'ok', 'подпись маяка будет включена: секрет доступен из ' +
+      (fromEnv ? 'HM_COURSE_BEACON_SECRET' : 'CC_BEACON_SECRET (креды)') +
+      ', длина ' + secret.length + '. В сборке его подставит npm run beacon:stamp.');
+  } else {
+    add(S, 'warn', 'секрета подписи нет ни в HM_COURSE_BEACON_SECRET, ни в CC_BEACON_SECRET — ' +
+      'маяк уйдёт НЕПОДПИСАННЫМ, и академия пометит завершение курса недоказанным.\n' +
+      '      Истина живёт в CC_BEACON_SECRET контейнера academy-funnel на vertex; ' +
+      'для CI он лежит секретом репозитория HM_COURSE_BEACON_SECRET.');
+  }
+}
+
 // офлайн-памятка. Не гейт по строгости, а WARN: vendor может быть не развёрнут, и
 // падать из-за его отсутствия значило бы останавливать исправное. Но НАЙДЕННОЕ
 // валит — это уже не «нечего проверять», а факт.
@@ -506,6 +551,7 @@ async function main(argv) {
   const reg = checkRegistry(platforms, chk);
   checkSize();
   checkShippedPrivacy();
+  checkBeaconSignature();
   if (network) await checkMirrors(reg, platforms);
   else warn('зеркала', '--offline: живость зеркал НЕ проверена — перед выкладкой прогони с сетью.');
 

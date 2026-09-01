@@ -10319,3 +10319,88 @@ ok('config.json в репозитории без сборочных маркер
     assert(!fs.existsSync(victim), 'подложенный файл убран, пак не изменён');
   });
 })();
+
+// ===========================================================================
+// Секрет подписи маяка: подставляется НА СБОРКЕ, в git не попадает (задача 8h0).
+//
+// Маяк завершения курса подписывает {ts,email,course} HMAC-ом по общему секрету.
+// Вся цепочка была на месте — config.json → main.js:1162 → HM_COURSE_BEACON_SECRET
+// → course.sh — кроме значения: поле стояло пустым, и НИЧТО его не заполняло.
+// Комментарий в config.json утверждал, что подставляет fetch-vendor; обход файла
+// показал ноль упоминаний. Маяк уходил неподписанным во всех сборках.
+//
+// Секрет при этом существовал на сервере академии (CC_BEACON_SECRET в контейнере
+// academy-funnel). Не хватало моста — им стал tools/stamp-beacon-secret.js.
+//
+// Здесь сторожим ДВА разных утверждения, и путать их нельзя:
+//   1. механизм подстановки работает и не портит соседние поля;
+//   2. заполненное поле НЕ УЕЗЖАЕТ В GIT — проверяется по `git show HEAD:config.json`,
+//      а НЕ по диску: во время сборки на диске значение как раз стоит, и проверка
+//      диска была бы красной именно тогда, когда всё правильно.
+// ===========================================================================
+(function beaconSecretTests() {
+  console.log('== Секрет подписи маяка: сборка подставляет, git не хранит ==');
+  const stamp = require(path.join(ROOT, 'tools', 'stamp-beacon-secret.js'));
+
+  ok('git: в коммите config.json поле beaconSecret ПУСТОЕ (секрет не утёк в репозиторий)', () => {
+    const r = spawnSync('git', ['show', 'HEAD:config.json'], { cwd: ROOT, encoding: 'utf8' });
+    if (r.error) SKIP('git не запустился: ' + String(r.error.message || r.error));
+    if (r.status !== 0) {
+      SKIP('git show отказал (код ' + r.status + '): ' +
+        String(r.stderr || '').trim().slice(0, 80) + ' — проверка НЕ выполнена');
+    }
+    const cfg = JSON.parse(String(r.stdout || ''));
+    const v = (cfg.course && cfg.course.beaconSecret) || '';
+    assert.strictEqual(v, '',
+      'в КОММИТЕ course.beaconSecret обязан быть пустым, а там ' + v.length +
+      ' знаков — секрет уехал в git, его надо отозвать на сервере академии и переписать историю');
+  });
+
+  ok('подстановка кладёт значение в course.beaconSecret и не трогает соседние поля', () => {
+    const before = JSON.parse(fs.readFileSync(stamp.CFG, 'utf8'));
+    const raw = fs.readFileSync(stamp.CFG, 'utf8');
+    const out = stamp.writeSecret(raw, 'ТЕСТ-секрет-64');
+    assert(out !== null, 'поле course.beaconSecret найдено в config.json');
+    const after = JSON.parse(out);
+    assert.strictEqual(after.course.beaconSecret, 'ТЕСТ-секрет-64', 'значение подставлено');
+    assert.strictEqual(after.course.beaconUrl, before.course.beaconUrl, 'beaconUrl не тронут');
+    assert.strictEqual(after.course.shortcutName, before.course.shortcutName, 'соседние поля целы');
+    assert.strictEqual(Object.keys(after).length, Object.keys(before).length, 'состав ключей не изменился');
+  });
+
+  ok('доллар в секрете записывается БУКВАЛЬНО (замена функцией, а не строкой)', () => {
+    // String.replace со строкой-заменой толкует $&, $1, $' как ссылки на группы, а
+    // секрет — произвольные знаки. Тот же класс ошибки уже ловили в записи ключей
+    // визарда; здесь он повторился бы молча и сломал подпись у ВСЕХ учеников.
+    const raw = fs.readFileSync(stamp.CFG, 'utf8');
+    const weird = "p$&ss$1w$'rd";
+    const after = JSON.parse(stamp.writeSecret(raw, weird));
+    assert.strictEqual(after.course.beaconSecret, weird,
+      'значение с $ записано буквально, а не как ссылка на группу');
+  });
+
+  ok('--clear возвращает поле в пустое (уборка после сборки)', () => {
+    const raw = fs.readFileSync(stamp.CFG, 'utf8');
+    const filled = stamp.writeSecret(raw, 'что-то');
+    const cleared = JSON.parse(stamp.writeSecret(filled, ''));
+    assert.strictEqual(cleared.course.beaconSecret, '', 'поле снова пустое');
+  });
+
+  ok('шаг подстановки подключён ко ВСЕМ трём сборкам (win, mac, общая)', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    for (const s of ['dist', 'dist:win', 'dist:mac']) {
+      assert(/beacon:stamp/.test(pkg.scripts[s] || ''),
+        s + ' обязан звать beacon:stamp — иначе на этой платформе маяк уйдёт неподписанным, ' +
+        'а на другой подписанным, и разница будет невидимой');
+    }
+    assert(/stamp-beacon-secret\.js/.test(pkg.scripts['beacon:stamp'] || ''), 'beacon:stamp зовёт инструмент');
+  });
+
+  ok('источник значения: env приоритетнее кредов, отсутствие — не падение', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'tools', 'stamp-beacon-secret.js'), 'utf8');
+    assert(/process\.env\.HM_COURSE_BEACON_SECRET \|\| fromCreds\('CC_BEACON_SECRET'\)/.test(src),
+      'порядок источников: сначала env (так его даёт CI), потом креды (локальная сборка)');
+    assert(/return 0;/.test(src), 'отсутствие секрета не роняет сборку');
+    assert(/НЕПОДПИСАННЫМ/.test(src), 'при отсутствии секрета человеку сказано, ЧТО это значит');
+  });
+})();
