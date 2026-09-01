@@ -40,6 +40,20 @@ jobs:
     # как закрепление, а ведёт себя как его отсутствие.
     env:
       HM_CONFIG_REF: ${{ inputs.config_ref }}
+      # Секрет подписи маяка завершения курса. Читает его `npm run beacon:stamp`
+      # (tools/stamp-beacon-secret.js) и кладёт в config.json НА ВРЕМЯ СБОРКИ; в
+      # репозитории поле остаётся пустым, это сторожит тест.
+      #
+      # Задан на уровне job-а, а не одного шага, СОЗНАТЕЛЬНО: сборка dmg зовёт
+      # electron-builder напрямую (не через `npm run dist:mac`), и пропущенная
+      # строка env в нужном шаге дала бы Windows-сборку с подписью, а mac — без.
+      # Половина защиты читается как целая: у одного ученика маяк доказан, у
+      # другого нет, и разницу никто не заметит.
+      #
+      # Нет секрета — маяк уйдёт неподписанным, сборка НЕ падает (см. комментарий
+      # в config.json). Истина живёт в CC_BEACON_SECRET контейнера academy-funnel;
+      # менять надо обе стороны разом.
+      HM_COURSE_BEACON_SECRET: ${{ secrets.HM_COURSE_BEACON_SECRET }}
     permissions:
       contents: write   # публикация dmg в Release (не artifact — квота)
     steps:
@@ -81,6 +95,19 @@ jobs:
           # shared-IP раннера → транзиентные 403 → FATAL. С токеном лимит на порядки выше.
           GITHUB_TOKEN: ${{ github.token }}
         run: bash tools/fetch-vendor-mac.sh
+
+      # ПОСЛЕ fetch-vendor-mac.sh и ДО сборки — порядок обязателен, а не косметика.
+      # Тот скрипт переписывает корневой config.json целиком (пишет туда
+      # `offlineEdition`, см. tools/fetch-vendor-mac.sh:714-722). Подстановка секрета
+      # раньше него была бы ЗАТЁРТА молча: сборка осталась бы зелёной, а маяк уехал
+      # неподписанным — то есть ровно тот случай, ради которого всё это и делается.
+      #
+      # (`fetch:config` config.json НЕ трогает — он пишет только штамп внутри пака;
+      # проверено обходом tools/fetch-config.js, единственный writeFileSync там на
+      # `.hamidun-config-pack.json`. Первая редакция этого комментария утверждала
+      # обратное — исправлено до вливания.)
+      - name: Stamp beacon secret (подпись маяка; в репозиторий не коммитится)
+        run: npm run beacon:stamp
 
       - name: Validate bundled git (dugite)
         run: |
