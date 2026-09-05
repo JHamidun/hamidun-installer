@@ -50,15 +50,25 @@ function Resolve-UvExe {
 # без скачиваний. github.com — оттуда `uv python install` тянет CPython
 # (python-build-standalone), pypi.org — оттуда `uv tool install` резолвит зависимости.
 # Достаточно ЛЮБОГО ответившего хоста (цель — отсечь полностью офлайн-машину).
+# ТРИ попытки с растущим таймаутом, а не одна на 3 секунды. Единственная короткая проба
+# решала судьбу компонента целиком: не ответила — exit 120, «поставь позже», и человек
+# к этому шагу больше не возвращается. А не ответить она может на живой сети — холодный
+# DNS на ноутбуке после сна, ещё переподключающийся Wi-Fi, VPN в момент подъёма. Цена
+# ошибки несимметрична: лишние секунды ожидания против навсегда не поставленного агента.
+# Реальный офлайн отвечает быстрым отказом DNS, а не таймаутом, поэтому длинные ожидания
+# тратятся именно на «сеть висит» — тот случай, ради которого повтор и нужен.
 function Test-NomadNetwork {
-    foreach ($nomadHost in @('github.com', 'pypi.org')) {
-        try {
-            $tcp = New-Object Net.Sockets.TcpClient
-            $iar = $tcp.BeginConnect($nomadHost, 443, $null, $null)
-            $ok  = $iar.AsyncWaitHandle.WaitOne(3000, $false)
-            if ($ok -and $tcp.Connected) { $tcp.Close(); return $true }
-            $tcp.Close()
-        } catch {}
+    foreach ($timeoutMs in @(3000, 5000, 8000)) {
+        foreach ($nomadHost in @('github.com', 'pypi.org')) {
+            try {
+                $tcp = New-Object Net.Sockets.TcpClient
+                $iar = $tcp.BeginConnect($nomadHost, 443, $null, $null)
+                $ok  = $iar.AsyncWaitHandle.WaitOne($timeoutMs, $false)
+                if ($ok -and $tcp.Connected) { $tcp.Close(); return $true }
+                $tcp.Close()
+            } catch {}
+        }
+        if ($timeoutMs -ne 8000) { Start-Sleep -Seconds 1 }
     }
     return $false
 }
@@ -68,10 +78,19 @@ $DRY = [bool]$env:HM_DRY_RUN
 # GUARD (Codex P0): не перезаписываем ЧУЖОЙ uv-tool/шимы. Если uv-tool nomad-agent ИЛИ
 # команды nmd/nomad-agent/nomad-acp (entrypoints агента) уже существуют — НЕ ставим поверх
 # (без принудительной перезаписи): осознанный skip (exit 120). Клонирования нет вовсе.
+#
+# Признак «чужое стоит» — ИСПОЛНЯЕМЫЙ ФАЙЛ, а не каталог тула. `uv tool install`
+# создаёт каталог venv первым, а entrypoint'ы кладёт последними (проверено запуском
+# вшитого uv): каталог без Scripts\nmd.exe — это не чужая установка, а огрызок нашей
+# собственной, оборванной закрытым окном. Раньше такой огрызок давал exit 120 на
+# КАЖДОМ повторном запуске, и человек не мог поставить агента вообще ничем.
 if (-not $DRY) {
     $existingNomad = @(
-        (Join-Path $env:APPDATA 'uv\tools\nomad-agent'),
-        (Join-Path $env:USERPROFILE '.local\share\uv\tools\nomad-agent'),
+        (Join-Path $env:APPDATA 'uv\tools\nomad-agent\Scripts\nmd.exe'),
+        (Join-Path $env:APPDATA 'uv\tools\nomad-agent\Scripts\nomad-agent.exe'),
+        (Join-Path $env:APPDATA 'uv\tools\nomad-agent\Scripts\nomad-acp.exe'),
+        (Join-Path $env:USERPROFILE '.local\share\uv\tools\nomad-agent\Scripts\nmd.exe'),
+        (Join-Path $env:USERPROFILE '.local\share\uv\tools\nomad-agent\bin\nmd'),
         (Join-Path $env:USERPROFILE '.local\bin\nmd.exe'),
         (Join-Path $env:USERPROFILE '.local\bin\nmd'),
         (Join-Path $env:USERPROFILE '.local\bin\nomad-agent.exe'),
@@ -157,8 +176,33 @@ if (-not $uv) {
             # exit N внутри дочернего .ps1 возвращает управление сюда с $LASTEXITCODE=N.
             $savedVendor = $env:HM_VENDOR
             try { $env:HM_VENDOR = $uvRoot; & $uvScript } finally { $env:HM_VENDOR = $savedVendor }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "  [warn] вшитый uv не установился (код $LASTEXITCODE) — попробую онлайн-фолбэк."
+            $uvRc = $LASTEXITCODE
+            if ($uvRc -ne 0) {
+                # РАЗЛИЧАЕМ ДВА ВИДА ОТКАЗА — они значат противоположное.
+                #
+                # 120 = «вшитого uv в этой сборке нет» (uv.ps1 делает graceful skip).
+                # Это не поломка, а состав издания: онлайн-фолбэк тут законен и
+                # ровно для этого случая и задуман.
+                #
+                # Любой другой ненулевой код = ПРОВЕРКА ЦЕЛОСТНОСТИ НЕ ПРОШЛА:
+                # Confirm-HmArtifact внутри uv.ps1 выходит единицей, когда SHA-256
+                # вшитого бинаря не сошёлся, то есть файл повреждён или подменён.
+                # Уходить после этого в интернет — значит обесценить саму проверку:
+                # мы обнаружили, что артефакту нельзя верить, и вместо остановки
+                # молча взяли другой источник. Человек при этом видит слово «warn»
+                # и установку, которая продолжается как ни в чём не бывало.
+                #
+                # Тот же приём, что с зеркалами докачки: «не ответил» и «ответил
+                # отказом» — разные вещи, и повторять попытку осмысленно только
+                # в первом случае.
+                if ($uvRc -eq 120) {
+                    Write-Host "  [warn] вшитого uv в этой сборке нет (код 120) — попробую онлайн-фолбэк."
+                } else {
+                    Write-Host "ОСТАНОВЛЕНО: проверка вшитого uv не прошла (код $uvRc)."
+                    Write-Host "Это значит, что файл vendor\apps\uv повреждён или подменён — и качать замену из сети вместо разбирательства нельзя."
+                    Write-Host "Что делать: переустанови из свежескачанного дистрибутива. Если повторится — напиши нам, это не нормальная ситуация."
+                    exit 1
+                }
             }
             Update-Path
             $uv = Resolve-UvExe

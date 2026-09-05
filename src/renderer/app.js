@@ -142,13 +142,24 @@ async function init() {
   $('#btn-finish').addEventListener('click', async () => {
     const auto = $('#ns-autovscode');
     if (auto && auto.checked) {
-      let ok = false;
-      try { ok = await window.installer.launchVsCode(); } catch (_) {}
-      if (ok) sendOpenEditorTelemetry();
-      // #7: не закрываемся МОЛЧА, если VS Code не открылся (нет в сборке / не встал) —
-      // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе. Показываем
-      // ту же подсказку, что и главная CTA, и НЕ квитим.
-      if (!ok) { const cta = $('#ns-vscode'); if (cta) cta.click(); return; }
+      let r = false;
+      try { r = await window.installer.launchVsCode(); } catch (_) {}
+      // true = поднялся редактор; 'explorer'/'finder' = открылась только папка;
+      // false = не открылось ничего. Считать успехом любое truthy нельзя: тогда за
+      // «дошёл до редактора» засчитывалось открытие Проводника.
+      if (r === true) sendOpenEditorTelemetry();
+      // #7: не закрываемся МОЛЧА, если редактор не открылся (нет в сборке / не встал) —
+      // иначе установщик исчезает, а новичок остаётся на пустом рабочем столе.
+      if (r !== true) {
+        const cta = $('#ns-vscode');
+        // Клик по CTA работает, только пока она включена. Когда редактора нет, она
+        // намеренно disabled — и клик не доставляется: раньше на этом всё и обрывалось.
+        if (cta && !cta.disabled) { cta.click(); return; }
+        showEditorHint(r === 'explorer' || r === 'finder'
+          ? 'Открылась папка с файлами, а не редактор — запустить его не удалось. Открой редактор сам и выбери в нём эту папку.'
+          : 'Редактор не открылся — похоже, он не установлен. Запусти установщик ещё раз с компонентом «VS Code» либо спроси бота-помощника.');
+        return;
+      }
     }
     window.installer.quit();
   });
@@ -1404,7 +1415,7 @@ function stopStepClock() {
 // Общий прогресс прогона в ПРОЦЕНТАХ. Проценты настоящие — доля пройденных
 // компонентов от выбранных; внутри шага скрипты прогресс не сообщают, поэтому там
 // идут секунды (startStepClock), а выдуманную полосу мы не рисуем.
-function setRunProgress(done, total, currentName, bad) {
+function setRunProgress(done, total, currentName, bad, okCount, skippedCount) {
   const box = document.getElementById('run-progress');
   const fill = document.getElementById('run-progress-fill');
   const label = document.getElementById('run-progress-label');
@@ -1418,10 +1429,19 @@ function setRunProgress(done, total, currentName, bad) {
   // Живой пример: у ученика внизу стояло «Готово: 12 · Ошибок: 2 · Пропущено: 1»,
   // а полоса сверху рапортовала 100% и 15 из 15 — две строки на одном экране
   // противоречили друг другу, и верили верхней.
+  // Числитель «установлено» — РЕАЛЬНО прошедшие, а не «всё, кроме упавших». Полосу выше
+  // уже чинили от того же обмана, но подпись осталась считать `total − failedN`: на
+  // пятнадцати шагах, где третий упал, она объявляла «установлено 14 из 15», хотя встали
+  // два, а двенадцать даже не запускались. Пропущенные называем отдельно — они не
+  // установлены и не сломаны, и молча приписывать их к любой из двух групп нельзя.
   const failedN = Number(bad) || 0;
+  const okN = Number.isFinite(okCount) ? okCount : Math.max(0, (Number(done) || 0) - failedN);
+  const skipN = Number(skippedCount) || 0;
   fill.classList.toggle('warn', failedN > 0);
-  const base = failedN > 0
-    ? `${pct}% пройдено · установлено ${total - failedN} из ${total} · с ошибкой ${failedN}`
+  const base = failedN > 0 || skipN > 0
+    ? `${pct}% пройдено · установлено ${okN} из ${total}`
+      + (failedN > 0 ? ` · с ошибкой ${failedN}` : '')
+      + (skipN > 0 ? ` · пропущено ${skipN}` : '')
     : `${pct}% · ${done} из ${total}`;
   label.textContent = currentName ? `${base} · сейчас: ${currentName}` : base;
 }
@@ -1581,7 +1601,8 @@ async function runComponents(ids, env) {
       setStepLabel(id, `${STATE.byId[id].name} — ждёт «${STATE.byId[broken].name}»`);
       appendLog(depSkipMessage(id, broken, badWhy));
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length);
+      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
+      ok, depSkipped.length + gracefulSkipped.length);
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
@@ -1589,7 +1610,8 @@ async function runComponents(ids, env) {
     setStep(id, 'running');
     startStepClock(id, (STATE.byId[id] && STATE.byId[id].name) || id);
     setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length,
-      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id, failed.length);
+      ids.length, (STATE.byId[id] && STATE.byId[id].name) || id, failed.length,
+      ok, depSkipped.length + gracefulSkipped.length);
     // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
     // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
     // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
@@ -1651,10 +1673,14 @@ async function runComponents(ids, env) {
       gracefulSkipped.push(id);
       bad.add(id);
       runtimeSkipped.add(id);
-      badWhy.set(id, { kind: 'skip' });
+      // Причину пропуска сохраняем: код 120 приходит и от «не вшито в сборку», и от
+      // «нет сети», и от fail-closed отказа по подписи. Без неё финиш подписывал все
+      // случаи одинаково — «не входит в эту сборку, это не ошибка».
+      const skipWhy = (res.skipReason || '').trim();
+      badWhy.set(id, { kind: 'skip', hint: skipWhy });
       badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       STATE.errorDigest.delete(id);
-      appendLog(`[~] Пропущено: нечего устанавливать (${STATE.byId[id].name}).`);
+      appendLog(`[~] Пропущено: ${STATE.byId[id].name}${skipWhy ? ' — ' + skipWhy : ' (нечего устанавливать)'}.`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
       badEver.delete(id); // встало — проблема закрыта
@@ -1736,7 +1762,8 @@ async function runComponents(ids, env) {
       }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length);
+    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
+      ok, depSkipped.length + gracefulSkipped.length);
   }
   off && off();
   STATE.runActive = false;
@@ -2024,6 +2051,24 @@ function sendOpenEditorTelemetry() {
   } catch (e) { /* никогда не мешаем запуску редактора */ }
 }
 
+// Подсказка под кнопкой «Открыть VS Code» — одним местом для всех, кто её показывает.
+// Раньше «Готово» звало эту подсказку через cta.click(), а браузер клик по КНОПКЕ С
+// disabled не доставляет вовсе. Кнопка же ровно в этом случае и стоит отключённой —
+// когда редактора нет. Получалось: галка автозапуска отмечена по умолчанию, человек
+// жмёт «Готово», установщик не закрывается, не открывает ничего и молчит.
+function showEditorHint(text) {
+  const cta = document.querySelector('#ns-vscode');
+  if (!cta || !cta.parentElement) return false;
+  let hint = cta.parentElement.querySelector('.ns-vscode-err');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.className = 'ns-course-err ns-vscode-err';
+    cta.parentElement.appendChild(hint);
+  }
+  hint.textContent = text;
+  return true;
+}
+
 function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed) {
   failed = failed || [];
   depSkipped = depSkipped || [];
@@ -2080,18 +2125,52 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   // VS Code продолжал говорить «Открой VS Code — синяя кнопка ниже» и предлагал
   // активную кнопку, которая ничего не открывала. Человек жал и не понимал, почему
   // «ничего не происходит», а причина — редактора на диске нет.
-  const editorMissing = failed.includes('vscode');
-  const editorMissingName = editorMissing
-    ? ((STATE.byId['vscode'] && STATE.byId['vscode'].name) || 'VS Code')
-    : '';
+  //
+  // Считать это по одному лишь `failed.includes('vscode')` нельзя: кнопка открывает НЕ
+  // только VS Code. launchVsCodeOn (main.js) при отсутствии VS Code берёт Cursor —
+  // установщик оба редактора и предлагает на выбор. Человек, который снял VS Code и
+  // оставил Cursor (или у которого VS Code упал, а Cursor встал), получал отключённую
+  // кнопку и требование «доустанови редактор», хотя рабочий редактор у него на диске.
+  // Поэтому «редактора нет» = нет НИ ОДНОГО из двух, а «есть» считается по тем же
+  // данным, что и галки на экране выбора: упал сейчас / пропущен → нет; выбран и не
+  // упал → поставился; не выбирали → смотрим, был ли обнаружен до установки.
+  const editorReady = (id) => {
+    if (failed.indexOf(id) !== -1) return false;
+    if (gracefulSkipped.indexOf(id) !== -1 || depSkipped.indexOf(id) !== -1) return false;
+    if (STATE.selected && STATE.selected[id]) return true;
+    const d = STATE.detected && STATE.detected[id];
+    return !!(d && d.installed);
+  };
+  const editorReadyId = ['vscode', 'cursor'].find(editorReady) || '';
+  const editorMissing = !editorReadyId;
+  const nameOf = (id, dflt) => ((STATE.byId[id] && STATE.byId[id].name) || dflt);
+  // В тексте «доустанови» называем VS Code: он рекомендуемый и именно его чинит
+  // «Повторить неустановленное». Имя рабочего редактора нужно для обратного случая —
+  // когда открывать есть чем, но это Cursor, и звать его «VS Code» было бы ложью.
+  const editorMissingName = editorMissing ? nameOf('vscode', 'VS Code') : '';
+  const editorReadyName = editorReadyId === 'cursor' ? nameOf('cursor', 'Cursor') : 'VS Code';
   const failHtml = retryList.length
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
          <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${whyHint}${netHint}${integrityHint}
          <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
+  // Пропущенные — С ПРИЧИНОЙ у каждого. Прежняя строка объявляла ЛЮБОЙ exit 120
+  // «не входит в эту сборку», а этот код выдают 74 места скриптов по несовместимым
+  // поводам: нет сети, не найден winget, уже стоит чужая установка — и fail-closed
+  // отказы безопасности («установщик не прошёл проверку подписи — НЕ запускаю»).
+  // Последнее объявлять «не ошибкой» нельзя: человек как раз должен об этом узнать.
+  // Текст берём тот, что скрипт напечатал перед выходом (см. skipReason в main.js).
+  const skipLines = gracefulSkipped.map((i) => {
+    const w = (whyMap && whyMap.get(i)) || null;
+    const why = (w && w.hint) ? String(w.hint) : '';
+    // Экранируем обязательно: текст пришёл из вывода скрипта и несёт пути, имена
+    // файлов и системные сообщения — то есть данные машины пользователя, а не наш
+    // литерал. Имена компонентов рядом свои, из components.json.
+    return '<b>' + STATE.byId[i].name + '</b>' + (why ? ' — ' + escapeHtml(why) : '');
+  });
   const gracefulSkipHtml = gracefulSkipped.length
-    ? `<div class="ns-note">Не входит в эту сборку — пропущено (это не ошибка): <b>${gracefulSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
+    ? `<div class="ns-note">Пропущено (устанавливать не стали): ${skipLines.join('; ')}.</div>`
     : '';
 
   // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
@@ -2280,7 +2359,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
       ${editorMissing ? `<li><b>Сначала доустанови редактор</b> — ${editorMissingName} не установился, а первый шаг делается именно в нём. Нажми <b>«Повторить неустановленное»</b> ниже. Не помогло — закрой установщик, запусти его правым кликом → <b>«Запуск от имени администратора»</b>, и отметь только этот компонент.</li>`
-      : `<li><b>Открой VS Code</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в VS Code: закрыл окно — просто открой VS Code снова (ярлык на рабочем столе / в меню Пуск).</li>`}
+      : `<li><b>Открой ${editorReadyName}</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в ${editorReadyName}: закрыл окно — просто открой ${editorReadyName} снова (ярлык на рабочем столе / в меню Пуск).</li>`}
       <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». Claude Code — это <b>чат</b>: ты пишешь задачу текстом, он делает. При первом запросе он попросит подключить нейросеть — как (своя подписка Claude или Nomad для РФ), смотри в блоке ниже.</li>
       ${step3}
     </ol>
@@ -2292,7 +2371,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     <div class="ns-actions">
       ${editorMissing
         ? `<button type="button" id="ns-vscode" class="btn-sm ns-main" disabled title="${editorMissingName} не установился — сначала доустанови его кнопкой «Повторить неустановленное»">▶ Открыть VS Code — сначала доустанови редактор</button>`
-        : `<button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть VS Code — начать здесь</button>`}
+        : `<button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть ${editorReadyName} — начать здесь</button>`}
       ${videoBtn}
       ${(failed.length || checkFailed) ? logBtn : ''}
     </div>
@@ -2333,17 +2412,29 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   // Теперь ждём реальный результат и показываем подсказку про доустановку — как у курса.
   const vscodeBtnEl = $('#ns-vscode');
   vscodeBtnEl.addEventListener('click', async () => {
-    let ok = false;
-    try { ok = await window.installer.launchVsCode(); } catch (_) {}
-    if (ok) sendOpenEditorTelemetry();
-    if (!ok) {
+    let r = false;
+    try { r = await window.installer.launchVsCode(); } catch (_) {}
+    // Различаем «открылся редактор» и «открылась только папка». main отдаёт
+    // 'explorer'/'finder', когда редактора запустить не вышло и показан проводник:
+    // раньше любое truthy считалось успехом, человек читал, что редактор открыт, глядя
+    // на окно с файлами, а в телеметрию уходило open_editor — то есть и метрика
+    // «дошёл до редактора» считала эти случаи успешными.
+    const openedEditor = r === true;
+    const openedFolder = r === 'explorer' || r === 'finder';
+    if (openedEditor) sendOpenEditorTelemetry();
+    if (openedFolder) {
+      showEditorHint('Открылась папка с файлами, а не редактор — запустить его не удалось. '
+        + 'Открой ' + editorReadyName + ' сам (ярлык на рабочем столе / в меню Пуск) и выбери в нём эту папку: '
+        + 'без редактора панель Claude не появится.');
+    }
+    if (!openedEditor && !openedFolder) {
       let hint = vscodeBtnEl.parentElement.querySelector('.ns-vscode-err');
       if (!hint) {
         hint = document.createElement('div');
         hint.className = 'ns-course-err ns-vscode-err'; // стиль ns-course-err + уникальный якорь для дедупа
         vscodeBtnEl.parentElement.appendChild(hint);
       }
-      hint.textContent = 'VS Code не открылся — похоже, он не установлен в этой сборке. ' +
+      hint.textContent = editorReadyName + ' не открылся — похоже, он не установлен в этой сборке. ' +
         'Запусти установщик ещё раз с компонентом «VS Code», ' +
         (cursorSelected ? 'или открой Cursor кнопкой в «Ещё инструменты», ' : '') +
         'либо спроси бота-помощника.';

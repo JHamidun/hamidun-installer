@@ -39,13 +39,21 @@ function Set-HmGitDefaults {
         $ac = ''
         try { $ac = ("$(git config --global core.autocrlf 2>$null)").Trim() } catch { }
         if (-not $ac) { git config --global core.autocrlf true 2>$null }
-        $un = ''
+        # user.name и user.email — КАЖДЫЙ НЕЗАВИСИМО (зеркало scripts/macos/git.sh:17-27,
+        # где так и было). Прежде отсутствие ОДНОГО user.name заставляло писать ОБА, и у
+        # человека с настроенной почтой, но без имени — обычное состояние после GitHub
+        # Desktop — настоящий e-mail молча заменялся на `<USERNAME>@example.com`. Дальше
+        # его коммиты уходили с адресом-заглушкой, а строка на экране говорила ровно то
+        # же, что и при честной первичной настройке: узнать о подмене было неоткуда.
+        $un = ''; $ue = ''
         try { $un = ("$(git config --global user.name 2>$null)").Trim() } catch { }
-        if (-not $un) {
-            $name = if ($env:USERNAME) { $env:USERNAME } else { 'user' }
-            git config --global user.name "$name" 2>$null
-            git config --global user.email "$name@example.com" 2>$null
-            Write-Host "Git: user.name/user.email заданы по умолчанию — поменяй потом: git config --global user.email твоя@почта"
+        try { $ue = ("$(git config --global user.email 2>$null)").Trim() } catch { }
+        $name = if ($env:USERNAME) { $env:USERNAME } else { 'user' }
+        $setAny = @()
+        if (-not $un) { git config --global user.name "$name" 2>$null; $setAny += 'user.name' }
+        if (-not $ue) { git config --global user.email "$name@example.com" 2>$null; $setAny += 'user.email' }
+        if ($setAny.Count) {
+            Write-Host "Git: $($setAny -join ' и ') задан(ы) по умолчанию — поменяй потом: git config --global user.email твоя@почта"
         }
         Write-Host "Git-дефолты применены (longpaths, main, autocrlf)."
     } catch { Write-Host "Git-дефолты: предупреждение: $($_.Exception.Message)" }

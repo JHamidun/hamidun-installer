@@ -9,9 +9,16 @@ DRY="${HM_DRY_RUN:-}"
 # команды nmd/nomad-agent/nomad-acp (entrypoints агента) уже существуют — установщик их
 # НЕ трогает и НЕ ставит поверх (без принудительной перезаписи): осознанный skip (exit 120).
 # Клонирования нет вовсе (vendor-only).
+# Признак «чужое стоит» — ИСПОЛНЯЕМЫЙ ФАЙЛ, а не каталог тула. `uv tool install`
+# создаёт каталог venv первым, а entrypoint'ы кладёт последними (проверено запуском
+# вшитого uv): каталог без bin/nmd — это не чужая установка, а огрызок нашей
+# собственной, оборванной закрытым окном. Раньше такой огрызок давал exit 120 на
+# КАЖДОМ повторном запуске, и человек не мог поставить агента вообще ничем.
 if [ -z "$DRY" ]; then
-  UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"
+  UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent/bin/nmd"
+  UV_TOOL_NA2="$HOME/.local/share/uv/tools/nomad-agent/bin/nomad-agent"
   if [ -e "$UV_TOOL_NA" ] || [ -L "$UV_TOOL_NA" ] \
+     || [ -e "$UV_TOOL_NA2" ] || [ -L "$UV_TOOL_NA2" ] \
      || [ -e "$HOME/.local/bin/nmd" ] || [ -L "$HOME/.local/bin/nmd" ] \
      || [ -e "$HOME/.local/bin/nomad-agent" ] || [ -L "$HOME/.local/bin/nomad-agent" ] \
      || [ -e "$HOME/.local/bin/nomad-acp" ] || [ -L "$HOME/.local/bin/nomad-acp" ]; then
@@ -96,9 +103,21 @@ fi
 #     без скачиваний; curl внутри условия if — под set -e упавшая проба скрипт не убивает.
 #     В dry-run сеть не пробуем.
 if [ -z "$DRY" ]; then
+  # ТРИ попытки с растущим таймаутом — зеркало Test-NomadNetwork в nomad.ps1, там же
+  # разбор. Коротко: единственная проба на 3 секунды решала судьбу компонента целиком, а
+  # не ответить она может и на живой сети (холодный DNS после сна, поднимающийся Wi-Fi,
+  # VPN). Цена ошибки несимметрична — секунды ожидания против навсегда не поставленного
+  # агента, к которому человек уже не вернётся.
   NET_OK=0
-  for probe_host in https://github.com https://pypi.org; do
-    if curl -sI --connect-timeout 3 --max-time 5 "$probe_host" >/dev/null 2>&1; then NET_OK=1; break; fi
+  for probe_timeout in 3 5 8; do
+    for probe_host in https://github.com https://pypi.org; do
+      if curl -sI --connect-timeout "$probe_timeout" --max-time "$((probe_timeout * 2))" "$probe_host" >/dev/null 2>&1; then NET_OK=1; break; fi
+    done
+    # Полная форма if, а не `[ ... ] && cmd`: под `set -e` ложное условие делает всю
+    # строку неуспешной и роняет скрипт — здесь это случилось бы на ПОСЛЕДНЕЙ попытке,
+    # то есть ровно тогда, когда сети действительно нет.
+    if [ "$NET_OK" = "1" ]; then break; fi
+    if [ "$probe_timeout" != "8" ]; then sleep 1; fi
   done
   if [ "$NET_OK" != "1" ]; then
     echo "Nomad требует интернет (Python + библиотеки, ~300 МБ) — сеть недоступна. Поставь позже при подключении к интернету. Пропускаю."

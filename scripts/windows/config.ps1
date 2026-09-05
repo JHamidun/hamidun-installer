@@ -131,10 +131,25 @@ if (Test-Path $claudeHome) {
     # перезапуск) оставлял ПОЛНУЮ копию ~/.claude навсегда — гигабайты, о которых юзер не
     # знает и которые никто не чистит. Имена $claudeHome.backup.<YYYYMMDD-HHmmss> →
     # лексикографическая сортировка = хронологическая. Зеркало config.sh (mac).
+    #
+    # Junction/симлинк среди «старых копий» НЕ удаляем рекурсивно. Каталог-родитель
+    # user-writable, а скрипт идёт под админом: `Remove-Item -Recurse -Force` в PS 5.1,
+    # получив reparse point, вычищает СОДЕРЖИМОЕ ЦЕЛИ, а не саму ссылку — достаточно
+    # положить рядом `.claude.backup.2020` со ссылкой на Documents, чтобы установщик
+    # снёс их под правами администратора. Тот же приём (ReparsePoint-гейт) уже стоит
+    # ниже на прунинге скиллов; ретенция бэкапов его просто не получила.
+    # Ссылку убираем как ссылку — Directory::Delete($p, $false) снимает только её.
     try {
         Get-ChildItem -Path (Split-Path $claudeHome -Parent) -Directory -Filter ((Split-Path $claudeHome -Leaf) + '.backup.*') -ErrorAction Stop |
             Sort-Object Name -Descending | Select-Object -Skip 3 |
-            ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+            ForEach-Object {
+                if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    Write-Host "  (пропускаю ссылку, а не копию: $($_.Name) — рекурсивное удаление ушло бы в чужой каталог)"
+                    try { [System.IO.Directory]::Delete($_.FullName, $false) } catch { }
+                } else {
+                    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+                }
+            }
     } catch { Write-Host "  (старые копии ~/.claude.backup.* не удалось перечислить — оставляю как есть)" }
 }
 
@@ -221,12 +236,18 @@ if ($skillsReparse) {
     foreach ($n in $reparseSkills) { $mergeXD += (Join-Path (Join-Path $srcClaude 'skills') $n) }
     Write-Host "  Скиллы-ссылки пропущены поимённо (внешние цели не тронуты): $($reparseSkills -join ', ')"
 }
+# /R:1 /W:1 — как у бэкапа выше (:121), и по той же причине: дефолт robocopy это
+# МИЛЛИОН ретраев по 30 секунд на файл. Здесь мы пишем в ~/.claude, где в этот самый
+# момент могут быть открыты файлы запущенного Claude Code или Cursor — один залоченный
+# хук вешал установку насмерть, без вывода и без шанса понять, что происходит. Причём
+# комментарий у бэкапа опасность прямо называет, и читалось это так, будто защита стоит
+# на всех копированиях. Стояла на одном.
 if ($ADDITIVE) {
     Write-Host "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
-    robocopy $srcClaude $claudeHome /E /XC /XN /XO /XJ /XF $excludeNames /XD $mergeXD | Out-Null
+    robocopy $srcClaude $claudeHome /E /XC /XN /XO /XJ /R:1 /W:1 /XF $excludeNames /XD $mergeXD | Out-Null
 } else {
     Write-Host "Переустановка начисто: перезаписываю НАШИ базовые файлы свежими (пользовательское — ключи/память/история/CLAUDE.md — не трогаю)..."
-    robocopy $srcClaude $claudeHome /E /XJ /XF $excludeNames /XD $mergeXD | Out-Null
+    robocopy $srcClaude $claudeHome /E /XJ /R:1 /W:1 /XF $excludeNames /XD $mergeXD | Out-Null
 }
 if ($LASTEXITCODE -ge 8) {
     $installFailed = $true; $pruneDisabled = $true
