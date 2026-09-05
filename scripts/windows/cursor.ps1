@@ -102,7 +102,33 @@ if ($inst) {
     # навсегда (пользователю он недоступен: owner=Administrators, Users без ACE).
     $instProc = Start-Process -FilePath $inst -ArgumentList '/S' -PassThru
 }
-for ($i = 0; $i -lt 180 -and -not (Test-Path $cexe); $i++) { Start-Sleep -Seconds 1 }
+# Ждём НЕ появления Cursor.exe, а завершения распаковки.
+#
+# Установщик Cursor кладёт ~200 МБ по одному файлу, и Cursor.exe появляется в первые
+# секунды — задолго до resources/, bin/cursor.cmd, ярлыков и записи в PATH. Цикл выходил
+# на первом же Test-Path, через 2 секунды Stop-Process убивал авто-запуск, и шаг
+# рапортовал «Cursor установлен» поверх наполовину распакованного каталога. Следующим
+# шагом extension.ps1 не находил CLI и молча пропускал панель Claude — при зелёном Cursor.
+#
+# Признак завершённости берём тот же, который ищет extension.ps1 (:155-159): CLI. Если
+# его так и не появилось, но exe есть — выходим по exe, как раньше: это не повод
+# заваливать шаг, дальше он проверяется отдельно.
+$cursorCliCands = @(
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\resources\app\bin\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\bin\cursor.cmd'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\cursor\cursor.cmd')
+)
+$cliSeen = $false
+for ($i = 0; $i -lt 180; $i++) {
+    foreach ($c in $cursorCliCands) { if (Test-Path -LiteralPath $c) { $cliSeen = $true; break } }
+    if ($cliSeen) { break }
+    Start-Sleep -Seconds 1
+}
+if (-not $cliSeen) {
+    # CLI не дождались — добираем по прежнему признаку, чтобы не ужесточать шаг.
+    for ($i = 0; $i -lt 60 -and -not (Test-Path $cexe); $i++) { Start-Sleep -Seconds 1 }
+    Write-Host "Cursor: CLI (cursor.cmd) не появился за отведённое время — панель Claude в Cursor может не встать; VS Code это не затрагивает."
+}
 Start-Sleep -Seconds 2
 Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 

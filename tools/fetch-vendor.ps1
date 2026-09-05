@@ -9,8 +9,31 @@ $UA = @{ 'User-Agent' = 'hamidun-setup' }
 
 function Dl($url, $out) {
   if (Test-Path $out) { Write-Host "  skip $([IO.Path]::GetFileName($out))"; return }
-  try { Write-Host "  GET  $url"; Invoke-WebRequest $url -OutFile $out -MaximumRedirection 6 -UseBasicParsing }
-  catch { Write-Host "  ! не скачалось ($([IO.Path]::GetFileName($out))): $($_.Exception.Message)" }
+  # Качаем во ВРЕМЕННЫЙ файл и переносим на место только при успехе.
+  #
+  # Прежняя редакция писала прямо в $out. Invoke-WebRequest в PS 5.1 пишет тело потоково,
+  # поэтому обрыв связи посреди загрузки оставлял усечённый файл на диске; catch его не
+  # убирал, а следующий прогон пропускал по `Test-Path $out` как готовый. Дальше обрубок
+  # проходил весь конвейер незамеченным: regen-checksums снимал SHA-256 С НЕГО ЖЕ и клал
+  # в манифест как эталон, гейт целостности сверял диск с этим манифестом и сходился,
+  # release-check был зелёный — а покупатель получал битый установщик.
+  #
+  # Сумма, снятая с непроверенного файла, не проверяет ничего: она фиксирует то, что
+  # лежит, а не подтверждает, что лежит правильное. Единственное место, где это можно
+  # разорвать, — здесь: на диск под настоящим именем попадает только докачанное до конца.
+  $tmp = "$out.part"
+  if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
+  try {
+    Write-Host "  GET  $url"
+    Invoke-WebRequest $url -OutFile $tmp -MaximumRedirection 6 -UseBasicParsing
+    if (-not (Test-Path $tmp)) { throw 'файл не создан' }
+    if ((Get-Item -LiteralPath $tmp).Length -eq 0) { throw 'скачано 0 байт' }
+    Move-Item -LiteralPath $tmp -Destination $out -Force
+  }
+  catch {
+    Write-Host "  ! не скачалось ($([IO.Path]::GetFileName($out))): $($_.Exception.Message)"
+    if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
+  }
 }
 
 Write-Host "[vendor] Git for Windows..."
@@ -69,7 +92,13 @@ Write-Host "[vendor] Claude Code CLI -> npm cache (для офлайн -g уст
 $cache = Join-Path $root 'vendor\npm-cache'
 $tmp   = Join-Path $root 'vendor\_claudetmp'
 New-Item -ItemType Directory -Force $tmp | Out-Null
+# Код возврата npm проверяем: вывод здесь заглушён Out-Null, и провал (обрыв сети,
+# недоступный реестр) не оставлял вообще НИКАКОГО следа — а гейт полноты ниже считал
+# npm-cache заполненным, если в нём лежал хоть один файл от прошлых прогонов. Тогда
+# офлайн-установка Claude Code падала уже у покупателя.
 & npm install '@anthropic-ai/claude-code' --prefix $tmp --cache $cache --no-audit --no-fund 2>&1 | Out-Null
+$npmCacheOk = ($LASTEXITCODE -eq 0)
+if (-not $npmCacheOk) { Write-Host "  ! npm install завершился с кодом $LASTEXITCODE — npm-кеш НЕПОЛНЫЙ (гейт полноты ниже это назовёт)" }
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 
 # ЧИСТКА КЕША — ОБЯЗАТЕЛЬНЫЙ ШАГ, А НЕ ГИГИЕНА.
@@ -279,11 +308,22 @@ $req = Join-Path $root 'vendor\config-pack\requirements.txt'
 $wheels = Join-Path $root 'vendor\pywheels'
 if (Test-Path $wheels) { Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force $wheels | Out-Null
+# Код возврата pip проверяем ПОСЛЕ КАЖДОЙ команды. Скачиваний два: базовые
+# pip/setuptools/wheel и весь requirements.txt. Раньше не смотрели ни на одно, а гейт
+# полноты ниже считал каталог заполненным по признаку «есть хоть один файл» — то есть
+# трёх базовых колёс от ПЕРВОЙ команды хватало, чтобы провал ВТОРОЙ (обрыв сети, пакет
+# без колеса под эту платформу) прошёл незамеченным. Сборка уезжала с неполным набором
+# зависимостей, а установка у покупателя падала уже на его машине, где чинить нечем.
+# $LASTEXITCODE переживает конвейер с Select-Object (проверено запуском) — в отличие от
+# bash-пайпа, который отдал бы код последней команды в цепочке.
+$wheelsOk = $true
 if ($py -and (Test-Path $req)) {
   & $py -m pip download pip setuptools wheel -d $wheels 2>&1 | Select-Object -Last 1
+  if ($LASTEXITCODE -ne 0) { $wheelsOk = $false; Write-Host "  ! pip download (pip/setuptools/wheel) завершился с кодом $LASTEXITCODE" }
   & $py -m pip download -r $req pystray pillow -d $wheels 2>&1 | Select-Object -Last 3
+  if ($LASTEXITCODE -ne 0) { $wheelsOk = $false; Write-Host "  ! pip download (requirements.txt + pystray/pillow) завершился с кодом $LASTEXITCODE" }
   Write-Host "  wheels/sdists: $((Get-ChildItem $wheels -File).Count) шт."
-} else { Write-Host "  (python/requirements не найдены, пропускаю wheels)" }
+} else { $wheelsOk = $false; Write-Host "  (python/requirements не найдены, пропускаю wheels)" }
 
 Write-Host "[vendor] Playwright Chromium (best-effort)..."
 $pw = Join-Path $root 'vendor\playwright-browsers'
@@ -368,10 +408,44 @@ function Invoke-NomadSrcSanitize {
   param([string]$Src)
   Write-Host "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
   # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
-  foreach ($rel in @('.superpowers', 'docs\plans', 'docs\superpowers', 'deploy')) {
+  # docs целиком: каталог не нужен ни сборке, ни рантайму — его нет ни в MANIFEST.in, ни
+  # в [tool.setuptools] (packages.find / package-data / data-files), и ни один .py дерева
+  # его не читает (проверено обходом). Зато он вёз покупателю внутреннюю кухню: релизный
+  # процесс подписи Windows, аудит сессий, планы фаз, RCA-разборы. Перечислять такие
+  # файлы по одному бессмысленно — за 422 коммита список отстанет снова.
+  foreach ($rel in @('.superpowers', '.plans', '.github', '.claude',
+                     'docs',
+                     'deploy', 'scripts\tests')) {
     $p = Join-Path $Src $rel
     if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')/" }
   }
+  # 1a) СТОРОЖ вместо одного лишь списка. Поимённый список отстаёт молча: он
+  #     писался под структуру репозитория Nomad на тот день, а за 422 коммита
+  #     там завелись .plans/, .github/, docs/nomad-upgrade-reports/ — и все они
+  #     уехали покупателям, потому что в списке их не было. Ошибка не в том, что
+  #     кто-то забыл дописать строку, а в том, что забывчивость ничем не ловилась.
+  #
+  #     Признак внутреннего каталога устойчивее имени: точка в начале (кроме
+  #     тех, что нужны пакету) и слова reports/plans/specs в пути docs. Найденное
+  #     по признаку удаляем и ПЕЧАТАЕМ — чтобы новый каталог был виден в логе
+  #     сборки, а не растворился в тишине.
+  $dotKeep = @('.python-version')
+  Get-ChildItem -LiteralPath $Src -Force -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name.StartsWith('.') -and ($dotKeep -notcontains $_.Name) } |
+    ForEach-Object {
+      Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+      Write-Host "    - удалил по признаку (точка в начале): $($_.Name)/"
+    }
+  #     Тот же сторож — по ФАЙЛАМ верхнего уровня. Прежняя редакция смотрела только
+  #     каталоги (-Directory), и внутренние документы, лежащие файлами, проходили мимо:
+  #     PHASE2_SAAS_PLAN.md содержал слово из списка признаков и всё равно уезжал.
+  #     Проверка, которая ловит половину случаев, зелёная ровно так же, как настоящая.
+  Get-ChildItem -LiteralPath $Src -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '(?i)(_plan|plan_|_spec|spec_|internal|audit|backlog|^phase[0-9])' } |
+    ForEach-Object {
+      Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue
+      Write-Host "    - удалил по признаку (внутренний документ): $($_.Name)"
+    }
   # 1b) Поимённые внутренние документы, которые под глобы ниже не подпадают.
   #     MAC_SIGNING.md — руководство по подписи релиза: несёт юридическое имя владельца
   #     из сертификата Developer ID и Apple Team ID. Покупателю оно не нужно вовсе, а
@@ -476,7 +550,15 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
   $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO } else { 'C:\Vibecode\hamidun-agent' }
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (зеркало
   # fetch-vendor-mac.sh). Бамп = сменить тег здесь и в fetch-vendor-mac.sh, либо env HM_NOMAD_REF.
-  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { 'v2026.7.22' }
+  # 05.09.2026: пин поднят с тега v2026.7.22 (0.17.0, 22 июля) на КОММИТ 0.18.1.
+  #
+  # Почему коммит, а не тег: у нашей линии свежих релизных тегов НЕТ. Теги
+  # v2026.8.* в этом репозитории принадлежат АПСТРИМУ (NousResearch/hermes-agent,
+  # там своя нумерация — на v2026.8.31 версия 0.21.0) и нашему main не предки.
+  # Последний тег нашей линии — тот самый v2026.7.22, и с него набежало 422
+  # коммита без единой релизной отметки. Пин на движущийся main взять нельзя:
+  # сборка обязана быть воспроизводимой, а main правится ежедневно.
+  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { '5a73e548233d2f830e3f0d619509012394a02280' }
   $srcOut    = Join-Path $root 'vendor\nomad-src'
   if (-not (Test-Path (Join-Path $agentRepo '.git'))) {
     Write-Host "  ! репозиторий Nomad не найден ($agentRepo) — задай HM_NOMAD_AGENT_REPO. nomad-src НЕ вшит (компонент Nomad → graceful skip)."
@@ -566,6 +648,11 @@ foreach ($d in @('npm-cache','pywheels','config-pack')) {
   }
   if ($cnt -eq 0) { $missing += ($d + '/ (нет файлов)') }
 }
+# «Есть хоть один файл» — не полнота. Каталог с тремя базовыми колёсами из ста
+# тринадцати проходил этот счётчик так же, как полный: гейт умел отличать только
+# «каталога нет вовсе». Провал самого скачивания — сигнал точный, его и добавляем.
+if (-not $wheelsOk) { $missing += 'pywheels/ (скачивание колёс завершилось с ошибкой — набор НЕПОЛНЫЙ)' }
+if (-not $npmCacheOk) { $missing += 'npm-cache/ (npm install завершился с ошибкой — кеш НЕПОЛНЫЙ)' }
 if ($missing.Count -gt 0) {
   Write-Host ''
   Write-Host "[vendor] WARNING: неполный vendor — отсутствуют/пустые артефакты:"

@@ -1422,7 +1422,25 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       }
       // Skip — не провал: отдаём ok (как раньше отдавал exit 0), но с флагом skipped и
       // БЕЗ маркера установки. Реальный успех (код 0) → ok. Прочие коды → не ok.
-      resolve({ id, ok: okRun || skipped, code, skipped });
+      //
+      // При пропуске (120) отдаём ПРИЧИНУ, а не только факт. Код 120 выдают 74 места в
+      // скриптах, и причины у них несовместимые: «артефакт не вшит в эту сборку», «нет
+      // сети», «winget не найден», «уже стоит чужая установка» — и, что важнее всего,
+      // fail-closed отказы безопасности вроде «установщик не прошёл проверку подписи —
+      // НЕ запускаю». Renderer подписывал их всех одинаково: «Не входит в эту сборку —
+      // пропущено (это не ошибка)». Про отклонённую подпись человек так не узнавал
+      // ничего, а это ровно тот случай, когда узнать нужно.
+      //
+      // Причину берём из последней содержательной строки вывода: скрипты печатают её
+      // прямо перед exit 120 — это их собственное объяснение, а не наша догадка.
+      let skipReason = '';
+      if (skipped) {
+        const lines = String(outTail || '').split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !/^\[(dry-run|debug)\]/i.test(l));
+        skipReason = lines.length ? lines[lines.length - 1].slice(0, 240) : '';
+      }
+      resolve({ id, ok: okRun || skipped, code, skipped, skipReason });
     });
   });
   } finally {
@@ -1544,6 +1562,33 @@ ipcMain.handle('save-start-here', () => {
     if (!src.startsWith(root + path.sep)) return { ok: false, dest: '', src: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, dest: '', src, error: 'source-missing' };
     const dest = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    // Проверяем НАЗНАЧЕНИЕ, а не только источник. Раньше здесь был голый
+    // copyFileSync: имя на рабочем столе фиксированное и известное заранее, и
+    // если по нему заранее подложить symlink или hardlink на чужой файл, копия
+    // пойдёт ПО ССЫЛКЕ и затрёт его содержимое HTML-памяткой. Установщик при
+    // этом местами работает с правами администратора — тогда запись уйдёт туда,
+    // куда обычный пользователь не дотянулся бы.
+    //
+    // lstat, а не existsSync: последний идёт ПО ссылке и о самой ссылке молчит.
+    // Отсутствие файла — норма (первый запуск), обычный файл — норма (повторное
+    // сохранение перезаписывает нашу же памятку). Всё остальное — отказ.
+    let dst = null;
+    try { dst = fs.lstatSync(dest); } catch (e) {
+      if (!e || e.code !== 'ENOENT') {
+        return { ok: false, dest: '', src, error: 'dest-stat: ' + ((e && e.code) || e) };
+      }
+    }
+    if (dst && !dst.isFile()) {
+      return { ok: false, dest: '', src, error: 'dest-not-regular-file' };
+    }
+    // Hardlink от обычного файла НЕ отличается ни lstat-ом, ни stat-ом: тип тот
+    // же, флага нет. Единственный признак — счётчик жёстких ссылок: у честного
+    // файла он равен единице, у второго имени того же содержимого — больше.
+    // Без этой строки проверка выше ловила бы только symlink, то есть половину
+    // случая, и читалась бы как полная защита.
+    if (dst && dst.nlink > 1) {
+      return { ok: false, dest: '', src, error: 'dest-hardlinked' };
+    }
     fs.copyFileSync(src, dest);
     return { ok: true, dest, src };
   } catch (e) {
@@ -1772,12 +1817,22 @@ async function winMakeSecureDir() {
 async function winLaunchDeElevated(exe, folderArg) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
+  // Возвращаем 'explorer', а НЕ true: открылась папка, редактор не запускался.
+  //
+  // Контракт «true = редактор, 'explorer'/'finder' = только папка» уже соблюдён и в
+  // launchVsCodeOn (ветка без редактора), и в обработчике launch-course, который под
+  // 'explorer' печатает отдельный текст — файлы видно, но наставник не подхватится.
+  // Ломало его ровно это место: фолбэк отдавал true, и правильный обработчик получал
+  // ложь на входе. Человеку рапортовали «редактор открыт», в телеметрию уходило
+  // open_editor как успех, а на экране был Проводник. Сюда приходят не редкие случаи:
+  // отключённый UAC, сломанный планировщик, отказ создать задачу — всё, где
+  // де-элевированный запуск невозможен.
   const folderFallback = () => {
     try {
       const exp = path.join(sysRoot, 'explorer.exe');
       if (folderArg && fs.existsSync(exp)) {
         spawn(exp, [String(folderArg)], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-        return true;
+        return 'explorer';
       }
     } catch (e) { /* ignore */ }
     return false;
@@ -1973,7 +2028,17 @@ ipcMain.handle('nomad-set-key', (_e, key) =>
 // Code picks up the mentor CLAUDE.md; the user then types «начать» to activate
 // the course-driver. Only if the course actually installed (folder exists) —
 // we never create an empty course dir.
-ipcMain.handle('launch-course', () => {
+// async — ОБЯЗАТЕЛЬНО, и вот почему. На Windows launchVsCodeOn возвращает
+// результат winLaunchDeElevated, а та объявлена `async` (строка ~1799), то есть
+// отдаёт Promise. Синхронное сравнение `r === true` ниже с Promise не сходится
+// НИКОГДА: редактор при этом честно открывается (обещание уже исполняется), а
+// человеку интерфейс отвечает «редактор не найден». Кнопка работает, ответ врёт.
+//
+// На macOS ветка синхронная, поэтому дефект был виден только на Windows — и
+// только вживую: main.js в юнит-тестах не грузится (требует electron), а E2E
+// гоняется на mac-раннере. Чтение кода тоже не помогало: `r === true` выглядит
+// правильным ровно до того момента, когда посмотришь на объявление вызываемой.
+ipcMain.handle('launch-course', async () => {
   const cfg = readJson('config.json', {});
   const raw = (cfg.course && cfg.course.targetDirDefault) || '';
   // resolveCourseTarget зеркалит course.ps1/course.sh: expand %USERPROFILE% на Win,
@@ -1993,7 +2058,7 @@ ipcMain.handle('launch-course', () => {
     if (!fs.existsSync(path.join(dir, 'CLAUDE.md'))) return { ok: false, reason: 'no-mentor', dir };
   } catch (e) { return { ok: false, reason: 'no-dir', dir }; }
 
-  const r = launchVsCodeOn(dir, { create: false });
+  const r = await launchVsCodeOn(dir, { create: false });
   if (r === true) return { ok: true, how: 'editor', dir };
   // Папка открыта в проводнике/Finder — это успех с оговоркой: файлы человек видит,
   // но наставник не подхватится, пока он не откроет папку редактором.
@@ -2575,6 +2640,28 @@ function detectComponents() {
         found = true;
       } catch (e) { found = false; }
     }
+    // Браузер Playwright — часть этого компонента, и без него он неполон.
+    //
+    // pydeps выходит кодом 0, даже когда `playwright install chromium` не прошёл: сами
+    // Python-пакеты при этом стоят, и валить весь шаг нельзя — от pydeps зависит bridge,
+    // которому браузер не нужен. Но main на код 0 пишет квитанцию «установлено», и на
+    // СЛЕДУЮЩЕМ прогоне детекция (проверявшая только импорт PIL/requests) подтверждала
+    // это же: компонент зелёный, кнопки «Повторить» нет, а браузерные навыки молча не
+    // работают. Первый прогон ловил verify, второй не ловил никто.
+    //
+    // Поэтому «установлен» = пакеты И браузер. Каталоги — те же, куда кладёт pydeps
+    // (pydeps.ps1:174 / pydeps.sh:98). Пустой каталог не считаем: `playwright install`
+    // создаёт его до распаковки.
+    if (found) {
+      const pwRoot = IS_WIN
+        ? path.join(winLocalAppData(), 'ms-playwright')
+        : path.join(home, 'Library', 'Caches', 'ms-playwright');
+      let hasBrowser = false;
+      try {
+        hasBrowser = fs.readdirSync(pwRoot).some((n) => /^chromium/i.test(n));
+      } catch (e) { hasBrowser = false; }
+      if (!hasBrowser) found = false;
+    }
     out.pydeps = { installed: found, detectedVersion: '' };
   }
   // course (папка курса)
@@ -2598,12 +2685,24 @@ function detectComponents() {
              : ['nmd', 'nomad-agent', 'nomad-acp'],
       [shimDir]);
     // P1-4: uv-тул называется по pyproject [project].name = nomad-agent.
-    const uvTools = IS_WIN
-      ? firstExisting([
-          path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'uv', 'tools', 'nomad-agent'),
-          path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')
-        ])
-      : firstExisting([path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')]);
+    // Проверяем НЕ сам каталог тула, а entrypoint внутри него. Порядок, в котором
+    // работает `uv tool install` (проверено запуском вшитого uv): каталог venv
+    // создаётся ПЕРВЫМ, исполняемые файлы кладутся ПОСЛЕДНИМИ. Значит закрытое
+    // посреди установки окно оставляет ровно тот каталог, который прежняя проверка
+    // считала успехом: детекция рапортовала «Nomad уже установлен», повторный
+    // запуск шаг пропускал — и человек навсегда оставался без агента при зелёной
+    // галке. Имена entrypoint'ов — из [project.scripts] пакета.
+    const uvToolDirs = IS_WIN
+      ? [path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'uv', 'tools', 'nomad-agent'),
+         path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')]
+      : [path.join(home, '.local', 'share', 'uv', 'tools', 'nomad-agent')];
+    const uvToolEntries = [];
+    for (const d of uvToolDirs) {
+      for (const n of ['nmd', 'nomad-agent', 'nomad-acp']) {
+        uvToolEntries.push(IS_WIN ? path.join(d, 'Scripts', n + '.exe') : path.join(d, 'bin', n));
+      }
+    }
+    const uvTools = firstExisting(uvToolEntries);
     const src = IS_WIN
       ? firstExisting([path.join(winLocalAppData(), 'nomad-src', 'pyproject.toml')])
       : firstExisting([path.join(home, '.nomad-src', 'pyproject.toml')]);
@@ -2968,8 +3067,29 @@ function winRemoveUserPathEntry(t, guardOpts) {
   const after = regQueryValueDotNet('HKCU\\Environment', 'Path');
   if (!after.ok || !after.found || after.data !== upd.value) {
     // Верификация не сошлась — пробуем вернуть исходное значение (не теряем PATH).
-    regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);
-    return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — вернул исходный' };
+    //
+    // Ответ отката ЧИТАЕТСЯ, и сообщение ставится по факту. Раньше здесь стоял
+    // голый вызов, а строкой ниже человеку сообщалось «вернул исходный» — как
+    // свершившееся. Если откат не проходил (отказ доступа, PowerShell не
+    // стартовал), у человека оставался УРЕЗАННЫЙ PATH, то есть сломанный
+    // терминал, и он читал, что всё вернули. Битый PATH и так плохо; хуже
+    // только битый PATH, про который сказали, что он цел.
+    //
+    // Сверяем не кодом возврата записи, а ЧТЕНИЕМ: запись может отчитаться
+    // успехом и не долететь — ровно поэтому выше и стоит верификация.
+    const back = regWriteValueTyped('HKCU\\Environment', 'Path', cur.data, cur.type);
+    const now = regQueryValueDotNet('HKCU\\Environment', 'Path');
+    const restored = back.ok && now.ok && now.found && now.data === cur.data;
+    if (restored) {
+      return { status: 'failed', message: 'PATH после записи не совпал с ожидаемым — исходный ВЕРНУЛ (проверено чтением)' };
+    }
+    return {
+      status: 'failed',
+      message: 'PATH после записи не совпал с ожидаемым, и откат НЕ УДАЛСЯ (' +
+        (back.ok ? 'запись прошла, но чтение показало другое' : 'запись отката: ' + back.error) +
+        '). PATH пользователя сейчас в НЕИЗВЕСТНОМ состоянии — проверь ' +
+        'переменную Path в «Переменные среды» и при необходимости верни строку вручную.',
+    };
   }
   invalidatePathCache();   // запись убрана — кэш PATH протух
   return { status: 'removed', message: 'убрал «' + dir + '» из пользовательского PATH' };

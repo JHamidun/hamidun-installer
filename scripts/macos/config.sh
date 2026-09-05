@@ -239,6 +239,24 @@ if [ "$SKILLS_REPARSE" -eq 1 ]; then
   echo "  ~/.claude/skills — симлинк/junction: пропускаю skills в раскладке (внешняя цель не тронута)."
 fi
 
+# Правило «не писать СКВОЗЬ ссылку» действует НЕ только на skills — зеркало config.ps1,
+# где исключаются ВСЕ непосредственные дети ~/.claude, помеченные reparse point.
+# Пакет везёт agents, commands, rules, hooks, tools, config, templates… и любой из них
+# человек мог слинковать на свой dotfiles-репозиторий (`ln -s`). Здесь проверялся один
+# skills, поэтому rsync в repair шёл по такой ссылке и перезаписывал файлы ВО ВНЕШНЕЙ
+# цели — в его же рабочем репозитории, молча и без следа в выводе.
+# Нераскрытый glob остаётся литералом → `[ -L литерал ]` ложно, лишних исключений нет.
+REPARSE_EXCLUDE=""
+for _kid in "$CLAUDE_HOME"/* "$CLAUDE_HOME"/.[!.]* "$CLAUDE_HOME"/..?*; do
+  if [ -L "$_kid" ]; then
+    _kn=$(basename "$_kid")
+    if [ "$_kn" != "skills" ]; then      # skills уже покрыт SKILLS_EXCLUDE выше
+      REPARSE_EXCLUDE="$REPARSE_EXCLUDE --exclude=/$_kn"
+      echo "  ~/.claude/$_kn — ссылка: пропускаю в раскладке (внешняя цель не тронута)."
+    fi
+  fi
+done
+
 # === Merge-copy НАШЕЙ базы ПОВЕРХ ~/.claude (БЕЗ переноса/стирания) ===
 # add-missing: rsync --ignore-existing (существующее не трогаем) / hm_copy missing.
 # repair:      rsync без --ignore-existing (перезапись наших базовых) / hm_copy overwrite.
@@ -247,7 +265,7 @@ fi
 if [ "$ADDITIVE" -eq 1 ]; then
   echo "Добавляю только НЕДОСТАЮЩИЕ файлы конфига (существующее сохраняю)..."
   if command -v rsync >/dev/null 2>&1; then
-    if ! rsync -a --ignore-existing $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
+    if ! rsync -a --ignore-existing $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE $REPARSE_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
       COPY_FAILED=1
     fi
   else
@@ -256,7 +274,7 @@ if [ "$ADDITIVE" -eq 1 ]; then
 else
   echo "Переустановка начисто: перезаписываю НАШИ базовые файлы свежими (пользовательское — ключи/память/история/CLAUDE.md — не трогаю)..."
   if command -v rsync >/dev/null 2>&1; then
-    if ! rsync -a $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
+    if ! rsync -a $PRESERVE_FILE_GLOBS $PRESERVE_DIR_GLOBS $SKILLS_EXCLUDE $REPARSE_EXCLUDE "$SRC_CLAUDE/" "$CLAUDE_HOME/"; then
       COPY_FAILED=1
     fi
   else
@@ -286,6 +304,30 @@ else
   else
     echo "Готово: наши базовые файлы обновлены, пользовательские данные (ключи/память/история) на месте."
   fi
+fi
+
+# Список скиллов, разложенных НАМИ (накопительный) — зеркало .hamidun-skills.txt из
+# config.ps1:191,303. Пишем ПОСЛЕ успешной раскладки и только при валидном перечислении
+# пред-существующих: имя, которого не было в skills до merge, а после merge появилось —
+# наше. Прошлые записи сохраняем (список накопительный, иначе он забудет позавчерашнее).
+# Сбой записи не фатален: без файла прунинг просто останется консервативным, как раньше.
+OUR_PREV_LIST="$CLAUDE_HOME/.hamidun-skills.txt"
+if [ "$COPY_FAILED" -eq 0 ] && [ "$PRUNE_DISABLED" -eq 0 ] \
+   && [ -n "$PRE_EXISTING_SKILLS" ] && [ -f "$PRE_EXISTING_SKILLS" ] && [ -d "$CLAUDE_HOME/skills" ]; then
+  OUR_NOW="$(mktemp "${TMPDIR:-/tmp}/hm-ourskills.XXXXXX" 2>/dev/null)" || OUR_NOW=""
+  if [ -n "$OUR_NOW" ] && [ ! -L "$OUR_NOW" ]; then
+    [ -f "$OUR_PREV_LIST" ] && cat "$OUR_PREV_LIST" >> "$OUR_NOW" 2>/dev/null
+    for _sd in "$CLAUDE_HOME/skills"/*/; do
+      [ -d "$_sd" ] || continue
+      [ -L "${_sd%/}" ] && continue          # ссылку мы не клали
+      _sn=$(basename "$_sd")
+      if ! grep -qxF "$_sn" "$PRE_EXISTING_SKILLS" 2>/dev/null; then echo "$_sn" >> "$OUR_NOW"; fi
+    done
+    if sort -u "$OUR_NOW" > "$OUR_PREV_LIST.tmp" 2>/dev/null && mv -f "$OUR_PREV_LIST.tmp" "$OUR_PREV_LIST" 2>/dev/null; then :; else
+      rm -f "$OUR_PREV_LIST.tmp" 2>/dev/null || true
+    fi
+  fi
+  [ -n "$OUR_NOW" ] && rm -f "$OUR_NOW" 2>/dev/null
 fi
 
 # --- фильтрация скиллов по выбранным наборам (пакам) ---
@@ -322,6 +364,15 @@ if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]; then
           g=$?
           if [ "$g" -eq 0 ]; then
             we_added=0
+            # …но «пред-существующий» может означать «положен НАМИ в прошлый прогон».
+            # Без этой поправки снятие набора работало ровно ОДИН раз — на чистой машине:
+            # во второй раз наши вчерашние скиллы уже лежат в skills, попадают в список
+            # пред-существующих, we_added=0 — и прунинг молча не удаляет ничего, хотя
+            # человек набор снял. На Windows такой список ведётся (.hamidun-skills.txt,
+            # config.ps1:191), на mac его просто не было.
+            if [ -f "$OUR_PREV_LIST" ] && grep -qxF "$name" "$OUR_PREV_LIST" 2>/dev/null; then
+              we_added=1
+            fi
           elif [ "$g" -ge 2 ]; then
             PRUNE_ABORT=1; break
           fi

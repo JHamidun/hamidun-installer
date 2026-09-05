@@ -36,6 +36,17 @@ function assertOrder(hay, first, second, msg) {
   assert(i < j, msg || 'нарушен порядок');
 }
 
+// Комментарии — не код, и порядок в них ничего не значит. Без вырезания сторож порядка
+// краснел от одного лишь УПОМИНАНИЯ команды: комментарий «`uv tool install` создаёт
+// каталог venv первым» встал выше гейта, и тест доложил о нарушенном fail-closed там,
+// где ничего не менялось. Ложная тревога съедает доверие к сторожу ровно так же, как
+// пропущенный дефект: и то и другое отучает читать красную строку всерьёз.
+// Строковые литералы с '#' внутри при этом не режем — только строки, где '#' первый
+// непробельный символ.
+function codeOnly(text) {
+  return String(text).split('\n').map((l) => (/^\s*#/.test(l) ? '' : l)).join('\n');
+}
+
 // Async-колбэк в СИНХРОННОМ ok() — мнимый страж: галочка печатается не дожидаясь
 // результата, процесс успевает выйти, и провал не всплывает НИКОГДА. Такой тест уже
 // сторожил главный фикс дня (закрытый stdin) и был зелёным при нарочно сломанном
@@ -2058,10 +2069,27 @@ const CFG_SH  = () => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'confi
 
 ok('config.ps1: add-missing = robocopy /XC /XN /XO; repair = robocopy без /XC; оба с /XF preserve + /XD; НЕ запускает install.ps1', () => {
   const s = CFG_PS1();
-  assert(/robocopy \$srcClaude \$claudeHome \/E \/XC \/XN \/XO \/XJ \/XF \$excludeNames \/XD \$mergeXD/.test(s),
-    'add-missing: /XC /XN /XO — существующее НЕ перезаписываем; /XJ — не сквозь junction; /XD $mergeXD');
-  assert(/robocopy \$srcClaude \$claudeHome \/E \/XJ \/XF \$excludeNames \/XD \$mergeXD/.test(s),
-    'repair: robocopy БЕЗ /XC — наши базовые перезаписываются, /XF/XD исключают пользовательское; /XJ не сквозь junction');
+  // Проверяем НАБОР флагов, а не их последовательность. Прежняя редакция требовала
+  // строку целиком, слово в слово: добавление /R:1 /W:1 (защита от зависания на
+  // залоченном файле — дефолт robocopy это миллион ретраев по 30 с) красило тест в
+  // красный, хотя команда стала строго безопаснее. Сторож, привязанный к порядку
+  // аргументов, запрещает не ошибку, а любое изменение — включая починку.
+  const roboCalls = (s.match(/robocopy \$srcClaude \$claudeHome[^\n|]*/g) || []);
+  assert(roboCalls.length === 2, 'ровно два вызова robocopy: add-missing и repair');
+  const [addCall, repairCall] = roboCalls;
+  const hasAll = (call, flags) => flags.every((f) => new RegExp('(^|\\s)' + f.replace(/[/]/g, '\\/') + '(\\s|$)').test(call));
+  assert(hasAll(addCall, ['/E', '/XC', '/XN', '/XO', '/XJ']),
+    'add-missing: /XC /XN /XO — существующее НЕ перезаписываем; /XJ — не сквозь junction');
+  assert(/\/XF \$excludeNames/.test(addCall) && /\/XD \$mergeXD/.test(addCall),
+    'add-missing: preserve-list (/XF) и исключённые каталоги (/XD $mergeXD) на месте');
+  assert(hasAll(repairCall, ['/E', '/XJ']) && !/\/XC(\s|$)/.test(repairCall),
+    'repair: robocopy БЕЗ /XC — наши базовые перезаписываются; /XJ не сквозь junction');
+  assert(/\/XF \$excludeNames/.test(repairCall) && /\/XD \$mergeXD/.test(repairCall),
+    'repair: /XF/XD исключают пользовательское');
+  // Ограничение ретраев — обязательное, а не косметика: без него один залоченный файл
+  // (открытый Claude Code/Cursor хук) вешает установку насмерть и без вывода.
+  assert(hasAll(addCall, ['/R:1', '/W:1']) && hasAll(repairCall, ['/R:1', '/W:1']),
+    'оба вызова ограничивают ретраи (/R:1 /W:1) — залоченный файл не вешает установку');
   assert(/\$mergeXD = @\(\$excludeDirs\) \+ @\('skills'\)/.test(s),
     'skills — reparse point → исключается из merge (/XD skills), robocopy не пишет сквозь junction');
   // Правило «не писать сквозь reparse» — для ВСЕХ детей ~/.claude (agents/rules/tools/…),
@@ -3233,7 +3261,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/использую как есть/.test(nsh), 'nomad.sh: старой ветки «использую как есть» нет');
   // Установка гейтится доверием ДО секции uv.
   assert(/if \[ "\$SRC_TRUSTED" != "1" \]; then/.test(nsh), 'nomad.sh: гейт SRC_TRUSTED');
-  assertOrder(nsh, 'SRC_TRUSTED" != "1" ]; then', 'uv tool install',
+  assertOrder(codeOnly(nsh), 'SRC_TRUSTED" != "1" ]; then', 'uv tool install',
     'nomad.sh: skip-гейт (exit 120) ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
@@ -3269,12 +3297,25 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
   assert(iGate !== -1, 'nomad.sh: гейт сверки SHA-256 дерева НА МЕСТЕ (без него vendor можно подменить)');
   assert(iBuild !== -1, 'nomad.sh: сборка из приватного temp-каталога на месте');
   assert(iGate < iBuild, 'nomad.sh: порядок verify → copy → install (fail-closed сохранён)');
-  assert(nsh.indexOf('UV_TOOL_NA="$HOME/.local/share/uv/tools/nomad-agent"') !== -1, 'nomad.sh: проверяется uv-tool nomad-agent');
+  // Guard смотрит на ИСПОЛНЯЕМЫЙ ФАЙЛ внутри тула, а не на каталог: `uv tool install`
+  // создаёт каталог venv первым, entrypoint кладёт последним, поэтому голый каталог —
+  // это огрызок нашей же оборванной установки, а не чужая. Прежний сторож требовал
+  // ровно путь до каталога и тем самым ЗАКРЕПЛЯЛ дефект: починка красила его в красный.
+  assert(/UV_TOOL_NA="\$HOME\/\.local\/share\/uv\/tools\/nomad-agent\/bin\/[a-z-]+"/.test(nsh),
+    'nomad.sh: guard проверяет entrypoint внутри uv-тула nomad-agent, а не каталог');
+  assert(!/UV_TOOL_NA="\$HOME\/\.local\/share\/uv\/tools\/nomad-agent"\s*$/m.test(nsh),
+    'nomad.sh: голый каталог тула НЕ считается признаком установки');
   assert(nsh.indexOf('[ -e "$HOME/.local/bin/nmd" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-agent" ]') !== -1 && nsh.indexOf('[ -e "$HOME/.local/bin/nomad-acp" ]') !== -1,
     'nomad.sh: проверяются шимы nmd/nomad-agent/nomad-acp');
-  const guardSh = nsh.slice(nsh.indexOf('UV_TOOL_NA='), nsh.indexOf('UV_TOOL_NA=') + 800);
+  // Граница — по структуре (конец охватывающего if), а не по числу символов: см. разбор
+  // у близнеца для nomad.ps1 ниже. Здесь 800 знаков пока хватает случайно.
+  const gsStart = nsh.indexOf('UV_TOOL_NA=');
+  assert(gsStart > 0, 'nomad.sh: guard существующей установки найден');
+  const gsMatch = /\r?\nfi\r?\n/.exec(nsh.slice(gsStart));
+  const guardSh = nsh.slice(gsStart, gsMatch ? gsStart + gsMatch.index : nsh.length);
+  assert(guardSh.length < 2000, 'nomad.sh: граница guard-блока найдена, а не уехала на весь файл');
   assert(/exit 120/.test(guardSh), 'nomad.sh: существующий тул/шим → exit 120');
-  assertOrder(nsh, 'UV_TOOL_NA=', 'uv tool install',
+  assertOrder(codeOnly(nsh), 'UV_TOOL_NA=', 'uv tool install',
     'nomad.sh: guard ПЕРЕД uv tool install');
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
@@ -3282,11 +3323,35 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
   // Ставим из КОПИИ проверенного дерева (uv/setuptools собирают IN-TREE и портят vendor,
   // из-за чего повторный запуск падал на гейте целостности), но по-прежнему без --force.
   assert(/& \$uv tool install --python 3\.12 "\$srcForInstall"/.test(nps), 'nomad.ps1: uv tool install без --force');
-  assert(/uv\\tools\\nomad-agent/.test(nps) && /\.local\\share\\uv\\tools\\nomad-agent/.test(nps),
-    'nomad.ps1: guard проверяет nomad-agent tool (APPDATA + .local\\share)');
+  // Как и в nomad.sh: признаком чужой установки считается ИСПОЛНЯЕМЫЙ ФАЙЛ внутри тула.
+  // Подстрочный /uv\\tools\\nomad-agent/ проходил и на голом каталоге — то есть закреплял
+  // ровно тот дефект, из-за которого повторный запуск вечно печатал «уже установлено».
+  // Проверяем ИМЕННО guard-блок, а не файл целиком: ниже, в Write-NomadReceipt, голый
+  // каталог тула законен и нужен — деинсталлятор сносит каталог целиком, entrypoint ему
+  // ни к чему. Сторож, написанный на весь файл, краснел на этой законной строке; такая
+  // ложная тревога отучает читать красное так же верно, как пропущенный дефект.
+  const guardBlock = nps.slice(nps.indexOf('$existingNomad = @('),
+    nps.indexOf(')', nps.indexOf('.local\\bin\\nomad-acp')));
+  assert(/uv\\tools\\nomad-agent\\Scripts\\[a-z-]+\.exe/.test(guardBlock)
+      && /\.local\\share\\uv\\tools\\nomad-agent\\(Scripts\\[a-z-]+\.exe|bin\\[a-z-]+)/.test(guardBlock),
+    'nomad.ps1: guard проверяет entrypoint в nomad-agent tool (APPDATA + .local\\share), а не каталог');
+  assert(!/'uv\\tools\\nomad-agent'\)/.test(guardBlock)
+      && !/'\.local\\share\\uv\\tools\\nomad-agent'\)/.test(guardBlock),
+    'nomad.ps1: голый каталог тула НЕ считается признаком установки');
   assert(/\.local\\bin\\nmd\.exe/.test(nps) && /\.local\\bin\\nomad-agent/.test(nps) && /\.local\\bin\\nomad-acp/.test(nps),
     'nomad.ps1: проверяются шимы nmd/nomad-agent/nomad-acp(.exe)');
-  const guardPs = nps.slice(nps.indexOf('$existingNomad = @('), nps.indexOf('$existingNomad = @(') + 900);
+  // Границу блока берём по СТРУКТУРЕ (закрывающая скобка внешнего if), а не по числу
+  // символов. Прежние 900 знаков были ровно по размеру тогдашнего списка путей: стоило
+  // добавить в guard три пути к entrypoint'ам, и `exit 120` уехал за окно — тест покраснел
+  // на коде, где всё на месте. Сторож, привязанный к длине, стареет вместе с ней.
+  // Перевод строки ищем регексом: файл в CRLF, и поиск литерала '\n}\n' не находил
+  // закрывающую скобку вовсе — срез уезжал на половину файла, и сторож переставал
+  // ловить подмену `exit 120` (проверено подлогом: с таким срезом он оставался зелёным).
+  const gStart = nps.indexOf('$existingNomad = @(');
+  assert(gStart > 0, 'nomad.ps1: guard существующей установки найден');
+  const gMatch = /\r?\n\}\r?\n/.exec(nps.slice(gStart));
+  const guardPs = nps.slice(gStart, gMatch ? gStart + gMatch.index : nps.length);
+  assert(guardPs.length < 2000, 'nomad.ps1: граница guard-блока найдена, а не уехала на весь файл');
   assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
   assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$srcForInstall"',
     'nomad.ps1: guard ПЕРЕД uv tool install');
@@ -4159,7 +4224,26 @@ ok('main.js (source): reg — только HKCU из аллоулиста клю
   // found:false, запрет HKLM, пакетный regQueryManyDotNet).
   assert(/regQueryValueTyped\(/.test(code), 'типизированное чтение значения реестра (regQueryValueTyped)');
   assert(/computeUserPathWithout/.test(code), 'PATH правится чистой точной функцией');
-  assert(/вернул исходный/.test(code), 'верификация записи PATH с восстановлением при расхождении');
+  // Откат PATH при расхождении: проверяем НЕ формулировку сообщения, а то, что откат
+  // подтверждён ЧТЕНИЕМ. Прежняя редакция искала строку «вернул исходный» — то есть
+  // сторожила текст, который человек увидит, а не факт, который этот текст утверждает.
+  // Такой сторож остаётся зелёным, если убрать саму проверку и оставить сообщение, и
+  // краснеет, если сообщение переписать, ничего не сломав, — обе ошибки в одну сторону:
+  // зелёная строка перестаёт означать выполненную проверку.
+  {
+    const i = code.indexOf('function winRemoveUserPathEntry');
+    assert(i > 0, 'функция правки PATH найдена');
+    const body = code.slice(i, code.indexOf('\nfunction ', i + 10));
+    const j = body.indexOf('regWriteValueTyped(\'HKCU\\\\Environment\', \'Path\', cur.data, cur.type)');
+    assert(j > 0, 'откат PATH записывает обратно ИСХОДНОЕ значение с его типом');
+    const after = body.slice(j, j + 700);
+    assert(/regQueryValueDotNet\('HKCU\\\\Environment', 'Path'\)/.test(after),
+      'после отката PATH перечитывается из реестра (успех записи не принимается на слово)');
+    assert(/===\s*cur\.data/.test(after),
+      'прочитанное сравнивается с исходным — иначе «вернул» ничем не подтверждено');
+    assert(/НЕИЗВЕСТНОМ состоянии/.test(after),
+      'провал отката назван прямо, а не выдан за успешное восстановление');
+  }
   assert(/Microsoft\.Win32\.Registry/.test(code), 'авторитетный путь чтения/записи — .NET');
   assert(/DoNotExpandEnvironmentNames/.test(code), 'REG_EXPAND_SZ читается сырым — чужие %VAR% не раскрываются (В КОДЕ, не в комментарии)');
   assert(/ToBase64String/.test(code) && /HMREG1:/.test(code), 'значение едет base64 — кодировка консоли не участвует');
@@ -10402,5 +10486,105 @@ ok('config.json в репозитории без сборочных маркер
       'порядок источников: сначала env (так его даёт CI), потом креды (локальная сборка)');
     assert(/return 0;/.test(src), 'отсутствие секрета не роняет сборку');
     assert(/НЕПОДПИСАННЫМ/.test(src), 'при отсутствии секрета человеку сказано, ЧТО это значит');
+  });
+})();
+
+// ===========================================================================
+// Код возврата компонентного скрипта — не «обычно правильный», а гарантированный.
+//
+// main.js запускает .ps1 обёрткой (src/main.js:1220-1222):
+//     & 'script.ps1'; if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }
+//
+// `$LASTEXITCODE` — код последней НАТИВНОЙ программы, а не признак успеха самого
+// PowerShell. Случай «скрипт не загрузился» авторы закрыли ($null → exit 1). Но
+// есть второй: нативная команда вернула 0, дальше произошла ошибка PowerShell, и
+// при `$ErrorActionPreference = 'Continue'` (а он у нас Continue сознательно —
+// нативные команды пишут в stderr и под Stop это падение) скрипт доходит до конца
+// и отдаёт прежний НОЛЬ. Установка отчиталась успехом, шаг не выполнен.
+//
+// Сегодня этого не происходит: каждый компонентный скрипт заканчивается явным
+// `exit`. Но держится это на ДИСЦИПЛИНЕ, а не на коде — первый же новый скрипт
+// без финальной строки вернёт ложный успех, и заметит это не CI, а человек.
+// Класс «правило есть, но его никто не сторожит» встречался за неделю четырежды;
+// здесь он закрывается сторожем.
+// ===========================================================================
+(function scriptExitDisciplineTests() {
+  console.log('== Код возврата .ps1: явный exit, а не унаследованный $LASTEXITCODE ==');
+
+  // Библиотеки, а не компоненты: их подключают через точку (dot-source), они
+  // НЕ запускаются обёрткой и своего кода возврата не отдают. Требовать от них
+  // финальный exit — требовать неверного.
+  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1']);
+
+  const listScripts = () => fs.readdirSync(path.join(ROOT, 'scripts', 'windows'))
+    .filter((f) => f.endsWith('.ps1'))
+    .filter((f) => !LIBS.has(f));
+
+  ok('у каждого компонентного .ps1 есть явный exit в завершающей логике', () => {
+    const scripts = listScripts();
+    assert(scripts.length >= 10,
+      'скрипты найдены (иначе проверка пуста и ничего не доказывает): ' + scripts.length);
+    const bad = [];
+    for (const f of scripts) {
+      const text = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8');
+      const lines = text.split(/\r?\n/).map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'));
+      // Ищем exit в ХВОСТЕ, а не строго в последней строке.
+      //
+      // Первая редакция требовала буквально последнюю строку — и покраснела на
+      // ДВУХ исправных скриптах: у extension.ps1 и vscode.ps1 стоит
+      //     try { ... exit 1 } finally { Remove-HmVsixTemp }
+      // то есть exit внутри try, а файл кончается скобкой finally. Уборка при
+      // этом отработает, код возврата будет верным. Правило, которое ругается
+      // на исправное, отключают через неделю — и тогда оно не проверяет вовсе.
+      //
+      // Граница проверки названа честно: она ловит «про exit забыли совсем», но
+      // НЕ доказывает, что exit стоит на всех путях исполнения — статически это
+      // в PowerShell не проверить. Полную гарантию дал бы прогон скрипта, а он
+      // ставит софт на живую машину.
+      const tail = lines.slice(-15);
+      if (!tail.some((l) => /(^|;\s*)exit\b/.test(l))) {
+        bad.push(f + ' -> хвост без exit: «' + (lines[lines.length - 1] || '').slice(0, 50) + '»');
+      }
+    }
+    assert.deepStrictEqual(bad, [],
+      'в хвосте этих скриптов нет явного exit — код возврата унаследуется от последней ' +
+      'нативной команды, и отказ PowerShell уедет как успех: ' + bad.join('; '));
+  });
+
+  ok('каждый компонентный .ps1 задаёт $ErrorActionPreference явно', () => {
+    const scripts = listScripts();
+    const bad = scripts.filter((f) =>
+      !/\$ErrorActionPreference\s*=/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8')));
+    assert.deepStrictEqual(bad, [],
+      'без явного $ErrorActionPreference поведение при ошибке зависит от хоста, ' +
+      'а не от скрипта: ' + bad.join(', '));
+  });
+
+  ok('обёртка запуска не потеряет отказ: $null → exit 1 (а не унаследованный ноль)', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(/\$null -eq \$LASTEXITCODE\) \{ exit 1 \}/.test(s),
+      'скрипт, который не загрузился, обязан давать 1: $LASTEXITCODE там $null, и голый ' +
+      '`exit $LASTEXITCODE` вернул бы 0');
+  });
+
+  // Отрицательный контроль САМОГО сторожа: на подложенном скрипте без exit он
+  // обязан покраснеть. Проверка, которая не умеет падать, — украшение.
+  ok('сторож ловит скрипт без финального exit (проверено подлогом)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-exit-'));
+    try {
+      const good = path.join(dir, 'good.ps1');
+      const bad = path.join(dir, 'bad.ps1');
+      fs.writeFileSync(good, "$ErrorActionPreference = 'Stop'\nWrite-Host 'ok'\nexit 0\n");
+      fs.writeFileSync(bad, "$ErrorActionPreference = 'Stop'\nWrite-Host 'ok'\n# всё\n");
+      const tail = (p) => {
+        const lines = fs.readFileSync(p, 'utf8').split(/\r?\n/).map((l) => l.trim())
+          .filter((l) => l && !l.startsWith('#'));
+        return lines[lines.length - 1] || '';
+      };
+      assert(/^exit\b/.test(tail(good)), 'исправный скрипт правило проходит');
+      assert(!/^exit\b/.test(tail(bad)), 'скрипт без exit правилом ОТБИВАЕТСЯ');
+      assert(!/^exit\b/.test('# всё'), 'комментарий в конце не считается за exit');
+    } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 })();

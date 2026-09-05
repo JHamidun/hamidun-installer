@@ -64,6 +64,47 @@ function normKey(p, platform) {
   return isCaseInsensitive(platform) ? n.toLowerCase() : n;
 }
 function pathEq(a, b, platform) { return normKey(a, platform) === normKey(b, platform); }
+/** Путь и ВСЕ его существующие предки — без symlink и junction.
+ *
+ *  Вынесено отдельно, потому что нужно двум разным операциям с разными целями:
+ *  `checkTarget` защищает от УДАЛЕНИЯ не того каталога, `restoreHookUrl` — от
+ *  ЗАПИСИ не в тот файл. Проверка одна и та же, и держать её в двух копиях
+ *  значит однажды починить одну из них.
+ *
+ *  Возвращает {ok:false, absent:true}, когда цели просто нет: это не отказ
+ *  защиты, а «править нечего», и звать это ошибкой было бы враньём.
+ *  Любая другая ошибка lstat — отказ (fail-closed): не смогли убедиться, что
+ *  ссылки нет, значит считаем, что она есть.
+ */
+function symlinkFreeChain(target) {
+  const norm = path.resolve(String(target || ''));
+  if (!norm) return { ok: false, error: 'пустой путь' };
+  let self = null;
+  let cur = norm;
+  let prev = '';
+  while (cur && cur !== prev) {
+    let st = null;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        if (cur === norm) return { ok: false, absent: true };
+      } else {
+        return { ok: false, error: 'lstat(' + cur + '): ' + (code || e) };
+      }
+    }
+    if (st) {
+      if (st.isSymbolicLink()) return { ok: false, error: 'symlink/junction в цепочке: ' + cur };
+      if (cur === norm) self = st;
+    }
+    prev = cur;
+    cur = path.dirname(cur);
+  }
+  if (!self) return { ok: false, absent: true };
+  return { ok: true, isFile: self.isFile() };
+}
+
 function isInside(child, parent, platform) {
   const c = normKey(child, platform), p = normKey(parent, platform);
   return c.length > p.length && c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
@@ -529,17 +570,23 @@ function restoreHookUrl(settingsFile, from, to, opts, dry) {
   if (!pathEq(allowed, settingsFile, opts.platform)) {
     return res('failed', 'ЗАЩИТА: правка hook-url разрешена только для ~/.claude/settings.json, получено: ' + settingsFile);
   }
-  // checkTarget здесь НЕ применим (он защищает весь ~/.claude от удаления), но
-  // symlink-подмену проверить обязаны: писать в файл, на который кто-то подложил
-  // ссылку, нельзя.
-  let st = null;
-  try { st = fs.lstatSync(settingsFile); }
-  catch (e) {
-    if (e && e.code === 'ENOENT') return res('absent', 'settings.json нет — править нечего');
-    return res('failed', 'чтение settings.json: ' + ((e && e.code) || e));
+  // checkTarget здесь НЕ применим целиком (он защищает весь ~/.claude от
+  // удаления, а мы правим файл ВНУТРИ него), но ссылку проверить обязаны:
+  // писать в файл, на который кто-то подложил ссылку, нельзя.
+  //
+  // Проверяем ВСЮ ЦЕПОЧКУ, а не только сам файл. Раньше стоял один lstat по
+  // settings.json, и этого было мало: если `~/.claude` — junction или symlink,
+  // lstat самого файла видит обычный файл, а запись уходит ПО ТУ СТОРОНУ ссылки.
+  // На Windows junction создаётся без прав администратора, и перенос профиля
+  // junction-ом — обычная практика при маленьком системном диске; тогда правка
+  // молча уезжает в чужой каталог. Комментарий здесь раньше признавал, что
+  // предков не проверяем, — но объяснение не заменяет проверку.
+  const chain = symlinkFreeChain(settingsFile);
+  if (!chain.ok) {
+    if (chain.absent) return res('absent', 'settings.json нет — править нечего');
+    return res('failed', 'ЗАЩИТА: ' + chain.error);
   }
-  if (st.isSymbolicLink()) return res('failed', 'ЗАЩИТА: settings.json — symlink');
-  if (!st.isFile()) return res('failed', 'ЗАЩИТА: settings.json — не обычный файл');
+  if (!chain.isFile) return res('failed', 'ЗАЩИТА: settings.json — не обычный файл');
 
   let raw;
   try { raw = fs.readFileSync(settingsFile, 'utf8'); }
@@ -664,6 +711,25 @@ function verifyPostconditions(plan, opts, helpers) {
         }
         case 'killproc':
           break;
+        case 'hookurl': {
+          // План удаления скрепки НАЧИНАЕТСЯ с этой цели (uninstall-targets.js:201-207),
+          // а пост-проверка её не знала и роняла в default — то есть КАЖДОЕ удаление
+          // скрепки рапортовало «неизвестный тип цели», даже когда всё прошло.
+          // Человек видит проблему там, где её нет, и перестаёт верить отчёту вообще.
+          //
+          // Проверяем то, ради чего цель существует: подстроки `from` в файле
+          // больше нет. Отсутствие файла — тоже успех: правку возвращать некуда.
+          let text = null;
+          try { text = fs.readFileSync(t.file, 'utf8'); } catch (e) {
+            if (!e || e.code !== 'ENOENT') {
+              problems.push('пост-проверка hookurl: ' + t.file + ' не прочитан (' + ((e && e.code) || e) + ')');
+            }
+          }
+          if (text !== null && t.from && text.indexOf(t.from) !== -1) {
+            problems.push('hook-url скрепки остался в ' + t.file + ': ' + t.from);
+          }
+          break;
+        }
         default:
           problems.push('неизвестный тип цели в пост-проверке: ' + String(t && t.type));
       }
