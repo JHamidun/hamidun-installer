@@ -111,10 +111,25 @@ function uninstallTargets(id, ctx) {
       for (const sub of ['tracks', P.join('.claude', 'skills'), P.join('.claude', 'commands'), P.join('.course', 'knowledge')]) {
         targets.push({ type: 'dirtree', path: P.join(courseDir, sub), why: 'контент архива курса' });
       }
+      // Список сверен С АРХИВОМ (vendor/course/vibecoding-course.zip, листинг: 133 файла).
+      // send_beacon.mjs в нём есть, а в плане удаления его не было — .course не пустел,
+      // и emptydir-цель ниже молча не срабатывала.
+      //
+      // sandbox/README.md сюда НЕ добавлен, хотя в архиве он тоже есть: sandbox стоит в
+      // preserve ниже, то есть объявлен защищённым намеренно — это песочница ученика.
+      // Проверка защиты (uninstall-exec.js) такую цель отклоняет как «внутри
+      // защищённого», и правильно делает: один наш README не стоит того, чтобы
+      // ковыряться внутри неприкосновенной папки. Он останется — вместе с работой.
       for (const f of ['CLAUDE.md', 'AGENTS.md', 'README.md',
-        P.join('.course', 'config.yaml'), P.join('.course', 'state.example.json')]) {
+        P.join('.course', 'config.yaml'), P.join('.course', 'state.example.json'),
+        P.join('.course', 'send_beacon.mjs')]) {
         targets.push({ type: 'file', path: P.join(courseDir, f) });
       }
+      // Лаунчер, который кладёт САМ установщик (course.ps1:212) — внутрь папки курса,
+      // а не на стол. Его в архиве нет, поэтому в «контенте архива» он не значился и
+      // не удалялся вовсе. На macOS лаунчер лежит на рабочем столе и уже покрыт целью
+      // ярлыка ниже.
+      if (isWin) targets.push({ type: 'file', path: P.join(courseDir, 'Запустить курс.cmd') });
       // Ярлык на рабочем столе — имя ТОЛЬКО из вшитого config.json.
       const shortcut = String(ctx.courseShortcut || 'Курс вайбкодинг (Claude Code)');
       const desktop = ctx.desktop || P.join(home, 'Desktop');

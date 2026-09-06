@@ -55,8 +55,36 @@ function stagingRootOf(p) {
 function rmStagingTree(p) {
   const root = stagingRootOf(p);
   if (!isStagingName(root)) return false;
-  try { fs.rmSync(root, { recursive: true, force: true }); return true; }
-  catch (e) { return false; }
+  // Повторы под конкретную гонку. Уборка идёт сразу за killChildren(), а тот делает
+  // `taskkill /T /F`: TerminateProcess ИНИЦИИРУЕТ завершение и возвращается, не
+  // дожидаясь закрытия хендлов. Дочерний powershell и запущенный из staging установщик
+  // (cursor.ps1 стартует его прямо из HmDeElev-*\w) в этот момент ещё держат файлы,
+  // единственная попытка падала по EBUSY/EPERM — и Admins-only каталог оставался в
+  // %ProgramData% НАВСЕГДА: пользователь его удалить не может, а следующий запуск
+  // подберёт только через шесть часов «остывания».
+  //
+  // Цикл СВОЙ, а не опции maxRetries/retryDelay у rmSync. Их поведение проверено
+  // запуском на настоящем EBUSY (Node 22.15, удаление каталога, занятого как cwd):
+  // с ними и без них ошибка возвращается одинаково быстро — 29 против 39 мс, то есть
+  // ни одной паузы не было. Опции существуют, но на этот случай не действуют, и
+  // полагаться на них значило бы поставить комментарий про повторы там, где повторов нет.
+  //
+  // Пауза синхронная (Atomics.wait): уборка вызывается из обработчиков закрытия окна,
+  // где отдать управление циклу событий уже нельзя — процесс завершается.
+  const RETRY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
+  const sleep = (ms) => {
+    try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+    catch (e) { /* SharedArrayBuffer недоступен — просто без паузы */ }
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { fs.rmSync(root, { recursive: true, force: true }); return true; }
+    catch (e) {
+      if (!e || !RETRY_CODES.has(e.code)) return false;   // не гонка — повторять бессмысленно
+      if (attempt === 4) return false;
+      sleep(200);
+    }
+  }
+  return false;
 }
 
 module.exports = { STAGING_NAME, isStagingName, stagingRootOf, rmStagingTree };

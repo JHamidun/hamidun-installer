@@ -87,7 +87,22 @@ else
   # osxkeychain, а при установленном GCM — графическое окно) при любом отказе доступа
   # ждёт ввода, и установка виснет ВЕЧНО. Репозиторий конфига публичный: запрос
   # кредов = сломанная ситуация, правильный исход — быстро упасть с ошибкой.
-  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false -c credential.helper= -c credential.interactive=false clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
+  # Предел на «git ждёт сеть» — зеркало config.ps1. Список -c выше закрывает класс «git
+  # ждёт ввода», но полуоткрытое соединение (РФ-DPI, зависший прокси) он не лечит: без
+  # lowSpeedLimit клон висит молча и бесконечно, и шаг выглядит намертво вставшим.
+  # 30 секунд ниже 1 КБ/с — это уже не «медленно», а «не идёт».
+  "$GIT_BIN" -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.symlinks=false \
+             -c credential.helper= -c credential.interactive=false \
+             -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 \
+             clone --depth 1 -b "$BRANCH" "$URL" "$CLONE"
+  # Код возврата ЧИТАЕМ. Без этого провал клона всплывал ниже как «Источник конфига
+  # (.claude) не найден» — сообщение, по которому причину (нет сети, ветки, доступа)
+  # восстановить нельзя ни человеку, ни поддержке.
+  CLONE_RC=$?
+  if [ "$CLONE_RC" -ne 0 ]; then
+    echo "Не удалось скачать конфиг с GitHub (git вернул код $CLONE_RC). Проверь интернет и повтори установку этого компонента."
+    exit 1
+  fi
 fi
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.sh
