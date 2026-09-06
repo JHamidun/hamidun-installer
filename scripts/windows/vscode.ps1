@@ -76,7 +76,18 @@ if ($present) {
     # либо быть диагнозом, либо не выглядеть им.
     Write-Host "Ставлю VS Code из встроенного установщика (офлайн, издание User Setup — ставится в твой профиль)..."
     # User Setup (Inno) с !runcode НЕ запускает VS Code сам -> -Wait безопасен (в отличие от Cursor).
-    Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/NORESTART', '/MERGETASKS=!runcode,addtopath' -Wait
+    # -PassThru обязателен: без него код возврата Inno не прочитать, и провал САМОГО
+    # установщика (отменён политикой, не хватило места, повреждён) остаётся невидимым.
+    # Дальше скрипт не находил code.cmd и завершался текстом «CLI VS Code не найден —
+    # расширения не поставить», а словарь причин относил это к классу «расширение не
+    # встало». Человеку сообщали не про то: у него не установился редактор целиком.
+    $setupProc = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/NORESTART', '/MERGETASKS=!runcode,addtopath' -Wait -PassThru
+    $setupRc = if ($setupProc) { $setupProc.ExitCode } else { $null }
+    if ($null -ne $setupRc -and $setupRc -ne 0) {
+        # Inno: 2 = отменено пользователем, 5 = отменено на этапе подготовки,
+        # 1 = ошибка запуска setup. Точную расшифровку не выдумываем — печатаем код.
+        Write-Host "ВНИМАНИЕ: установщик VS Code завершился с кодом $setupRc — установка редактора НЕ прошла."
+    }
     Update-Path
     $codeExe = "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Code.exe"
     for ($i = 0; $i -lt 60 -and -not (Test-Path $codeExe); $i++) { Start-Sleep -Seconds 1 }
@@ -85,7 +96,11 @@ if ($present) {
         # Квитанция владения (каталог установки) — для будущего деинсталлятора.
         Write-Host "HM-RECEIPT path $(Split-Path $codeExe)"
     } else {
-        Write-Host "ВНИМАНИЕ: VS Code не подтвердил установку (Code.exe не найден) — расширения всё равно попробую доставить."
+        # Отдельный маркер для финального сообщения ниже: НЕ встал сам редактор.
+        # Без него оба исхода («редактора нет» и «редактор есть, CLI нет») сливались
+        # в одну строку про расширения.
+        $script:HmEditorMissing = $true
+        Write-Host "ВНИМАНИЕ: VS Code не подтвердил установку (Code.exe не найден$(if ($null -ne $setupRc) { ", код установщика $setupRc" })) — расширения всё равно попробую доставить."
     }
 }
 
