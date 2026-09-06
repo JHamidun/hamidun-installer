@@ -165,22 +165,22 @@
     {
       "remoteId": "nomad",
       "name": "Nomad (source + integrity manifest)",
-      "sizeBytes": 42554305,
-      "sha256": "88449e571684e29159a8d72003f1e18c2d5a7ab07792e902c5ba3bcc0c66f4fc",
+      "sizeBytes": 108438482,
+      "sha256": "e595218920aba3f861ef84087d0dfcd6b2e16b8f4bfd938d9dfd8d1c90f4ba81",
       "mirrors": [
         {
           "host": "regru",
-          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/nomad-win32-88449e571684e29159a8d72003f1e18c2d5a7ab07792e902c5ba3bcc0c66f4fc.zip"
+          "url": "https://s3.regru.cloud/hamidun-academy-materials/vibecoding-installer/nomad-win32-e595218920aba3f861ef84087d0dfcd6b2e16b8f4bfd938d9dfd8d1c90f4ba81.zip"
         },
         {
           "host": "yandex",
-          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/nomad-win32-88449e571684e29159a8d72003f1e18c2d5a7ab07792e902c5ba3bcc0c66f4fc.zip"
+          "url": "https://storage.yandexcloud.net/hamidun-installer-vendor/vibecoding-installer/nomad-win32-e595218920aba3f861ef84087d0dfcd6b2e16b8f4bfd938d9dfd8d1c90f4ba81.zip"
         }
       ],
       "installRelPath": "scripts/windows/nomad.ps1",
       "gatedFiles": {
-        "pyproject.toml": "dd2128ba79509d0dfc71f6c206d8282a414a61097dd5ab67b2da149041f2af40",
-        "nomad-src.sha256": "c64221c2cea2e61433c4963e6e7db76ac5075da53873eae1ffb765db2b5d1899"
+        "pyproject.toml": "57214b08355fb04adcc9d3dd42e7947af0cfdc9ed8f713e64b25c9efc6add81c",
+        "nomad-src.sha256": "ae8d8142edaa8b7e75e5b803ad8a836b1d8eb8efa7d9ed0ecd039347c4ca13da"
       },
       "platform": "win32"
     },
