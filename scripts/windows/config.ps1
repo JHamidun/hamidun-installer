@@ -89,9 +89,28 @@ if ($haveBundled) {
     $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false',
                  '-c','credential.helper=','-c','credential.interactive=false')
     if (Test-Path $clone) { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }
+    # Каталог мог НЕ удалиться (антивирус или индексатор держат объект в .git —
+    # SilentlyContinue это проглатывает). Тогда clone падает с «destination path already
+    # exists and is not an empty directory», а раньше его код возврата никто не читал:
+    # шаг шёл дальше и спотыкался позже, уже на «источник конфига не найден» — сообщение,
+    # по которому причину не восстановить.
+    if (Test-Path $clone) {
+        Write-Host "Не удалось очистить каталог для клона ($clone) — вероятно, файлы заняты антивирусом или индексатором."
+        Write-Host "Закрой редакторы, подожди минуту и повтори установку этого компонента."
+        exit 1
+    }
     Write-Host "Скачиваю конфиг с GitHub ($url)..."
     New-Item -ItemType Directory -Force (Split-Path $clone) | Out-Null
-    git @gitHard clone --depth 1 -b $branch $url $clone
+    # Предел на «git ждёт сеть». Список -c выше закрывает класс «git ждёт ввода», но
+    # полуоткрытое соединение (РФ-DPI, зависший прокси) он не лечит: без lowSpeedLimit
+    # клон висит молча и бесконечно, и шаг выглядит намертво вставшим. 30 секунд ниже
+    # 1 КБ/с — это уже не «медленно», а «не идёт».
+    $gitNet = @('-c','http.lowSpeedLimit=1024','-c','http.lowSpeedTime=30')
+    git @gitHard @gitNet clone --depth 1 -b $branch $url $clone
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Не удалось скачать конфиг с GitHub (git вернул код $LASTEXITCODE). Проверь интернет и повтори установку этого компонента."
+        exit 1
+    }
 }
 
 # Раскладываем из клонированного/вшитого source САМИ (merge-копией), НЕ через install.ps1

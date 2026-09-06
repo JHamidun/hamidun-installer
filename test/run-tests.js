@@ -5715,8 +5715,22 @@ ok('git НИКОГДА не спрашивает креды — иначе ок�
   // тест был зелёным на мёртвом коде. Поэтому собираем argv настоящим bash.
   assert(/credential\.helper=/.test(sh) && /credential\.interactive=false/.test(sh),
     'флаги защиты есть в строке (macOS)');
-  const gitLine = (sh.split(/\r?\n/).find((l) => /clone --depth 1 -b "\$BRANCH"/.test(l)) || '');
-  assert(gitLine, 'нашли строку вызова git clone');
+  // Вызов может быть МНОГОСТРОЧНЫМ (продолжения через « \» в конце строки) — так он и
+  // выглядит с тех пор, как к флагам добавились http.lowSpeedLimit/lowSpeedTime.
+  // Прежняя редакция брала ровно одну строку с `clone --depth 1`, и на многострочном
+  // вызове ей доставался огрызок без "$GIT_BIN" и без флагов: подставной git не
+  // запускался вовсе, argv приходил пустым. Склеиваем строки от "$GIT_BIN" до первой
+  // без хвостового обратного слэша — то есть ровно ту команду, что выполнит bash.
+  const shLines = sh.split(/\r?\n/);
+  const gitStart = shLines.findIndex((l) => /^\s*"\$GIT_BIN"/.test(l));
+  assert(gitStart !== -1, 'нашли начало вызова git clone');
+  const gitParts = [];
+  for (let k = gitStart; k < shLines.length; k++) {
+    gitParts.push(shLines[k]);
+    if (!/\\\s*$/.test(shLines[k])) break;
+  }
+  const gitLine = gitParts.join('\n');
+  assert(/clone --depth 1 -b "\$BRANCH"/.test(gitLine), 'в собранном вызове есть clone --depth 1: ' + gitLine.slice(0, 120));
   assert(gitLine.indexOf('\\n') === -1,
     'в строке нет литерального backslash-n: он ломает argv и убивает единственный путь получения конфига');
 
