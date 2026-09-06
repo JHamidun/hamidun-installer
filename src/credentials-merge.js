@@ -22,6 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 /** Имя переменной окружения: заглавные, цифры и подчёркивание, начиная с буквы. */
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
@@ -77,8 +78,35 @@ function saveCredentials(obj, opts) {
     if (saved.length) {
       // Атомарная замена: без tmp+rename падение посреди записи (диск полон,
       // антивирус) оставило бы ОБРЕЗАННЫЙ файл ключей.
-      const tmp = file + '.tmp-' + process.pid;
-      fs.writeFileSync(tmp, text, 'utf8');
+      //
+      // Имя временного файла — СЛУЧАЙНОЕ, и создаётся он режимом 'wx' (эксклюзивно,
+      // 0600), а не 'w'. Прежнее имя `<файл>.tmp-<pid>` предсказуемо, а 'w' идёт ПО
+      // СИМЛИНКУ: этот код работает в main, на Windows под администратором, и заранее
+      // подложенная ссылка с таким именем заставила бы элевейтед-процесс записать
+      // ВСЕ КЛЮЧИ человека в чужой файл — то есть не только затереть его, но и вынести
+      // секреты туда, куда указал не мы. `wx` на симлинк падает с EEXIST, а проверка
+      // nlink !== 1 отсекает жёсткую ссылку, подложенную между созданием и записью.
+      // Приём тот же, что в install-manifest.js:87 и install-receipts.js:108 — там он
+      // уже стоит и покрыт тестами; до ключей просто не дошёл.
+      const dir = path.dirname(file);
+      let tmp = '';
+      let fd = null;
+      for (let i = 0; i < 3 && fd === null; i++) {
+        const cand = path.join(dir, path.basename(file) + '.' + crypto.randomBytes(8).toString('hex') + '.tmp');
+        try { fd = fs.openSync(cand, 'wx', 0o600); tmp = cand; }
+        catch (e) { if (e && e.code === 'EEXIST') continue; throw e; }
+      }
+      if (fd === null) throw new Error('ЗАЩИТА: временный файл ключей уже существует (EEXIST) — возможная подмена, отказ');
+      try {
+        const st = fs.fstatSync(fd);
+        if (!st.isFile() || (typeof st.nlink === 'number' && st.nlink !== 1)) {
+          throw new Error('ЗАЩИТА: временный файл ключей не обычный файл / nlink!=1 — отказ');
+        }
+        fs.writeFileSync(fd, text, 'utf8');
+        try { fs.fsyncSync(fd); } catch (e) { /* fsync не везде обязателен */ }
+      } finally {
+        try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+      }
       try { fs.renameSync(tmp, file); }
       catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ } throw e; }
     }

@@ -3,7 +3,15 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
 
 echo "Проверяю Cursor..."
-if [ -d "/Applications/Cursor.app" ]; then echo "Cursor уже установлен."; exit 0; fi
+# Смотрим ОБА штатных места — так же, как детекция в main.js (ветка out.cursor):
+# /Applications (общесистемно) и ~/Applications (установка без прав администратора,
+# обычный путь, когда человек ставил Cursor сам). Здесь проверялось только первое, и у
+# такого человека шаг ставил ВТОРУЮ копию ~200 МБ в /Applications. Дальше расхождение
+# пряталось: детекция снимала галку, а повторный запуск видел /Applications/Cursor.app
+# и рапортовал «уже установлен» — с виду всё сошлось, а копии на диске две.
+for _capp in "/Applications/Cursor.app" "$HOME/Applications/Cursor.app"; do
+  if [ -d "$_capp" ]; then echo "Cursor уже установлен ($_capp)."; exit 0; fi
+done
 
 BUNDLED=0
 if [ -n "${HM_VENDOR:-}" ] && [ -f "$HM_VENDOR/apps/cursor.dmg" ]; then

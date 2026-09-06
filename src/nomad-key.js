@@ -16,6 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 // Управляемый блок и «голый» model: — те же выражения, что в nomad.ps1:275.
 const MANAGED_BLOCK = /^# >>> nomad-cloud[\s\S]*?# <<< nomad-cloud <<<\r?\n?/m;
@@ -81,11 +82,39 @@ function writeNomadKey(key, opts) {
   try {
     fs.mkdirSync(path.dirname(cfgY), { recursive: true });
     let text = '';
-    try { text = fs.readFileSync(cfgY, 'utf8'); } catch (e) { /* файла ещё нет — создадим */ }
+    try {
+      text = fs.readFileSync(cfgY, 'utf8');
+    } catch (e) {
+      // НЕ ПРОЧИТАЛИ — НЕ ПИШЕМ. Тот же инвариант, что в credentials-merge.js:12-16.
+      // «Файла нет» — это ENOENT/ENOTDIR, и только тогда создавать с нуля безопасно.
+      // Любая другая ошибка (EBUSY — конфиг открыт запущенным агентом, EACCES, EIO,
+      // облачный placeholder OneDrive) значит «файл, возможно, ЕСТЬ, но мы его не
+      // увидели». Прежний код глотал их все: text оставался пустым, и запись ниже
+      // заменяла ВЕСЬ config.yaml человека одним нашим блоком — а кнопку «Ключ из
+      // кабинета» жмут на финише, когда агентом уже пользовались и настройки в нём
+      // накоплены. Потеря молчаливая: ответ приходил ok.
+      if (!(e && (e.code === 'ENOENT' || e.code === 'ENOTDIR'))) {
+        return { ok: false, reason: 'io',
+          message: 'Не удалось прочитать текущий config.yaml (' + ((e && e.code) || String(e)) +
+            '). Ключ НЕ записан, чтобы не потерять твои настройки агента. Закрой Nomad и попробуй снова.' };
+      }
+    }
     text = text.replace(MANAGED_BLOCK, '');
     text = text.replace(BARE_MODEL, '');
     // Без BOM: BOM ломает YAML-парсер (тот же вывод, что в nomad.ps1:311).
-    fs.writeFileSync(cfgY, buildBlock(san.key, url, model, nl) + text, { encoding: 'utf8' });
+    // Запись через временный файл: падение посреди writeFileSync (диск полон,
+    // антивирус) оставило бы ОБРЕЗАННЫЙ конфиг агента — то есть сломало бы то,
+    // что мы пришли настроить.
+    const tmpY = cfgY + '.' + crypto.randomBytes(8).toString('hex') + '.tmp';
+    const fd = fs.openSync(tmpY, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, buildBlock(san.key, url, model, nl) + text, { encoding: 'utf8' });
+      try { fs.fsyncSync(fd); } catch (e2) { /* fsync не везде обязателен */ }
+    } finally {
+      try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+    }
+    try { fs.renameSync(tmpY, cfgY); }
+    catch (e2) { try { fs.rmSync(tmpY, { force: true }); } catch (e3) { /* ignore */ } throw e2; }
     return { ok: true, path: cfgY, model };
   } catch (e) {
     // Форма ответа — ровно как была в ipcMain.handle: renderer её уже читает.

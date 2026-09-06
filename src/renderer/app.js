@@ -2038,6 +2038,31 @@ function sendStartTelemetry(order) {
 
 // «Открыл редактор» — единственный сигнал, что человек реально пошёл работать, а не
 // просто получил зелёные галочки и закрыл окно.
+// Ошибки записи — человеческим языком, а не сырым текстом Node.
+//
+// Наружу шли строки вида «Error: EACCES: permission denied, open 'C:\Users\…\.claude\
+// .credentials.master.env'». Новичку, ради которого весь этот установщик и написан, они
+// не говорят ничего — зато выкладывают на экран путь к файлу ключей. Ниже — те коды,
+// что реально сюда доходят; всё прочее сворачиваем в общий совет, а технический текст
+// оставляем в логе (он уже там), не на экране.
+function humanIoError(raw) {
+  const s = String(raw || '');
+  if (!s) return 'неизвестная ошибка. Попробуй ещё раз или пришли лог в бота.';
+  if (/EACCES|EPERM/.test(s)) {
+    return 'нет прав на запись. Закрой Claude Code и редактор, потом попробуй снова; если не поможет — '
+      + 'запусти установщик правым кликом → «Запуск от имени администратора».';
+  }
+  if (/ENOSPC/.test(s)) return 'на диске кончилось место. Освободи немного и попробуй снова.';
+  if (/EBUSY|ETXTBSY/.test(s)) return 'файл занят другой программой. Закрой Claude Code и Cursor, потом попробуй снова.';
+  if (/EROFS/.test(s)) return 'диск доступен только для чтения.';
+  if (/EISDIR|ENOTDIR/.test(s)) return 'по этому пути лежит папка вместо файла — так бывает после сбоя. Пришли лог в бота.';
+  if (/EMFILE|ENFILE/.test(s)) return 'система исчерпала лимит открытых файлов. Перезагрузи компьютер и повтори.';
+  // Своё осмысленное сообщение (например, из credentials-merge) пропускаем как есть:
+  // оно уже написано для человека. Признак — отсутствие «Error:» и кода в верхнем регистре.
+  if (!/^Error:|\b[A-Z]{4,}\b/.test(s)) return s;
+  return 'ошибка записи. Пришли лог в бота — там полный текст.';
+}
+
 function sendOpenEditorTelemetry() {
   // Защёлка на прогон: кнопок, ведущих сюда, три (финиш с автозапуском, «Открыть VS
   // Code», «Открыть Cursor»), а обратной связи у них нет — человек жмёт повторно, пока
@@ -2233,14 +2258,23 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     const st = c.status || (c.ok ? 'ok' : 'fail');
     // skip = компонент не ставили: рисуем нейтрально (серым), НЕ как провал.
     if (st === 'skip') {
-      // Ярлык может нести уточнение в скобках («Claude CLI (установлен, запуск
-      // не проверен)») — для сопоставления берём часть до первой скобки.
-      const base = String(c.label || '').split(' (')[0].trim();
+      // Протокол CHECK трёхзначный, а не двузначный. Скрипт может прислать skip с
+      // СОБСТВЕННЫМ уточнением в скобках — «Claude CLI (установлен, запуск не
+      // проверен)»: это не «не ставили», а «поставили, но запуск подтвердить не вышло».
+      // Прежний код брал часть до скобки только для сопоставления id, а причину дописывал
+      // свою — и на экране выходило «Claude CLI (установлен, запуск не проверен) (не
+      // выбрано)»: дубль скобок и прямая ложь про невыбранный компонент.
+      // Если уточнение пришло от скрипта — оно и есть причина; своё дописываем, только
+      // когда скрипт молчит.
+      const label = String(c.label || '');
+      const m = label.match(/^([^(]+)\((.+)\)\s*$/);
+      const base = (m ? m[1] : label).trim();
+      const own = m ? m[2].trim() : '';
       const cid = CHECK_LABEL_TO_ID[base];
-      const why = cid && depSkippedIds.has(cid)
+      const why = own || (cid && depSkippedIds.has(cid)
         ? 'не ставили: не встала зависимость'
-        : 'не выбрано';
-      return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(c.label)} <span style="font-size:11px">(${why})</span></span></li>`;
+        : 'не выбрано');
+      return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(base)} <span style="font-size:11px">(${escapeHtml(why)})</span></span></li>`;
     }
     return `<li class="${st === 'ok' ? 'ok' : 'fail'}"><span class="mark">${st === 'ok' ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`;
   };
@@ -2469,8 +2503,11 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
       } else if (res && res.reason === 'empty') {
         setMsg('Поле пустое — вставь ключ из кабинета.', 'bad');
       } else {
-        setMsg('Не удалось записать ключ' + (res && res.message ? ' (' + res.message + ')' : '') +
-               '. Покажи эту строку боту-помощнику.', 'bad');
+        // Сообщение из nomad-key может быть уже человеческим («Ключ НЕ записан, чтобы не
+        // потерять твои настройки агента») — humanIoError такие пропускает как есть и
+        // переводит только сырые коды Node.
+        setMsg('Не удалось записать ключ' + (res && res.message ? ': ' + humanIoError(res.message) : '') +
+               ' Покажи эту строку боту-помощнику.', 'bad');
       }
     };
     nomadSaveBtn.addEventListener('click', save);
@@ -2533,9 +2570,42 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
     });
   }
   // reveal in Explorer/Finder — openPath on a .env silently fails on macOS.
-  $('#ns-keys').addEventListener('click', () => window.installer.revealPath(credPath));
+  //
+  // Результат IPC ЧИТАЕМ. Обе ручки честно возвращают статус: reveal-path отдаёт false,
+  // когда файла нет (а на финише с упавшим конфигом ключей и не будет), open-path —
+  // {ok:false,error}. Раньше оба вызова стояли однострочными стрелками без обработки:
+  // человек жал кнопку, не происходило ничего, и понять, что не так, было неоткуда —
+  // тот же «пустой клик», который уже ловили на кнопке редактора.
+  const sayNear = (btn, text) => {
+    if (!btn || !btn.parentElement) return;
+    let note = btn.parentElement.querySelector('.ns-reveal-err');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'ns-course-err ns-reveal-err';
+      btn.parentElement.appendChild(note);
+    }
+    note.textContent = text;
+  };
+  const keysBtnEl = $('#ns-keys');
+  keysBtnEl.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.revealPath(credPath); } catch (_) { ok = false; }
+    if (!ok) {
+      sayNear(keysBtnEl, 'Файл ключей пока не создан — он появится, когда сохранишь хотя бы один ключ '
+        + 'кнопкой «Сохранить ключи» выше. Путь: ' + credPath);
+    }
+  });
   const logBtnEl = $('#ns-log');
-  if (logBtnEl) logBtnEl.addEventListener('click', () => window.installer.openPath(STATE.logPath));
+  if (logBtnEl) {
+    logBtnEl.addEventListener('click', async () => {
+      let res = null;
+      try { res = await window.installer.openPath(STATE.logPath); } catch (_) { res = null; }
+      if (!res || res.ok !== true) {
+        sayNear(logBtnEl, 'Не удалось открыть лог. Он лежит здесь — открой вручную и пришли файл в бота: '
+          + STATE.logPath);
+      }
+    });
+  }
   const startBtnEl = $('#ns-start');
   if (startBtnEl && startHtmlRel) {
     // Авто-показ ОДИН раз — встроенный просмотр (Shadow DOM-оверлей), НЕ браузер.
@@ -2577,7 +2647,7 @@ async function saveCredentialKeys() {
   if (status) {
     status.textContent = res && res.ok
       ? `Сохранено (${(res.saved || []).length}) в .credentials.master.env ✓`
-      : 'Не удалось сохранить: ' + ((res && res.error) || 'неизвестная ошибка');
+      : 'Не удалось сохранить: ' + humanIoError(res && res.error);
   }
 }
 

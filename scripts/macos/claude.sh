@@ -24,11 +24,27 @@ claude_install_ok() {
   elif have claude; then bin="$(command -v claude)"
   else return 1; fi
   if "$bin" --version >/dev/null 2>&1; then return 0; fi
-  echo "Проверка запуском: claude на месте, но НЕ отвечает — убираю нерабочий артефакт из ~/.local."
-  rm -f "$HOME/.local/bin/claude" 2>/dev/null
-  rm -rf "$HOME/.local/lib/node_modules/@anthropic-ai/claude-code" 2>/dev/null
+  # Убираем ТОЛЬКО то, что положили сами. Снимок PRE_EXISTING снят до любой нашей
+  # установки (ниже): если claude в ~/.local уже лежал ДО нас, он не наш — его мог
+  # поставить сам человек своим npm, и не ответить на --version тот может по причине,
+  # к нам не относящейся (урезанный PATH под GUI, отсутствующий node). Зеркало
+  # claude.ps1:196-201, где такой снимок есть; здесь его просто не было, и установщик
+  # удалял чужие файлы, ничего при этом не установив.
+  if [ "${PRE_EXISTING:-none}" = "ours-absent" ]; then
+    echo "Проверка запуском: claude на месте, но НЕ отвечает — убираю нерабочий артефакт из ~/.local."
+    rm -f "$HOME/.local/bin/claude" 2>/dev/null
+    rm -rf "$HOME/.local/lib/node_modules/@anthropic-ai/claude-code" 2>/dev/null
+  else
+    echo "Проверка запуском: claude на месте, но НЕ отвечает. Он лежал здесь ДО установки — не трогаю чужое."
+  fi
   return 1
 }
+
+# Снимок ДО любой нашей установки: был ли claude в ~/.local уже на месте.
+# 'ours-absent' — файла не было, значит всё, что появится там дальше, положили мы (и
+# нерабочее можно убрать). 'pre-existing' — файл был, трогать его нельзя.
+PRE_EXISTING='ours-absent'
+if [ -e "$HOME/.local/bin/claude" ] || [ -L "$HOME/.local/bin/claude" ]; then PRE_EXISTING='pre-existing'; fi
 
 # Платформенный пакет Claude Code для ТЕКУЩЕЙ архитектуры. Настоящий бинарь едет
 # именно в нём (@anthropic-ai/claude-code-darwin-arm64 | -darwin-x64), а не в
@@ -106,12 +122,48 @@ fi
 # Честный финальный гейт: не «файл на диске», а РАБОТАЕТ. Тот же claude_install_ok:
 # нерабочий артефакт здесь же удаляется, и человек видит красный статус, а не ложный OK
 # с бинарём, который упадёт при первом запуске.
+
+# Вердикт ЗАПУСКОМ пишем в ~/.hamidun-setup/checks.json — зеркало Write-HmCheck из
+# claude.ps1:269. Финальный чек-лист (verify.sh) обязан ПЕРЕНЕСТИ его, а не выводить
+# заново по наличию файла: наличие обёртки ничего не доказывает — её оставляет и
+# провалившаяся установка, и «✓» по файлу давало зелёную галочку при неработающем
+# claude. Один факт «claude работает» — один стандарт доказательства на обеих ОС;
+# до сих пор он был только на Windows. Диагностика не должна ломать установку,
+# поэтому все ошибки записи глушим.
+hm_write_check() {
+  local name="$1" verdict="$2" dir="$HOME/.hamidun-setup" file tmp now
+  file="$dir/checks.json"; tmp="$file.$$.tmp"; now=$(date +%s000 2>/dev/null || echo 0)
+  mkdir -p "$dir" 2>/dev/null || return 0
+  # Правим JSON через python3 только если он есть и не голый CLT-шим; иначе пишем
+  # одиночную запись — verify.sh читает конкретный ключ, а не всю структуру.
+  if command -v python3 >/dev/null 2>&1 && { [ "$(command -v python3)" != "/usr/bin/python3" ] || xcode-select -p >/dev/null 2>&1; }; then
+    python3 - "$file" "$tmp" "$name" "$verdict" "$now" <<'PY' 2>/dev/null || return 0
+import io, json, os, sys
+f, tmp, name, verdict, now = sys.argv[1:6]
+data = {}
+try:
+    with io.open(f, encoding='utf-8') as fh: data = json.load(fh)
+    if not isinstance(data, dict): data = {}
+except Exception:
+    data = {}
+data[name] = {'verdict': verdict, 'at': int(now)}
+with io.open(tmp, 'w', encoding='utf-8') as fh: json.dump(data, fh, ensure_ascii=False)
+os.replace(tmp, f)
+PY
+  else
+    printf '{"%s":{"verdict":"%s","at":%s}}' "$name" "$verdict" "$now" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
+  fi
+  return 0
+}
+
 export PATH="$HOME/.local/bin:$PATH"
 if claude_install_ok; then
   persist_local_bin_path
+  hm_write_check claude works
   if have claude; then echo "OK: $(claude --version 2>&1 | head -n1)"
   else echo "OK: claude установлен, PATH прописан — открой НОВЫЙ терминал для команды claude."; fi
   exit 0
 else
+  hm_write_check claude broken
   echo "ОШИБКА: Claude Code CLI не установился или не запускается — смотри лог выше."; exit 1
 fi

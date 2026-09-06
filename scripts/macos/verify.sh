@@ -57,15 +57,34 @@ fi
 if ! is_selected claude; then
   echo "CHECK skip Claude CLI"
 else
-  CLAUDE_OK=0
-  if have claude; then
-    echo "  claude: $(command -v claude)"
-    CLAUDE_OK=1
-  elif [ -x "$HOME/.local/bin/claude" ]; then
-    echo "  claude: $HOME/.local/bin/claude (появится в PATH после перезапуска терминала)"
-    CLAUDE_OK=1
+  # ОДИН факт — ОДИН стандарт доказательства (зеркало verify.ps1:100-116). claude.sh
+  # проверяет claude ЗАПУСКОМ и пишет вердикт в ~/.hamidun-setup/checks.json; здесь мы
+  # его ПЕРЕНОСИМ. Наличие файла ничего не доказывает: обёртку оставляет и провалившаяся
+  # установка, и «✓» по файлу давало зелёную галочку при неработающем claude. Git и Node
+  # рядом проверяются запуском — исключения для claude быть не должно.
+  CLAUDE_VERDICT=""
+  CHECKS_FILE="$HOME/.hamidun-setup/checks.json"
+  if [ -f "$CHECKS_FILE" ]; then
+    # grep, а не парсер: нужен один ключ, а python3 на чистом маке — CLT-шим с GUI-диалогом.
+    CLAUDE_VERDICT=$(grep -o '"claude"[^}]*"verdict"[[:space:]]*:[[:space:]]*"[a-z]*"' "$CHECKS_FILE" 2>/dev/null \
+      | sed -e 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/' | tail -n1)
   fi
-  if [ "$CLAUDE_OK" -eq 1 ]; then echo "CHECK ok Claude CLI"; else echo "CHECK fail Claude CLI"; fi
+  CLAUDE_BIN=""
+  if have claude; then CLAUDE_BIN="$(command -v claude)"
+  elif [ -x "$HOME/.local/bin/claude" ]; then CLAUDE_BIN="$HOME/.local/bin/claude (появится в PATH после перезапуска терминала)"; fi
+  [ -n "$CLAUDE_BIN" ] && echo "  claude: $CLAUDE_BIN"
+  if [ "$CLAUDE_VERDICT" = "works" ]; then
+    echo "CHECK ok Claude CLI"
+  elif [ "$CLAUDE_VERDICT" = "broken" ]; then
+    echo "CHECK fail Claude CLI"
+  elif [ -n "$CLAUDE_BIN" ]; then
+    # Вердикта нет (компонент ставили прошлой версией установщика, файл не создан) —
+    # третье состояние, как на Windows: файл есть, но запуск НЕ подтверждён. Врать
+    # зелёным нельзя, красным — тоже: claude может быть вполне рабочим.
+    echo "CHECK skip Claude CLI (установлен, запуск не проверен)"
+  else
+    echo "CHECK fail Claude CLI"
+  fi
 fi
 
 # --- Конфиг (~/.claude развёрнут?) ---
