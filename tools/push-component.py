@@ -96,7 +96,19 @@ def gated_files_map(zip_path: Path, platform):
     # закономерно и безобидно: config-pack несёт свой canvas-fonts/JetBrainsMono-*.ttf,
     # а манифест — совсем другой шрифт из vendor/apps для терминала. Без этого исключения
     # сборка ложно падала бы «рассинхрон манифеста» на файле, который никто не верифицирует.
-    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/")
+    # nomad-src/skills/ — ровно тот же случай, что config-pack, и он уже сработал:
+    # дерево скиллов Nomad несёт СВОЙ canvas-fonts/JetBrainsMono-Regular.ttf
+    # (b6b1ff4ddefe), а в манифесте под тем же базовым именем лежит наш терминальный
+    # шрифт из vendor/apps (a0bf60ef0f83). gated_files_map брала sha чужого файла, и
+    # release-check объявлял блокер «рассинхрон» — при том что у пользователя всё сходится:
+    # гейт проверяет apps/JetBrainsMono-Regular.ttf и находит запись по имени с тем же sha.
+    #
+    # Хуже, что блокер был НЕВЫВОДИМЫМ: он советовал перепубликовать компонент, а
+    # перепубликация ничего не меняет — файл в скилле тот же. Релиз вставал навсегда.
+    #
+    # Исключается ИМЕННО skills/, а не весь nomad-src: pyproject.toml лежит в корне
+    # дерева и проверяется гейтом по-настоящему (nomad.ps1 перед uv tool install).
+    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/", "nomad-src/skills/")
     gated = {}
     with zipfile.ZipFile(zip_path) as z:
         for info in z.infolist():
