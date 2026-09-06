@@ -322,8 +322,15 @@ function verifyDirSecureWin(dir, log) {
     "if($allow -notcontains $s){Write-Output ('INSECURE:ace='+$s);exit 0}};" +
     "Write-Output 'SECURE'";
   const env = Object.assign(trustedEnv(), { HM_VERIFY_DIR: dir });
+  // Таймаут ОБЯЗАТЕЛЕН: вызов синхронный, и он идёт в цикле на старте приложения —
+  // pruneStaleSecureDirs обходит все %ProgramData%\HmDeElev-* сразу после createWindow.
+  // Без предела один затянувшийся powershell (первый запуск после установки, агрессивный
+  // антивирус, повреждённый профиль) держит главный поток, и окно установщика не
+  // появляется вовсе: человек видит, что «ничего не запустилось». 20 секунд с запасом
+  // хватает на честный ответ, а fail-closed ниже трактует таймаут как «не подтвердили
+  // безопасность каталога» — то есть в сторону отказа, а не доверия.
   const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-    { encoding: 'utf8', windowsHide: true, env });
+    { encoding: 'utf8', windowsHide: true, env, timeout: 20000 });
   const out = String(r.stdout || '').trim();
   if (!r.error && r.status === 0 && /(^|\n)SECURE$/.test(out)) return true;
   log && log('  [sec] проверка ACL не пройдена для ' + dir + ': ' + (out || trimOut(r) || (r.error && r.error.message) || ('exit ' + r.status)));
@@ -761,10 +768,23 @@ function unpackZip(zipPath, destDir) {
       // encoding НЕ 'utf8': powershell.exe пишет в кодовой странице консоли
       // (см. decodeConsole выше) — берём вывод буфером и декодируем реальной CP,
       // иначе кириллица в тексте .NET-исключения приезжает пользователю мусором.
+      // Таймаут распаковки. Она идёт СИНХРОННО в главном процессе Electron: пока
+      // spawnSync не вернулся, окно не перерисовывается и кнопки не отвечают. Без предела
+      // повисший распаковщик (сетевой диск отвалился, антивирус держит файл, битый
+      // архив на файловой системе, которая не отдаёт ошибку) морозил установщик
+      // НАВСЕГДА — человек видел мёртвое окно и мог только убить процесс. Порог щедрый:
+      // архивы до гигабайта на медленном диске распаковываются минутами, рвать честную
+      // работу нельзя. Ниже таймаут отдаёт r.error и превращается во внятный отказ шага.
+      const UNPACK_TIMEOUT_MS = 15 * 60 * 1000;
       const r = spawnSync(ps,
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript],
-        { windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      if (r.error) return { ok: false, error: String(r.error.message || r.error) };
+        { windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: UNPACK_TIMEOUT_MS });
+      if (r.error) {
+        const timedOut = r.error && (r.error.code === 'ETIMEDOUT' || /ETIMEDOUT/.test(String(r.error.message || '')));
+        return { ok: false, error: timedOut
+          ? 'распаковка не завершилась за 15 минут и была прервана (диск занят, антивирус или повреждённый архив) — повтори шаг'
+          : String(r.error.message || r.error) };
+      }
       if (r.status !== 0) {
         const text = decodeConsole(r.stderr) || decodeConsole(r.stdout);
         return { ok: false, error: (text || ('powershell exit ' + r.status)).trim() };
@@ -776,13 +796,19 @@ function unpackZip(zipPath, destDir) {
       // unzip ЗАДАЁТ ВОПРОС «Continue? (y/n)», подвешивая шаг навсегда. ditto — родной
       // распаковщик, имена читает верно и вопросов не задаёт.
       // stdin закрыт у ОБОИХ: любой вопрос получает EOF и процесс честно падает.
+      // Тот же предел, что и у Windows-ветки выше, и по той же причине: распаковка
+      // синхронна, а главный процесс — единственный, кто рисует окно.
+      const UNPACK_TIMEOUT_MS = 15 * 60 * 1000;
       let r = spawnSync('/usr/bin/ditto', ['-x', '-k', zipPath, destDir],
-        { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+        { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'], timeout: UNPACK_TIMEOUT_MS });
       if (r.error || r.status !== 0) {
         r = spawnSync('/usr/bin/unzip', ['-o', '-q', zipPath, '-d', destDir],
-          { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
+          { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'], timeout: UNPACK_TIMEOUT_MS });
         if (r.error || r.status !== 0) {
-          return { ok: false, error: String((r.stderr || (r.error && r.error.message) || 'распаковка не удалась')).trim() };
+          const timedOut = r.error && (r.error.code === 'ETIMEDOUT' || /ETIMEDOUT/.test(String(r.error.message || '')));
+          return { ok: false, error: timedOut
+            ? 'распаковка не завершилась за 15 минут и была прервана (диск занят или повреждённый архив) — повтори шаг'
+            : String((r.stderr || (r.error && r.error.message) || 'распаковка не удалась')).trim() };
         }
       }
     }

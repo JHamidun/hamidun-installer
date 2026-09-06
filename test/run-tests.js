@@ -275,6 +275,31 @@ ok('реестр: pickEntry reverse-mapping + отвергает опечатк�
   }
 });
 
+// Ни одного синхронного вызова без предела времени в remote-fetch.
+//
+// Все spawnSync здесь идут в ГЛАВНОМ процессе Electron: пока вызов не вернулся, окно не
+// перерисовывается и кнопки не отвечают. Без таймаута повисший распаковщик или проверка
+// ACL (её pruneStaleSecureDirs гоняет в цикле сразу после createWindow) морозили
+// установщик насмерть — человек видел мёртвое окно и мог только убить процесс.
+// Сторож на ВЕСЬ файл, а не на конкретные строки: чинить одну точку из пяти бессмысленно,
+// а новый вызов без предела иначе проскочит незамеченным.
+ok('remote-fetch: КАЖДЫЙ spawnSync ограничен таймаутом (главный процесс не морозится)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'remote-fetch.js'), 'utf8');
+  const calls = [];
+  const re = /spawnSync\(/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    // Аргументы вызова — до первого `);` (внутри опций скобок нет).
+    const seg = src.slice(m.index, m.index + 600);
+    const end = seg.indexOf(');');
+    calls.push({ line: src.slice(0, m.index).split('\n').length, text: seg.slice(0, end > 0 ? end : 400) });
+  }
+  assert(calls.length >= 4, 'вызовы spawnSync найдены: ' + calls.length);
+  const noTimeout = calls.filter((c) => !/timeout\s*:/.test(c.text));
+  assert(noTimeout.length === 0,
+    'spawnSync без timeout в строках: ' + noTimeout.map((c) => c.line).join(', '));
+});
+
 // BUG #11: mac-uv platform-гейт. Проверяем pickEntry на КАЖДОЙ платформе, где
 // компонент ПОКАЗАН (по components.json `platforms`), а не «есть хоть одна запись».
 ok('BUG #11: remote-компонент имеет сборку в реестре для КАЖДОЙ показанной платформы', () => {
@@ -1490,6 +1515,26 @@ ok('P0-A (extension.ps1): Cursor install де-элевированно + FS-ат
   assert(!/\$r\.Output/.test(s) && !/\$lst\.Output/.test(s), 'вывод бинаря НЕ используется как доверие');
   assert(!/& \$cli --install-extension/.test(s), 'НЕТ прямого elevated `& $cli --install-extension`');
   assert(/DeElevFailed/.test(s) && /\$null -eq \$r/.test(s), 'fail-closed при недоступной де-элевации');
+});
+
+// Cursor человека НЕ убивается ради нашего шага. Прежняя «крайняя мера» делала
+// `Stop-Process -Force` по пользовательскому Cursor — то есть теряла его несохранённые
+// файлы. Шаг того не стоит: панель Claude уже стоит в VS Code, а в Cursor ставится
+// вручную одним кликом. Просим закрыться, ждём, и при отказе отступаем с объяснением.
+ok('extension.ps1: пользовательский Cursor не убивается принудительно — просим закрыться, при отказе отступаем', () => {
+  const s = EG_EXT();
+  const i = s.indexOf('$userCursorSpared -and (Get-Process Cursor');
+  assert(i > 0, 'ветка «расширение не встало при открытом Cursor» найдена');
+  // codeOnly: комментарий рядом ОБЪЯСНЯЕТ, почему принудительного убийства больше нет, и
+  // потому содержит слова «Stop-Process -Force». Сторож на сыром тексте ловил это
+  // объяснение и краснел на исправном коде — та же ловушка, что уже была у assertOrder.
+  const branch = codeOnly(s.slice(i, i + 1800));
+  assert(/CloseMainWindow\(\)/.test(branch), 'просим окно закрыться штатно (несохранённое Cursor предложит сохранить)');
+  assert(!/Stop-Process[^\n]*Force/.test(branch), 'НЕТ принудительного убийства пользовательского Cursor');
+  assert(/for \(\$w = 0; \$w -lt \d+; \$w\+\+\)/.test(branch), 'даём время закрыться, а не проверяем однократно');
+  assert(/не закрылся/.test(branch) && /твоя работа важнее/.test(branch),
+    'при отказе честно объясняем, почему шаг не доведён');
+  assert(/Повторить неустановленное/.test(branch), 'сказано, что делать дальше');
 });
 
 // P0-B/P1-3 (verify.ps1): проверка расширения — по каталогам, точный префикс ${extId}- + ЦИФРА
@@ -3219,6 +3264,14 @@ ok('долгие шаги не выглядят зависшими: де-эле�
   assert(!/системный установщик ждёт другую установку/.test(msg),
     'сторож больше не назначает единственную причину');
   assert(/НЕ остановлена|продолжается/.test(msg), 'сказано, что установка продолжается');
+  // И не обещает спасения, которого нет. Дочерний процесс спавнится БЕЗ timeout
+  // (watchdog намеренно без убийства), внутри скриптов Start-Process -Wait, npm, pip и
+  // распаковка тоже без лимита. Текст обещал «шаг сам прервётся по своему лимиту» —
+  // человек ждал автоматического исхода, который наступить не мог.
+  assert(!/прервётся по своему лимиту/.test(msg),
+    'сторож не обещает несуществующее автопрерывание шага');
+  assert(/сам по себе шаг не\s+прервётся|решение за тобой/i.test(msg),
+    'сказано прямо: шаг сам не прервётся, дальше решает человек');
 });
 
 ok('nomad.sh: на Intel-маке cryptography ограничена версией с колесом — через -c, а не надеждой на uv.lock', () => {
@@ -6722,7 +6775,14 @@ asyncTests()
   });
 
   // Хелпер: собрать временный HOME с claude нужного поведения и прогнать claude_install_ok.
-  function runClaudeGate(prep) {
+  //
+  // preExisting — снимок «лежал ли claude в ~/.local ДО нашей установки». В самом скрипте
+  // он снимается всегда (claude.sh, сразу за объявлением функции), и функция по нему
+  // решает, своё она удаляет или чужое. Прежняя редакция хелпера вырезала функцию БЕЗ
+  // снимка и гоняла её в вакууме — то есть проверяла поведение, которого в боевом
+  // скрипте не бывает. По умолчанию 'ours-absent': это ровно тот случай, что описан в
+  // тестах ниже — обёртку положил НАШ npm в этом же запуске.
+  function runClaudeGate(prep, preExisting) {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-claude-'));
     try {
       prep(home);
@@ -6732,6 +6792,7 @@ asyncTests()
       fs.writeFileSync(scriptFile,
         'set -u\nHOME="' + toPosix(home) + '"\nexport PATH="$HOME/.local/bin:/usr/bin:/bin"\n' +
         'have() { command -v "$1" >/dev/null 2>&1; }\n' +
+        "PRE_EXISTING='" + (preExisting || 'ours-absent') + "'\n" +
         bashFn(CLAUDE_SH, 'claude_install_ok') + '\n' +
         'claude_install_ok; echo "rc=$?"\n');
       const r = runBashFile(scriptFile);
@@ -6775,6 +6836,25 @@ asyncTests()
   ok('claude.sh (поведение): claude нет вовсе → гейт красный (без ложного OK)', () => {
     const r = runClaudeGate(() => { /* пустой HOME */ });
     assert(/rc=1/.test(r.out), 'отсутствующий claude не должен проходить гейт: ' + r.out);
+  });
+
+  ok('claude.sh (поведение): claude лежал ДО установки и не отвечает — гейт красный, но ЧУЖОЕ НЕ УДАЛЯЕМ', () => {
+    // Зеркало claude.ps1:196-201, где такой снимок есть. Человек мог поставить claude
+    // сам своим npm; не ответить на --version тот может по причине, к нам не относящейся
+    // (урезанный PATH под GUI, отсутствующий node). Удалять его файлы, ничего при этом
+    // не установив, установщик не вправе — это чужие данные на чужой машине.
+    const r = runClaudeGate((home) => {
+      const bin = path.join(home, '.local', 'bin');
+      fs.mkdirSync(bin, { recursive: true });
+      fs.mkdirSync(path.join(home, '.local', 'lib', 'node_modules', '@anthropic-ai', 'claude-code'),
+        { recursive: true });
+      fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 1\n');
+      try { fs.chmodSync(path.join(bin, 'claude'), 0o755); } catch (e) { /* win */ }
+    }, 'pre-existing');
+    assert(/rc=1/.test(r.out), 'нерабочий claude обязан провалить гейт и в этом случае: ' + r.out);
+    assert(r.wrapper, 'ЧУЖАЯ обёртка (лежала до установки) НЕ удаляется');
+    assert(r.pkg, 'чужой пакет в ~/.local/lib тоже не трогаем');
+    assert(/не трогаю чужое/.test(r.out), 'человеку сказано, почему артефакт оставлен: ' + r.out);
   });
 
   ok('claude.sh: ЕДИНЫЙ гейт стоит на ВСЕХ путях — офлайн, curl, npm-фолбэк, финал', () => {

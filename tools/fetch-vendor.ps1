@@ -573,8 +573,22 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
       if (Test-Path $srcOut) { Remove-Item -Recurse -Force $srcOut -ErrorAction SilentlyContinue }
       New-Item -ItemType Directory -Force $srcOut | Out-Null
       # Нативный Windows tar.exe (bsdtar) — понимает C:\ пути. НЕ msys /usr/bin/tar.
+      #
+      # Код возврата ПРОВЕРЯЕМ. Единственным признаком успеха было наличие
+      # pyproject.toml (он лежит в корне и распаковывается одним из первых), поэтому
+      # ошибка после первых файлов — кончилось место, битый архив, недоступный файл —
+      # давала НЕПОЛНОЕ дерево, которое проходило дальше как готовое: хеш дерева
+      # снимался с того, что распаковалось, и манифест целостности заверял огрызок.
+      # Тот же класс, что обрубок скачивания: проверка сверяет артефакт сам с собой.
       & "$env:SystemRoot\System32\tar.exe" -x -f "$tmpTar" -C "$srcOut"
+      $tarRc = $LASTEXITCODE
       Remove-Item $tmpTar -Force -ErrorAction SilentlyContinue
+      if ($tarRc -ne 0) {
+        Write-Host "[vendor] FATAL: распаковка nomad-src завершилась с кодом $tarRc — дерево неполное."
+        Write-Host "         Собирать из него нельзя: манифест целостности заверил бы огрызок, а установка"
+        Write-Host "         у покупателя упала бы на недостающем файле. Освободи место / повтори fetch:vendor."
+        exit 1
+      }
       # `uv tool install` не требует тестов, сайт-доков и опциональных скиллов —
       # снимаем их, чтобы вшитый .7z оставался под лимитом mmap 32-битного
       # makensis (~2GB, target=portable). Иначе крупный агент рушит NSIS-сборку.

@@ -213,10 +213,30 @@ if (Test-Path $cursorSettings) {
 # Крайняя мера: расширение не встало, а пользовательский Cursor так и остался открытым
 # (частая причина 'aborted'). Честно предупреждаем и закрываем — иначе установка не завершится.
 if (-not $installed -and -not $DRY -and $userCursorSpared -and (Get-Process Cursor -ErrorAction SilentlyContinue)) {
-    Write-Host "Расширение не установилось при открытом Cursor. Крайняя мера: закрываю Cursor и пробую ещё раз (сохранённая работа не пострадает; несохранённая — увы)."
-    Get-Process Cursor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 600
-    if (Install-Into $cursorCli 'Cursor') { $installed = $true }
+    # Просим ЗАКРЫТЬСЯ, а не убиваем. Прежний `Stop-Process -Force` уносил несохранённую
+    # работу человека без спроса — редактор, который он открыл сам, с его файлами. Это
+    # не «крайняя мера установщика», это потеря чужих данных ради нашего шага, который
+    # и так не обязателен: панель Claude уже стоит в VS Code, а в Cursor её можно
+    # доставить одним кликом вручную.
+    #
+    # CloseMainWindow() шлёт окну обычный запрос на закрытие. Есть несохранённое —
+    # Cursor покажет свой диалог и НЕ закроется; тогда мы отступаем и говорим человеку,
+    # что делать. Нечего сохранять — закроется сам за пару секунд, и мы доставим
+    # расширение, как и хотели.
+    Write-Host "Расширение не установилось при открытом Cursor. Прошу Cursor закрыться (несохранённое он предложит сохранить)..."
+    $cursorProcs = @(Get-Process Cursor -ErrorAction SilentlyContinue)
+    foreach ($p in $cursorProcs) { try { [void]$p.CloseMainWindow() } catch { } }
+    $closed = $false
+    for ($w = 0; $w -lt 20; $w++) {          # до 10 секунд
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-Process Cursor -ErrorAction SilentlyContinue)) { $closed = $true; break }
+    }
+    if ($closed) {
+        if (Install-Into $cursorCli 'Cursor') { $installed = $true }
+    } else {
+        Write-Host "Cursor не закрылся — похоже, в нём есть несохранённые файлы. НЕ закрываю его принудительно: твоя работа важнее этого шага."
+        Write-Host "Сохрани файлы, закрой Cursor и нажми «Повторить неустановленное». Либо поставь панель вручную: Cursor -> расширения -> '$extId' -> Install."
+    }
 }
 
 if ($installed) { Write-Host "OK: панель Claude Code установлена в Cursor."; exit 0 }
