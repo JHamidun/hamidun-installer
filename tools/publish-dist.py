@@ -199,6 +199,23 @@ def main():
             print('     %s  %s' % (url, 'OK' if ok else 'РАЗМЕР НЕ СОВПАЛ (%s против %s)' % (got, size)))
             if not ok:
                 failures.append(url)
+            # Размер не ловит испорченный заголовок. 21.09.2026 put_object положил
+            # /config с «Content-Encoding: aws-chunked» при совпавшем размере — и
+            # проверка «OK» там тоже стояла. У файлов крупнее порога multipart
+            # заголовок пока выходил чистым (dmg 3 ГБ из CI), но это наблюдение,
+            # а не гарантия: проверяем сам заголовок и чиним серверной копией.
+            enc = s3.head_object(Bucket=bucket, Key=t['key']).get('ContentEncoding', '')
+            if 'aws-chunked' in enc:
+                print('     заголовок «%s» — чиню серверной копией…' % enc)
+                s3.copy_object(Bucket=bucket, Key=t['key'],
+                               CopySource={'Bucket': bucket, 'Key': t['key']},
+                               MetadataDirective='REPLACE', ACL='public-read',
+                               ContentType=t['type'])
+                enc = s3.head_object(Bucket=bucket, Key=t['key']).get('ContentEncoding', '')
+            if 'aws-chunked' in enc:
+                failures.append(url + ' (Content-Encoding: %s)' % enc)
+            else:
+                print('     заголовок сжатия: %s' % (enc or 'нет — чисто'))
 
     if failures:
         raise SystemExit('проверка после заливки не сошлась: ' + ', '.join(failures))
