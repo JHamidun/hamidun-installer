@@ -28,14 +28,20 @@ mac-workflow. Ручная заливка Windows опасна ровно одн
   • multipart с порогом 64 МиБ, ACL public-read, честный ContentType;
   • после заливки — анонимный HEAD: размер обязан совпасть с локальным.
 
+И ДО заливки — подпись: exe уходит только подписанным нашим сертификатом Certum
+(Get-AuthenticodeSignature = Valid и отпечаток из tools/sign-win.js). Иначе стоп;
+осознанно без подписи — --allow-unsigned, и это видно в логе. Как подписать —
+WIN-SIGNING.md.
+
 Запуск:
-    python tools/publish-dist.py --dry-run          показать план
+    python tools/publish-dist.py --dry-run          показать план (и проверить подписи)
     python tools/publish-dist.py --only win-offline
     python tools/publish-dist.py                    выложить всё, что найдено
 """
 import argparse
 import io
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -97,6 +103,33 @@ def client_for(env, prefix):
     return c, env[f'{prefix}_BUCKET'], env[f'{prefix}_ENDPOINT'].rstrip('/')
 
 
+def expected_signer():
+    """Отпечаток нашего сертификата — из tools/sign-win.js (один источник правды) или HM_WIN_CERT_SHA1."""
+    if os.environ.get('HM_WIN_CERT_SHA1'):
+        return os.environ['HM_WIN_CERT_SHA1'].upper()
+    src = io.open(os.path.join(REPO, 'tools', 'sign-win.js'), encoding='utf-8').read()
+    m = re.search(r"CERT_SHA1 = '([0-9A-Fa-f]{40})'", src)
+    return m.group(1).upper() if m else None
+
+
+def authenticode(path):
+    """Вердикт САМОЙ Windows о подписи файла: (статус, отпечаток подписанта).
+
+    Get-AuthenticodeSignature проверяет то же, что SmartScreen и окно UAC у
+    пользователя: цепочку до доверенного корня и целостность файла после подписи.
+    Не на Windows проверить нечем — (None, None), и публикация exe тогда стоп.
+    """
+    if os.name != 'nt':
+        return None, None
+    ps = ('$s = Get-AuthenticodeSignature -LiteralPath $env:HM_SIG_FILE; '
+          '"$($s.Status)|$($s.SignerCertificate.Thumbprint)"')
+    r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+                       capture_output=True, text=True, timeout=600,
+                       env=dict(os.environ, HM_SIG_FILE=path))
+    status, _, thumb = (r.stdout or '').strip().partition('|')
+    return (status or 'unknown: ' + (r.stderr or '').strip()[:80]), thumb.upper()
+
+
 def head_size(url):
     """Анонимный HEAD — ровно то, что увидит пользователь, а не наш авторизованный клиент."""
     try:
@@ -112,6 +145,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--only', choices=sorted(TARGETS))
+    ap.add_argument('--allow-unsigned', action='store_true',
+                    help='выложить exe без подписи осознанно (видно в логе)')
     args = ap.parse_args()
 
     try:
@@ -135,6 +170,24 @@ def main():
             problems.append('%s: размер %.1f МиБ вне рамок редакции %d–%d МиБ — похоже, перепутаны сборки'
                             % (name, mib, t['min_mib'], t['max_mib']))
             continue
+        # Подпись — ДО заливки. С 05.10.2026 у нас есть код-сертификат Certum, и
+        # неподписанный exe у пользователя = синий экран SmartScreen «неизвестный
+        # издатель» и жёлтое окно UAC. Выложить такой можно только осознанно.
+        if p.lower().endswith('.exe'):
+            status, thumb = authenticode(p)
+            want = expected_signer()
+            if status == 'Valid' and want and thumb == want:
+                print('  %-12s подпись: Valid, сертификат %s…' % (name, thumb[:8]))
+            elif args.allow_unsigned:
+                print('  ВНИМАНИЕ: %s подпись «%s» — выкладываю БЕЗ подписи осознанно (--allow-unsigned)'
+                      % (name, status))
+            else:
+                why = ('подписан ЧУЖИМ сертификатом %s' % thumb) if status == 'Valid' else ('подпись «%s»' % status)
+                problems.append('%s: %s — такой exe не публикую. Подпиши: '
+                                'python ~/.claude/tools/simplysign_connect.py, затем сборка (хук '
+                                'tools/sign-win.js) или signtool; осознанно без подписи — --allow-unsigned'
+                                % (name, why))
+                continue
         plan.append((name, t, p, os.path.getsize(p)))
 
     for name, t, p, size in plan:

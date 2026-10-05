@@ -10682,3 +10682,63 @@ ok('config.json в репозитории без сборочных маркер
     } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
   });
 })();
+
+// ===========================================================================
+// Подпись Windows (05.10.2026): хук electron-builder tools/sign-win.js и стоп
+// неподписанных exe в tools/publish-dist.py. Сертификат облачный (Certum), ключа на
+// диске нет — поэтому здесь проверяется решение и обвязка, а не сама подпись:
+// живую подпись проверили сборкой electron-builder с этим же хуком (WIN-SIGNING.md).
+// ===========================================================================
+(function () {
+  console.log('\n== Подпись Windows: хук сборки и стоп в publish-dist ==');
+  const sw = require(path.join(ROOT, 'tools', 'sign-win.js'));
+
+  ok('sign-win: обычная Windows-машина — подписываем', () => {
+    assert.strictEqual(sw.decide({}, 'win32').sign, true);
+  });
+  ok('sign-win: HM_WIN_SIGN=0 — пропуск с причиной в логе', () => {
+    const d = sw.decide({ HM_WIN_SIGN: '0' }, 'win32');
+    assert.strictEqual(d.sign, false);
+    assert(/HM_WIN_SIGN=0/.test(d.why), 'причина пропуска обязана называть выключатель');
+  });
+  ok('sign-win: CI и не-Windows — пропуск, HM_WIN_SIGN=1 заставляет подписать', () => {
+    assert.strictEqual(sw.decide({ GITHUB_ACTIONS: 'true' }, 'win32').sign, false);
+    assert.strictEqual(sw.decide({ CI: 'true' }, 'win32').sign, false);
+    assert.strictEqual(sw.decide({}, 'darwin').sign, false);
+    assert.strictEqual(sw.decide({ CI: 'true', HM_WIN_SIGN: '1' }, 'win32').sign, true);
+    assert.strictEqual(sw.decide({ HM_WIN_SIGN: '0', CI: 'true' }, 'win32').sign, false, '0 сильнее CI');
+  });
+  ok('sign-win: аргументы signtool — sha256, метка RFC 3161, файл последним', () => {
+    const f = 'C:\\x\\Hamidun Setup.exe';
+    const a = sw.signtoolArgs(f, sw.CERT_SHA1, 'http://time.certum.pl');
+    assert.deepStrictEqual(a.slice(0, 3), ['sign', '/sha1', sw.CERT_SHA1]);
+    assert(a.includes('/tr') && !a.includes('/t'), 'только RFC 3161 (/tr), не устаревший /t');
+    assert.strictEqual(a[a.indexOf('/fd') + 1], 'sha256');
+    assert.strictEqual(a[a.indexOf('/td') + 1], 'sha256');
+    assert.strictEqual(a[a.length - 1], f, 'путь с пробелом — один аргумент, последним');
+    assert(/^[0-9A-F]{40}$/.test(sw.CERT_SHA1), 'отпечаток — 40 hex заглавными');
+  });
+  ok('package.json: win.signtoolOptions.sign ведёт на существующий хук, только sha256', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const so = pkg.build.win.signtoolOptions;
+    assert(so && so.sign, 'нет win.signtoolOptions.sign — Windows-сборка снова выйдет без подписи');
+    assert(fs.existsSync(path.join(ROOT, so.sign)), 'хук ' + so.sign + ' не найден');
+    assert.deepStrictEqual(so.signingHashAlgorithms, ['sha256'], 'sha1-подпись устарела и тратит лимит Certum');
+  });
+  ok('publish-dist: подпись проверяется ДО заливки, отпечаток берётся из sign-win.js', () => {
+    const src = codeOnly(fs.readFileSync(path.join(ROOT, 'tools', 'publish-dist.py'), 'utf8'));
+    assertOrder(src, 'status, thumb = authenticode(p)', 's3.upload_file(', 'подпись должна проверяться до заливки');
+    assert(/CERT_SHA1 = '\(\[0-9A-Fa-f\]\{40\}\)'/.test(src), 'publish-dist обязан читать отпечаток из sign-win.js');
+    // Тот же шаблон, что в publish-dist, по живому sign-win.js — должен дать ровно тот
+    // отпечаток, которым хук подписывает. Иначе стоп пропустит чужую подпись или завернёт свою.
+    const m = /CERT_SHA1 = '([0-9A-Fa-f]{40})'/.exec(fs.readFileSync(path.join(ROOT, 'tools', 'sign-win.js'), 'utf8'));
+    assert(m && m[1].toUpperCase() === sw.CERT_SHA1, 'publish-dist нашёл бы в sign-win.js другой отпечаток');
+    assert(/--allow-unsigned/.test(src), 'осознанный обход должен существовать и быть явным');
+  });
+  ok('сторож порядка краснеет, если проверку подписи унести после заливки (подлог)', () => {
+    const swapped = "s3.upload_file(p, bucket, key)\nstatus, thumb = authenticode(p)\n";
+    assert.throws(() => assertOrder(swapped, 'status, thumb = authenticode(p)', 's3.upload_file('));
+    assert.throws(() => assertOrder('s3.upload_file(p)', 'status, thumb = authenticode(p)', 's3.upload_file('),
+      'пропавшая проверка тоже обязана ронять тест');
+  });
+})();
