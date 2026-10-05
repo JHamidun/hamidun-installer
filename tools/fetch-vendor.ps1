@@ -42,8 +42,13 @@ $a = $rel.assets | Where-Object { $_.name -match '64-bit\.exe$' } | Select-Objec
 Dl $a.browser_download_url (Join-Path $apps 'git-setup.exe')
 
 Write-Host "[vendor] Node.js LTS..."
+# Мажор закреплён: «первая LTS из index.json» 28.10.2026 молча стала бы v26, и сборка
+# сменила бы мажор Node без единой правки в репозитории. Бамп — HM_NODE_MAJOR или здесь.
+$nodeMajor = if ($env:HM_NODE_MAJOR) { $env:HM_NODE_MAJOR } else { '24' }
 $idx = Invoke-RestMethod "https://nodejs.org/dist/index.json"
-$lts = $idx | Where-Object { $_.lts } | Select-Object -First 1
+$lts = $idx | Where-Object { $_.lts -and $_.version -like "v$nodeMajor.*" } | Select-Object -First 1
+if (-not $lts) { throw "нет LTS-выпуска Node v$nodeMajor в index.json" }
+Write-Host "  версия: $($lts.version)"
 Dl "https://nodejs.org/dist/$($lts.version)/node-$($lts.version)-x64.msi" (Join-Path $apps 'node-lts.msi')
 
 Write-Host "[vendor] Cursor..."
@@ -80,8 +85,15 @@ try {
 }
 
 Write-Host "[vendor] Python (под версию сборочной машины — чтобы wheels совпали)..."
-$pyver = (& python -c "import platform;print(platform.python_version())" 2>$null)
+# HM_PY_VERSION задаёт раздаваемый патч явно (колёса cp3XX совпадают у всех патчей одного
+# минора, поэтому минор обязан совпасть с Python сборочной машины). Без неё пользователи
+# получали ровно ту версию, что случайно стояла на машине сборки.
+$pyver = if ($env:HM_PY_VERSION) { $env:HM_PY_VERSION } else { (& python -c "import platform;print(platform.python_version())" 2>$null) }
 if (-not $pyver) { $pyver = '3.12.10' }
+$localMinor = (& python -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null)
+if ($env:HM_PY_VERSION -and $localMinor -and -not "$pyver".StartsWith("$localMinor.")) {
+  throw "HM_PY_VERSION=$pyver не совпадает по минору с Python сборки ($localMinor): колёса pywheels не подойдут"
+}
 $pyver = "$pyver".Trim()
 $pyInstaller = Join-Path $apps 'python-setup.exe'
 if (Test-Path $pyInstaller) { Remove-Item $pyInstaller -Force -ErrorAction SilentlyContinue }
@@ -547,7 +559,12 @@ Write-Host "[vendor] Исходник Nomad → vendor\nomad-src (git archive me
 # исходника → компонент Nomad у пользователя выполнит graceful skip (exit 120) — сборку НЕ валим.
 $componentsRawN = Get-Content -Raw (Join-Path $root 'components.json') -ErrorAction SilentlyContinue
 if ($componentsRawN -and $componentsRawN -match '"nomad"') {
-  $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO } else { 'C:\Vibecode\hamidun-agent' }
+  # Репозиторий переехал 30.09.2026 (C:\Vibecode\hamidun-agent -> D:\Nomad\hamidun-agent).
+  # Старый путь оставлен вторым: без него на старой раскладке фетчер молча оставлял
+  # прошлый vendor\nomad-src, и гейты проходили, сверяя старый манифест сам с собой.
+  $agentRepo = if ($env:HM_NOMAD_AGENT_REPO) { $env:HM_NOMAD_AGENT_REPO }
+               else { @('D:\Nomad\hamidun-agent', 'C:\Vibecode\hamidun-agent') | Where-Object { Test-Path (Join-Path $_ '.git') } | Select-Object -First 1 }
+  if (-not $agentRepo) { $agentRepo = 'D:\Nomad\hamidun-agent' }
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (зеркало
   # fetch-vendor-mac.sh). Бамп = сменить тег здесь и в fetch-vendor-mac.sh, либо env HM_NOMAD_REF.
   # 05.09.2026: пин поднят с тега v2026.7.22 (0.17.0, 22 июля) на КОММИТ 0.18.1.

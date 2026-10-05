@@ -21,6 +21,11 @@ on:
           имя боевого сервера ещё оставалось в описании навыка озвучки.
         required: false
         default: ''
+  # Обкатка до мержа: workflow_dispatch берёт файл только из main, поэтому пробная
+  # сборка идёт пушем в mac-offline/*. Такой прогон льёт dmg в vibecoding/downloads/test/
+  # и Release не создаёт — боевая ссылка меняется только ручным запуском из main.
+  push:
+    branches: ['mac-offline/**']
 
 # Очередь БЕЗ отмены. Отменять релизную сборку на середине нельзя: она заливает
 # объекты в S3 и коммитит реестр обратно в ветку — прерывание оставит половину.
@@ -67,7 +72,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       # Тот же гейт, что стоит первым в `npm run dist` / `dist:win` / `dist:mac`. Здесь он
@@ -251,6 +256,8 @@ jobs:
       # остаётся как УКАЗАТЕЛЬ на S3-ссылку (сам dmg туда не влезает).
       - name: Upload universal dmg to Reg.ru S3
         env:
+          HM_EVENT: ${{ github.event_name }}
+          HM_RUN: ${{ github.run_number }}
           REGRU_S3_ACCESS_KEY: ${{ secrets.REGRU_S3_ACCESS_KEY }}
           REGRU_S3_SECRET_KEY: ${{ secrets.REGRU_S3_SECRET_KEY }}
           REGRU_S3_ENDPOINT: ${{ secrets.REGRU_S3_ENDPOINT }}
@@ -269,7 +276,11 @@ jobs:
               aws_access_key_id=os.environ['REGRU_S3_ACCESS_KEY'],
               aws_secret_access_key=os.environ['REGRU_S3_SECRET_KEY'],
               region_name=os.environ['REGRU_S3_REGION'])
-          key = 'vibecoding/downloads/Hamidun-Setup-Mac.dmg'
+          if os.environ.get('HM_EVENT') == 'workflow_dispatch':
+              key = 'vibecoding/downloads/Hamidun-Setup-Mac.dmg'
+          else:
+              key = 'vibecoding/downloads/test/Hamidun-Setup-Mac-run%s.dmg' % os.environ.get('HM_RUN', 'x')
+          print('S3 key:', key)
           bucket = os.environ['REGRU_S3_BUCKET']
           # СТАРЫЙ dmg НЕ УДАЛЯЕМ — заливаем поверх.
           # Раньше здесь стоял delete_object: квота бакета была ~10ГБ, и overwrite 2.7ГБ
@@ -291,6 +302,7 @@ jobs:
           PY
 
       - name: Publish GitHub Release pointer (S3 link)
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

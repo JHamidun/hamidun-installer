@@ -516,7 +516,7 @@ echo "[vendor-mac] Исходник Nomad → vendor/nomad-src (git archive, Б�
 # nomad-src приватный, в git НЕ коммитится (.gitignore vendor/*). Нет исходника →
 # компонент Nomad у пользователя выполнит graceful skip (exit 120) — сборку НЕ валим (WARNING).
 if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
-  AGENT_REPO="${HM_NOMAD_AGENT_REPO:-/c/Vibecode/hamidun-agent}"
+  AGENT_REPO="${HM_NOMAD_AGENT_REPO:-/d/Nomad/hamidun-agent}"   # переехал 30.09.2026 с /c/Vibecode/hamidun-agent
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (иначе в
   # раздачу утечёт незакоммиченная/недоделанная работа при активной разработке агента).
   # Бамп версии = сменить дефолт здесь (и в fetch-vendor.ps1) или задать env HM_NOMAD_REF.
@@ -534,15 +534,23 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
     echo "  git archive $NOMAD_REF из локального репо $AGENT_REPO"
     git -C "$AGENT_REPO" archive --format=tar "$NOMAD_REF" | tar -x -C "$SRCOUT"
   elif [ -n "$GITURL" ]; then
-    echo "  git clone --depth 1 -b $NOMAD_REF <NOMAD_AGENT_GIT_URL> (раннер без локального репо)"
+    # Пин — КОММИТ, а `git clone -b` принимает только ветку или тег: раньше clone по SHA
+    # падал (stderr скрыт), и фолбэк молча клонировал ветку по умолчанию. Mac offline 21.09
+    # так получил Nomad 0.18.3 вместо закреплённого 0.18.1. Теперь пин берётся через
+    # `fetch <ref>` (GitHub отдаёт коммит по SHA), а недоступный пин НЕ подменяется
+    # чужой версией: Nomad пропускается громко.
+    echo "  git fetch --depth 1 $NOMAD_REF <NOMAD_AGENT_GIT_URL> (раннер без локального репо)"
     TMPC="$(mktemp -d)"
-    if git clone --depth 1 -b "$NOMAD_REF" "$GITURL" "$TMPC" 2>/dev/null || git clone --depth 1 "$GITURL" "$TMPC"; then
+    if git -C "$TMPC" init -q \
+       && git -C "$TMPC" remote add origin "$GITURL" \
+       && git -C "$TMPC" fetch -q --depth 1 origin "$NOMAD_REF" \
+       && git -C "$TMPC" checkout -q FETCH_HEAD; then
+      echo "  ok: Nomad из коммита $(git -C "$TMPC" rev-parse --short HEAD) (пин $NOMAD_REF)"
       (cd "$TMPC" && git archive --format=tar HEAD) | tar -x -C "$SRCOUT"
-      rm -rf "$TMPC"
     else
-      echo "  ! git clone не удался — проверь NOMAD_AGENT_GIT_URL/токен. Компонент Nomad → graceful skip."
-      rm -rf "$TMPC"
+      echo "  ! [vendor-mac] ПИН Nomad $NOMAD_REF недоступен (NOMAD_AGENT_GIT_URL/токен?) — другую версию НЕ подставляю. Компонент Nomad → graceful skip."
     fi
+    rm -rf "$TMPC"
   else
     echo "  ! нет локального репо ($AGENT_REPO) и не задан NOMAD_AGENT_GIT_URL — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
   fi

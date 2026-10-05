@@ -65,7 +65,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install deps
@@ -364,15 +364,19 @@ jobs:
           echo "итоговый lite-dmg: ${DMGMB} МБ"
           [ "$DMGMB" -lt 600 ] || { echo "FATAL: lite-dmg ${DMGMB} МБ — это не лёгкая редакция (ожидалось ~100-300 МБ)."; exit 1; }
 
-      # Заливаем ПОД STAGING-КЛЮЧОМ: стабильный vibecoding/downloads/Hamidun-Setup-Mac.dmg
-      # НЕ трогаем — свап делает владелец вручную после теста на чистом маке.
-      - name: Upload lite dmg to Reg.ru S3 (staging key)
+      # Куда заливать, решает СПОСОБ запуска. Ключ Hamidun-Setup-Mac-Lite.dmg задумывался
+      # staging, но на него ссылается лендинг — это боевой ключ. Поэтому прогон из
+      # тестовой ветки (push в mac-lite/**) кладёт dmg в vibecoding/downloads/test/ и
+      # пользователям ничего не меняет; боевой ключ — только ручной запуск из main.
+      - name: Upload lite dmg to Reg.ru S3
         env:
           REGRU_S3_ACCESS_KEY: ${{ secrets.REGRU_S3_ACCESS_KEY }}
           REGRU_S3_SECRET_KEY: ${{ secrets.REGRU_S3_SECRET_KEY }}
           REGRU_S3_ENDPOINT: ${{ secrets.REGRU_S3_ENDPOINT }}
           REGRU_S3_BUCKET: ${{ secrets.REGRU_S3_BUCKET }}
           REGRU_S3_REGION: ${{ secrets.REGRU_S3_REGION }}
+          HM_EVENT: ${{ github.event_name }}
+          HM_RUN: ${{ github.run_number }}
         run: |
           set -e
           ls -la release/*.dmg
@@ -384,7 +388,11 @@ jobs:
               aws_access_key_id=os.environ['REGRU_S3_ACCESS_KEY'],
               aws_secret_access_key=os.environ['REGRU_S3_SECRET_KEY'],
               region_name=os.environ['REGRU_S3_REGION'])
-          key = 'vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg'
+          if os.environ.get('HM_EVENT') == 'workflow_dispatch':
+              key = 'vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg'
+          else:
+              key = 'vibecoding/downloads/test/Hamidun-Setup-Mac-Lite-run%s.dmg' % os.environ.get('HM_RUN', 'x')
+          open('release/s3-key.txt', 'w').write(key)
           bucket = os.environ['REGRU_S3_BUCKET']
           # abort ТОЛЬКО orphan-multipart СВОЕГО ключа (чужие in-flight заливки — напр.
           # Windows exe в тот же бакет — не трогаем), затем перезалив.
@@ -407,9 +415,9 @@ jobs:
           PY
           DMG_SHA256=$(shasum -a 256 release/Hamidun-Setup-Mac-Lite.dmg | awk '{print $1}')
           {
-            echo "## macOS LITE dmg (staging)"
+            echo "## macOS LITE dmg ($HM_EVENT)"
             echo ""
-            echo "URL: https://s3.regru.cloud/${REGRU_S3_BUCKET}/vibecoding/downloads/Hamidun-Setup-Mac-Lite.dmg"
+            echo "URL: https://s3.regru.cloud/${REGRU_S3_BUCKET}/$(cat release/s3-key.txt)"
             echo ""
             echo "SHA-256: \`$DMG_SHA256\`"
             echo ""
