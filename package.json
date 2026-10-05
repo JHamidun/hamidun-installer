@@ -116,6 +116,12 @@
       ],
       "artifactName": "Hamidun-Setup-Windows.${ext}",
       "requestedExecutionLevel": "requireAdministrator",
+      "signtoolOptions": {
+        "sign": "./tools/sign-win.js",
+        "signingHashAlgorithms": [
+          "sha256"
+        ]
+      },
       "extraResources": [
         {
           "from": "vendor",
