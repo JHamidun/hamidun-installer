@@ -3,7 +3,7 @@
 <!-- spec-id: handy-golosovoy-vvod -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:300-330`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,95-97,342-347,447-459,481-504,1264-1308`, `src/install-env.js:19-46`, `src/main.js:457-460,603-606,703-725,744,970-995,1258-1276,1748`, `package.json:115`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:524-685`, `scripts/macos/_lib.sh:97-109,219-246,314-328`, `src/install-receipts.js:33-43`, `src/uninstall-targets.js:255-256`, `vendor/checksums.json:10`, `remote-components.json:459-503`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:42-57`, `tools/fetch-vendor-mac.sh:39-61,559-564`, `tools/release-check.js:154-172`
+- **Код:** `components.json:300-330`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,95-97,342-347,447-459,481-504,1264-1308`, `src/install-env.js:19-46`, `src/main.js:457-460,603-606,703-725,744,970-995,1258-1276,1748`, `package.json:115`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:524-685`, `scripts/macos/_lib.sh:97-109,219-246,314-328`, `src/install-receipts.js:33-43`, `src/uninstall-targets.js:255-256`, `vendor/checksums.json:10`, `remote-components.json:455-499`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:42-57`, `tools/fetch-vendor-mac.sh:39-61,559-564`, `tools/release-check.js:154-172`
 - **Тесты:** «handy: компонент объявлен, опционален и не требует администратора», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского», «handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой», «handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом», «app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит», «app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент», «handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json»
 
 ## Что обещает человеку
@@ -76,7 +76,7 @@ universal, `mac-arch-support.json:40-47`). В `src/main.js:703-725` компон
 `src/main.js:719-723` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
 offlineEdition, полезло бы в сеть за тем, что уже лежит рядом»), на macOS остаётся
 открытой: mac-сборка с вшитыми dmg, но без маркера `offlineEdition`, пойдёт в сеть.
-Lite-издание качает по двум записям `remote-components.json:459-503`
+Lite-издание качает по двум записям `remote-components.json:455-499`
 (win32 и darwin, зеркала regru + yandex, хеши вложенных файлов в `gatedFiles`). В
 `SCRIPT_ONLINE_FALLBACK` (`src/main.js:744`) handy **не входит** — провал докачки не
 прощается и не выдаётся за успех.
