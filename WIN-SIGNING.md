@@ -40,8 +40,16 @@ TOTP — в `~/.claude/.credentials.master.env`, ключи `CERTUM_SIMPLYSIGN_*
 ## Подпись при сборке
 
 `package.json` → `build.win.signtoolOptions.sign` = `tools/sign-win.js`.
-electron-builder вызывает его на каждый исполняемый файл: само приложение,
-`elevate.exe` и итоговый portable-exe (проверено сборкой 05.10). Хук:
+electron-builder вызывает его на каждый исполняемый файл, который попал в сборку:
+само приложение, `elevate.exe`, итоговый portable-exe **и все .exe из
+`resources\vendor`** (вшитые установщики Git, VS Code, Cursor, Python, Handy, а
+также uv и скрепка; проверено мини-сборкой 09.10). Последние хук НЕ подписывает
+(`isForeign` в `tools/sign-win.js`): их SHA-256 закреплён в `vendor\checksums.json`,
+и после подписи `Confirm-HmArtifact` останавливал бы установку каждого из них как
+«файл подменён». Подписи самих вендоров остаются нетронутыми. Подписываются только
+свои файлы. После сборки `tools/verify-packed-vendor.js` (подключён в `npm run dist`,
+`dist:win` и `build-lite.js`) сверяет упакованный `vendor` с `checksums.json`.
+Хук:
 
 1. один раз за сборку входит через коннектор;
 2. подписывает: `signtool sign /sha1 <отпечаток> /fd sha256 /tr http://time.certum.pl /td sha256`,

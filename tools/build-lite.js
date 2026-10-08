@@ -361,6 +361,14 @@ function main() {
     // нужен shell:true (тогда 'npx' резолвится шеллом в npx.cmd). На macOS безвреден.
     execFileSync('npx', ['electron-builder'].concat(t.builderArgs), { cwd: ROOT, stdio: 'inherit', shell: true });
 
+    // 4b. Упакованный vendor-lite побайтно равен своему checksums.json. Подписанная сборка
+    // переписала бы uv/uvx, и на машине человека Confirm-HmArtifact остановил бы их как
+    // «подменённые» (хук подписи теперь обходит чужие файлы — это страховка от возврата).
+    if (target !== 'mac') {
+      execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-packed-vendor.js'),
+        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'vendor')], { cwd: ROOT, stdio: 'inherit' });
+    }
+
     // 5. size-assert — страховка от случайного вшивания полного vendor
     const art = findLiteArtifact(t);
     if (art) {

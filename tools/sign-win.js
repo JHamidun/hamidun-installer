@@ -42,6 +42,34 @@ function decide(env, platform) {
   return { sign: true, why: '' };
 }
 
+// Чужие файлы НЕ подписываем. electron-builder отдаёт хуку каждый .exe, попавший в
+// resources\ через extraResources, то есть и вшитые установщики Git, VS Code, Cursor,
+// Python, Handy, и uv, и скрепку (проверено мини-сборкой 09.10: хук получил
+// resources\vendor\apps\*.exe). SHA-256 этих файлов закреплён в vendor\checksums.json,
+// и Confirm-HmArtifact (scripts/windows/_verify.ps1) останавливает установку при любом
+// расхождении («файл подменён»). Подпись меняет байты, поэтому после неё отказал бы
+// КАЖДЫЙ вшитый компонент (в Lite — uv и uvx). Подписи вендоров остаются нетронутыми.
+// Своё — только exe приложения, resources\elevate.exe от electron-builder и итоговый
+// portable: они лежат вне resources\ либо называются elevate.exe. Привязка к
+// win-*unpacked нужна, чтобы папка «resources» в пути к репозиторию не сделала чужим всё.
+const FOREIGN_RE = /[\\/]win-[\w.-]*unpacked[\\/]resources[\\/](?!elevate\.exe$)/i;
+function isForeign(file) {
+  return FOREIGN_RE.test(String(file || ''));
+}
+
+// Решение по одному файлу — чистая функция (тестируется без signtool и SimplySign).
+function plan(file, env, platform) {
+  if (isForeign(file)) {
+    return {
+      sign: false,
+      foreign: true,
+      why: 'чужой файл: его SHA-256 закреплён в vendor\\checksums.json, подпись сломала бы проверку целостности',
+    };
+  }
+  const d = decide(env, platform);
+  return { sign: d.sign, foreign: false, why: d.why };
+}
+
 function signtoolArgs(file, sha1, tsa) {
   return ['sign', '/sha1', sha1, '/fd', 'sha256', '/tr', tsa, '/td', 'sha256', file];
 }
@@ -81,9 +109,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function sign(configuration) {
   const file = configuration.path;
   const env = process.env;
-  const d = decide(env, process.platform);
+  const d = plan(file, env, process.platform);
   if (!d.sign) {
-    console.log('  • sign-win: ПРОПУСК подписи ' + path.basename(file) + ' — ' + d.why);
+    // Для чужого файла печатаем путь от resources\, чтобы в логе было видно, какой именно.
+    const shown = d.foreign ? String(file).replace(/^.*?[\\/](resources[\\/])/i, '$1') : path.basename(file);
+    console.log('  • sign-win: ПРОПУСК подписи ' + shown + ' — ' + d.why);
     return;
   }
   connectOnce(env);
@@ -112,5 +142,7 @@ async function sign(configuration) {
 module.exports = sign;
 module.exports.default = sign;
 module.exports.decide = decide;
+module.exports.plan = plan;
+module.exports.isForeign = isForeign;
 module.exports.signtoolArgs = signtoolArgs;
 module.exports.CERT_SHA1 = CERT_SHA1;

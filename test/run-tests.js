@@ -10741,4 +10741,97 @@ ok('config.json в репозитории без сборочных маркер
     assert.throws(() => assertOrder('s3.upload_file(p)', 'status, thumb = authenticode(p)', 's3.upload_file('),
       'пропавшая проверка тоже обязана ронять тест');
   });
+
+  // Блокер, найденный при подготовке релиза 09.10: electron-builder отдаёт хуку КАЖДЫЙ .exe
+  // из extraResources, и первая подписанная сборка переписала бы вшитые Git, VS Code,
+  // Cursor, Python, Handy, uv и скрепку. Их SHA-256 закреплён в vendor\checksums.json,
+  // Confirm-HmArtifact остановил бы установку каждого («файл подменён»). Пути ниже — в
+  // том виде, как хук получил их от настоящей сборки electron-builder 25.1.8.
+  ok('sign-win: чужие файлы из resources\\vendor не подписываются, свои — подписываются', () => {
+    const foreign = [
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\git-setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\uv\\uvx.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\claude-mascot\\claude-mascot.exe',
+      'D:/r/release/win-arm64-unpacked/resources/vendor/apps/cursor-setup.exe',
+    ];
+    const own = [
+      'D:\\r\\release\\win-unpacked\\Hamidun Setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\elevate.exe',
+      'C:\\T\\elevate-staging\\resources\\elevate.exe',
+      'D:\\r\\release\\Hamidun-Setup-Windows.exe',
+      'D:\\resources\\repo\\release\\win-unpacked\\Hamidun Setup.exe', // «resources» в пути репозитория
+    ];
+    for (const f of foreign) {
+      assert.strictEqual(sw.isForeign(f), true, 'чужой файл подписался бы: ' + f);
+      const p = sw.plan(f, { HM_WIN_SIGN: '1' }, 'win32');
+      assert.strictEqual(p.sign, false, 'даже HM_WIN_SIGN=1 не должен подписывать чужое: ' + f);
+      assert.strictEqual(p.foreign, true);
+    }
+    for (const f of own) {
+      assert.strictEqual(sw.isForeign(f), false, 'свой файл остался бы без подписи: ' + f);
+      assert.strictEqual(sw.plan(f, { HM_WIN_SIGN: '1' }, 'win32').sign, true, f);
+    }
+  });
+  ok('sign-win: sign() на чужом файле возвращается молча — ни входа в SimplySign, ни signtool', () => {
+    // Если бы чужой файл дошёл до connectOnce, команда ниже уронила бы процесс.
+    const r = require('child_process').spawnSync(process.execPath, ['-e',
+      "const sw=require(process.argv[1]);" +
+      "sw({path:'D:\\\\r\\\\release\\\\win-unpacked\\\\resources\\\\vendor\\\\apps\\\\git-setup.exe'}).then(()=>process.exit(0),(e)=>{console.error(e.message);process.exit(7);});",
+      path.join(ROOT, 'tools', 'sign-win.js')],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { HM_WIN_SIGN: '1', HM_SIMPLYSIGN_CONNECT: 'exit 9', HM_SIGNTOOL: 'C:\\нет\\signtool.exe' }) });
+    assert.strictEqual(r.status, 0, 'sign() полез подписывать чужой файл: ' + r.stdout + r.stderr);
+    assert(/ПРОПУСК подписи resources[\\/]vendor/.test(r.stdout), 'пропуск должен быть виден в логе: ' + r.stdout);
+  });
+  ok('sign-win: тот же вызов на СВОЁМ файле доходит до входа в SimplySign (отрицательный контроль)', () => {
+    const r = require('child_process').spawnSync(process.execPath, ['-e',
+      "const sw=require(process.argv[1]);" +
+      "sw({path:'D:\\\\r\\\\release\\\\win-unpacked\\\\Hamidun Setup.exe'}).then(()=>process.exit(0),(e)=>{console.error(e.message);process.exit(7);});",
+      path.join(ROOT, 'tools', 'sign-win.js')],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { HM_WIN_SIGN: '1', HM_SIMPLYSIGN_CONNECT: 'exit 9' }) });
+    assert.notStrictEqual(r.status, 0, 'свой файл обязан пройти в connectOnce (и здесь упасть на «exit 9»), иначе проверка выше ничего не доказывает');
+  });
+  ok('сборка проверяет упакованный vendor: npm run dist/dist:win и build-lite.js зовут verify-packed-vendor ПОСЛЕ electron-builder', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    for (const k of ['dist', 'dist:win']) {
+      assertOrder(pkg.scripts[k], 'electron-builder', 'node tools/verify-packed-vendor.js', k + ': проверка до сборки ничего не проверяет');
+    }
+    const lite = codeOnly(fs.readFileSync(path.join(ROOT, 'tools', 'build-lite.js'), 'utf8'));
+    assertOrder(lite, "['electron-builder'].concat(t.builderArgs)", 'verify-packed-vendor.js', 'build-lite: проверка упакованного vendor-lite идёт после electron-builder');
+    assert.throws(() => assertOrder('verify-packed-vendor.js … electron-builder', 'electron-builder', 'verify-packed-vendor.js'),
+      'сторож порядка обязан краснеть, если проверку унести до сборки');
+  });
+  ok('verify-packed-vendor: хеши упакованных файлов сверяются с checksums.json; подмена байт ловится', () => {
+    const vpv = require(path.join(ROOT, 'tools', 'verify-packed-vendor.js'));
+    const crypto = require('crypto');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-vpv-'));
+    try {
+      const put = (rel, txt) => { const p = path.join(dir, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, txt); return p; };
+      const h = (txt) => crypto.createHash('sha256').update(txt).digest('hex');
+      put('apps/git-setup.exe', 'GIT');
+      put('apps/uv/uv.exe', 'UV');
+      fs.writeFileSync(path.join(dir, 'checksums.json'), JSON.stringify({
+        algorithm: 'sha256',
+        files: {
+          'git-setup.exe': { sha256: h('GIT'), bytes: 3 },
+          'uv.exe': { sha256: h('UV'), bytes: 2 },
+          'chatgpt.vsix': { sha256: h('VSIX'), bytes: 4 }, // исключён фильтром упаковки: в сборке нет
+        },
+      }));
+      const okRes = vpv.verify(dir);
+      assert.strictEqual(okRes.bad.length, 0, JSON.stringify(okRes.bad));
+      assert.strictEqual(okRes.checked, 2);
+      assert.deepStrictEqual(okRes.missing, ['chatgpt.vsix'], 'отсутствие файла из манифеста — не ошибка');
+      // «Подпись» дописала байты в конец uv.exe: именно это сделал бы хук.
+      fs.appendFileSync(path.join(dir, 'apps', 'uv', 'uv.exe'), 'SIGNATURE');
+      const bad = vpv.verify(dir);
+      assert.strictEqual(bad.bad.length, 1);
+      assert.strictEqual(bad.bad[0].name, 'uv.exe');
+      assert(/sha256/.test(bad.bad[0].why) && /размер/.test(bad.bad[0].why), bad.bad[0].why);
+      const cli = require('child_process').spawnSync(process.execPath, [path.join(ROOT, 'tools', 'verify-packed-vendor.js'), dir], { encoding: 'utf8' });
+      assert.strictEqual(cli.status, 1, 'CLI обязан падать на расхождении: ' + cli.stdout + cli.stderr);
+      assert(/РАСХОЖДЕНИЕ/.test(cli.stderr) && /uv\.exe/.test(cli.stderr), cli.stderr);
+      const none = require('child_process').spawnSync(process.execPath, [path.join(ROOT, 'tools', 'verify-packed-vendor.js'), path.join(dir, 'нет-такой')], { encoding: 'utf8' });
+      assert.strictEqual(none.status, 2, 'нет манифеста — код 2, а не молчаливый успех');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
 })();
