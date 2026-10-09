@@ -244,12 +244,45 @@ try {
 } catch { Write-Host "Ярлык не создался (не критично): $($_.Exception.Message)" }
 
 # Честное предупреждение: без claude ярлык откроет голую консоль с «команда не найдена».
-$claudeSeen = [bool](Get-Command claude -ErrorAction SilentlyContinue)
-if (-not $claudeSeen) {
-    foreach ($n in @('claude.exe', 'claude.cmd', 'claude')) {
-        if (Test-Path (Join-Path (Join-Path $env:USERPROFILE '.local\bin') $n)) { $claudeSeen = $true; break }
+# Ищем ПО АБСОЛЮТНЫМ ПУТЯМ, как Find-ClaudeBinary в claude.ps1: PATH этого процесса урезан
+# до HKLM (SECURITY #4), а claude живёт в профиле пользователя — %APPDATA%\npm после
+# `npm install -g` или ~/.local\bin после нативного установщика. Одного Get-Command мало:
+# раньше здесь печаталось «команда claude не найдена» через две минуты после того, как
+# claude встал в %APPDATA%\npm. Только смотрим файлы — ничего не запускаем (мы под
+# админом): свой npm-prefix читаем из ~/.npmrc текстом, как npmPrefixFromRc в main.js,
+# а не вызовом `npm config get prefix`.
+function Find-ClaudeBinary {
+    $cmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $dirs = @()
+    if ($env:APPDATA) { $dirs += (Join-Path $env:APPDATA 'npm') }
+    try {
+        $rc = Join-Path $env:USERPROFILE '.npmrc'
+        if (Test-Path -LiteralPath $rc -PathType Leaf) {
+            # npm берёт ПОСЛЕДНИЙ prefix=, кавычки вокруг значения снимаем.
+            $last = ''
+            foreach ($line in @(Get-Content -LiteralPath $rc -ErrorAction Stop)) {
+                if ($line -match '^\s*prefix\s*=\s*(.+?)\s*$') { $last = $Matches[1] }
+            }
+            if ($last) { $dirs += ($last -replace '^["'']|["'']$', '') }
+        }
+    } catch { }
+    if ($env:USERPROFILE) { $dirs += (Join-Path $env:USERPROFILE '.local\bin') }
+    foreach ($d in $dirs) {
+        if (-not $d) { continue }
+        foreach ($n in @('claude.cmd', 'claude.exe', 'claude')) {
+            # Путь собирает .NET ВНУТРИ try: prefix из ~/.npmrc бывает на отсутствующем диске (снятая
+            # флешка, отключённая сетевая папка), а Join-Path на таком в PowerShell 5.1 пишет в журнал
+            # красную ошибку DriveNotFound.
+            try {
+                $p = [IO.Path]::Combine($d, $n)
+                if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+            } catch { }
+        }
     }
+    return $null
 }
+$claudeSeen = [bool](Find-ClaudeBinary)
 if (-not $claudeSeen) {
     Write-Host "ВНИМАНИЕ: команда claude не найдена — ярлык курса заработает после установки Claude Code (перезапусти установщик с включённым компонентом Claude Code)."
 }

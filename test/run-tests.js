@@ -435,8 +435,8 @@ ok('main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only
   // await обязателен: примитив асинхронный (spawn, не spawnSync — иначе главный процесс
   // морозится на каждом артефакте и окно перестаёт отвечать). Без await в cacheDir лёг бы
   // Promise, и «защищённый каталог» молча превратился бы в мусорный путь.
-  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = await winMakeSecureDir\(\)/.test(h),
-    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив), вызов awaited');
+  assert(/if \(IS_WIN\)/.test(h) && /cacheDir = await winMakeSecureDir\(\{ retry: true \}\)/.test(h),
+    'win32: cacheDir рождается winMakeSecureDir (атомарный owner+DACL примитив), вызов awaited; докачка просит повтор (retry), запуск редактора — нет');
   assert(/secureCacheDir = cacheDir/.test(h), 'win32: каталог помечен для очистки');
   assert(/cacheDir = remoteCacheDir\(declared\)/.test(h), 'POSIX: remoteCacheDir (uv неэлевейтед)');
   assert(/if \(remoteCache\) childEnv\.HM_REMOTE_CACHE = remoteCache/.test(m),
@@ -942,7 +942,8 @@ ok('node --check: main.js / preload.js / renderer/app.js / test/run-tests.js в�
 // Синтаксис новых скриптов: PS ParseFile (BOM+синтаксис) и bash -n (парсинг, не исполнение).
 if (powershellAvailable()) {
   // vscode.ps1 + изменённые/новые де-элевация-скрипты: BOM + синтаксис.
-  ['vscode.ps1', '_deelev.ps1', 'extension.ps1', 'verify.ps1', 'claude-desktop.ps1', 'chatgpt-desktop.ps1', 'uv.ps1'].forEach((name) => {
+  ['vscode.ps1', '_deelev.ps1', 'extension.ps1', 'verify.ps1', 'claude-desktop.ps1', 'chatgpt-desktop.ps1', 'uv.ps1',
+    '_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', 'claude.ps1', 'config.ps1', 'course.ps1', 'nomad.ps1', 'pydeps.ps1'].forEach((name) => {
     ok(name + ': PowerShell парсер без ошибок (синтаксис + BOM)', () => {
       const script = path.join(ROOT, 'scripts', 'windows', name);
       // BOM обязателен (кириллица в Windows PowerShell 5.1).
@@ -2554,7 +2555,10 @@ if (powershellAvailable()) {
       seedHome(home);
       const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '{"user":"custom"}', 'settings.json юзера НЕ перезаписан (add-missing)');
+      // Файл человека пак НЕ перезаписывает; миграция settings.json (_cfgmigrate.ps1) лишь
+      // добавляет выключатель опроса, которого в старых файлах нет, — остальное как было.
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')),
+        { user: 'custom', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing)');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'недостающий файл доложен');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл доложен');
       assertUserDataIntact(home);
@@ -2568,7 +2572,9 @@ if (powershellAvailable()) {
       seedHome(home);
       const r = runCfgPs1(home, clone, {});   // HM_ADDITIVE удалён → repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '{"fresh":"base"}', 'settings.json (наш базовый) перезаписан свежим (repair)');
+      // Свежий файл пака + значения по умолчанию миграции (выключатель опроса).
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')),
+        { fresh: 'base', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair)');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'свежие правила разложены');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл разложен');
       assertUserDataIntact(home);   // пользовательское НЕ тронуто даже в repair
@@ -6180,8 +6186,8 @@ ok('телеметрия: согласие и защёлки — повторн�
 
 ok('главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)', () => {
   const m = EG_MAIN();
-  const i = m.indexOf('async function winMakeSecureDir()');
-  const h = m.slice(i, i + 5000);
+  const i = m.indexOf('async function winMakeSecureDir(');
+  const h = m.slice(i, i + 6500);
   assert(/env: detectSpawnEnv\(\)/.test(h),
     'spawn получает доверенный env: инлайн $env:PSModulePath не закрывает COR_ENABLE_PROFILING/COR_PROFILER — их CLR читает ДО разбора -Command');
   assert(/lastSecureDirError = '';/.test(h), 'причина отказа сбрасывается на входе (не липнет к другому компоненту)');
@@ -8132,7 +8138,9 @@ ok('config.json в репозитории без сборочных маркер
   // Вердикт запуском переносится в checks.json, verify его читает, а не судит по файлу.
   ok('claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит', () => {
     const c = claude();
-    assert(/function Write-HmCheck/.test(c), 'claude.ps1 умеет писать вердикт');
+    const envLib = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_claudeenv.ps1'), 'utf8');
+    assert(/_claudeenv\.ps1/.test(c) && /function Write-HmCheck/.test(envLib),
+      'claude.ps1 умеет писать вердикт (Write-HmCheck живёт в общей библиотеке _claudeenv.ps1, её зовёт и verify.ps1)');
     const writes = (c.match(/Write-HmCheck 'claude'/g) || []).length;
     assert(writes >= 3, 'вердикт пишется во всех исходах (' + writes + ')');
     ['works', 'broken', 'unverified'].forEach((v) =>
@@ -10608,7 +10616,7 @@ ok('config.json в репозитории без сборочных маркер
   // Библиотеки, а не компоненты: их подключают через точку (dot-source), они
   // НЕ запускаются обёрткой и своего кода возврата не отдают. Требовать от них
   // финальный exit — требовать неверного.
-  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1']);
+  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1', '_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1']);
 
   const listScripts = () => fs.readdirSync(path.join(ROOT, 'scripts', 'windows'))
     .filter((f) => f.endsWith('.ps1'))
@@ -10740,5 +10748,1636 @@ ok('config.json в репозитории без сборочных маркер
     assert.throws(() => assertOrder(swapped, 'status, thumb = authenticode(p)', 's3.upload_file('));
     assert.throws(() => assertOrder('s3.upload_file(p)', 'status, thumb = authenticode(p)', 's3.upload_file('),
       'пропавшая проверка тоже обязана ронять тест');
+  });
+})();
+
+// ===========================================================================
+// Windows-скрипты по диалогам Ники (05.10.2026): запуск claude из PowerShell
+// (ExecutionPolicy), ~/.local\bin в PATH пользователя, поиск claude в course.ps1,
+// AI-мост (скрыт без адреса сервера, поиск Python, журнал с BOM), повтор защищённого
+// каталога, миграция settings.json у тех, кто ставил раньше, опись конфига, python и
+// заглушка Магазина. PowerShell-логика проверяется ЗАПУСКОМ вынутых функций в
+// powershell.exe 5.1 без побочных эффектов: реестр — только песочный ключ
+// HKCU\Software\HamidunTest-*, файлы — только mkdtemp.
+// ===========================================================================
+(function windowsScriptsFromDialogs() {
+  console.log('\n== Windows-скрипты: ExecutionPolicy, PATH, курс, мост, staging, settings.json, python ==');
+  const WIN = path.join(ROOT, 'scripts', 'windows');
+  const readWin = (f) => fs.readFileSync(path.join(WIN, f), 'utf8').replace(/^﻿/, '');
+  const PS = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const havePs = powershellAvailable();
+  const cutPsFn = (src, name) => {
+    const m = src.match(new RegExp('function ' + name + '\\b[\\s\\S]*?\\r?\\n\\}'));
+    assert(m, name + ' извлекается из скрипта');
+    return m[0];
+  };
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  // Текст -> временный .ps1 (BOM + CRLF, как у боевых скриптов) -> powershell.exe 5.1.
+  function runPsText(text, env) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-wb-'));
+    const f = path.join(dir, 'h.ps1');
+    fs.writeFileSync(f, '\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+      String(text).replace(/\r?\n/g, '\r\n'));
+    try {
+      const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: 180000, env: Object.assign({}, process.env, env || {}) });
+      return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+    } finally { dropDir(dir); }
+  }
+
+  // ---- песочница для verify.ps1 и nomad.ps1 (раунд ревью) ------------------------------
+  // Скрипт идёт ЦЕЛИКОМ, но в чужих декорациях: профиль, LOCALAPPDATA, APPDATA и ProgramFiles — во
+  // временной папке; _userpath.ps1 подменён тонкой обёрткой, которая подтягивает настоящий файл
+  // (_userpath.real.ps1) и переопределяет ТОЛЬКО то, что трогает реестр и систему
+  // (Add-HmUserPath, Get-HmFreshShellPath): они пишут в журнал вызовов, а не в HKCU; командлеты
+  // политики выполнения закрыты функциями-стабами в драйвере (функция в PS сильнее командлета).
+  // Настоящие реестр и политика этой машины не читаются и не пишутся.
+  // checks.json пишет Set-Content -Encoding UTF8 (в Windows PowerShell 5.1 это UTF-8 С BOM) — JSON.parse на BOM падает.
+  const readJsonTolerant = (p) => JSON.parse(fs.readFileSync(p, 'utf8').replace(/^﻿/, ''));
+  function mkVerifySandbox() {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-vfy-'));
+    const scripts = path.join(base, 'scripts'); fs.mkdirSync(scripts);
+    for (const f of ['verify.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', 'nomad.ps1', '_verify.ps1']) {
+      fs.copyFileSync(path.join(WIN, f), path.join(scripts, f));
+    }
+    fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(scripts, '_userpath.real.ps1'));
+    const bom = '﻿';
+    fs.writeFileSync(path.join(scripts, '_userpath.ps1'), bom + [
+      ". (Join-Path $PSScriptRoot '_userpath.real.ps1')",
+      'function Add-HmUserPath { param([string]$Dir, [switch]$AllowMissing, [switch]$Prepend, [string]$RegistrySubKey)',
+      "  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ('PATH ' + $Dir + $(if ($Prepend) { ' prepend' } else { '' }) + $(if ($AllowMissing) { ' allowmissing' } else { '' }))",
+      '  return $true }',
+      'function Get-HmFreshShellPath { return [string]$env:HM_TEST_FRESH_PATH }',
+    ].join('\r\n'));
+    const home = path.join(base, 'home'); const la = path.join(base, 'localapp');
+    const ad = path.join(base, 'appdata'); const pf = path.join(base, 'pf');
+    [home, la, ad, pf].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+    fs.mkdirSync(path.join(home, '.hamidun-setup'), { recursive: true });
+    const log = path.join(base, 'calls.log'); fs.writeFileSync(log, '');
+    const driver = path.join(base, 'driver.ps1');
+    fs.writeFileSync(driver, bom + [
+      "$ErrorActionPreference = 'Continue'",
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      "$global:HmCU = $(if ($env:HM_TEST_CU) { $env:HM_TEST_CU } else { 'Undefined' })",
+      'function Get-Command { param($Name, $ErrorAction)',
+      "  if ($Name -eq 'claude' -and $env:HM_TEST_CLAUDE) { return [pscustomobject]@{ Source = $env:HM_TEST_CLAUDE } }",
+      '  return $null }',
+      'function Get-ExecutionPolicy { param([switch]$List, $Scope, $ErrorAction)',
+      '  if ($List) {',
+      "    return @([pscustomobject]@{ Scope = 'MachinePolicy'; ExecutionPolicy = $(if ($env:HM_TEST_MP) { $env:HM_TEST_MP } else { 'Undefined' }) },",
+      "             [pscustomobject]@{ Scope = 'UserPolicy'; ExecutionPolicy = 'Undefined' },",
+      "             [pscustomobject]@{ Scope = 'Process'; ExecutionPolicy = 'Bypass' },",
+      "             [pscustomobject]@{ Scope = 'CurrentUser'; ExecutionPolicy = $global:HmCU },",
+      "             [pscustomobject]@{ Scope = 'LocalMachine'; ExecutionPolicy = 'Undefined' }) }",
+      "  if ($Scope -eq 'CurrentUser') { return $global:HmCU }",
+      "  return 'Undefined' }",
+      'function Set-ExecutionPolicy { param($Scope, $ExecutionPolicy, [switch]$Force, $ErrorAction)',
+      "  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ('POLICY ' + [string]$Scope + '=' + [string]$ExecutionPolicy)",
+      '  $global:HmCU = [string]$ExecutionPolicy }',
+      'function Get-CimInstance { param($ClassName, $ErrorAction) [pscustomobject]@{ ProductType = 1 } }',
+      '& (Join-Path $PSScriptRoot ("scripts\\" + $env:HM_TEST_SCRIPT))',
+      'exit $LASTEXITCODE',
+    ].join('\r\n'));
+    return { base, scripts, home, la, ad, pf, log, driver };
+  }
+  function runScriptIn(sb, script, extraEnv) {
+    const env = Object.assign({}, process.env, {
+      USERPROFILE: sb.home, LOCALAPPDATA: sb.la, APPDATA: sb.ad, ProgramFiles: sb.pf, 'ProgramFiles(x86)': sb.pf,
+      HM_TEST_LOG: sb.log, HM_TEST_SCRIPT: script, HM_SELECTED: 'verify',
+    });
+    ['HM_DRY_RUN', 'HM_BUNDLED_CONFIG', 'HM_TEST_CLAUDE', 'HM_TEST_FRESH_PATH', 'HM_TEST_CU', 'HM_TEST_MP', 'HM_VENDOR', 'HM_NOMAD_SRC']
+      .forEach((k) => delete env[k]);
+    Object.assign(env, extraEnv || {});
+    const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', sb.driver],
+      { encoding: 'utf8', timeout: 180000, env });
+    return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || ''), log: fs.readFileSync(sb.log, 'utf8') };
+  }
+  const runVerifyIn = (sb, extraEnv) => runScriptIn(sb, 'verify.ps1', extraEnv);
+  // Профиль «человека, который ставил раньше»: старый settings.json, claude и nmd уже на диске,
+  // пак под рукой. Всё, что нужно verify.ps1 для починок, без единого вызова claude или nmd.
+  function seedOldInstall(sb, o) {
+    o = o || {};
+    fs.mkdirSync(path.join(sb.home, '.claude'), { recursive: true });
+    const bad = {
+      model: 'opus',
+      permissions: { allow: ['Write(~/**)', 'Edit(~/**)', 'Glob(src/**)'], deny: ['Bash(*format C:*)'] },
+      enabledPlugins: { 'greptile@claude-plugins-official': true, 'slack@claude-plugins-official': true, 'my-plugin@my-market': true },
+    };
+    fs.writeFileSync(path.join(sb.home, '.claude', 'settings.json'), o.settingsText || JSON.stringify(bad, null, 2));
+    const lb = path.join(sb.home, '.local', 'bin'); fs.mkdirSync(lb, { recursive: true });
+    fs.writeFileSync(path.join(lb, 'nmd.exe'), 'x');
+    const npmDir = path.join(sb.ad, 'npm'); fs.mkdirSync(npmDir, { recursive: true });
+    fs.writeFileSync(path.join(npmDir, 'claude.cmd'), '@exit /b 0');
+    fs.writeFileSync(path.join(npmDir, 'claude.ps1'), 'exit 0');
+    const py = path.join(sb.la, 'Programs', 'Python', 'Python312'); fs.mkdirSync(py, { recursive: true });
+    fs.writeFileSync(path.join(py, 'python.exe'), 'x');
+    const stub = path.join(sb.base, 'Microsoft', 'WindowsApps'); fs.mkdirSync(stub, { recursive: true });
+    fs.writeFileSync(path.join(stub, 'python.exe'), '');
+    const pack = path.join(sb.base, 'pack'); fs.mkdirSync(pack, { recursive: true });
+    fs.writeFileSync(path.join(pack, 'CATALOG.md'), '# Что внутри пака\n');
+    fs.writeFileSync(path.join(sb.home, '.hamidun-setup', 'checks.json'),
+      JSON.stringify({ claude: { verdict: o.claudeVerdict || 'works' }, 'claude-ps': { verdict: 'blocked' } }));
+    return {
+      claude: path.join(npmDir, 'claude.cmd'), npmDir, localBin: lb, pyDir: py, pack,
+      settings: path.join(sb.home, '.claude', 'settings.json'),
+      checks: path.join(sb.home, '.hamidun-setup', 'checks.json'),
+      env: { HM_TEST_CLAUDE: path.join(npmDir, 'claude.cmd'), HM_BUNDLED_CONFIG: pack, HM_TEST_FRESH_PATH: stub },
+    };
+  }
+
+  // ---- A06: claude.ps1 и политика выполнения PowerShell ---------------------------
+  if (havePs) {
+    ok('A06 ExecutionPolicy: решение по областям — GPO не трогаем, Restricted/Undefined на клиенте -> CurrentUser RemoteSigned, разрешающее не ослабляем', () => {
+      const fn = cutPsFn(readWin('_claudeenv.ps1'), 'Get-HmExecPolicyPlan');
+      // [MachinePolicy, UserPolicy, CurrentUser, LocalMachine, IsServer, действие, итоговая]
+      const cases = [
+        ['Undefined', 'Undefined', 'Undefined', 'Undefined', false, 'set', 'Restricted'],
+        ['', '', '', '', false, 'set', 'Restricted'],
+        ['Undefined', 'Undefined', 'Undefined', 'Undefined', true, 'none', 'RemoteSigned'],
+        ['Restricted', 'Undefined', 'Undefined', 'Undefined', false, 'gpo', 'Restricted'],
+        ['Undefined', 'AllSigned', 'RemoteSigned', 'Undefined', false, 'gpo', 'AllSigned'],
+        ['RemoteSigned', 'Undefined', 'Restricted', 'Undefined', false, 'none', 'RemoteSigned'],
+        ['Undefined', 'Undefined', 'RemoteSigned', 'Undefined', false, 'none', 'RemoteSigned'],
+        ['Undefined', 'Undefined', 'Unrestricted', 'Restricted', false, 'none', 'Unrestricted'],
+        ['Undefined', 'Undefined', 'Bypass', 'Undefined', false, 'none', 'Bypass'],
+        ['Undefined', 'Undefined', 'Restricted', 'Undefined', false, 'set', 'Restricted'],
+        ['Undefined', 'Undefined', 'Undefined', 'Restricted', false, 'set', 'Restricted'],
+        ['Undefined', 'Undefined', 'Undefined', 'RemoteSigned', false, 'none', 'RemoteSigned'],
+        ['Undefined', 'Undefined', 'Undefined', 'AllSigned', false, 'keep', 'AllSigned'],
+        ['Undefined', 'Undefined', 'AllSigned', 'Undefined', false, 'keep', 'AllSigned'],
+        ['Undefined', 'Undefined', 'Default', 'Undefined', false, 'set', 'Restricted'],
+      ];
+      const call = (c) => '$p = Get-HmExecPolicyPlan -MachinePolicy ' + q(c[0]) + ' -UserPolicy ' + q(c[1]) +
+        ' -CurrentUser ' + q(c[2]) + ' -LocalMachine ' + q(c[3]) + ' -IsServer $' + c[4] +
+        "\r\nWrite-Output ($p.Action + '|' + $p.Effective)";
+      const r = runPsText(fn + '\r\n' + cases.map(call).join('\r\n'));
+      const lines = r.out.trim().split(/\r?\n/);
+      cases.forEach((c, i) => assert.strictEqual(lines[i], c[5] + '|' + c[6],
+        'области ' + JSON.stringify(c.slice(0, 5)) + ' -> ' + lines[i] + ' ' + r.err));
+      // Отрицательный контроль: без ветки групповой политики GPO=Restricted превратился бы
+      // в «перепишу CurrentUser» — тест обязан это различать.
+      const mutant = fn.replace(/if \(\$gpoScope\) \{[\s\S]*?\n    \}\r?\n/, '');
+      assert(mutant !== fn, 'мутация применилась (ветка GPO вырезана)');
+      const r2 = runPsText(mutant + '\r\n' + call(cases[3]));
+      assert.strictEqual(r2.out.trim().split(/\r?\n/)[0], 'set|Restricted', 'мутант без GPO-ветки отвечает set — тест его ловит');
+    });
+
+    ok('A06 ExecutionPolicy: пишется ТОЛЬКО CurrentUser, итог сверяется чтением; GPO и AllSigned не трогаются', () => {
+      const src = readWin('_claudeenv.ps1');
+      const fns = cutPsFn(src, 'Get-HmExecPolicyPlan') + '\r\n' + cutPsFn(src, 'Set-HmUserExecPolicy');
+      // Командлеты закрыты функциями-стабами (функция в PS сильнее командлета): настоящая
+      // политика этой машины не читается и не меняется.
+      const stub = (scopes, persist, throwOnSet) => [
+        '$global:HmSet = @()',
+        '$global:HmCU = ' + q(scopes.CurrentUser || 'Undefined'),
+        'function Get-ExecutionPolicy { param([switch]$List, $Scope, $ErrorAction)',
+        '  if ($List) { return @(' + ['MachinePolicy', 'UserPolicy', 'Process', 'CurrentUser', 'LocalMachine']
+          .map((s) => "[pscustomobject]@{ Scope = '" + s + "'; ExecutionPolicy = " +
+            (s === 'CurrentUser' ? '$global:HmCU' : q(scopes[s] || (s === 'Process' ? 'Bypass' : 'Undefined'))) + ' }').join(', ') + ') }',
+        "  if ($Scope -eq 'CurrentUser') { return $global:HmCU }",
+        "  return 'Undefined' }",
+        'function Set-ExecutionPolicy { param($Scope, $ExecutionPolicy, [switch]$Force, $ErrorAction)',
+        "  $global:HmSet += ([string]$Scope + '=' + [string]$ExecutionPolicy)",
+        persist ? '  $global:HmCU = [string]$ExecutionPolicy' : '',
+        throwOnSet ? "  throw 'Windows PowerShell updated your execution policy successfully, but the setting is overridden by a policy defined at a more specific scope.'" : '',
+        '}',
+        'function Get-CimInstance { param($ClassName, $ErrorAction) [pscustomobject]@{ ProductType = 1 } }',
+      ].join('\r\n');
+      const run = (scopes, persist, throwOnSet) => runPsText(stub(scopes, persist, throwOnSet) + '\r\n' + fns +
+        '\r\n$res = Set-HmUserExecPolicy\r\nWrite-Output ("RES=" + $res)\r\nWrite-Output ("SET=" + ($global:HmSet -join ","))').out;
+      let o = run({}, true, true);
+      assert(/RES=ok/.test(o) && /SET=CurrentUser=RemoteSigned\s*$/m.test(o),
+        'клиент без настроек: CurrentUser=RemoteSigned, ругань «перекрыто областью Process» не мешает: ' + o);
+      assert(/Set-ExecutionPolicy -Scope CurrentUser Undefined/.test(o), 'человеку сказано, как вернуть');
+      o = run({}, false, true);
+      assert(/RES=blocked/.test(o), 'значение не легло — честный blocked, а не ok: ' + o);
+      o = run({ MachinePolicy: 'Restricted' }, true, false);
+      assert(/RES=blocked/.test(o) && /^SET=\s*$/m.test(o), 'групповая политика: запись не пробовалась: ' + o);
+      assert(/claude\.cmd/.test(o), 'и сказано, что набирать вместо claude');
+      o = run({ CurrentUser: 'AllSigned' }, true, false);
+      assert(/RES=blocked/.test(o) && /^SET=\s*$/m.test(o), 'AllSigned не ослабляем: ' + o);
+      o = run({ CurrentUser: 'RemoteSigned' }, true, false);
+      assert(/RES=ok/.test(o) && /^SET=\s*$/m.test(o), 'уже разрешено — ничего не пишем: ' + o);
+      o = run({ CurrentUser: 'Bypass', LocalMachine: 'Restricted' }, true, false);
+      assert(/RES=ok/.test(o) && /^SET=\s*$/m.test(o), 'более разрешающее не «понижаем» до RemoteSigned: ' + o);
+      assert(!/-Scope\s+LocalMachine/i.test(codeOnly(src)), 'область LocalMachine установщик не трогает никогда');
+    });
+
+    ok('A06: проба claude из PowerShell берёт claude.ps1 (а не .cmd) и отличает запрет политики (код 197)', () => {
+      const fn = cutPsFn(readWin('_claudeenv.ps1'), 'Get-HmPsProbeScript');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-psprobe-'));
+      try {
+        const bin = path.join(base, "n'pm dir");   // апостроф и пробел — проверка экранирования
+        fs.mkdirSync(bin);
+        fs.writeFileSync(path.join(bin, 'claude.ps1'), 'exit 0\r\n');
+        fs.writeFileSync(path.join(bin, 'claude.cmd'), '@exit /b 5\r\n');
+        const out = path.join(base, 'probe.txt');
+        const r0 = runPsText(fn + '\r\n[IO.File]::WriteAllText(' + q(out) + ', (Get-HmPsProbeScript ' + q(bin) + '))');
+        assert(fs.existsSync(out), 'текст пробы получен: ' + r0.err);
+        const b64 = Buffer.from(fs.readFileSync(out, 'utf8'), 'utf16le').toString('base64');
+        // Своей политики проба не задаёт — здесь её роль играет -ExecutionPolicy процесса.
+        const code = (policy) => spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', policy,
+          '-EncodedCommand', b64], { encoding: 'utf8', timeout: 60000 }).status;
+        assert.strictEqual(code('Bypass'), 0, 'политика пускает — выполнен claude.ps1 (0), а не claude.cmd (5)');
+        assert.strictEqual(code('Restricted'), 197, 'Restricted: отказ загрузить claude.ps1 -> 197');
+        assert.strictEqual(code('AllSigned'), 197, 'AllSigned и неподписанный claude.ps1 -> 197');
+        fs.writeFileSync(path.join(bin, 'claude.ps1'), 'exit 3\r\n');
+        assert.strictEqual(code('Bypass'), 3, 'код самого claude доходит как есть');
+      } finally { dropDir(base); }
+    });
+
+    ok('A06: Test-HmClaudeViaPowerShell — через powershell.exe, n/a без claude.ps1, служебные коды не приговор', () => {
+      const src = readWin('_claudeenv.ps1');
+      const fns = cutPsFn(src, 'Get-HmPsProbeScript') + '\r\n' + cutPsFn(src, 'Test-HmClaudeViaPowerShell');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-psverd-'));
+      try {
+        const withPs = path.join(base, 'npm'); const noPs = path.join(base, 'local');
+        fs.mkdirSync(withPs); fs.mkdirSync(noPs);
+        fs.writeFileSync(path.join(withPs, 'claude.ps1'), 'exit 0');
+        fs.writeFileSync(path.join(withPs, 'claude.cmd'), '@exit /b 0');
+        fs.writeFileSync(path.join(noPs, 'claude.exe'), 'x');
+        // Де-элевация подставная: Gate/Code из env. Если зовут НЕ powershell.exe с
+        // -EncodedCommand (то есть проба снова пошла бы через cmd) — отвечает 99 = broken.
+        const stub = 'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+          "  if ($env:HM_T_GATE -eq 'null') { return $null }\r\n" +
+          "  if (-not ($Exe -like '*\\WindowsPowerShell\\v1.0\\powershell.exe') -or ($Arguments -notcontains '-EncodedCommand')) { return [pscustomobject]@{ Gate = 'medium'; Code = 99 } }\r\n" +
+          '  [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE }\r\n}\r\n';
+        const v = (bin, gate, codeN) => runPsText(stub + fns + '\r\nWrite-Output (Test-HmClaudeViaPowerShell ' + q(bin) + ')',
+          { HM_T_GATE: gate, HM_T_CODE: String(codeN) }).out.trim();
+        const shim = path.join(withPs, 'claude.cmd');
+        assert.strictEqual(v(path.join(noPs, 'claude.exe'), 'medium', 0), 'n/a', 'нет claude.ps1 — PowerShell возьмёт .exe, политика ни при чём');
+        assert.strictEqual(v(shim, 'medium', 0), 'works', 'проба идёт через powershell.exe и -EncodedCommand');
+        assert.strictEqual(v(shim, 'medium', 197), 'blocked');
+        assert.strictEqual(v(shim, 'medium', 1), 'broken');
+        assert.strictEqual(v(shim, 'medium', 267009), 'unverified', 'статус планировщика — не ответ claude');
+        assert.strictEqual(v(shim, 'medium', -2147024891), 'unverified', 'HRESULT отказа — не ответ claude');
+        assert.strictEqual(v(shim, 'null', 0), 'unverified', 'де-элевация не отчиталась');
+        assert.strictEqual(v(shim, 'refused', 0), 'unverified', 'обёртка увидела не medium');
+      } finally { dropDir(base); }
+    });
+  }
+
+  ok('A06: claude.ps1 правит политику общей функцией до пробы и пишет вердикт claude-ps; verify.ps1 показывает запрет отдельной строкой', () => {
+    const s = codeOnly(readWin('claude.ps1'));
+    assert(/_userpath\.ps1/.test(s) && /_claudeenv\.ps1/.test(s), 'claude.ps1 подключает помощников PATH и политики');
+    assert(!/function Set-HmUserExecPolicy|function Add-ToUserPath/.test(s), 'функции живут в библиотеке, а не копией в claude.ps1');
+    assertOrder(s, "$psVerdict = Repair-HmClaudeUserEnv -Bin $claudeBin -Probe:($probe -eq 'works')", "Write-HmCheck 'claude-ps' $psVerdict",
+      'вердикт PowerShell пишется после починки');
+    assertOrder(s, "Write-HmCheck 'claude-ps' $psVerdict", 'Write-Host "OK: Claude Code CLI', 'вердикт PowerShell пишется до финального OK');
+    const lib = codeOnly(readWin('_claudeenv.ps1'));
+    assertOrder(lib, '$policy = Set-HmUserExecPolicy', 'Test-HmClaudeViaPowerShell $Bin', 'политика правится ДО пробы из PowerShell');
+    assert(/if \(-not \(Test-Path -LiteralPath \(Join-Path \(Split-Path \$Bin\) 'claude\.ps1'\)\)\) \{ return 'n\/a' \}/.test(lib),
+      'политику трогаем, только когда рядом с бинарём лежит claude.ps1');
+    const vRaw = readWin('verify.ps1');
+    const blk = vRaw.slice(vRaw.indexOf("if (-not (Test-Selected 'claude'))"), vRaw.indexOf('# --- Конфиг'));
+    assert(blk.length > 200, 'блок проверки claude найден');
+    assert(/\$j\.'claude-ps'/.test(blk) && /CHECK fail Запуск claude в PowerShell/.test(blk), 'verify.ps1 переносит вердикт claude-ps');
+    assert(/\$psVerdict = \[string\]\$psVerdictLive/.test(blk), 'при невыбранном claude вердикт берётся из свежей починки, а не из файла');
+    assert(/^CHECK (ok|fail|skip)\s+(.*)$/.test('CHECK fail Запуск claude в PowerShell'), 'строку распознаёт рендерер');
+    if (!havePs) return;
+    const sb = mkVerifySandbox();
+    try {
+      const run = (ps, selected) => {
+        fs.writeFileSync(path.join(sb.home, '.hamidun-setup', 'checks.json'),
+          JSON.stringify({ claude: { verdict: 'works' }, 'claude-ps': { verdict: ps } }));
+        return runVerifyIn(sb, { HM_SELECTED: selected || 'claude' }).out;
+      };
+      let o = run('blocked');
+      assert(/CHECK ok Claude CLI/.test(o) && /CHECK fail Запуск claude в PowerShell/.test(o), 'запрет политики виден в чек-листе: ' + o);
+      o = run('broken');
+      assert(/CHECK fail Запуск claude в PowerShell/.test(o), 'отказ в PowerShell виден в чек-листе');
+      for (const quiet of ['works', 'unverified', 'n/a']) {
+        o = run(quiet);
+        assert(/CHECK ok Claude CLI/.test(o) && !/PowerShell/.test(o.split(/\r?\n/).filter((l) => l.startsWith('CHECK')).join('\n')),
+          quiet + ': лишней строки в чек-листе нет');
+      }
+    } finally { dropDir(sb.base); }
+  });
+
+  // ---- A07: ~/.local\bin в PATH пользователя -------------------------------------
+  if (havePs) {
+    ok('A07: Get-HmPathWithDir — конец/начало, дубль по развёрнутому значению без учёта регистра и хвостового слеша', () => {
+      const fn = cutPsFn(readWin('_userpath.ps1'), 'Get-HmPathWithDir');
+      const up = process.env.USERPROFILE || 'C:\\Users\\x';
+      const cases = [
+        ['', 'C:\\x\\bin', '', 'C:\\x\\bin'],
+        ['C:\\a;', 'C:\\b', '', 'C:\\a;C:\\b'],
+        ['C:\\a;C:\\W', 'C:\\p', '-Prepend', 'C:\\p;C:\\a;C:\\W'],
+        ['%USERPROFILE%\\.local\\bin;C:\\a', up + '\\.local\\bin\\', '', '<null>'],
+        ['c:\\B\\;C:\\a', 'C:\\b', '', '<null>'],
+        [';;', 'C:\\b', '', 'C:\\b'],
+      ];
+      const body = fn + '\r\n' + cases.map((c) => '$r = Get-HmPathWithDir -Raw ' + q(c[0]) + ' -Dir ' + q(c[1]) + ' ' + c[2] +
+        "\r\nif ($null -eq $r) { Write-Output '<null>' } else { Write-Output $r }").join('\r\n');
+      const out = runPsText(body).out.trim().split(/\r?\n/);
+      cases.forEach((c, i) => assert.strictEqual(out[i], c[3], JSON.stringify(c) + ' -> ' + out[i]));
+    });
+
+    ok('A07: Add-HmUserPath — REG_EXPAND_SZ и %VAR% целы, повтор ничего не меняет, несуществующий каталог — только с -AllowMissing', () => {
+      const libSrc = readWin('_userpath.ps1');
+      const sub = 'Software\\HamidunTest-' + crypto.randomBytes(8).toString('hex');
+      const missing = 'C:\\hm-missing-' + crypto.randomBytes(4).toString('hex');
+      const body = (lib) => [
+        lib,
+        // Настоящий WM_SETTINGCHANGE тест не рассылает — считаем вызовы.
+        'function Send-HmEnvBroadcast { $global:HmBc++; return $true }',
+        '$global:HmBc = 0',
+        '$sub = ' + q(sub),
+        'try {',
+        '  $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($sub)',
+        "  $k.SetValue('Path', '%USERPROFILE%\\bin;C:\\a', [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close()",
+        "  Write-Output ('A1=' + (Add-HmUserPath -Dir " + q(missing) + ' -RegistrySubKey $sub))',
+        "  Write-Output ('A2=' + (Add-HmUserPath -Dir " + q(missing) + ' -AllowMissing -RegistrySubKey $sub))',
+        "  Write-Output ('A3=' + (Add-HmUserPath -Dir " + q(missing.toLowerCase() + '\\') + ' -AllowMissing -RegistrySubKey $sub))',
+        '  $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($sub)',
+        "  Write-Output ('RAW=' + $k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))",
+        "  Write-Output ('KIND=' + $k.GetValueKind('Path')); $k.Close()",
+        "  Write-Output ('BC=' + $global:HmBc)",
+        '} finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($sub, $false) }',
+        "Write-Output ('GONE=' + ($null -eq [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($sub)))",
+      ].join('\r\n');
+      const o = runPsText(body(libSrc)).out;
+      assert(/A1=False/.test(o), 'несуществующий каталог без -AllowMissing не пишется: ' + o);
+      assert(/A2=True/.test(o), '-AllowMissing: пишется (каталог создадут позже)');
+      assert(/A3=False/.test(o), 'тот же каталог в другом регистре и с «\\» — не дубль');
+      assert(o.indexOf('RAW=%USERPROFILE%\\bin;C:\\a;' + missing) !== -1, '%USERPROFILE% не развёрнут, запись в конце: ' + o);
+      assert(/KIND=ExpandString/.test(o), 'тип REG_EXPAND_SZ сохранён');
+      assert(/BC=1/.test(o), 'WM_SETTINGCHANGE — ровно при реальной записи');
+      assert(/GONE=True/.test(o), 'песочный ключ убран');
+      // Отрицательный контроль: без поиска дубля повтор дописал бы каталог второй раз.
+      const fn = cutPsFn(libSrc, 'Get-HmPathWithDir');
+      const mutFn = fn.replace(/    foreach \(\$e in [^\n]*\n[^\n]*\n    \}\r?\n/, '');
+      assert(mutFn !== fn, 'мутация применилась (поиск дубля вырезан)');
+      const o2 = runPsText(body(libSrc.replace(fn, () => mutFn))).out;
+      assert(/A3=True/.test(o2), 'мутант пишет дубль — тест различает');
+    });
+  }
+
+  ok('A07: ~/.local/bin пишут в PATH пользователя claude.ps1 и nomad.ps1, PATH процесса под админом не трогается', () => {
+    const n = codeOnly(readWin('nomad.ps1'));
+    assert(/_userpath\.ps1/.test(n), 'nomad.ps1 подключает помощник PATH');
+    assertOrder(n, 'Add-HmUserPath $localBin', 'if (Get-Command nmd', 'PATH пишется ДО финальной проверки');
+    assert(!/\$env:Path\s*=[^\n]*localBin/i.test(n), 'PATH процесса (под админом) без ~/.local\\bin: Get-Command nmd не найдёт user-writable шим');
+    assert(!/появится в PATH после перезапуска/.test(n), 'обещания «появится в PATH» без записи PATH больше нет');
+    const c = codeOnly(readWin('claude.ps1'));
+    const envLib = codeOnly(readWin('_claudeenv.ps1'));
+    assert(/Add-HmUserPath \(Join-Path \$env:USERPROFILE '\.local\\bin'\) -AllowMissing/.test(envLib) && /Repair-HmClaudeUserEnv/.test(c),
+      'claude.ps1 (через общую Repair-HmClaudeUserEnv) пишет ~/.local\\bin, даже если каталог появится позже');
+    assert(!/function Add-ToUserPath/.test(c), 'старый помощник (только существующий каталог, без рассылки) убран');
+    const u = codeOnly(readWin('_userpath.ps1'));
+    assert(!/\$env:Path\s*=/.test(u), 'помощник не трогает PATH процесса');
+    assert(/SendMessageTimeout/.test(u) && /0x1A/.test(u), 'WM_SETTINGCHANGE рассылается');
+    assert(/DoNotExpandEnvironmentNames/.test(u) && /ExpandString/.test(u), 'REG_EXPAND_SZ и %VAR% сохраняются');
+  });
+
+  // ---- A08: course.ps1 находит claude --------------------------------------------
+  if (havePs) {
+    ok('A08: course.ps1 находит claude по абсолютным путям (APPDATA/npm, prefix из ~/.npmrc, ~/.local/bin) и не запускает npm', () => {
+      const src = readWin('course.ps1');
+      const fn = cutPsFn(src, 'Find-ClaudeBinary');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-course-'));
+      try {
+        const home = path.join(base, 'home'); const appdata = path.join(base, 'appdata');
+        fs.mkdirSync(home, { recursive: true }); fs.mkdirSync(appdata, { recursive: true });
+        // Get-Command закрыт стабом: PATH процесса (урезанный до HKLM) claude не видит.
+        const run = () => runPsText('function Get-Command { param($Name, $ErrorAction) return $null }\r\n' + fn +
+          "\r\n$r = Find-ClaudeBinary\r\nif ($r) { Write-Output ('HIT=' + $r) } else { Write-Output 'MISS' }",
+          { USERPROFILE: home, APPDATA: appdata }).out.trim();
+        assert.strictEqual(run(), 'MISS', 'ничего нет — предупреждение честное');
+        fs.mkdirSync(path.join(appdata, 'npm'));
+        fs.writeFileSync(path.join(appdata, 'npm', 'claude.cmd'), '@echo x');
+        assert.strictEqual(run(), 'HIT=' + path.join(appdata, 'npm', 'claude.cmd'), 'npm install -g в дефолтный prefix');
+        fs.rmSync(path.join(appdata, 'npm'), { recursive: true, force: true });
+        const own = path.join(base, 'own prefix');
+        fs.mkdirSync(own); fs.writeFileSync(path.join(own, 'claude.cmd'), '@echo x');
+        fs.writeFileSync(path.join(home, '.npmrc'), 'prefix=C:\\nowhere\r\nprefix = "' + own + '"\r\n');
+        assert.strictEqual(run(), 'HIT=' + path.join(own, 'claude.cmd'), 'свой prefix: последний prefix= из ~/.npmrc, кавычки сняты');
+        fs.rmSync(path.join(home, '.npmrc'));
+        fs.mkdirSync(path.join(home, '.local', 'bin'), { recursive: true });
+        fs.writeFileSync(path.join(home, '.local', 'bin', 'claude.exe'), 'x');
+        assert.strictEqual(run(), 'HIT=' + path.join(home, '.local', 'bin', 'claude.exe'), 'нативный установщик');
+      } finally { dropDir(base); }
+      assert(!/npm config get/.test(codeOnly(src)), 'course.ps1 не запускает npm под админом — prefix читается из ~/.npmrc текстом');
+      assert(/\$claudeSeen = \[bool\]\(Find-ClaudeBinary\)/.test(src), 'предупреждение опирается на поиск по абсолютным путям');
+    });
+  }
+
+  // ---- A24: AI-мост ----------------------------------------------------------------
+  ok('A24: мост скрыт, пока enrollEndpoint пуст, — кроме уже поставленного нами; адрес вписан — вернулся сам', () => {
+    const vis = require(path.join(ROOT, 'src', 'component-visibility.js'));
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    const bridge = byId.bridge;
+    assert(bridge && bridge.hideWhileUnconfigured === true && bridge.needsConfig === 'bridge.enrollEndpoint',
+      'связь объявлена данными в components.json');
+    assert.strictEqual(String(cfg.bridge.enrollEndpoint).trim(), '', 'в сборке адреса нет — значит мост и должен быть скрыт');
+    assert.strictEqual(vis.hiddenWhileUnconfigured(bridge, cfg, () => false), true, 'нет адреса, не стоит — скрыт');
+    assert.strictEqual(vis.hiddenWhileUnconfigured(bridge, cfg, (id) => id === 'bridge'), false,
+      'уже стоит от нашего установщика — карточка с «Удалить» остаётся');
+    const filled = JSON.parse(JSON.stringify(cfg)); filled.bridge.enrollEndpoint = 'https://enroll.example/api';
+    assert.strictEqual(vis.hiddenWhileUnconfigured(bridge, filled, () => false), false, 'адрес вписан — мост вернулся сам');
+    filled.bridge.enrollEndpoint = '   ';
+    assert.strictEqual(vis.hiddenWhileUnconfigured(bridge, filled, () => false), true, 'одни пробелы — не адрес');
+    assert.strictEqual(vis.hiddenWhileUnconfigured(Object.assign({}, bridge, { hideWhileUnconfigured: false }), cfg, () => false), false,
+      'без флага не прячем — остаётся только предупреждение needsConfig');
+    Object.values(byId).filter((c) => c.id !== 'bridge')
+      .forEach((c) => assert.strictEqual(vis.hiddenWhileUnconfigured(c, cfg, () => false), false, c.id + ' не прячется'));
+    assert.strictEqual(vis.hiddenWhileUnconfigured(bridge, cfg, () => { throw new Error('io'); }), true,
+      'сбой чтения квитанции — fail-closed: прячем, а не предлагаем мост');
+    assert.strictEqual(vis.isUnconfigured({ needsConfig: 'нет.такого' }, cfg), true, 'несуществующий путь — «не настроен»');
+  });
+
+  ok('A24 (main.js): выбор приходит без моста, run-component его отклоняет, квитанция возвращает карточку', () => {
+    const vm = require('vm');
+    const src = EG_MAIN();
+    const grab = (re, what) => { const m = re.exec(src); assert(m, 'в main.js нет ' + what); return m[0]; };
+    const code = [
+      grab(/function componentShownOnPlatform\([\s\S]*?\n\}/, 'componentShownOnPlatform'),
+      grab(/const componentVisibility = require\('\.\/component-visibility'\);/, 'require модуля видимости'),
+      grab(/function componentHiddenUnconfigured\([\s\S]*?\n\}/, 'componentHiddenUnconfigured'),
+      grab(/function componentsForPlatform\(\)[\s\S]*?\n\}/, 'componentsForPlatform'),
+    ].join('\n') + '\nthis.__cfp = componentsForPlatform; this.__hid = componentHiddenUnconfigured;';
+    let receipted = false;
+    const sb = {
+      require: (p) => require(path.join(ROOT, 'src', p.replace(/^\.\//, '') + '.js')),
+      readJson: (name) => JSON.parse(fs.readFileSync(path.join(ROOT, name), 'utf8')),
+      receipts: { hasReceipt: (h, id) => receipted && id === 'bridge' },
+      os: { homedir: () => 'C:\\Users\\x' },
+      process: { platform: 'win32' },
+    };
+    vm.createContext(sb);
+    vm.runInContext(code, sb);
+    const ids = (r) => [].concat(...r.groups.map((g) => g.components.map((c) => c.id)));
+    let list = ids(sb.__cfp());
+    assert(list.indexOf('bridge') === -1, 'моста нет в выборе: ' + list.join(','));
+    assert(list.indexOf('claude') !== -1 && list.indexOf('pydeps') !== -1 && list.indexOf('verify') !== -1, 'остальные на месте');
+    receipted = true;
+    assert(ids(sb.__cfp()).indexOf('bridge') !== -1, 'с квитанцией карточка моста возвращается (на ней «Удалить»)');
+    receipted = false;
+    assert.strictEqual(sb.__hid(byId.bridge), true, 'тот же гейт без переданного конфига читает config.json сам');
+    const rc = src.slice(src.indexOf('if (meta && !componentShownOnPlatform(meta, process.platform)) {'));
+    assertOrder(rc, 'if (meta && componentHiddenUnconfigured(meta)) {', 'const script = scriptFor(id);',
+      'run-component отклоняет скрытый компонент ДО запуска скрипта');
+  });
+
+  ok('A24: bridge.ps1 ищет Python тем же списком, что config.ps1', () => {
+    const b = readWin('bridge.ps1'); const c = readWin('config.ps1');
+    const cands = (s) => (s.match(/"\$env:(?:LOCALAPPDATA|ProgramFiles)\\[^"]*python\.exe"/g) || []);
+    const cb = cands(b.slice(b.indexOf('# 2. реальный Python'), b.indexOf('$pyw =')));
+    const cc = cands(c.slice(c.indexOf('$pyPath = $null'), c.indexOf('# claude ставится через npm')));
+    assert.strictEqual(cb.length, 5, 'в bridge.ps1 пять каталогов-кандидатов: ' + cb.join(' '));
+    assert.deepStrictEqual(cb, cc, 'список каталогов совпадает с config.ps1');
+    assert(/foreach \(\$name in 'python', 'python3'\)/.test(b) && /-notmatch 'WindowsApps'/.test(b),
+      'python и python3, заглушка Магазина отбрасывается');
+  });
+
+  if (havePs) {
+    ok('A24 (прогон PS 5.1): мост находит python3 и Python311 там, где раньше писал, что Python не найден', () => {
+      const b = readWin('bridge.ps1');
+      const block = b.slice(b.indexOf("$py = ''"), b.indexOf('$pyw ='));
+      assert(block.length > 100 && /exit 1/.test(block), 'блок поиска Python найден');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-brpy-'));
+      try {
+        const la = path.join(base, 'la');
+        const py311 = path.join(la, 'Programs', 'Python', 'Python311', 'python.exe');
+        fs.mkdirSync(path.dirname(py311), { recursive: true });
+        fs.writeFileSync(py311, 'x');
+        const run = (cmdMap) => runPsText(
+          'function Get-Command { param($Name, $ErrorAction)\r\n' +
+          Object.keys(cmdMap).map((k) => '  if ($Name -eq ' + q(k) + ') { return [pscustomobject]@{ Source = ' + q(cmdMap[k]) + ' } }').join('\r\n') +
+          '\r\n  return $null }\r\n' + block + "\r\nWrite-Output ('PY=' + $py)",
+          { LOCALAPPDATA: la, ProgramFiles: path.join(base, 'pf') }).out;
+        let o = run({ python: 'C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe', python3: 'C:\\Py\\python3.exe' });
+        assert(o.indexOf('PY=C:\\Py\\python3.exe') !== -1, 'заглушка python пропущена, взят python3: ' + o);
+        o = run({ python: 'C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe' });
+        assert(o.indexOf('PY=' + py311) !== -1, 'Python311 из LOCALAPPDATA найден: ' + o);
+      } finally { dropDir(base); }
+    });
+  }
+
+  ok('A24: журнал моста на Windows — UTF-8 с BOM один раз; старый журнал без BOM получает метку', () => {
+    if (process.platform !== 'win32') SKIP('журнал с BOM пишется только на Windows');
+    const pv = spawnSync('python', ['--version'], { encoding: 'utf8', timeout: 30000 });
+    if (pv.error || pv.status !== 0) SKIP('нет python для прогона агента');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-brlog-'));
+    try {
+      const agent = path.join(ROOT, 'agent', 'bridge_agent.py');
+      const run = () => spawnSync('python', ['-c',
+        "import importlib.util as u; s = u.spec_from_file_location('ba', r'" + agent + "'); m = u.module_from_spec(s); " +
+        "s.loader.exec_module(m); m.log('проверка журнала'); m.log('ещё строка')"],
+      { encoding: 'utf8', timeout: 60000,
+        env: Object.assign({}, process.env, { LOCALAPPDATA: base, PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' }) });
+      const logp = path.join(base, 'HamidunBridge', 'bridge.log');
+      const boms = (b) => b.toString('latin1').split('\xef\xbb\xbf').length - 1;
+      let r = run();
+      assert.strictEqual(r.status, 0, 'агент импортируется и пишет журнал: ' + (r.stderr || ''));
+      let b = fs.readFileSync(logp);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'новый журнал начинается с BOM');
+      r = run(); b = fs.readFileSync(logp);
+      assert.strictEqual(boms(b), 1, 'BOM ровно один — в середину журнала метка не попадает');
+      assert(b.toString('utf8').indexOf('проверка журнала') !== -1, 'кириллица в UTF-8');
+      fs.writeFileSync(logp, Buffer.from('старая строка\n', 'utf8'));
+      r = run(); b = fs.readFileSync(logp);
+      assert(b[0] === 0xEF && boms(b) === 1 && b.toString('utf8').indexOf('старая строка') !== -1,
+        'журнал старой версии сохранён и получил метку BOM в начало');
+    } finally { dropDir(base); }
+  });
+
+  // ---- A44: защищённый каталог докачки — повтор с запасом ---------------------------
+  trackAsync(okAsync('A44 (main.js): защищённый каталог — вторая попытка 60 с после таймаута 20 с; без совета запустить от администратора', async () => {
+    const vm = require('vm');
+    const EventEmitter = require('events');
+    const src = EG_MAIN();
+    const m = /async function winMakeSecureDir\(opts\) \{[\s\S]*?\n\}\n/.exec(src);
+    assert(m, 'winMakeSecureDir найдена');
+    const budgets = [];
+    let attempt = 0;
+    const DIR = 'C:\\ProgramData\\HmDeElev-0123456789abcdef0123456789abcdef';
+    const fakeSpawn = () => {
+      attempt++;
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.kill = () => {};
+      // Первая попытка «висит»: ни вывода, ни close — как холодный powershell под антивирусом.
+      if (attempt >= 2) setImmediate(() => { child.stdout.emit('data', 'HMSECDIR::' + DIR + '::END'); child.emit('close', 0); });
+      return child;
+    };
+    const sb = {
+      remoteFetch: {
+        winProgramData: () => 'C:\\ProgramData',
+        winPowershellPath: () => 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        sysBin: () => 'C:\\Windows\\System32\\icacls.exe',
+        verifyDirSecureWin: () => true,
+      },
+      winDeElevScript: () => 'C:\\res\\scripts\\windows\\_deelev.ps1',
+      fs: { existsSync: () => true },
+      path: path.win32,
+      spawn: fakeSpawn,
+      detectSpawnEnv: () => ({}),
+      rmStagingTree: () => {},
+      // Таймер «срабатывает» сразу: проверяем логику попыток, а не ждём 80 секунд.
+      setTimeout: (fn, ms) => { budgets.push(ms); return setImmediate(fn); },
+      clearTimeout: (h) => clearImmediate(h),
+    };
+    vm.createContext(sb);
+    vm.runInContext('var lastSecureDirError = ""; var lastSecureDirAttempts = 0;\n' + m[0] +
+      '\nthis.__f = winMakeSecureDir; this.__err = function () { return lastSecureDirError; };', sb);
+    const dir = await sb.__f({ retry: true });     // путь докачки просит повтор
+    assert.strictEqual(dir, DIR, 'вторая попытка дала каталог');
+    assert.deepStrictEqual(budgets.slice(0, 2), [20000, 60000], 'бюджеты попыток: 20 с, затем 60 с');
+    attempt = -100; budgets.length = 0;          // обе попытки «висят»
+    const none = await sb.__f({ retry: true });
+    assert.strictEqual(none, null, 'обе попытки не прошли — fail-closed');
+    assert.strictEqual(budgets.length, 2, 'ровно две попытки, без бесконечного цикла');
+    assert(/60 с/.test(sb.__err()), 'причина называет вторую попытку: ' + sb.__err());
+    const ei = src.indexOf("error: 'не удалось подготовить защищённый каталог для загрузки'");
+    const msg = src.slice(ei, src.indexOf('};', ei));
+    assert(ei !== -1 && !/от имени администратора/.test(msg), 'совета «запусти от администратора» нет — установщик и так под админом');
+    assert(/Повторить/.test(msg) && /антивирус/.test(msg), 'человеку сказано, что вероятно случилось и что нажать');
+  }));
+
+  // ---- Миграция settings.json (B01-B04, B08, B10) и опись (B13) -----------------------
+  const MIG_LIB = path.join(WIN, '_cfgmigrate.ps1');
+  const migBad = () => ({
+    model: 'opus', effortLevel: 'xhigh', cleanupPeriodDays: 99999, autoCompactWindow: 0.85,
+    env: { MCP_TIMEOUT: '120000', NOTE: 'русский <тег> & "кавычки"\tтаб' },
+    permissions: {
+      defaultMode: 'bypassPermissions',
+      allow: ['Bash(*)', 'Write', 'Write(*)', 'Edit(*)', 'Write(~/notes/**)', 'Glob(src/**)', 'Read(*)',
+        'MultiEdit(*)', 'Write(.claude/**)', 'Edit(.claude/**)', 'Bash(git *:*)', 'mcp__*'],
+      deny: ['Bash(*format C:*)', 'Write(~/.ssh/**)', 'Bash(rm -rf /)'],
+      ask: [],
+    },
+    hooks: {
+      PreToolUse: [
+        { matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.js', timeout: 5 },
+          { type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] },
+      ],
+      Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] }],
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo мой хук' }] }],
+    },
+    enabledPlugins: {
+      'greptile@claude-plugins-official': true, 'hookify@claude-plugins-official': true,
+      'github@claude-plugins-official': true, 'semgrep@claude-plugins-official': true,
+      'slack@claude-plugins-official': true, 'sentry@claude-plugins-official': true, 'figma@claude-plugins-official': true,
+      'huggingface-skills@claude-plugins-official': true, 'legalzoom@claude-plugins-official': true,
+      'adspirer-ads-agent@claude-plugins-official': true,
+      'linear@claude-plugins-official': false, 'my-plugin@my-market': true, 'code-review@claude-plugins-official': true,
+    },
+    statusLine: { type: 'command', command: 'node x.js', padding: 0 },
+    mcpServers: { a: { command: 'npx', args: ['-y', 'a'] } },
+    nested: { list: [[1, 2], [], {}], flag: null, n: -3, big: 12345678901 },
+  });
+  const migWant = () => {
+    const w = migBad();
+    w.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
+    // Те же правила, что guard_student_defaults.py пака: Tool(*) и голый Write не трогаем,
+    // путь — в «близнеца» на том же месте или убрать, если близнец уже есть; :* с * — в deny.
+    // allow: убираем ТОЛЬКО дубль уже работающего правила (Write(.claude/**) при Edit(.claude/**)).
+    // Write(~/notes/**) и Glob(src/**) без «близнеца» остаются как были — иначе неработающее правило
+    // стало бы разрешением, которого у человека нет. `mcp__*` на 2.1.283 не предупреждает — остаётся.
+    w.permissions.allow = ['Bash(*)', 'Write', 'Write(*)', 'Edit(*)', 'Write(~/notes/**)', 'Glob(src/**)', 'Read(*)',
+      'MultiEdit(*)', 'Edit(.claude/**)', 'Bash(git *:*)', 'mcp__*'];
+    w.permissions.deny = ['Bash(*format C*)', 'Edit(~/.ssh/**)', 'Bash(rm -rf /)'];
+    w.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.js', timeout: 5 }] }];
+    delete w.hooks.Stop;
+    ['greptile', 'hookify', 'github', 'semgrep', 'slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom',
+      'adspirer-ads-agent'].forEach((n) => { w.enabledPlugins[n + '@claude-plugins-official'] = false; });
+    delete w.mcpServers;
+    return w;
+  };
+  const runMig = (file, fresh, marker, lib) => runPsText('. ' + q(lib || MIG_LIB) + '\r\nInvoke-HmSettingsMigration -Path ' + q(file) +
+    ' -Fresh $' + !!fresh + ' -MarkerPath ' + q(marker));
+  const baks = (dir) => fs.readdirSync(dir).filter((n) => n.startsWith('settings.json.hamidun-bak-'));
+
+  if (havePs) {
+    ok('B: settings.json прошлых версий пака — исправлено ровно известное, формат пака сохранён, копия до правки, повтор без изменений', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mig-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const marker = path.join(base, '.hamidun-setup', 'config-migrations.json');
+        const original = JSON.stringify(migBad(), null, 2);
+        fs.writeFileSync(file, original);
+        let r = runMig(file, false, marker);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), JSON.stringify(migWant(), null, 2),
+          'исправлено ровно известное, остальное и формат — как в паке (JSON.stringify(…, 2)):\n' + r.out + r.err);
+        assert.strictEqual(baks(cdir).length, 1, 'одна копия до правки');
+        assert.strictEqual(fs.readFileSync(path.join(cdir, baks(cdir)[0]), 'utf8'), original, 'копия — исходный файл байт в байт');
+        ['выключил плагины', 'hookify', 'semgrep', 'slack', 'adspirer-ads-agent', 'permissions.allow', 'permissions.deny', 'VSCODE_PORT',
+          'mcpServers', 'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY', 'не действует'].forEach((w) => assert(r.out.indexOf(w) !== -1, 'в журнале названо: ' + w));
+        assert(fs.existsSync(marker), 'отметка шага значений по умолчанию записана');
+        r = runMig(file, false, marker);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), JSON.stringify(migWant(), null, 2), 'повтор не меняет файл');
+        assert.strictEqual(baks(cdir).length, 1, 'повтор не плодит копии');
+        assert(/устаревших правок в settings\.json нет/.test(r.out), 'повтор честно говорит, что править нечего');
+      } finally { dropDir(base); }
+    });
+
+    ok('B: выбор человека после миграции уважается (отметка), а свежий файл пака приводится к значениям по умолчанию; мутант без отметки пойман', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mig2-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const marker = path.join(base, 'm.json');
+        fs.writeFileSync(file, JSON.stringify(migBad(), null, 2));
+        runMig(file, false, marker);
+        // Человек поставил токен GitHub и сам включил плагин, а опрос вернул.
+        const mine = JSON.parse(fs.readFileSync(file, 'utf8'));
+        mine.enabledPlugins['github@claude-plugins-official'] = true;
+        delete mine.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY;
+        const mineText = JSON.stringify(mine, null, 2);
+        fs.writeFileSync(file, mineText);
+        runMig(file, false, marker);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), mineText, 'повторный запуск не откатывает выбор человека');
+        // Свежий файл (его не было или «начисто» перезаписал) — значения по умолчанию всегда.
+        runMig(file, true, marker);
+        const fresh = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.strictEqual(fresh.enabledPlugins['github@claude-plugins-official'], false, 'свежий файл: github выключен');
+        assert.strictEqual(fresh.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY, '1', 'свежий файл: опрос выключен');
+        // Отрицательный контроль: без отметки шаг применялся бы каждый раз.
+        const libSrc = fs.readFileSync(MIG_LIB, 'utf8');
+        const mutSrc = libSrc.replace('$defaults = $Fresh -or -not $applied.Contains($HmDefaultsStepId)', '$defaults = $true');
+        assert(mutSrc !== libSrc, 'мутация применилась');
+        const mutLib = path.join(base, 'mut.ps1');
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(base, '_userpath.ps1'));   // библиотека подтягивает соседа
+        fs.writeFileSync(mutLib, mutSrc.charCodeAt(0) === 0xFEFF ? mutSrc : '\uFEFF' + mutSrc);
+        fs.writeFileSync(file, mineText);
+        runMig(file, false, marker, mutLib);
+        assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).enabledPlugins['github@claude-plugins-official'], false,
+          'мутант без отметки снова выключает плагин человека — тест это различает');
+      } finally { dropDir(base); }
+    });
+
+    ok('B: неразбираемый settings.json, файл без дефектов и ~/.claude-ссылка не трогаются (байт в байт, без копии)', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mig3-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const cases = [
+          ['{"mcpServers": {"a": {}}, "permissions": {"allow": ["Write(~/x/**)"]}', /не разбирается/],
+          ['not json at all', /не разбирается/],
+          ['[{"mcpServers": {}}]', /не разбирается/],
+          ['{"model":"opus","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n', /правок в settings\.json нет/],
+        ];
+        cases.forEach(([text, says], i) => {
+          fs.writeFileSync(file, text);
+          const r = runMig(file, false, path.join(base, 'm' + i + '.json'));
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), text, 'случай ' + i + ': файл не тронут');
+          assert.strictEqual(baks(cdir).length, 0, 'случай ' + i + ': копий нет');
+          assert(says.test(r.out), 'случай ' + i + ': причина в журнале: ' + r.out);
+        });
+        // ~/.claude — junction на чужой каталог: правка ушла бы во внешнюю цель.
+        const real = path.join(base, 'real'); fs.mkdirSync(real);
+        const bad = JSON.stringify(migBad(), null, 2);
+        fs.writeFileSync(path.join(real, 'settings.json'), bad);
+        const link = path.join(base, 'linked');
+        fs.symlinkSync(real, link, 'junction');
+        const r = runMig(path.join(link, 'settings.json'), false, path.join(base, 'mj.json'));
+        assert.strictEqual(fs.readFileSync(path.join(real, 'settings.json'), 'utf8'), bad, 'файл за ссылкой не тронут');
+        assert(/ссылка/.test(r.out), 'причина названа: ' + r.out);
+      } finally { dropDir(base); }
+    });
+
+    ok('B: правка сохраняет BOM и CRLF исходного файла', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mig4-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const src = { a: 1, env: { X: 'y' }, mcpServers: { s: {} } };
+        fs.writeFileSync(file, '\uFEFF' + JSON.stringify(src, null, 2).replace(/\n/g, '\r\n') + '\r\n');
+        runMig(file, false, path.join(base, 'm.json'));
+        const b = fs.readFileSync(file);
+        assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'BOM на месте');
+        const t = b.toString('utf8').slice(1);
+        const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+        assert.strictEqual(t, JSON.stringify(want, null, 2).replace(/\n/g, '\r\n') + '\r\n', 'CRLF и финальный перевод строки сохранены');
+      } finally { dropDir(base); }
+    });
+
+    ok('B13 + миграция (прогон config.ps1): CATALOG.md в ~/.claude, сводка с числами, старый settings.json исправлен с копией', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        fs.writeFileSync(clone + '/CATALOG.md', '# Что внутри пака\n');
+        fs.mkdirSync(clone + '/.claude/agents/health/workers', { recursive: true });
+        fs.writeFileSync(clone + '/.claude/agents/a1.md', 'a');
+        fs.writeFileSync(clone + '/.claude/agents/README.md', 'r');
+        fs.writeFileSync(clone + '/.claude/agents/health/workers/w1.md', 'w');
+        fs.mkdirSync(clone + '/.claude/commands/gsd', { recursive: true });
+        fs.writeFileSync(clone + '/.claude/commands/c1.md', 'c');
+        fs.writeFileSync(clone + '/.claude/commands/gsd/g1.md', 'g');
+        seedHome(home);
+        const old = { model: 'opus', permissions: { allow: ['Write(~/**)', 'Edit(~/**)'] },
+          enabledPlugins: { 'greptile@claude-plugins-official': true } };
+        fs.writeFileSync(home + '/.claude/settings.json', JSON.stringify(old, null, 2));
+        const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        const s = JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8'));
+        assert.strictEqual(s.enabledPlugins['greptile@claude-plugins-official'], false, 'плагин без токена выключен');
+        assert.deepStrictEqual(s.permissions.allow, ['Edit(~/**)'], 'Write(~/**) убран — Edit(~/**) уже есть');
+        assert.strictEqual(s.model, 'opus', 'модель человека не тронута');
+        assert(fs.readdirSync(home + '/.claude').some((n) => n.startsWith('settings.json.hamidun-bak-')), 'копия до правки');
+        assertUserDataIntact(home);
+        assert.strictEqual(fs.readFileSync(home + '/.claude/CATALOG.md', 'utf8'), '# Что внутри пака\n', 'каталог пака в ~/.claude');
+        const sum = JSON.parse(fs.readFileSync(home + '/.hamidun-setup/config-summary.json', 'utf8'));
+        assert.strictEqual(sum.skills, 2, 'навыки: наш и пользовательский (у обоих SKILL.md)');
+        assert.strictEqual(sum.agents, 2, 'агенты: a1 и workers/w1, README не считается');
+        assert.strictEqual(sum.commands, 2, 'команды: c1 и gsd/g1');
+        assert(/CATALOG\.md$/.test(sum.catalog), 'путь к каталогу для финального экрана');
+        assert(/навыков 2, агентов 2, команд 2/.test(r.stdout || ''), 'цифры названы в журнале');
+      } finally { dropDir(base); }
+    });
+  }
+
+  ok('B: config.ps1 зовёт миграцию ПОСЛЕ раскладки и опись ПЕРЕД маркером завершённости', () => {
+    const c = codeOnly(readWin('config.ps1'));
+    assert(/_cfgmigrate\.ps1/.test(c), 'config.ps1 подключает библиотеку миграции');
+    assertOrder(c, '$settingsExisted = Test-Path', 'robocopy $srcClaude $claudeHome', 'снимок «был ли settings.json» — до раскладки');
+    assertOrder(c, 'robocopy $srcClaude $claudeHome /E /XJ', 'Invoke-HmSettingsMigration -Path', 'миграция — после раскладки');
+    assertOrder(c, 'Write-HmConfigSummary -Clone', "'.hamidun-config-complete'", 'опись — до маркера завершённости');
+  });
+
+  // ---- A09: python в новом терминале и заглушка Магазина ----------------------------
+  if (havePs) {
+    ok('A09: python в новом терминале — заглушка Магазина первой -> fix, настоящий python или Python из Магазина -> ok', () => {
+      const plan = cutPsFn(readWin('_userpath.ps1'), 'Get-HmPythonPathPlan');
+      const find = cutPsFn(readWin('_userpath.ps1'), 'Find-HmOnPath');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pyalias-'));
+      try {
+        const stub = path.join(base, 'Microsoft', 'WindowsApps'); const real = path.join(base, 'Python312');
+        const empty = path.join(base, 'empty');
+        [stub, real, empty].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+        fs.writeFileSync(path.join(stub, 'python.exe'), '');
+        fs.writeFileSync(path.join(real, 'python.exe'), 'x');
+        const pth = (...ds) => q(ds.join(';'));
+        const out = runPsText([plan, find,
+          "Write-Output ('1=' + (Find-HmOnPath -Name 'python' -PathText " + pth(empty, stub, real) + '))',
+          "Write-Output ('2=' + (Get-HmPythonPathPlan -Hit (Find-HmOnPath -Name 'python' -PathText " + pth(stub, real) + ') -StorePython $false))',
+          "Write-Output ('3=' + (Get-HmPythonPathPlan -Hit (Find-HmOnPath -Name 'python' -PathText " + pth(real, stub) + ') -StorePython $false))',
+          "Write-Output ('4=' + (Get-HmPythonPathPlan -Hit (Find-HmOnPath -Name 'python' -PathText " + pth(stub) + ') -StorePython $true))',
+          "Write-Output ('5=' + (Get-HmPythonPathPlan -Hit (Find-HmOnPath -Name 'python' -PathText " + pth(empty) + ') -StorePython $false))',
+        ].join('\r\n')).out;
+        assert(out.indexOf('1=' + path.join(stub, 'python.exe')) !== -1, 'находится то, что первым в PATH: ' + out);
+        assert(/2=fix/.test(out), 'заглушка Магазина первой — чиним');
+        assert(/3=ok/.test(out), 'настоящий python первым — не трогаем');
+        assert(/4=ok/.test(out), 'Python из Магазина — псевдоним настоящий');
+        assert(/5=fix/.test(out), 'python не находится вовсе — чиним');
+      } finally { dropDir(base); }
+      const p = codeOnly(readWin('pydeps.ps1'));
+      assert(/\[void\]\(Repair-HmPythonPath \$py\)/.test(p) && !/function Get-HmPythonPathPlan/.test(p),
+        'pydeps.ps1 зовёт общую Repair-HmPythonPath (та же логика идёт и из verify.ps1)');
+      const u = codeOnly(readWin('_userpath.ps1'));
+      assertOrder(u, 'if ((Get-HmPythonPathPlan -Hit $hit -StorePython $storePy) -ne \'fix\') { return $false }', 'Add-HmUserPath $pyDir -Prepend', 'чиним только по решению');
+      assert(!/Remove-Item[^\n]*WindowsApps|AppExecutionAlias/i.test(p + u), 'псевдонимы приложений Windows не трогаем');
+    });
+  }
+  // ===========================================================================================
+  // Раунд ревью (R1–R8): починки доходят до тех, у кого всё уже стоит; осторожнее с записью.
+  // ===========================================================================================
+
+  // ---- R1: починки профиля идут на КАЖДОМ прогоне, независимо от галочек ------------------------
+  if (havePs) {
+    ok('R1 (verify.ps1, песочница): повторный запуск, где config и claude найдены на диске и сняты, всё равно чинит settings.json, PATH и политику', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const seed = seedOldInstall(sb);
+        const r = runVerifyIn(sb, seed.env);          // HM_SELECTED=verify: config, claude, nomad, pydeps НЕ выбраны
+        assert.strictEqual(r.status, 0, 'verify всегда exit 0: ' + r.out + r.err);
+        const s = JSON.parse(fs.readFileSync(seed.settings, 'utf8'));
+        assert.strictEqual(s.enabledPlugins['greptile@claude-plugins-official'], false, 'плагин без токена выключен');
+        assert.strictEqual(s.enabledPlugins['slack@claude-plugins-official'], false, 'коннектор июня тоже');
+        assert.strictEqual(s.enabledPlugins['my-plugin@my-market'], true, 'чужое не тронуто');
+        assert.deepStrictEqual(s.permissions.allow, ['Edit(~/**)', 'Glob(src/**)'],
+          'allow: убран только дубль Write(~/**); Glob(src/**) без Read-близнеца остался');
+        assert.deepStrictEqual(s.permissions.deny, ['Bash(*format C*)'], 'deny починен');
+        assert.strictEqual(s.model, 'opus', 'модель человека не тронута');
+        assert(fs.readdirSync(path.dirname(seed.settings)).some((n) => n.startsWith('settings.json.hamidun-bak-')), 'копия до правки');
+        assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', 'CATALOG.md'), 'utf8'), '# Что внутри пака\n',
+          'каталог пака положен (config не ставился, пак под рукой)');
+        const sum = JSON.parse(fs.readFileSync(path.join(sb.home, '.hamidun-setup', 'config-summary.json'), 'utf8'));
+        assert(/CATALOG\.md$/.test(sum.catalog) && sum.skills === 0, 'сводка для финального экрана записана');
+        const lb = path.join(sb.home, '.local', 'bin');
+        assert(r.log.indexOf('PATH ' + lb + '\n') !== -1 || r.log.indexOf('PATH ' + lb + '\r\n') !== -1, 'nmd: ~/.local\\bin записан в PATH: ' + r.log);
+        assert(r.log.indexOf('PATH ' + seed.npmDir) !== -1, 'claude: каталог бинаря записан в PATH');
+        assert(r.log.indexOf('POLICY CurrentUser=RemoteSigned') !== -1, 'политика выполнения CurrentUser разрешена: ' + r.log);
+        assert(r.log.indexOf('PATH ' + seed.pyDir + ' prepend') !== -1, 'python: каталог встал в НАЧАЛО PATH (за заглушкой Магазина): ' + r.log);
+        const checks = readJsonTolerant(seed.checks);
+        assert.strictEqual(checks['claude-ps'].verdict, 'unverified', 'устаревший «blocked» заменён свежим вердиктом');
+        assert(!/CHECK fail Запуск claude в PowerShell/.test(r.out), 'красной строки нет: политика разрешена');
+        // Отрицательный контроль: без блока починок тот же прогон не чинит НИЧЕГО.
+        const vp = path.join(sb.scripts, 'verify.ps1');
+        const src = fs.readFileSync(vp, 'utf8');
+        const a = src.indexOf('# --- every-run repairs (B) ---');
+        const b = src.indexOf('# --- end ---', a);
+        assert(a > 0 && b > a, 'границы блока починок найдены (строки every-run repairs (B) и end)');
+        fs.writeFileSync(vp, src.slice(0, a) + src.slice(b + '# --- end ---'.length));
+        const sb2 = mkVerifySandbox();
+        try {
+          const seed2 = seedOldInstall(sb2);
+          fs.copyFileSync(vp, path.join(sb2.scripts, 'verify.ps1'));
+          const before = fs.readFileSync(seed2.settings, 'utf8');
+          const r2 = runVerifyIn(sb2, seed2.env);
+          assert.strictEqual(fs.readFileSync(seed2.settings, 'utf8'), before, 'мутант без блока: settings.json не тронут');
+          assert.strictEqual(r2.log.trim(), '', 'мутант без блока: ни PATH, ни политики');
+        } finally { dropDir(sb2.base); }
+      } finally { dropDir(sb.base); }
+    });
+
+    ok('R1: если config выбран, verify настройки не трогает (это работа config.ps1); nmd и python чинятся независимо от галочек', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const seed = seedOldInstall(sb);
+        const before = fs.readFileSync(seed.settings, 'utf8');
+        const r = runVerifyIn(sb, Object.assign({}, seed.env, { HM_SELECTED: 'verify,config,claude' }));
+        assert.strictEqual(fs.readFileSync(seed.settings, 'utf8'), before, 'config выбран — settings.json остаётся его заботе');
+        assert(!fs.existsSync(path.join(sb.home, '.claude', 'CATALOG.md')), 'каталог пака тоже не кладём');
+        assert(r.log.indexOf('POLICY') === -1, 'claude выбран — политикой занимается claude.ps1, не verify');
+        assert(r.log.indexOf('PATH ' + path.join(sb.home, '.local', 'bin')) !== -1, 'nmd чинится при любых галочках');
+        assert(r.log.indexOf('PATH ' + seed.pyDir + ' prepend') !== -1, 'python чинится при любых галочках');
+      } finally { dropDir(sb.base); }
+    });
+
+    ok('R1: сухой прогон ничего не пишет; claude с вердиктом broken не трогается', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const seed = seedOldInstall(sb);
+        const before = fs.readFileSync(seed.settings, 'utf8');
+        const r = runVerifyIn(sb, Object.assign({}, seed.env, { HM_DRY_RUN: '1' }));
+        assert.strictEqual(fs.readFileSync(seed.settings, 'utf8'), before, 'dry-run: settings.json не тронут');
+        assert.strictEqual(r.log.trim(), '', 'dry-run: ни PATH, ни политики');
+        assert(/\[dry-run\] WOULD/.test(r.out), 'и сказано, что было бы сделано');
+        const sb2 = mkVerifySandbox();
+        try {
+          const seed2 = seedOldInstall(sb2, { claudeVerdict: 'broken' });
+          const r2 = runVerifyIn(sb2, seed2.env);
+          assert(r2.log.indexOf('POLICY') === -1 && r2.log.indexOf('PATH ' + seed2.npmDir) === -1, 'сломанный claude: политику и PATH не трогаем: ' + r2.log);
+          assert(r2.log.indexOf('PATH ' + path.join(sb2.home, '.local', 'bin')) !== -1, 'nmd при этом чинится');
+        } finally { dropDir(sb2.base); }
+      } finally { dropDir(sb.base); }
+    });
+
+    ok('R1: политику задаёт групповая политика — verify её не трогает, но говорит об этом красной строкой чек-листа даже при снятой галочке claude', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const seed = seedOldInstall(sb);
+        const r = runVerifyIn(sb, Object.assign({}, seed.env, { HM_TEST_MP: 'Restricted' }));
+        assert(r.log.indexOf('POLICY') === -1, 'GPO: Set-ExecutionPolicy не вызывался: ' + r.log);
+        assert(/CHECK skip Claude CLI/.test(r.out) && /CHECK fail Запуск claude в PowerShell/.test(r.out),
+          'claude не ставился, но запрет виден: ' + r.out);
+        assert.strictEqual(readJsonTolerant(seed.checks)['claude-ps'].verdict, 'blocked', 'вердикт записан');
+      } finally { dropDir(sb.base); }
+    });
+
+    ok('R1 (nomad.ps1, песочница): уже установленный Nomad — PATH пишется ДО выхода с кодом 120', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const lb = path.join(sb.home, '.local', 'bin'); fs.mkdirSync(lb, { recursive: true });
+        fs.writeFileSync(path.join(lb, 'nmd.exe'), 'x');
+        const r = runScriptIn(sb, 'nomad.ps1');
+        assert.strictEqual(r.status, 120, 'существующий nmd — осознанный пропуск (120): ' + r.out + r.err);
+        assert(r.log.indexOf('PATH ' + lb) !== -1, 'но PATH пользователя подправлен: ' + r.log);
+        // Контроль: без записи в ветке «уже установлен» (как было) PATH не трогается.
+        const np = path.join(sb.scripts, 'nomad.ps1');
+        const src = fs.readFileSync(np, 'utf8');
+        const mutant = src.replace(/        if \(Test-Path -LiteralPath \(Join-Path \$shimDir 'nmd\.exe'\) -PathType Leaf\) \{ \[void\]\(Add-HmUserPath \$shimDir\) \}\r?\n/, '');
+        assert(mutant !== src, 'мутация применилась');
+        fs.writeFileSync(np, mutant);
+        fs.writeFileSync(sb.log, '');
+        const r2 = runScriptIn(sb, 'nomad.ps1');
+        assert.strictEqual(r2.status, 120);
+        assert.strictEqual(r2.log.trim(), '', 'мутант: PATH не тронут — тест различает');
+      } finally { dropDir(sb.base); }
+    });
+  }
+
+  // ---- R2: коннекторы июня–августа; mcp__* на валидаторе ---------------------------------------
+  if (havePs) {
+    ok('R2: коннекторы старых паков выключаются один раз (и только токен-зависимые), чужое и правило mcp остаются, выбор человека после миграции уважается', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r2-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const marker = path.join(base, '.hamidun-setup', 'config-migrations.json');
+        const ids = ['slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom', 'adspirer-ads-agent', 'semgrep'];
+        const ep = { 'context7@claude-plugins-official': true, 'code-review@claude-plugins-official': true, 'my@my-market': true,
+          'slack@other-market': true };
+        ids.forEach((n) => { ep[n + '@claude-plugins-official'] = true; });
+        fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['mcp__*', 'Edit(*)'] }, enabledPlugins: ep }, null, 2));
+        const r = runMig(file, false, marker);
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        ids.forEach((n) => assert.strictEqual(s.enabledPlugins[n + '@claude-plugins-official'], false, n + ' выключен'));
+        ['context7@claude-plugins-official', 'code-review@claude-plugins-official', 'my@my-market', 'slack@other-market']
+          .forEach((k) => assert.strictEqual(s.enabledPlugins[k], true, k + ' не тронут'));
+        assert.deepStrictEqual(s.permissions.allow, ['mcp__*', 'Edit(*)'], '`mcp__*` не предупреждает на 2.1.283 — правило остаётся как было');
+        assert(r.out.indexOf('slack') !== -1, 'в журнале названо');
+        // человек сам включил slack после миграции (поставил вход) — повтор его не выключает
+        s.enabledPlugins['slack@claude-plugins-official'] = true;
+        const mine = JSON.stringify(s, null, 2);
+        fs.writeFileSync(file, mine);
+        runMig(file, false, marker);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), mine, 'повторный запуск выбор человека не откатывает');
+      } finally { dropDir(base); }
+    });
+  }
+
+  // Настоящий валидатор: `claude -p` БЕЗ входа печатает предупреждения о правилах настроек раньше,
+  // чем выяснит, что входа нет. Песочный каталог настроек (CLAUDE_CONFIG_DIR), ни ключей, ни сети:
+  // так проверено, что `mcp__*` не предупреждает, а Write(путь) и Bash(*…:*) предупреждают, и что
+  // миграция их снимает. Нет claude 2.1.283+ на машине — тест пропускается.
+  ok('R2 (настоящий claude без входа): правило mcp валидатор не будит, Write с путём и Bash с хвостом двоеточие-звёздочка будит, после миграции предупреждений нет', () => {
+    if (process.platform !== 'win32') SKIP('валидатор проверялся на Windows-сборке claude');
+    if (!havePs) SKIP('нет powershell для миграции');
+    const claudeExe = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+    if (!fs.existsSync(claudeExe)) SKIP('нет claude.exe в %APPDATA%\\npm — валидатор не на чем гонять');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-ccv-'));
+    try {
+      const ask = (settingsText) => {
+        const d = fs.mkdtempSync(path.join(base, 'r-'));
+        const cfg = path.join(d, 'cfg'); const cwd = path.join(d, 'cwd');
+        fs.mkdirSync(cfg); fs.mkdirSync(cwd);
+        fs.writeFileSync(path.join(cfg, 'settings.json'), settingsText);
+        const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: cfg });
+        ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'].forEach((k) => delete env[k]);
+        const r = spawnSync(claudeExe, ['-p', 'x'], { cwd, env, encoding: 'utf8', timeout: 120000 });
+        if (r.error) SKIP('claude.exe не запустился: ' + r.error.message);
+        const out = String(r.stdout || '') + '\n' + String(r.stderr || '');
+        if (!/Not logged in|Please run \/login/i.test(out) && /\S/.test(out) === false) SKIP('claude ответил неожиданно: ' + out.slice(0, 80));
+        return out.split(/\r?\n/).filter((l) => /Permission (allow|deny|ask) rule|Settings Error/i.test(l));
+      };
+      const warnsMcp = ask(JSON.stringify({ permissions: { allow: ['mcp__*', 'mcp__filesystem__*'] } }));
+      assert.deepStrictEqual(warnsMcp, [], '`mcp__*` валидатор не будит: ' + warnsMcp.join(' | '));
+      const bad = JSON.stringify({ permissions: { allow: ['Write(~/x/**)', 'Edit(~/x/**)'], deny: ['Bash(*format C:*)'] } }, null, 2);
+      const warnsBad = ask(bad);
+      assert(warnsBad.length >= 2 && warnsBad.some((l) => /Write\(~\/x\/\*\*\)/.test(l)) && warnsBad.some((l) => /format C/.test(l)),
+        'старый файл предупреждает (иначе проверка ничего не стерегла): ' + warnsBad.join(' | '));
+      const m = fs.mkdtempSync(path.join(base, 'm-')); fs.mkdirSync(path.join(m, '.claude'));
+      const f = path.join(m, '.claude', 'settings.json'); fs.writeFileSync(f, bad);
+      runMig(f, false, path.join(m, 'mark.json'));
+      const warnsAfter = ask(fs.readFileSync(f, 'utf8'));
+      assert.deepStrictEqual(warnsAfter, [], 'после миграции валидатор молчит: ' + warnsAfter.join(' | '));
+    } finally { dropDir(base); }
+  });
+
+  // ---- R3: в allow ничего не «оживляем» --------------------------------------------------------
+  if (havePs) {
+    ok('R3: правило Write/Glob в allow без парного Edit/Read остаётся как есть (с подсказкой), с парным — убирается; в deny и ask — ужесточается', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r3-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const orig = {
+          permissions: {
+            allow: ['Write(~/inactive/**)', 'Glob(src/**)', 'NotebookEdit(~/nb/**)', 'Write(~/dup/**)', 'Edit(~/dup/**)', 'Edit(*)'],
+            deny: ['Write(~/.ssh/**)', 'Bash(*format C:*)'],
+            ask: ['Write(~/ask/**)'],
+          },
+        };
+        fs.writeFileSync(file, JSON.stringify(orig, null, 2));
+        const r = runMig(file, true, path.join(base, 'm.json'));
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.deepStrictEqual(s.permissions.allow, ['Write(~/inactive/**)', 'Glob(src/**)', 'NotebookEdit(~/nb/**)', 'Edit(~/dup/**)', 'Edit(*)'],
+          'allow: неработающие правила НЕ превращены в разрешения; убран только дубль');
+        assert.deepStrictEqual(s.permissions.deny, ['Edit(~/.ssh/**)', 'Bash(*format C*)'], 'deny ужесточён');
+        assert.deepStrictEqual(s.permissions.ask, ['Edit(~/ask/**)'], 'ask ужесточён');
+        assert(/Write\(~\/inactive\/\*\*\) не действует/.test(r.out) && /Edit\(~\/inactive\/\*\*\)/.test(r.out), 'подсказка названа: ' + r.out);
+        assert(!/permissions\.allow:[^\n]*→/.test(r.out), 'в allow нет замен «→»');
+        // Отрицательный контроль: прежнее поведение (замена в allow) оживляет правила — тест это видит.
+        const lib = fs.readFileSync(MIG_LIB, 'utf8');
+        const mutant = lib.replace("if ($listName -ceq 'allow') {\r\n                    $out.Add($r)", "if ($false) {\r\n                    $out.Add($r)");
+        assert(mutant !== lib, 'мутация применилась');
+        const ml = path.join(base, 'mut'); fs.mkdirSync(ml);
+        fs.writeFileSync(path.join(ml, '_cfgmigrate.ps1'), mutant);
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(ml, '_userpath.ps1'));
+        fs.writeFileSync(file, JSON.stringify(orig, null, 2));
+        runMig(file, true, path.join(base, 'm2.json'), path.join(ml, '_cfgmigrate.ps1'));
+        const bad = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert(bad.permissions.allow.includes('Edit(~/inactive/**)'), 'дефектная версия выдаёт разрешение Edit(~/inactive/**) — тест различает фикс и дефект');
+      } finally { dropDir(base); }
+    });
+
+    ok('R3 (прогон config.ps1): чистый файл человека, где уже есть всё нужное, проходит БАЙТ В БАЙТ — без переформатирования и без копии', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        seedHome(home);
+        // Компактный, «ручной» формат, CRLF, ключ опроса уже стоит, нечего чинить.
+        const clean = '{"model":"opus","env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"1"},"permissions":{"allow":["Edit(*)","Write"]},' +
+          '"enabledPlugins":{"github@claude-plugins-official":false}}\r\n';
+        fs.writeFileSync(home + '/.claude/settings.json', clean);
+        const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), clean, 'файл не изменился ни на байт');
+        assert(!fs.readdirSync(home + '/.claude').some((n) => n.startsWith('settings.json.hamidun-')), 'ни копии, ни временных файлов');
+      } finally { dropDir(base); }
+    });
+  }
+
+  // ---- R4: запись под администратором в каталоги пользователя ----------------------------------
+  if (havePs) {
+    ok('R4: копия settings.json — CreateNew: занятое имя (файл и junction) не затирается и не проходится насквозь, берётся следующее', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r4a-'));
+      try {
+        const cdir = path.join(base, '.claude'); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        const orig = JSON.stringify(migBad(), null, 2);
+        fs.writeFileSync(file, orig);
+        const other = path.join(base, 'elsewhere'); fs.mkdirSync(other);
+        const name1 = file + '.hamidun-bak-20260101-000000';
+        fs.writeFileSync(name1, 'PRECIOUS');
+        fs.symlinkSync(other, name1 + '-2', 'junction');            // имя «-2» занято ссылкой на чужой каталог
+        const lib = fs.readFileSync(MIG_LIB, 'utf8');
+        const script = '. ' + q(MIG_LIB) + '\r\n' +
+          'function Get-Date { param([Parameter(Position=0)]$Date, [string]$Format)\r\n' +
+          "  if ($Format) { return '20260101-000000' }\r\n" +
+          '  if ($PSBoundParameters.ContainsKey(\'Date\')) { return Microsoft.PowerShell.Utility\\Get-Date $Date }\r\n' +
+          '  return Microsoft.PowerShell.Utility\\Get-Date }\r\n' +
+          'Invoke-HmSettingsMigration -Path ' + q(file) + ' -Fresh $true -MarkerPath ' + q(path.join(base, 'm.json'));
+        assert(lib.indexOf('CreateNew') !== -1, 'в библиотеке режим CreateNew');
+        const r = runPsText(script);
+        assert.strictEqual(fs.readFileSync(name1, 'utf8'), 'PRECIOUS', 'занятое имя-файл не затёрто: ' + r.out + r.err);
+        assert.deepStrictEqual(fs.readdirSync(other), [], 'junction не пройден насквозь: в чужой каталог ничего не попало');
+        assert.strictEqual(fs.readFileSync(name1 + '-3', 'utf8'), orig, 'копия легла под следующим свободным именем и равна исходнику');
+        assert(JSON.parse(fs.readFileSync(file, 'utf8')).env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY === '1', 'сама правка при этом применена');
+        assert(!fs.readdirSync(cdir).some((n) => n.indexOf('.hamidun-tmp-') !== -1), 'временные файлы убраны');
+      } finally { dropDir(base); }
+    });
+
+    ok('R4: ~/.hamidun-setup или ~/.claude — ссылка: отметка, сводка и каталог пака не пишутся сквозь неё', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r4b-'));
+      try {
+        const claude = path.join(base, '.claude'); fs.mkdirSync(claude);
+        fs.mkdirSync(path.join(claude, 'skills', 's1'), { recursive: true });
+        fs.writeFileSync(path.join(claude, 'skills', 's1', 'SKILL.md'), 'x');
+        const file = path.join(claude, 'settings.json');
+        fs.writeFileSync(file, JSON.stringify(migBad(), null, 2));
+        const elsewhere = path.join(base, 'elsewhere'); fs.mkdirSync(elsewhere);
+        const setup = path.join(base, '.hamidun-setup');
+        fs.symlinkSync(elsewhere, setup, 'junction');                 // ~/.hamidun-setup подменён ссылкой
+        const pack = path.join(base, 'pack'); fs.mkdirSync(pack);
+        fs.writeFileSync(path.join(pack, 'CATALOG.md'), 'cat');
+        const r = runPsText('. ' + q(MIG_LIB) + '\r\nInvoke-HmSettingsMigration -Path ' + q(file) + ' -Fresh $true -MarkerPath ' + q(path.join(setup, 'config-migrations.json')) +
+          '\r\nWrite-HmConfigSummary -Clone ' + q(pack) + ' -ClaudeHome ' + q(claude) + ' -SetupDir ' + q(setup));
+        assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'в каталог за ссылкой ничего не записано: ' + r.out + r.err);
+        assert(/Сводку конфига записать не удалось/.test(r.out), 'человеку сказано, что сводку не записали');
+        assert.strictEqual(fs.readFileSync(path.join(claude, 'CATALOG.md'), 'utf8'), 'cat', 'обычный ~/.claude: каталог пака положен');
+        // и сам ~/.claude — ссылка: ничего не пишем в её цель
+        const real = path.join(base, 'real-claude'); fs.mkdirSync(real);
+        fs.writeFileSync(path.join(real, 'settings.json'), JSON.stringify(migBad(), null, 2));
+        const link = path.join(base, 'linked-claude'); fs.symlinkSync(real, link, 'junction');
+        runPsText('. ' + q(MIG_LIB) + '\r\nWrite-HmConfigSummary -Clone ' + q(pack) + ' -ClaudeHome ' + q(link) + ' -SetupDir ' + q(path.join(base, 'ok-setup')));
+        assert(!fs.existsSync(path.join(real, 'CATALOG.md')), 'CATALOG.md не лёг сквозь ссылку ~/.claude');
+      } finally { dropDir(base); }
+    });
+  }
+
+  // Временный замок на целевом файле (антивирус, индексатор поиска, редактор): раньше такой сбой оставлял
+  // старый файл молча, теперь перенос повторяется. Замок держит C#-поток внутри самого процесса PowerShell:
+  // он снимается сам через заданное число миллисекунд — так сценарий не зависит от скорости запуска второго процесса.
+  if (havePs) {
+    const lockHolder = [
+      "Add-Type -TypeDefinition @'",
+      'public static class HmHold {',
+      '  public static System.IO.FileStream Fs;',
+      '  public static void For(string path, int ms) {',
+      '    Fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.None);',
+      '    var t = new System.Threading.Thread(() => { System.Threading.Thread.Sleep(ms); Fs.Dispose(); });',
+      '    t.IsBackground = true; t.Start();',
+      '  }',
+      '}',
+      "'@",
+    ].join('\r\n');
+    const lockedWrite = (libPath, file, holdMs) => runPsText([
+      '. ' + q(libPath),
+      lockHolder,
+      '[IO.File]::WriteAllText(' + q(file) + ", 'OLD')",
+      '[HmHold]::For(' + q(file) + ', ' + holdMs + ')',
+      '$t0 = Get-Date',
+      "try { Write-HmFileSafe -Path " + q(file) + " -Bytes ([Text.Encoding]::UTF8.GetBytes('NEW')); Write-Output 'RESULT=ok' }",
+      "catch { Write-Output 'RESULT=fail' }",
+      "Write-Output ('WAITED=' + [int]((Get-Date) - $t0).TotalMilliseconds)",
+    ].join('\r\n'));
+
+    ok('R4: запись файла переживает временный замок на целевом (антивирус, индексатор): повторные попытки; замок, который не снялся, — честный отказ без мусора', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r4c-'));
+      try {
+        const file = path.join(base, 'settings.json');
+        let o = lockedWrite(MIG_LIB, file, 1200);
+        assert(/RESULT=ok/.test(o.out), 'замок на 1,2 с пережит: ' + o.out + o.err);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), 'NEW', 'новое содержимое на месте');
+        assert(Number((/WAITED=(\d+)/.exec(o.out) || [])[1]) >= 150, 'повтор действительно ждал: ' + o.out);
+        assert.deepStrictEqual(fs.readdirSync(base), ['settings.json'], 'временный файл не остался');
+        // Замок, который не снимается: после восьми попыток отказ, старое содержимое цело, мусора нет.
+        const file2 = path.join(base, 'stuck.json');
+        o = lockedWrite(MIG_LIB, file2, 120000);
+        assert(/RESULT=fail/.test(o.out), 'вечный замок — отказ, а не зависание: ' + o.out + o.err);
+        assert.strictEqual(fs.readFileSync(file2, 'utf8'), 'OLD', 'старое содержимое цело');
+        assert(!fs.readdirSync(base).some((n) => n.indexOf('.hamidun-tmp-') !== -1), 'временный файл убран');
+        // Отрицательный контроль: без повторов (как в первой редакции) тот же замок на 1,2 с даёт отказ.
+        const libSrc = fs.readFileSync(MIG_LIB, 'utf8');
+        const mutText = libSrc.replace('$try -ge 8', '$try -ge 1');
+        assert(mutText !== libSrc, 'мутация применилась');
+        const mdir = path.join(base, 'mut'); fs.mkdirSync(mdir);
+        fs.writeFileSync(path.join(mdir, '_cfgmigrate.ps1'), mutText);
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(mdir, '_userpath.ps1'));
+        o = lockedWrite(path.join(mdir, '_cfgmigrate.ps1'), path.join(base, 'mutated.json'), 1200);
+        assert(/RESULT=fail/.test(o.out), 'без повторов замок на 1,2 с ломает запись — тест различает: ' + o.out);
+      } finally { dropDir(base); }
+    });
+  }
+
+  // ---- B10: MCP_TIMEOUT ранних установок ------------------------------------------------------------
+  if (havePs) {
+    ok('B10: env MCP_TIMEOUT поднимается до 120000 только когда он ровно строка 30000 (значение пака 19.08–06.09) и один раз; чужое значение, число и отсутствие остаются', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mcpt-'));
+      try {
+        let n = 0;
+        // Возвращает env из файла после миграции; marker — отметка шага (общая для повторных запусков).
+        const migrate = (envObj, marker) => {
+          const cdir = path.join(base, 'c' + (++n)); fs.mkdirSync(cdir);
+          const file = path.join(cdir, 'settings.json');
+          fs.writeFileSync(file, JSON.stringify({ model: 'opus', env: envObj }, null, 2));
+          const r = runMig(file, false, marker || path.join(base, 'm' + n + '.json'));
+          return { env: JSON.parse(fs.readFileSync(file, 'utf8')).env, out: r.out, file, marker: marker || path.join(base, 'm' + n + '.json') };
+        };
+        let r = migrate({ MCP_TIMEOUT: '30000', KEEP: 'x' });
+        assert.strictEqual(r.env.MCP_TIMEOUT, '120000', 'ровно "30000" поднят: ' + r.out);
+        assert.strictEqual(r.env.KEEP, 'x', 'соседние значения целы');
+        assert(/MCP_TIMEOUT/.test(r.out) && /30000/.test(r.out) && /120000/.test(r.out), 'в журнале названо, что и во что: ' + r.out);
+        assert.strictEqual(migrate({ MCP_TIMEOUT: '45000' }).env.MCP_TIMEOUT, '45000', 'своё значение человека остаётся');
+        assert.strictEqual(migrate({ MCP_TIMEOUT: '120000' }).env.MCP_TIMEOUT, '120000', 'значение пака остаётся');
+        assert.strictEqual(migrate({ MCP_TIMEOUT: 30000 }).env.MCP_TIMEOUT, 30000, 'число (не строка) не трогаем');
+        assert.strictEqual(migrate({ MCP_TIMEOUT: ' 30000' }).env.MCP_TIMEOUT, ' 30000', 'почти такая же строка — тоже своё');
+        assert.strictEqual(Object.prototype.hasOwnProperty.call(migrate({ OTHER: '1' }).env, 'MCP_TIMEOUT'), false, 'не было — не добавляем');
+        // Шаг одноразовый: человек вернул 30000 после миграции — повторный запуск его выбор уважает.
+        const mine = JSON.stringify({ model: 'opus', env: { MCP_TIMEOUT: '30000', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, null, 2);
+        fs.writeFileSync(r.file, mine);
+        runMig(r.file, false, r.marker);
+        assert.strictEqual(fs.readFileSync(r.file, 'utf8'), mine, 'повтор с той же отметкой не откатывает выбор человека');
+        // Отрицательный контроль: без этого шага 30000 остаётся — тест различает.
+        const lib = fs.readFileSync(MIG_LIB, 'utf8');
+        const mutant = lib.replace("($mt.Value -ceq '30000')", '($false)');
+        assert(mutant !== lib, 'мутация применилась');
+        const mdir = path.join(base, 'mut'); fs.mkdirSync(mdir);
+        fs.writeFileSync(path.join(mdir, '_cfgmigrate.ps1'), mutant);
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(mdir, '_userpath.ps1'));
+        const cdir2 = path.join(base, 'cm'); fs.mkdirSync(cdir2);
+        const f2 = path.join(cdir2, 'settings.json');
+        fs.writeFileSync(f2, JSON.stringify({ env: { MCP_TIMEOUT: '30000' } }, null, 2));
+        runMig(f2, false, path.join(base, 'mm.json'), path.join(mdir, '_cfgmigrate.ps1'));
+        assert.strictEqual(JSON.parse(fs.readFileSync(f2, 'utf8')).env.MCP_TIMEOUT, '30000', 'без шага значение не меняется — тест различает');
+      } finally { dropDir(base); }
+    });
+  }
+
+  // ---- B12: AGENTS.md пака → ~/.codex/AGENTS.md ---------------------------------------------------------
+  if (havePs) {
+    const PACK_AGENTS = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.\n';
+    const PACK_WANT = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](~/.claude/CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.';
+    const BEGIN = '<!-- hamidun-pack begin -->'; const END = '<!-- hamidun-pack end -->';
+    const mkCodexBox = () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cdx-'));
+      const home = path.join(base, 'home'); const pack = path.join(base, 'pack');
+      fs.mkdirSync(home); fs.mkdirSync(pack);
+      fs.writeFileSync(path.join(pack, 'AGENTS.md'), PACK_AGENTS);
+      return { base, home, pack, src: path.join(pack, 'AGENTS.md'), dst: path.join(home, '.codex', 'AGENTS.md') };
+    };
+    const callCodex = (box, lib) => runPsText('. ' + q(lib || MIG_LIB) + '\r\n$r = Install-HmCodexAgents -Source ' + q(box.src) + ' -UserHome ' + q(box.home) +
+      "\r\nWrite-Output ('STATUS=' + $r)");
+    const status = (o) => (/STATUS=(\S+)/.exec(o.out) || [])[1];
+    const count = (text, needle) => text.split(needle).length - 1;
+
+    ok('B12 (фиктивный HOME): Codex нет — ничего не создаётся; есть расширение openai.chatgpt-* или ~/.codex — файл создан с отмеченным блоком, повтор не меняет ни байта', () => {
+      const box = mkCodexBox();
+      try {
+        let o = callCodex(box);
+        assert.strictEqual(status(o), 'no-codex', 'ни ~/.codex, ни расширения: ' + o.out + o.err);
+        assert(!fs.existsSync(path.join(box.home, '.codex')), '~/.codex не создан');
+        // расширение чужого издателя с похожим именем — не Codex
+        fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'other.chatgpt-1.0.0'), { recursive: true });
+        fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'someone.openai.chatgpt-1.0.0'), { recursive: true });
+        assert.strictEqual(status(callCodex(box)), 'no-codex', 'похожие имена расширений не считаются');
+        // настоящее расширение Codex
+        fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'openai.chatgpt-26.1002.51308-win32-x64'), { recursive: true });
+        o = callCodex(box);
+        assert.strictEqual(status(o), 'created', 'расширение есть — файл создан: ' + o.out + o.err);
+        const bytes = fs.readFileSync(box.dst);
+        assert.notStrictEqual(bytes[0], 0xEF, 'без BOM');
+        assert.strictEqual(bytes.toString('utf8'), BEGIN + '\n' + PACK_WANT + '\n' + END + '\n', 'блок пака; ссылка на каталог ведёт в ~/.claude/CATALOG.md');
+        assert(/~\/\.codex\/AGENTS\.md/.test(o.out), 'человеку сказано, куда положили: ' + o.out);
+        // повтор — ни байта, ни сообщения
+        const before = fs.readFileSync(box.dst);
+        o = callCodex(box);
+        assert.strictEqual(status(o), 'present', 'свой блок узнан');
+        assert(fs.readFileSync(box.dst).equals(before), 'повтор не меняет файл');
+        assert(!/Codex:/.test(o.out), 'и молчит: ' + o.out);
+        assert.deepStrictEqual(fs.readdirSync(path.join(box.home, '.codex')), ['AGENTS.md'], 'временных файлов нет');
+      } finally { dropDir(box.base); }
+    });
+
+    ok('B12: уже есть чужой ~/.codex/AGENTS.md — он остаётся байт в байт, в конец дописывается отмеченный блок ровно один раз (BOM/CRLF и отсутствие перевода строки сохранены)', () => {
+      const box = mkCodexBox();
+      try {
+        fs.mkdirSync(path.join(box.home, '.codex'));
+        const cases = [
+          ['﻿# Мои правила\r\nбыть вежливым', '\r\n'],          // BOM, CRLF, без финального перевода строки
+          ['# Мои правила\nотвечай коротко\n', '\n'],              // LF с финальным переводом строки
+          ['', '\n'],                                              // пустой файл
+        ];
+        for (const [text, nl] of cases) {
+          fs.writeFileSync(box.dst, text);
+          const orig = fs.readFileSync(box.dst);
+          let o = callCodex(box);
+          assert.strictEqual(status(o), 'appended', JSON.stringify(text) + ': ' + o.out + o.err);
+          const after = fs.readFileSync(box.dst);
+          assert(after.slice(0, orig.length).equals(orig), JSON.stringify(text) + ': начало файла человека не тронуто байт в байт');
+          const tail = after.slice(orig.length).toString('utf8');
+          const want = (text && !text.endsWith('\n') ? nl : '') + (text ? nl : '') + BEGIN + nl + PACK_WANT.replace(/\n/g, nl) + nl + END + nl;
+          assert.strictEqual(tail, want, JSON.stringify(text) + ': дописан отмеченный блок в стиле файла');
+          assert.strictEqual(count(after.toString('utf8'), BEGIN), 1, 'блок один');
+          assert(/Убрать: удали блок/.test(o.out) && /дописал/.test(o.out), 'человеку сказано, что дописано и как убрать: ' + o.out);
+          o = callCodex(box);
+          assert.strictEqual(status(o), 'present', 'второй запуск узнаёт блок');
+          assert(fs.readFileSync(box.dst).equals(after), JSON.stringify(text) + ': второй запуск не меняет ни байта');
+        }
+        // Отрицательные контроли: без распознавания своего блока повтор дублирует.
+        const lib = fs.readFileSync(MIG_LIB, 'utf8');
+        const mutant = lib.replace("if ($oldText.Contains($HmPackBlockBegin)) { return 'present' }", '');
+        assert(mutant !== lib, 'мутация применилась');
+        const mdir = path.join(box.base, 'mut'); fs.mkdirSync(mdir);
+        fs.writeFileSync(path.join(mdir, '_cfgmigrate.ps1'), mutant);
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(mdir, '_userpath.ps1'));
+        fs.writeFileSync(box.dst, '# чужое\n');
+        callCodex(box, path.join(mdir, '_cfgmigrate.ps1')); callCodex(box, path.join(mdir, '_cfgmigrate.ps1'));
+        assert.strictEqual(count(fs.readFileSync(box.dst, 'utf8'), BEGIN), 2, 'дефектная версия дублирует блок — тест различает');
+      } finally { dropDir(box.base); }
+    });
+
+    ok('B12: ссылка вместо ~/.codex, ~/.codex не каталог, файл не в UTF-8, нет AGENTS.md в паке — ничего не пишется', () => {
+      const box = mkCodexBox();
+      try {
+        // ~/.codex — junction на чужой каталог
+        const elsewhere = path.join(box.base, 'elsewhere'); fs.mkdirSync(elsewhere);
+        fs.symlinkSync(elsewhere, path.join(box.home, '.codex'), 'junction');
+        let o = callCodex(box);
+        assert.strictEqual(status(o), 'link', o.out + o.err);
+        assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'сквозь ссылку ничего не записано');
+        assert(/ссылка/.test(o.out), 'причина названа: ' + o.out);
+        fs.rmdirSync(path.join(box.home, '.codex'));
+        // ~/.codex — файл
+        fs.writeFileSync(path.join(box.home, '.codex'), 'x');
+        assert.strictEqual(status(callCodex(box)), 'skipped', '~/.codex не каталог');
+        assert.strictEqual(fs.readFileSync(path.join(box.home, '.codex'), 'utf8'), 'x', 'файл на месте каталога цел');
+        fs.rmSync(path.join(box.home, '.codex'));
+        // AGENTS.md человека в UTF-16 (не UTF-8)
+        fs.mkdirSync(path.join(box.home, '.codex'));
+        const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('# мои правила\n', 'utf16le')]);
+        fs.writeFileSync(box.dst, utf16);
+        o = callCodex(box);
+        assert.strictEqual(status(o), 'skipped', 'не UTF-8: ' + o.out + o.err);
+        assert(fs.readFileSync(box.dst).equals(utf16), 'такой файл не тронут');
+        // в паке нет AGENTS.md
+        fs.rmSync(box.src);
+        assert.strictEqual(status(callCodex(box)), 'no-source', 'нет источника');
+      } finally { dropDir(box.base); }
+    });
+
+    ok('B12 (прогон config.ps1): AGENTS.md пака ложится в ~/.codex при установленном Codex; чужой файл сохраняется с дописанным блоком; повторный запуск ничего не меняет', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        fs.writeFileSync(clone + '/AGENTS.md', PACK_AGENTS);
+        seedHome(home);
+        fs.mkdirSync(home + '/.codex', { recursive: true });
+        fs.writeFileSync(home + '/.codex/AGENTS.md', '# чужое\n');
+        const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        const t1 = fs.readFileSync(home + '/.codex/AGENTS.md', 'utf8');
+        assert(t1.startsWith('# чужое\n\n' + BEGIN + '\n'), 'чужое сохранено, блок дописан: ' + JSON.stringify(t1));
+        assert.strictEqual(count(t1, BEGIN), 1, 'блок один');
+        const r2 = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r2.status, 0);
+        assert.strictEqual(fs.readFileSync(home + '/.codex/AGENTS.md', 'utf8'), t1, 'повторный запуск не меняет файл');
+        // без Codex на машине config.ps1 ничего в ~/.codex не создаёт
+        const box2 = mkCfgSandbox();
+        try {
+          fs.writeFileSync(box2.clone + '/AGENTS.md', PACK_AGENTS);
+          seedHome(box2.home);
+          const r3 = runCfgPs1(box2.home, box2.clone, { HM_ADDITIVE: '1' });
+          assert.strictEqual(r3.status, 0, (r3.stdout || '') + (r3.stderr || ''));
+          assert(!fs.existsSync(box2.home + '/.codex'), 'Codex нет — ~/.codex не создан');
+        } finally { dropDir(box2.base); }
+      } finally { dropDir(base); }
+    });
+
+    ok('B12 (verify.ps1, песочница): AGENTS.md пака кладётся из вшитого пака на КАЖДОМ прогоне, в том числе при выбранном config (расширение Codex могло встать позже него); повтор ничего не меняет', () => {
+      const sb = mkVerifySandbox();
+      try {
+        const seed = seedOldInstall(sb);
+        fs.writeFileSync(path.join(seed.pack, 'AGENTS.md'), PACK_AGENTS);
+        fs.mkdirSync(path.join(sb.home, '.vscode', 'extensions', 'openai.chatgpt-26.1-win32-x64'), { recursive: true });
+        const dst = path.join(sb.home, '.codex', 'AGENTS.md');
+        let r = runVerifyIn(sb, seed.env);
+        assert.strictEqual(r.status, 0, r.out + r.err);
+        assert.strictEqual(fs.readFileSync(dst, 'utf8'), BEGIN + '\n' + PACK_WANT + '\n' + END + '\n', 'файл создан при снятых галочках: ' + r.out);
+        const before = fs.readFileSync(dst);
+        r = runVerifyIn(sb, seed.env);
+        assert(fs.readFileSync(dst).equals(before), 'второй прогон не меняет файл');
+        // config выбран в этом же прогоне, а расширение Codex встало ПОЗЖЕ config.ps1 (порядок шагов не задан) —
+        // карты ещё нет, и verify кладёт её сам; если config.ps1 уже положил, повтор ничего не меняет
+        fs.rmSync(dst);
+        runVerifyIn(sb, Object.assign({}, seed.env, { HM_SELECTED: 'verify,config' }));
+        assert.strictEqual(fs.readFileSync(dst, 'utf8'), BEGIN + '\n' + PACK_WANT + '\n' + END + '\n', 'config выбран, карты ещё нет — verify её кладёт');
+        const placed = fs.readFileSync(dst);
+        runVerifyIn(sb, Object.assign({}, seed.env, { HM_SELECTED: 'verify,config' }));
+        assert(fs.readFileSync(dst).equals(placed), 'и повтор при выбранном config ничего не меняет');
+        // лёгкое издание: пака на руках нет — тихо ничего
+        fs.rmSync(dst);
+        const env2 = Object.assign({}, seed.env); delete env2.HM_BUNDLED_CONFIG;
+        const r4 = runVerifyIn(sb, Object.assign(env2, { HM_BUNDLED_CONFIG: '' }));
+        assert.strictEqual(r4.status, 0); assert(!fs.existsSync(dst), 'пака нет — файл не создаётся');
+        // сухой прогон ничего не пишет
+        runVerifyIn(sb, Object.assign({}, seed.env, { HM_DRY_RUN: '1' }));
+        assert(!fs.existsSync(dst), 'dry-run: файл не создан');
+      } finally { dropDir(sb.base); }
+    });
+  }
+
+  // ---- R5: пути на несуществующих дисках ---------------------------------------------------------
+  if (havePs) {
+    const missingDrive = (() => {
+      for (const l of 'ZYXWVUTSRQPONMLKJIHGFED') { if (!fs.existsSync(l + ':\\')) return l + ':'; }
+      return null;
+    })();
+    ok('R5: Find-HmOnPath и Find-ClaudeBinary (course.ps1) не пишут ошибок DriveNotFound на записях с несуществующим диском', () => {
+      if (!missingDrive) SKIP('не нашлось свободной буквы диска');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r5-'));
+      try {
+        const real = path.join(base, 'bin'); fs.mkdirSync(real);
+        fs.writeFileSync(path.join(real, 'python.exe'), 'x');
+        const find = cutPsFn(readWin('_userpath.ps1'), 'Find-HmOnPath');
+        const pathText = missingDrive + '\\nope;' + missingDrive + '\\Program Files\\x;' + real;
+        const probe = (fn, text) => runPsText('$ErrorActionPreference = "Continue"\r\n' + fn + '\r\n$Error.Clear()\r\n' +
+          '$r = Find-HmOnPath -Name python -PathText ' + q(text) + '\r\n' +
+          'Write-Output ("HIT=" + $r)\r\nWrite-Output ("ERRORS=" + $Error.Count)');
+        const o = probe(find, pathText);
+        assert(o.out.indexOf('HIT=' + path.join(real, 'python.exe')) !== -1, 'находка на живом диске: ' + o.out);
+        assert(/ERRORS=0/.test(o.out) && o.err.trim() === '', 'записей об ошибках нет: ' + o.out + o.err);
+        // Запись с запрещёнными в пути символами не должна ронять поиск (исключение гасится внутри).
+        const o1 = probe(find, missingDrive + '\\"bad|<>";' + real);
+        assert(o1.status === 0 && o1.out.indexOf('HIT=' + path.join(real, 'python.exe')) !== -1, 'мусорная запись пропущена, поиск дошёл до живой: ' + o1.out + o1.err);
+        // Отрицательный контроль: Join-Path вне try (как было) пишет ошибку на несуществующем диске.
+        const mutant = find.replace(/try \{\s*\r?\n\s*\$p = \[IO\.Path\]::Combine\(\$dir, \$Name \+ \$ext\)/, '$p = Join-Path $dir ($Name + $ext)\r\n            try {');
+        assert(mutant !== find, 'мутация применилась');
+        const o2 = probe(mutant, pathText);
+        assert(!/ERRORS=0/.test(o2.out) || o2.err.trim() !== '', 'дефектная версия пишет ошибки — тест различает: ' + o2.out);
+        // course.ps1: prefix из ~/.npmrc на несуществующем диске
+        const cfn = cutPsFn(readWin('course.ps1'), 'Find-ClaudeBinary');
+        const home = path.join(base, 'home'); fs.mkdirSync(home);
+        fs.writeFileSync(path.join(home, '.npmrc'), 'prefix=' + missingDrive + '\\npm-global\r\n');
+        const courseRun = (fn) => runPsText('$ErrorActionPreference = "Continue"\r\nfunction Get-Command { param($Name, $ErrorAction) return $null }\r\n' + fn +
+          '\r\n$Error.Clear()\r\n$r = Find-ClaudeBinary\r\nWrite-Output ("R=[" + $r + "]")\r\nWrite-Output ("ERRORS=" + $Error.Count)',
+        { USERPROFILE: home, APPDATA: path.join(base, 'appdata') });
+        const o3 = courseRun(cfn);
+        assert(/R=\[\]/.test(o3.out) && /ERRORS=0/.test(o3.out) && o3.err.trim() === '', 'course.ps1: без ошибок на prefix с несуществующего диска: ' + o3.out + o3.err);
+        const cmut = cfn.replace(/try \{\s*\r?\n\s*\$p = \[IO\.Path\]::Combine\(\$d, \$n\)/, '$p = Join-Path $d $n\r\n            try {');
+        assert(cmut !== cfn, 'мутация course.ps1 применилась');
+        const o4 = courseRun(cmut);
+        assert(!/ERRORS=0/.test(o4.out) || o4.err.trim() !== '', 'дефектный course.ps1 пишет ошибки — тест различает: ' + o4.out);
+      } finally { dropDir(base); }
+    });
+  }
+
+  // ---- R6: вердикт claude-ps не переживает ранний выход ------------------------------------------
+  if (havePs) {
+    ok('R6 (claude.ps1, песочница): ранний выход (claude не установился) не оставляет вердикт claude-ps прошлого прогона', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-r6-'));
+      try {
+        const scripts = path.join(base, 'scripts'); fs.mkdirSync(scripts);
+        for (const f of ['claude.ps1', '_claudeenv.ps1', '_userpath.ps1']) fs.copyFileSync(path.join(WIN, f), path.join(scripts, f));
+        // _deelev.ps1 — стаб: настоящий при загрузке трогает планировщик задач.
+        fs.writeFileSync(path.join(scripts, '_deelev.ps1'), '\uFEFFfunction Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @()) return $null }\r\n');
+        const home = path.join(base, 'home'); fs.mkdirSync(path.join(home, '.hamidun-setup'), { recursive: true });
+        const checks = path.join(home, '.hamidun-setup', 'checks.json');
+        const stale = JSON.stringify({ claude: { verdict: 'works' }, 'claude-ps': { verdict: 'blocked' } });
+        fs.writeFileSync(checks, stale);
+        const driver = path.join(base, 'driver.ps1');
+        fs.writeFileSync(driver, '\uFEFF' + [
+          "$ErrorActionPreference = 'Continue'",
+          'function Get-Command { param($Name, $ErrorAction) return $null }',
+          "function Invoke-RestMethod { throw 'сеть недоступна (стаб)' }",
+          '& (Join-Path $PSScriptRoot "scripts\\claude.ps1")',
+          'exit $LASTEXITCODE',
+        ].join('\r\n'));
+        const run = (extra) => spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver],
+          { encoding: 'utf8', timeout: 120000,
+            env: Object.assign({}, process.env, { USERPROFILE: home, APPDATA: path.join(base, 'ad'), HM_VENDOR: '' }, extra || {}) });
+        let r = run();
+        assert.strictEqual(r.status, 1, 'claude не установился — exit 1: ' + r.stdout + r.stderr);
+        assert.strictEqual(readJsonTolerant(checks)['claude-ps'].verdict, 'n/a', 'вердикт прошлого прогона сброшен');
+        // dry-run ничего не пишет
+        fs.writeFileSync(checks, stale);
+        r = run({ HM_DRY_RUN: '1' });
+        assert.strictEqual(fs.readFileSync(checks, 'utf8'), stale, 'dry-run: checks.json не тронут');
+        // Отрицательный контроль: без сброса вердикт остался бы «blocked».
+        const cp = path.join(scripts, 'claude.ps1');
+        const src = fs.readFileSync(cp, 'utf8');
+        const mutant = src.replace(/if \(-not \$DRY\) \{ Write-HmCheck 'claude-ps' 'n\/a' \}\r?\n/, '');
+        assert(mutant !== src, 'мутация применилась');
+        fs.writeFileSync(cp, mutant);
+        fs.writeFileSync(checks, stale);
+        run();
+        assert.strictEqual(readJsonTolerant(checks)['claude-ps'].verdict, 'blocked', 'дефектная версия оставляет старый «blocked» — тест различает');
+      } finally { dropDir(base); }
+    });
+  }
+
+  if (havePs) {
+    ok('R6: Write-HmCheck при первой записи кладёт в checks.json только свои вердикты и не пишет сквозь ссылку ~/.hamidun-setup', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-chk-'));
+      try {
+        const lib = path.join(WIN, '_claudeenv.ps1');
+        const home = path.join(base, 'home'); fs.mkdirSync(home);
+        const readChecks = (h) => JSON.parse(fs.readFileSync(path.join(h, '.hamidun-setup', 'checks.json'), 'utf8').replace(/^﻿/, ''));
+        const call = "\r\nWrite-HmCheck 'claude-ps' 'works'\r\nWrite-HmCheck 'claude' 'unverified'";
+        const r = runPsText('. ' + q(lib) + call, { USERPROFILE: home });
+        assert.deepStrictEqual(Object.keys(readChecks(home)).sort(), ['claude', 'claude-ps'],
+          'ровно два ключа, без служебных свойств пустой хеш-таблицы: ' + JSON.stringify(readChecks(home)) + r.err);
+        assert.strictEqual(readChecks(home)['claude-ps'].verdict, 'works');
+        // Отрицательный контроль: с прежней инициализацией `@{}` в файл просачиваются Count, Keys и прочее.
+        const libSrc = fs.readFileSync(lib, 'utf8');
+        const mutText = libSrc.replace('$data = $null\r\n', '$data = @{}\r\n');
+        assert(mutText !== libSrc, 'мутация применилась');
+        const mdir = path.join(base, 'mut'); fs.mkdirSync(mdir);
+        fs.writeFileSync(path.join(mdir, '_claudeenv.ps1'), mutText);
+        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(mdir, '_userpath.ps1'));
+        const home2 = path.join(base, 'home2'); fs.mkdirSync(home2);
+        runPsText('. ' + q(path.join(mdir, '_claudeenv.ps1')) + call, { USERPROFILE: home2 });
+        assert(Object.keys(readChecks(home2)).length > 2, 'прежний код давал лишние ключи — тест различает: ' + Object.keys(readChecks(home2)).join(','));
+        // ~/.hamidun-setup — ссылка: ничего не пишем в её цель
+        const home3 = path.join(base, 'home3'); const out3 = path.join(base, 'elsewhere3');
+        fs.mkdirSync(home3); fs.mkdirSync(out3);
+        fs.symlinkSync(out3, path.join(home3, '.hamidun-setup'), 'junction');
+        runPsText('. ' + q(lib) + call, { USERPROFILE: home3 });
+        assert.deepStrictEqual(fs.readdirSync(out3), [], 'сквозь ссылку записи нет');
+      } finally { dropDir(base); }
+    });
+  }
+
+  // ---- R7: -Prepend переносит каталог вперёд -----------------------------------------------------
+  if (havePs) {
+    ok('R7: Get-HmPathWithDir -Prepend переносит уже стоящий каталог в начало, сохраняя %VAR% и остальные записи; уже первый или без -Prepend — не трогает', () => {
+      const fn = cutPsFn(readWin('_userpath.ps1'), 'Get-HmPathWithDir');
+      const cases = [
+        ['C:\\a;C:\\WA;C:\\Py;C:\\b', 'C:\\Py', '-Prepend', 'C:\\Py;C:\\a;C:\\WA;C:\\b'],
+        ['C:\\Py;C:\\a', 'C:\\Py', '-Prepend', '<null>'],
+        [';;C:\\Py;C:\\a', 'C:\\Py', '-Prepend', '<null>'],
+        ['%USERPROFILE%\\bin;C:\\Py\\;%X%', 'C:\\Py', '-Prepend', 'C:\\Py\\;%USERPROFILE%\\bin;%X%'],
+        ['C:\\a;C:\\Py;C:\\b;c:\\py\\', 'C:\\Py', '-Prepend', 'C:\\Py;C:\\a;C:\\b'],
+        // запись в кавычках с «;» внутри делением по «;» не разобрать — порядок не трогаем (лучше оставить как есть, чем испортить)
+        ['"C:\\a;b";C:\\Py', 'C:\\Py', '-Prepend', '<null>'],
+        ['"C:\\a;C:\\Py', 'C:\\Py', '-Prepend', '<null>'],
+        ['"C:\\My Dir";C:\\a;C:\\Py', 'C:\\Py', '-Prepend', 'C:\\Py;"C:\\My Dir";C:\\a'],
+        ['C:\\a;C:\\Py', 'C:\\Py', '', '<null>'],
+        ['C:\\a', 'C:\\Py', '-Prepend', 'C:\\Py;C:\\a'],
+        ['C:\\a', 'C:\\Py', '', 'C:\\a;C:\\Py'],
+      ];
+      const body = fn + '\r\n' + cases.map((c) => '$r = Get-HmPathWithDir -Raw ' + q(c[0]) + ' -Dir ' + q(c[1]) + ' ' + c[2] +
+        "\r\nif ($null -eq $r) { Write-Output '<null>' } else { Write-Output $r }").join('\r\n');
+      const out = runPsText(body).out.trim().split(/\r?\n/);
+      cases.forEach((c, i) => assert.strictEqual(out[i], c[3], JSON.stringify(c) + ' -> ' + out[i]));
+    });
+
+    ok('R7: Add-HmUserPath -Prepend в песочном ключе реестра ставит Python перед заглушкой Магазина, не портит REG_EXPAND_SZ и не пишет повторно', () => {
+      const sub = 'Software\\HamidunTest-' + crypto.randomBytes(8).toString('hex');
+      const body = [
+        '. ' + q(path.join(WIN, '_userpath.ps1')),
+        'function Send-HmEnvBroadcast { $global:HmBc++; return $true }',
+        '$global:HmBc = 0',
+        '$sub = ' + q(sub),
+        'try {',
+        '  $k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($sub)',
+        "  $k.SetValue('Path', '%USERPROFILE%\\AppData\\Local\\Microsoft\\WindowsApps;C:\\hm-py;C:\\hm-z', [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close()",
+        "  Write-Output ('W1=' + (Add-HmUserPath -Dir 'C:\\hm-py' -AllowMissing -Prepend -RegistrySubKey $sub))",
+        "  Write-Output ('W2=' + (Add-HmUserPath -Dir 'C:\\hm-py' -AllowMissing -Prepend -RegistrySubKey $sub))",
+        '  $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($sub)',
+        "  Write-Output ('RAW=' + $k.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))",
+        "  Write-Output ('KIND=' + $k.GetValueKind('Path')); $k.Close()",
+        "  Write-Output ('BC=' + $global:HmBc)",
+        '} finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($sub, $false) }',
+      ].join('\r\n');
+      const o = runPsText(body).out;
+      assert(/W1=True/.test(o) && /W2=False/.test(o), 'первый вызов пишет, второй — нет: ' + o);
+      assert(o.indexOf('RAW=C:\\hm-py;%USERPROFILE%\\AppData\\Local\\Microsoft\\WindowsApps;C:\\hm-z') !== -1, 'каталог первым, %USERPROFILE% не развёрнут: ' + o);
+      assert(/KIND=ExpandString/.test(o) && /BC=1/.test(o), 'тип REG_EXPAND_SZ цел, уведомление разослано один раз');
+    });
+  }
+
+  // ---- R8: повтор защищённого каталога — только в докачке, текст по факту -------------------------
+  trackAsync(okAsync('R8 (main.js): повтор 60 с — только с opts.retry и только когда примитив молчит; запуск редактора (без opts) — одна попытка 20 с', async () => {
+    const vm = require('vm');
+    const EventEmitter = require('events');
+    const src = EG_MAIN();
+    const m = /async function winMakeSecureDir\(opts\) \{[\s\S]*?\n\}\n/.exec(src);
+    assert(m, 'winMakeSecureDir(opts) найдена');
+    const DIR = 'C:\\ProgramData\\HmDeElev-0123456789abcdef0123456789abcdef';
+    const mk = (script) => {                       // script[i] — что делает i-я попытка: 'hang' | 'ok' | 'fail'
+      const budgets = []; let attempt = 0;
+      const sb = {
+        remoteFetch: {
+          winProgramData: () => 'C:\\ProgramData',
+          winPowershellPath: () => 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+          sysBin: () => 'C:\\Windows\\System32\\icacls.exe',
+          verifyDirSecureWin: () => true,
+        },
+        winDeElevScript: () => 'C:\\res\\scripts\\windows\\_deelev.ps1',
+        fs: { existsSync: () => true }, path: path.win32,
+        spawn: () => {
+          const mode = script[Math.min(attempt, script.length - 1)]; attempt++;
+          const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {};
+          if (mode === 'ok') setImmediate(() => { child.stdout.emit('data', 'HMSECDIR::' + DIR + '::END'); child.emit('close', 0); });
+          if (mode === 'fail') setImmediate(() => { child.stderr.emit('data', 'HMSECFAIL: владелец каталога не Administrators'); child.emit('close', 0); });
+          return child;                             // 'hang': ни вывода, ни close — сработает таймер
+        },
+        detectSpawnEnv: () => ({}), rmStagingTree: () => {},
+        setTimeout: (fn, ms) => { budgets.push(ms); return setImmediate(fn); }, clearTimeout: (h) => clearImmediate(h),
+      };
+      vm.createContext(sb);
+      vm.runInContext('var lastSecureDirError = ""; var lastSecureDirAttempts = 0;\n' + m[0] +
+        '\nthis.__f = winMakeSecureDir; this.__err = function () { return lastSecureDirError; }; this.__att = function () { return lastSecureDirAttempts; };', sb);
+      return { sb, budgets };
+    };
+    let t = mk(['hang', 'ok']);
+    assert.strictEqual(await t.sb.__f({ retry: true }), DIR, 'с retry вторая попытка дала каталог');
+    assert.deepStrictEqual(t.budgets.slice(0, 2), [20000, 60000], 'бюджеты: 20 с, затем 60 с');
+    assert.strictEqual(t.sb.__att(), 2);
+    t = mk(['hang', 'ok']);
+    assert.strictEqual(await t.sb.__f(), null, 'без opts (запуск редактора) повтора НЕТ');
+    assert.deepStrictEqual(t.budgets, [20000], 'ровно одна попытка на 20 с');
+    assert.strictEqual(t.sb.__att(), 1);
+    t = mk(['fail', 'ok']);
+    assert.strictEqual(await t.sb.__f({ retry: true }), null, 'окончательный ответ примитива (HMSECFAIL) повторять незачем');
+    assert.deepStrictEqual(t.budgets, [20000]);
+    assert(/владелец каталога/.test(t.sb.__err()), 'причина — из ответа примитива: ' + t.sb.__err());
+    t = mk(['hang', 'hang']);
+    assert.strictEqual(await t.sb.__f({ retry: true }), null, 'обе попытки молчат — fail-closed');
+    assert.strictEqual(t.sb.__att(), 2);
+    // до запуска примитива не дошли: попыток 0, причина названа
+    const early = mk(['ok']);
+    early.sb.remoteFetch.winProgramData = () => '';
+    assert.strictEqual(await early.sb.__f({ retry: true }), null);
+    assert.strictEqual(early.sb.__att(), 0, 'ни одной попытки');
+    assert(/ProgramData/.test(early.sb.__err()), 'причина названа: ' + early.sb.__err());
+  }));
+
+  ok('R8 (main.js): запуск редактора зовёт winMakeSecureDir без повтора, докачка — с повтором; текст отказа по факту числа попыток', () => {
+    const src = EG_MAIN();
+    assert(/cacheDir = await winMakeSecureDir\(\{ retry: true \}\)/.test(src), 'докачка (run-component) просит повтор');
+    const lh = src.slice(src.indexOf('async function winLaunchDeElevated('));
+    assert(/const dir = await winMakeSecureDir\(\);/.test(lh.slice(0, 6000)), 'winLaunchDeElevated: одна попытка, без opts');
+    const ei = src.indexOf("error: 'не удалось подготовить защищённый каталог для загрузки'");
+    const msg = src.slice(Math.max(0, ei - 400), src.indexOf("перезапусти установщик и пришли журнал боту.') };", ei) + 80);
+    assert(/tried >= 2/.test(msg) && /tried === 1/.test(msg) && /даже не запустилась/.test(msg), 'три разные формулировки: 2 попытки, 1 попытка, 0');
+    assert(!/от имени администратора/.test(msg), 'совета «запусти от администратора» нет');
+    // «Две попытки» говорится ТОЛЬКО в ветке tried >= 2
+    const twoIdx = msg.indexOf('Две попытки', msg.indexOf('tried >= 2'));
+    assert(twoIdx !== -1 && twoIdx < msg.indexOf('tried === 1'), 'Две попытки — только при двух реальных');
   });
 })();

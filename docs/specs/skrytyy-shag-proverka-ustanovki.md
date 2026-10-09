@@ -3,8 +3,8 @@
 <!-- spec-id: skrytyy-shag-proverka-ustanovki -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1:261-324`, `src/main.js:570-575`, `src/main.js:1323-1368`, `src/main.js:2669-2678`, `src/main.js:3163-3171`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
-- **Тесты:** «P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен»
+- **Код:** `components.json:97-106`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:356-361`, `src/renderer/app.js:1526-1536`, `src/renderer/app.js:1587-1624`, `src/renderer/app.js:1891-1898`, `src/renderer/app.js:1911-1964`, `src/renderer/app.js:2123-2168`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1`, `scripts/windows/_claudeenv.ps1`, `src/main.js:570-575`, `src/main.js:1336-1381`, `src/main.js:2687-2696`, `src/main.js:3181-3189`, `src/install-env.js:20-46`, `src/install-manifest.js:147-157`
+- **Тесты:** «P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен», «A06: claude.ps1 правит политику общей функцией до пробы и пишет вердикт claude-ps; verify.ps1 показывает запрет отдельной строкой», «R1 (verify.ps1, песочница): повторный запуск, где config и claude найдены на диске и сняты, всё равно чинит settings.json, PATH и политику», «R1: если config выбран, verify настройки не трогает (это работа config.ps1); nmd и python чинятся независимо от галочек», «R1: сухой прогон ничего не пишет; claude с вердиктом broken не трогается», «R1: политику задаёт групповая политика — verify её не трогает, но говорит об этом красной строкой чек-листа даже при снятой галочке claude», «B12 (verify.ps1, песочница): AGENTS.md пака кладётся из вшитого пака на КАЖДОМ прогоне, в том числе при выбранном config (расширение Codex могло встать позже него); повтор ничего не меняет»
 
 ## Что обещает человеку
 
@@ -32,6 +32,8 @@
 Второе обещание — обратное: сама проверка никогда не может испортить установку. Оба скрипта
 заканчиваются безусловным `exit 0` (`scripts/windows/verify.ps1:245`, `scripts/macos/verify.sh:149`),
 поэтому даже полностью сломанная диагностика не превращает удачную установку в красную.
+
+Третье — не обещание, а побочная обязанность шага: на Windows перед чек-листом он молча чинит в профиле человека то, что не доходит до него другим путём (§5а). Повторный запуск установщика снимает галочки со всего найденного на диске, и скрипты компонентов для таких людей не выполняются вовсе.
 
 ## Как работает
 
@@ -91,11 +93,24 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 
 **5. Ветка Claude CLI (только Windows).** `claude.ps1` проверяет claude запуском и пишет вердикт
 `works` / `broken` / `unverified` в `~/.hamidun-setup/checks.json` функцией `Write-HmCheck`
-(атомарно, temp + `Move-Item`, `scripts/windows/claude.ps1:269-287`, вызовы на строках 307, 312,
-318, 321). verify.ps1 читает этот файл и переносит вердикт: `works` → `CHECK ok`,
+(атомарно, temp + `Move-Item`; функция живёт в `scripts/windows/_claudeenv.ps1`, общая с `claude.ps1`).
+verify.ps1 читает этот файл и переносит вердикт: `works` → `CHECK ok`,
 `unverified` → `CHECK skip Claude CLI (установлен, запуск не проверен)`, всё остальное (включая
 отсутствие вердикта) → `CHECK fail`. Найденный путь бинаря (`Find-ClaudeBinary`) печатается
-отдельной строкой и **не** влияет на вердикт.
+отдельной строкой и **не** влияет на вердикт. Отдельно переносится второй факт — `claude-ps` (запуск
+`claude` из PowerShell, где берётся `claude.ps1` и действует политика выполнения скриптов): `blocked`
+или `broken` дают строку `CHECK fail Запуск claude в PowerShell` с пояснением «набирай claude.cmd»;
+`works`, `unverified` и `n/a` лишней строки не добавляют.
+
+**5а. Починки профиля на каждом прогоне (только Windows).** Перед чек-листом `verify.ps1` выполняет блок между строками `# --- every-run repairs (B) ---` и `# --- end ---`. Зачем он здесь: повторный запуск установщика снимает галочки со всего, что нашёл на диске, и скрипты компонентов (`config.ps1`, `claude.ps1`, `nomad.ps1`, `pydeps.ps1`) для таких людей не выполняются вовсе, а именно им нужны исправления, живущие в этих скриптах. Шаг `verify` скрытый, включён по умолчанию и идёт последним, поэтому он есть в каждом прогоне. Каждая часть блока ловит свои ошибки сама и на установку не влияет:
+
+1. `config` не выбран и есть `~/.claude/settings.json` — `Invoke-HmSettingsMigration` (чистка известных дефектов, копия рядом, отметка шага) и `Write-HmConfigSummary -OnlyIfMissing` (каталог пака кладётся, только если пак под рукой и в `~/.claude` каталога ещё нет);
+2. в `~/.local\bin` лежит `nmd.exe` — этот каталог дописывается в PATH пользователя;
+3. `claude` не выбран, найден на диске и прошлый вердикт не `broken` — `Repair-HmClaudeUserEnv` без пробы (PATH, политика PowerShell); вердикт `claude-ps` пишется в `checks.json` и сразу попадает в чек-лист;
+4. новый терминал находит `python` как заглушку Магазина, а настоящий Python стоит в привычном каталоге — `Repair-HmPythonPath` ставит его в начало PATH;
+5. пак под рукой и на машине есть Codex — `Install-HmCodexAgents` кладёт карту конфига в `~/.codex/AGENTS.md`, не перезаписывая файл человека. Шаг идемпотентен, поэтому зовётся и при выбранном `config`: расширение Codex могло встать позже `config.ps1` (порядок шагов не задан).
+
+Блок работает только с HKCU и файлами профиля и не запускает ни `claude`, ни `python`, ни `nmd` (под администратором это был бы запуск user-writable бинаря). В dry-run он лишь печатает `WOULD`. Вспомогательные скрипты (`_userpath.ps1`, `_cfgmigrate.ps1`, `_claudeenv.ps1`) подключаются под `try`: не загрузились — блок пропущен, проверка идёт дальше.
 
 **6. Приём результата в UI.** Подписка на лог в `runComponents` перехватывает строки с префиксом
 `CHECK ` и разбирает их регуляркой `/^CHECK (ok|fail|skip)\s+(.*)$/`, складывая в `STATE.checks`
@@ -128,7 +143,7 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 2. **Проверка не проваливает установку.** Оба скрипта завершаются безусловным `exit 0`
    (`scripts/windows/verify.ps1:245`, `scripts/macos/verify.sh:149`); внутри Windows-скрипта
    стоит `$ErrorActionPreference = 'Continue'` (строка 4), а запись вердикта в claude.ps1
-   обёрнута в пустой `catch` (`scripts/windows/claude.ps1:286`).
+   обёрнута в пустой `catch` (`Write-HmCheck` в `scripts/windows/_claudeenv.ps1`, общая с `claude.ps1`); блок починок профиля ловит ошибки каждой своей части отдельно.
 3. **Не выбранный компонент даёт прочерк, а не крест.** `Test-Selected` / `is_selected` печатают
    `CHECK skip` для всего, чего нет в `HM_SELECTED` (`verify.ps1:34-37`, `verify.sh:13-19`).
 4. **Пропущенное в ходе прогона тоже даёт прочерк.** `HM_SELECTED` для verify чистится от
@@ -158,8 +173,9 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
 10. **Крест чек-листа ломает «Готово!».** `okAll` включает `!checkFailed`
     (`src/renderer/app.js:1927-1931`).
 11. **Служебный компонент не удаляется и не числится установленным.** hidden отсекается в
-    `detect-state` (`src/main.js:2677`), в записи маркера (`src/main.js:1337`) и в
-    `uninstall-component` (`src/main.js:3169-3171`).
+    `detect-state` (`src/main.js:2695`), в записи маркера (`src/main.js:1350`) и в
+    `uninstall-component` (`src/main.js:3187-3189`).
+12. **Блок починок профиля — на каждом прогоне, без галочек, и ничего не запускает.** Он выполняется всегда, когда есть `verify` (а он есть всегда), читает и пишет только HKCU и файлы профиля, не стартует `claude`/`python`/`nmd` и в dry-run не пишет (`scripts/windows/verify.ps1`, блок между строками `every-run repairs (B)` и `end`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -203,12 +219,13 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
     надписью. Это худший из исходов: человек уносит уверенность, что установка удалась.
 11. **hidden без отсечек** — на экране выбора появится карточка «Проверка установки» с кнопкой
     «Удалить», а в `installed.json` — запись о версии служебного шага.
+12. **Блока нет или он зависит от галочек** — исправления, живущие в скриптах компонентов (чистка `settings.json`, PATH для `nmd` и `python`, политика PowerShell, карта конфига для Codex), не доходят до людей, поставивших раньше: у них повторный запуск снимает галочки со всего найденного на диске.
 
 ## Границы
 
-* Проверка **диагностическая**: она ничего не чинит, не доустанавливает и не откатывает. Кнопки
-  «Повторить» относятся к компонентам, а не к пунктам чек-листа.
-* Проверяются **шесть** пунктов: Git, Node, Claude CLI, Конфиг, Python-пакеты, Расширение.
+* Чек-лист **диагностический**: он ничего не доустанавливает и не откатывает, кнопки «Повторить» относятся к компонентам, а не к пунктам чек-листа. Единственное исключение — Windows-блок починок профиля (§5а): он правит только известные дефекты в профиле человека, и от него зависит один пункт чек-листа — красная строка «Запуск claude в PowerShell».
+* Проверяются **шесть** пунктов: Git, Node, Claude CLI, Конфиг, Python-пакеты, Расширение — плюс
+  седьмой, «Запуск claude в PowerShell», только когда он красный (Windows).
   Компоненты `vscode`, `cursor`, `course`, `nomad`, `uv`, `bridge`, `mascot`, `handy`,
   `claude-desktop`, `chatgpt-desktop` в verify не проверяются вовсе — их исход виден только по
   статусу шага.
@@ -261,9 +278,7 @@ allowlist-ом `src/install-env.js:23`). Для каждого пункта — 
    (`test/run-tests.js:1452`, `1480`, `7669`); остальные три Windows-ветку не трогают вовсе:
    1543 читает `src/renderer/app.js` через `EG_APP()`, 281 сверяет данные
    `remote-components.json` и `components.json`, 470 вызывает `installEnv.filterRendererEnv`.
-6. **Тесты проверяют текст скрипта, а не поведение.** Найденные тесты verify.ps1 — grep-инварианты
-   по исходнику (`EG_VERIFY()`); ни один не запускает verify и не сверяет напечатанный чек-лист с
-   состоянием файловой системы. Синтаксический прогон verify.ps1 существует, но его заголовок
+6. **Тесты проверяют в основном текст скрипта.** Старые тесты verify.ps1 — grep-инварианты по исходнику (`EG_VERIFY()`). Исключение — песочные прогоны целого `verify.ps1` на Windows (реестр и политика закрыты заглушками, профиль во временной папке): они проверяют и чек-лист, и блок починок. Поведение macOS-скрипта и остальных пунктов чек-листа не запускается. Синтаксический прогон verify.ps1 существует, но его заголовок
    собирается динамически (`name + ': PowerShell парсер без ошибок (синтаксис + BOM)'`,
    `test/run-tests.js:884-885`), поэтому дословно процитировать его в шапке нельзя.
 7. **Пункт «Расширение» на Windows не различает VS Code и Cursor.** Каталог `.cursor/extensions`

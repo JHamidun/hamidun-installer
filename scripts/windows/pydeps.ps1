@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # New-HmSecureStagingDir (Admins-only кэш для онлайн-фолбэка Python)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # python в PATH пользователя, если команда ведёт в Магазин
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -219,6 +220,12 @@ if (Test-Path $runtimeScript) {
 } else {
     Write-Host "  (пропускаю доводку рантайма: $runtimeScript не найден — конфиг ещё не разложен)"
 }
+
+# Команда python в НОВОМ терминале человека (A09): если она ведёт в заглушку Магазина, а не в
+# установленный Python, каталог Python встаёт в начало PATH пользователя — как сделала бы
+# галочка «Add python.exe to PATH». Логика общая с verify.ps1 (там она идёт на КАЖДОМ прогоне,
+# даже когда у pydeps снята галочка): Repair-HmPythonPath в _userpath.ps1.
+[void](Repair-HmPythonPath $py)
 
 if ($pwWarn) { Write-Host "Python-зависимости установлены, но браузеры Playwright — нет (повтори установку этого компонента)." }
 else { Write-Host "OK: Python-зависимости установлены." }

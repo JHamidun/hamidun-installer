@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Continue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 # #2: интегрити-гейт nomad-src (Confirm-HmArtifact + Get-HmTreeSha256 из _verify.ps1).
 . (Join-Path $PSScriptRoot '_verify.ps1')
+. (Join-Path $PSScriptRoot '_userpath.ps1')   # Add-HmUserPath: ~/.local\bin в PATH пользователя
 
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
@@ -100,6 +101,11 @@ if (-not $DRY) {
     ) | Where-Object { Test-Path -LiteralPath $_ }
     if ($existingNomad) {
         Write-Host "uv-tool nomad-agent или команды nmd/nomad-agent/nomad-acp уже установлены — не перезаписываю чужое (без принудительной перезаписи). Пропускаю."
+        # Установлен — значит, до записи PATH внизу скрипта дело уже не дойдёт, а у людей с давно
+        # поставленным Nomad ~/.local\bin в PATH пользователя как раз и нет («nmd не распознано»).
+        # Чиним тут же, до выхода: запись идёт только в HKCU, шим не запускается.
+        $shimDir = Join-Path $env:USERPROFILE '.local\bin'
+        if (Test-Path -LiteralPath (Join-Path $shimDir 'nmd.exe') -PathType Leaf) { [void](Add-HmUserPath $shimDir) }
         exit 120
     }
 }
@@ -361,6 +367,14 @@ if (-not $cloudKey) {
 if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }
 Update-Path
 
+# Шимы nmd/nomad-agent/nomad-acp лежат в ~/.local\bin, а его в PATH пользователя часто нет
+# (uv лишь предупреждает «is not on your PATH»). Финал раньше обещал «nmd появится в PATH»
+# и PATH не трогал — в новом окне человек получал «Имя "nmd" не распознано». Пишем в реестр
+# (HKCU) с рассылкой WM_SETTINGCHANGE; PATH ЭТОГО процесса не трогаем — Get-Command nmd
+# ниже не должен находить user-writable шим под администратором.
+$localBin = Join-Path $env:USERPROFILE '.local\bin'
+if (Test-Path -LiteralPath (Join-Path $localBin 'nmd.exe')) { [void](Add-HmUserPath $localBin) }
+
 # P0-4: квитанция владения — ТОЧНЫЕ пути СОЗДАННЫХ артефактов (main соберёт в receipt).
 # ВАЖНО: HERMES_HOME\config.yaml НЕ записываем в квитанцию — после установки это
 # пользовательский конфиг (ключи/настройки), деинсталлятор его трогать не должен.
@@ -393,7 +407,7 @@ if (Get-Command nmd -ErrorAction SilentlyContinue) {
 }
 if (Test-Path (Join-Path $env:USERPROFILE '.local\bin\nmd.exe')) {
     Write-NomadReceipt
-    Write-Host "OK: Nomad в ~/.local/bin — команда nmd появится в PATH после перезапуска терминала."; exit 0
+    Write-Host "OK: Nomad в ~/.local/bin — открой НОВОЕ окно терминала, и команда nmd заработает."; exit 0
 }
 Write-Host "ОШИБКА: Nomad не установился — смотри лог выше."
 exit 1

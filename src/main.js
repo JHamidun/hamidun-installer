@@ -606,15 +606,25 @@ function componentShownOnPlatform(comp, platform) {
   return !gate || gate.length === 0 || gate.indexOf(platform || process.platform) !== -1;
 }
 
+// AI-мост и подобные: без адреса сервиса в config.json (components.json →
+// hideWhileUnconfigured) компонент в выбор не отдаём и не запускаем — кроме уже
+// поставленного нами (квитанция), у которого на карточке «Удалить». См. модуль.
+const componentVisibility = require('./component-visibility');
+function componentHiddenUnconfigured(comp, cfg) {
+  return componentVisibility.hiddenWhileUnconfigured(comp, cfg || readJson('config.json', {}),
+    (cid) => receipts.hasReceipt(os.homedir(), cid));
+}
+
 // Компоненты для текущей платформы: платформо-гейтнутые (напр. uv=win32-only) на
 // чужой ОС в UI НЕ отдаём — иначе юзер выбрал бы uv на macOS и упёрся бы в отказ
 // pickEntry (в реестре докачки нет darwin-сборки). Пустые группы отбрасываем.
 function componentsForPlatform() {
   const data = readJson('components.json', { groups: [] });
   const plat = process.platform;
+  const cfg = readJson('config.json', {});
   const groups = (data.groups || [])
     .map((g) => Object.assign({}, g, {
-      components: (g.components || []).filter((c) => componentShownOnPlatform(c, plat))
+      components: (g.components || []).filter((c) => componentShownOnPlatform(c, plat) && !componentHiddenUnconfigured(c, cfg))
     }))
     .filter((g) => (g.components || []).length);
   return { groups };
@@ -920,6 +930,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   if (meta && !componentShownOnPlatform(meta, process.platform)) {
     return { id, ok: false, code: -1, error: `Компонент «${id}» недоступен на платформе ${process.platform}.` };
   }
+  if (meta && componentHiddenUnconfigured(meta)) {
+    return { id, ok: false, code: -1, error: `Компонент «${id}» в этой сборке не настроен (нет адреса сервиса) — не ставлю.` };
+  }
 
   const script = scriptFor(id);
   if (!fs.existsSync(script)) {
@@ -1021,12 +1034,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         try { stillSafe = fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir); } catch (e) { stillSafe = false; }
         if (!stillSafe) { SECURE_DIRS.delete(declared); cacheDir = ''; }
       }
-      if (!cacheDir) cacheDir = await winMakeSecureDir();
+      if (!cacheDir) cacheDir = await winMakeSecureDir({ retry: true });
       if (!cacheDir) {
+        // Текст по ФАКТУ: сколько раз примитив реально запускался. «Две попытки не прошли» при
+        // нуле или одной попытке было бы неправдой (а совет про антивирус — гаданием).
+        const tried = lastSecureDirAttempts;
         return { id, ok: false, code: -1, stage: 'env',
         error: 'не удалось подготовить защищённый каталог для загрузки'
           + (lastSecureDirError ? ' (' + lastSecureDirError + ')' : '')
-          + '. Запусти установщик от имени администратора; если это не помогает — пришли журнал боту.' };
+          + (tried >= 2
+            ? '. Две попытки (20 и 60 секунд) остались без ответа — чаще всего так антивирус или занятый диск задерживают запуск PowerShell. Подожди пару минут и нажми «Повторить»; не поможет — перезагрузи компьютер и запусти установку снова, а журнал пришли боту.'
+            : tried === 1
+              ? '. Нажми «Повторить»; не поможет — перезагрузи компьютер, запусти установку снова и пришли журнал боту.'
+              : '. Подготовка каталога даже не запустилась. Нажми «Повторить»; не поможет — перезапусти установщик и пришли журнал боту.') };
       }
       SECURE_DIRS.set(declared, cacheDir);
       secureCacheDir = cacheDir; // чистим после успешной установки / на выходе
@@ -1690,25 +1710,35 @@ function winDeElevScript() {
 // Последняя причина отказа защищённого staging — чтобы в журнале и в тексте ошибки
 // стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
 let lastSecureDirError = '';
+// Сколько раз примитив РЕАЛЬНО запускался в последнем вызове (0 — до запуска не дошли). Нужен вызывающему,
+// чтобы текст отказа не говорил «две попытки не прошли», когда не было ни одной.
+let lastSecureDirAttempts = 0;
 
 // Вычисление пути для сноса staging и сам снос живут в src/staging-paths.js:
 // это код с ценой ошибки «стёрли чужой каталог под админом», и он обязан
 // проверяться тестом напрямую, а не через выковыривание функции из этого файла.
 // Гейт по имени HmDeElev-<32 hex> — там же (зеркало Remove-HmSecureStagingDir).
 
-async function winMakeSecureDir() {
+// opts.retry — после ТАЙМАУТА или сбоя запуска примитива (он не ответил) один раз повторить с запасом
+// времени. Нужен только пути докачки (run-component): там шаг иначе падал. Запуск редактора
+// (winLaunchDeElevated) зовёт без него — человек ждёт окно, и 20 секунд ему уже долго.
+async function winMakeSecureDir(opts) {
   // Сбрасываем на КАЖДОМ входе. Иначе причина от прошлого отказа доживает до следующего
   // и приклеивается к другому компоненту: половина веток возвращает null молча, и в
   // тексте шага оказалась бы чужая, уже неверная причина — ровно то, ради чего эта
   // диагностика и заводилась.
   lastSecureDirError = '';
+  lastSecureDirAttempts = 0;
   try {
     const pd = remoteFetch.winProgramData();
-    if (!pd || !fs.existsSync(pd)) return null;
+    if (!pd || !fs.existsSync(pd)) { lastSecureDirError = 'папка %ProgramData% не найдена'; return null; }
     const ps = remoteFetch.winPowershellPath();       // абс. powershell из валидир. System32
     const icacls = remoteFetch.sysBin('icacls.exe');   // абс. icacls (примитив ставит владельца)
     const deelev = winDeElevScript();                  // абс. путь к вшитому _deelev.ps1
-    if (!ps || !icacls || !deelev || !fs.existsSync(deelev)) return null;
+    if (!ps || !icacls || !deelev || !fs.existsSync(deelev)) {
+      lastSecureDirError = 'не нашлись powershell.exe, icacls.exe или _deelev.ps1 установщика';
+      return null;
+    }
     // Инлайн: дот-сорсим bundled-примитив и зовём АТОМАРНЫЙ конструктор secure-dir.
     // Пути — ЛИТЕРАЛАМИ (single-quoted, ''-экранирование); ни одного аргумента из
     // renderer/сети. Установщик elevated -> каталог {SYSTEM,Admins}, без user-ACE.
@@ -1746,7 +1776,12 @@ async function winMakeSecureDir() {
     // Читаем stderr, а не только stdout: примитив на отказе НЕ бросает, он возвращает $null
     // и пишет причину (HMSECFAIL) в stderr. Раньше причина молча терялась, и пользователь
     // получал бесполезное «примитив не вернул путь».
-    const r = await new Promise((resolve) => {
+    // Попытки — 20 с, а с opts.retry при молчании примитива ещё 60 с. Холодный старт
+    // powershell.exe под антивирусом на слабой машине бывает дольше 20 с: у людей шаг падал с
+    // «таймаут примитива (20 с)», а повтор через пару минут проходил. Повторяем ТОЛЬКО когда
+    // примитив не ответил (таймаут, сбой запуска): ответ HMSECFAIL — окончательный, повтор
+    // дал бы то же самое.
+    const runOnce = (budgetMs) => new Promise((resolve) => {
       let so = '', se = '', settled = false;
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
       let child;
@@ -1759,12 +1794,17 @@ async function winMakeSecureDir() {
         child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
           { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
       } catch (e) { return done({ error: e }); }
-      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || 'таймаут примитива (20 с)' }); }, 20000);
+      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || ('таймаут примитива (' + (budgetMs / 1000) + ' с)') }); }, budgetMs);
       child.stdout.on('data', (d) => { so += String(d); });
       child.stderr.on('data', (d) => { se += String(d); });
       child.on('error', (e) => { clearTimeout(kill); done({ error: e }); });
       child.on('close', () => { clearTimeout(kill); done({ stdout: so, stderr: se }); });
     });
+    const answered = (x) => !!(x && !x.error && (/HMSECDIR::[\s\S]+?::END/.test(String(x.stdout || ''))
+      || /HMSECFAIL/.test(String(x.stderr || ''))));
+    let r = await runOnce(20000);
+    lastSecureDirAttempts = 1;
+    if (opts && opts.retry && !answered(r)) { r = await runOnce(60000); lastSecureDirAttempts = 2; }
     const out = String((r && r.stdout) || '');
     // Берём ПОСЛЕДНЮЮ строку HMSECFAIL: их может быть несколько (посторонние ACE
     // перечисляются по одному), и последняя — та, что решила исход.

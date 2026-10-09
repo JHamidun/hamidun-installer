@@ -3,8 +3,8 @@
 <!-- spec-id: python-pakety-pydeps-playwright-brauzery -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1103-1118`, `src/main.js:1137-1138`, `src/main.js:1332-1337`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
-- **Тесты:** «enableWithDeps: selecting "pydeps" transitively pulls config+git+node», «disableDependents: turning off git turns off config+pydeps», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «pydeps.sh: ОБА .pkg через общий root-скрипт HM_PKG_INSTALL_SH (PSF Team ID позиционным); verify_pkg_team_id убран», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)»
+- **Код:** `components.json:131-150`, `scripts/windows/pydeps.ps1`, `scripts/windows/_userpath.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:375-435`, `src/main.js:1116-1131`, `src/main.js:1150-1151`, `src/main.js:1345-1350`, `src/install-receipts.js:33-38`, `src/renderer/app.js:1646-1657`, `package.json:114-125`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:59-66`, `mac-arch-support.json`
+- **Тесты:** «enableWithDeps: selecting "pydeps" transitively pulls config+git+node», «disableDependents: turning off git turns off config+pydeps», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «pydeps.sh: ОБА .pkg через общий root-скрипт HM_PKG_INSTALL_SH (PSF Team ID позиционным); verify_pkg_team_id убран», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «A09: python в новом терминале — заглушка Магазина первой -> fix, настоящий python или Python из Магазина -> ok», «R7: Get-HmPathWithDir -Prepend переносит уже стоящий каталог в начало, сохраняя %VAR% и остальные записи; уже первый или без -Prepend — не трогает», «R7: Add-HmUserPath -Prepend в песочном ключе реестра ставит Python перед заглушкой Магазина, не портит REG_EXPAND_SZ и не пишет повторно», «R1 (verify.ps1, песочница): повторный запуск, где config и claude найдены на диске и сняты, всё равно чинит settings.json, PATH и политику», «R1: если config выбран, verify настройки не трогает (это работа config.ps1); nmd и python чинятся независимо от галочек»
 
 ## Что обещает человеку
 
@@ -87,6 +87,16 @@ darwin 797 395 819) не пишутся руками — их генерируе
 12. **Доводка рантайма** (201-221): если есть `%USERPROFILE%\.claude\scripts\setup_runtime.py`
     — запуск. Комментарий объясняет причину: `config` идёт раньше (`pydeps` требует `config`),
     Python там ещё не установлен, и доводка не выполнялась ни разу. Провал — только предупреждение.
+12а. **Команда `python` в новом терминале** (перед финалом). Скрипт сам зовёт Python по абсолютному
+    пути, а человек набирает `python` — и если каталога Python нет в PATH (Python стоял раньше без
+    галочки «Add python.exe to PATH»), Windows отдаёт заглушку Магазина из `WindowsApps`: «Python was
+    not found…». `Find-HmOnPath` (`scripts/windows/_userpath.ps1`) ищет `python` по машинному и
+    пользовательскому PATH из реестра так же, как cmd (путь собирается `[IO.Path]::Combine` внутри `try`: записи PATH на несуществующих дисках не пишут в журнал ошибок `DriveNotFound`); чистая `Get-HmPythonPathPlan` решает: первым
+    находится настоящий python или стоит Python из Магазина (`WindowsApps\PythonSoftwareFoundation.Python.*`) —
+    не трогаем; заглушка или ничего — каталог Python и его `Scripts` дописываются В НАЧАЛО PATH
+    пользователя (`Add-HmUserPath -Prepend`), как сделала бы та галочка; если каталог Python уже стоит в PATH, но ПОЗЖЕ заглушки Магазина, он переносится в начало, остальные записи и `%VAR%` остаются как были. Всё это — одна функция `Repair-HmPythonPath` в `scripts/windows/_userpath.ps1`: её зовёт `pydeps.ps1` и блок починок `verify.ps1` на каждом прогоне (Python ищется в привычных каталогах функцией `Find-HmKnownPython` и сам не запускается). Повторный запуск снимает галочку `pydeps`, и без второго вызова человек, поставивший библиотеки раньше, остался бы со ссылкой на Магазин. Если и после этого первой
+    остаётся заглушка, печатается, где выключить псевдонимы приложений; сами псевдонимы установщик
+    не трогает.
 13. Финал (223-225): при `$pwWarn` — «библиотеки установлены, но браузеры Playwright — нет»,
     иначе «OK». В обоих случаях `exit 0`.
 
@@ -156,7 +166,7 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    `:166`) и `python -m playwright install chromium` (`:184`, `:194`). Хост их тоже не
    убивает: watchdog в `src/main.js:1298-1300` намеренно без kill, `stallTimer`
    (`:1300-1316`) только печатает сообщение раз в 10 минут. Единственный kill по таймауту
-   в файле — `src/main.js:1714` (20 с) — сидит внутри `winMakeSecureDir()` (объявлена на
+   в файле — `src/main.js:1727` (20 с; на пути докачки, `opts.retry`, при молчании примитива ещё одна попытка на 60 с) — сидит внутри `winMakeSecureDir()` (объявлена на
    `:1649`), примитива СОЗДАНИЯ Admins-only staging-каталога, и к install-скриптам
    отношения не имеет. Практически это значит, что вечный спиннер из «Что ломается №5»
    остаётся достижим — самый хрупкий по сети шаг (докачка Chromium, ~150 МБ, о чём

@@ -1,5 +1,6 @@
 ﻿# Hamidun config (.claude) — Windows
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '_cfgmigrate.ps1')  # правка settings.json прошлых версий пака + опись (CATALOG.md, сводка)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -64,6 +65,8 @@ if ($DRY) {
     Write-Host "  [dry-run] WOULD: копия-бэкап ~/.claude → ~/.claude.backup.<stamp> (сейф-нет, КОПИЯ, НЕ move; неполнота не фатальна)"
     if ($ADDITIVE) { Write-Host "  [dry-run] WOULD (add-missing): merge-copy ТОЛЬКО недостающих файлов (robocopy /XC /XN /XO), существующее НЕ трогать; ~/.claude НЕ переносится и не стирается; preserve-list (/XF+/XD) исключён" }
     else { Write-Host "  [dry-run] WOULD (repair): перезаписать НАШИ базовые файлы свежими (robocopy без /XC), пользовательское (ключи/память/история/settings.local/CLAUDE.md) исключено; БЕЗ move/wipe" }
+    Write-Host "  [dry-run] WOULD: убрать из settings.json известные дефекты прошлых версий пака (копия до правки рядом); положить CATALOG.md и сводку конфига"
+    Write-Host "  [dry-run] WOULD: если на машине есть Codex (~/.codex или расширение openai.chatgpt-*) — положить AGENTS.md пака в ~/.codex/AGENTS.md (существующий файл не перезаписывать: дописать отмеченный блок)"
     Write-Host "[dry-run] Конфиг: без изменений."; exit 0
 }
 
@@ -174,6 +177,9 @@ if (Test-Path $claudeHome) {
 
 # Существовал ли рабочий конфиг ДО обновления — для честного финального рапорта.
 $hadOldConfig = (Test-Path (Join-Path $claudeHome 'skills')) -or (Test-Path (Join-Path $claudeHome 'settings.json'))
+# Был ли settings.json ДО раскладки: не было — после неё это наш свежий файл из пака, а не
+# выбор человека (см. Invoke-HmSettingsMigration ниже).
+$settingsExisted = Test-Path -LiteralPath (Join-Path $claudeHome 'settings.json')
 New-Item -ItemType Directory -Force $claudeHome | Out-Null
 
 # Какие скиллы БЫЛИ до раскладки — ПОЛНОЕ УСПЕШНОЕ перечисление обязательно.
@@ -277,6 +283,13 @@ $global:LASTEXITCODE = 0
 # settings.json — НАШ базовый: в add-missing robocopy /XC пропускает существующий (добавит,
 # если не было); в repair — перезаписывает свежим. settings.local.json (пользовательский) —
 # в preserve-list, цел ВСЕГДА. Semver-мерж JSON намеренно НЕ делаем (риск сломать конфиг).
+# Вместо мержа — точечная правка ИЗВЕСТНЫХ дефектов прошлых версий пака (плагины без
+# токена, Write(...), хуки VSCODE_PORT, mcpServers): без неё исправления пака до тех, кто
+# поставил раньше, не доходили никогда. Всё прочее в файле не трогается; копия — рядом.
+# Свежим файл считаем, если его не было до раскладки или repair только что его перезаписал.
+Invoke-HmSettingsMigration -Path (Join-Path $claudeHome 'settings.json') `
+    -Fresh ((-not $settingsExisted) -or (-not $ADDITIVE)) `
+    -MarkerPath (Join-Path $env:USERPROFILE '.hamidun-setup\config-migrations.json')
 
 # CLAUDE.md в корне профиля — ПОЛЬЗОВАТЕЛЬСКИЙ: добавляем ТОЛЬКО если отсутствует (в ОБОИХ
 # режимах — не затираем правки юзера даже в repair). Сбой копирования → честный провал.
@@ -285,6 +298,10 @@ if ((Test-Path $srcClaudeMd) -and -not (Test-Path $profileClaudeMd)) {
     try { Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction Stop }
     catch { $installFailed = $true; $pruneDisabled = $true; Write-Host "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md ($($_.Exception.Message))." }
 }
+# AGENTS.md пака — в ~/.codex/AGENTS.md, где Codex ищет глобальные инструкции (B12). Только если на
+# машине есть Codex; файл человека не перезаписывается — к нему дописывается отмеченный блок.
+# Сбой не фатален для конфига: Install-HmCodexAgents сам печатает причину и исключений не бросает.
+[void](Install-HmCodexAgents -Source (Join-Path $clone 'AGENTS.md') -UserHome $env:USERPROFILE)
 # credentials-шаблон — только если ключей ещё нет (в ОБОИХ режимах: preserve-list).
 $srcEnvTpl = Join-Path $clone '.credentials.template.env'
 $dstEnv    = Join-Path $claudeHome '.credentials.master.env'
@@ -513,6 +530,10 @@ if ($dstPresent) {
             Write-Host "  После установки Python запусти: python `"$runtimeScript`""
         }
     }
+
+    # Опись поставленного: CATALOG.md пака — в ~/.claude, цифры — в сводку для финального
+    # экрана (~/.hamidun-setup/config-summary.json). Считается ПОСЛЕ фильтра наборов.
+    Write-HmConfigSummary -Clone $clone -ClaudeHome $dst -SetupDir (Join-Path $env:USERPROFILE '.hamidun-setup')
 
     # #19: маркер ЗАВЕРШЁННОСТИ — детекция config в main.js считает «установлено» по
     # нему, а не по наличию одной папки skills. Иначе оборванная установка (частичный
