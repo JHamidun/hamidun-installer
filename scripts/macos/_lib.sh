@@ -66,6 +66,12 @@ admin_run() {
   /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" \
     /usr/bin/osascript -e "do shell script \"$c\" with administrator privileges"
 }
+# JavaScript для osascript (JXA) БЕЗ прав администратора — второй и последний вызов
+# osascript в скриптах (сторожит тест «НЕТ osascript вне _lib.sh»). Скрипт приходит
+# ФАЙЛОМ, данные — argv-ом (run(argv) в JS), в текст скрипта ничего не подставляется:
+# той интерполяции, от которой защищает admin_run, здесь нет. Прав не поднимает —
+# исполняется от того же пользователя, что и сам установочный скрипт.
+hm_jxa() { /usr/bin/osascript -l JavaScript "$@"; }
 arch_tag() { case "$(uname -m)" in arm64) echo arm64 ;; *) echo x64 ;; esac; }
 
 # ---- Архитектура Mac: честный выбор артефакта и честный отказ ----

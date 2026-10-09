@@ -1710,13 +1710,23 @@ ok('_lib.sh: admin_run принимает ARGV (нет local c="$*"); per-arg sh
 
 // (2) Инвариант по ВСЕМ scripts/macos/*.sh: ни одного строкового вызова admin_run "..."
 //     (единственный способ попасть в root-команду — argv с per-arg quoting) и ни одного
-//     osascript вне admin_run (нет второго пути интерполяции пути в root-команду).
+//     osascript вне _lib.sh (нет второго пути интерполяции пути в root-команду). В самом
+//     _lib.sh вызовов ровно два: admin_run и hm_jxa (JXA без прав: скрипт файлом, данные
+//     argv-ом, в текст скрипта ничего не подставляется) — третьего пути нет и там.
 ok('scripts/macos/*.sh: НЕТ строковой формы admin_run "..." и НЕТ osascript вне _lib.sh (инвариант против инъекции путей)', () => {
   ALL_MAC_SH().forEach(([name, s]) => {
     assert(!/admin_run\s+["']?\s*(cp|installer|sh)\b[^\n]*'\$/.test(s) || name === '_lib.sh',
       name + ': путь в admin_run не должен идти интерполяцией внутри строкового аргумента');
     assert(!/admin_run\s+"/.test(s), name + ': строковая форма admin_run "..." запрещена (только argv)');
-    if (name !== '_lib.sh') assert(!/osascript/.test(s.replace(/#[^\n]*/g, '')), name + ': osascript только внутри admin_run (_lib.sh)');
+    if (name !== '_lib.sh') {
+      assert(!/osascript/.test(s.replace(/#[^\n]*/g, '')), name + ': osascript только в _lib.sh (admin_run и hm_jxa)');
+    } else {
+      const calls = s.split('\n').filter((l) => !/^\s*#/.test(l) && /osascript/.test(l)).map((l) => l.trim());
+      assert.deepStrictEqual(calls, [
+        '/usr/bin/osascript -e "do shell script \\"$c\\" with administrator privileges"',
+        'hm_jxa() { /usr/bin/osascript -l JavaScript "$@"; }',
+      ], '_lib.sh: osascript только в admin_run и в hm_jxa (без подстановок в текст скрипта): ' + JSON.stringify(calls));
+    }
   });
 });
 
@@ -10741,4 +10751,1316 @@ ok('config.json в репозитории без сборочных маркер
     assert.throws(() => assertOrder('s3.upload_file(p)', 'status, thumb = authenticode(p)', 's3.upload_file('),
       'пропавшая проверка тоже обязана ронять тест');
   });
+})();
+
+// ===========================================================================
+// A2 (диалоги Ники 05.10.2026, строки A02/A03/A04/A05/A39): первый запуск VS Code у
+// новичка. Справа был открыт чат Copilot, и в него писали вместо Claude; всплывали
+// рекомендации и английская Welcome; Claude стартовал в домашней папке, а промпты
+// вставляли в голый PowerShell. Шаг дописывает недостающие ключи в settings.json,
+// включает русский интерфейс (только если пакет уже на диске), кладёт лаунчер и
+// ярлык «Claude Code — мои проекты».
+//
+// Второй заход (рецензия 09.10): шаг жил только внутри vscode.ps1, а у тех, у кого VS Code
+// уже стоит, карточка снята и vscode.ps1 не стартует — то есть у самих пострадавших он не
+// срабатывал. Теперь тот же код идёт ещё и отдельным входом touchup-vscode.ps1/.sh, который
+// зовёт проверка при каждом запуске установщика.
+//
+// Все прогоны — в песочницах mkdtemp: пути переносит HM_FIRSTRUN_ROOT (работает только
+// внутри %TEMP%), настоящие %APPDATA%, рабочий стол и меню «Пуск» не трогаются ни одним тестом.
+// ===========================================================================
+(function vscodeFirstRunTests() {
+  console.log('\n== A2: первый запуск VS Code — настройки новичка, русский интерфейс, ярлык Claude Code ==');
+  const PS1 = path.join(ROOT, 'scripts', 'windows', 'vscode-settings.ps1');
+  const TOUCH_PS1 = path.join(ROOT, 'scripts', 'windows', 'touchup-vscode.ps1');
+  const TOUCH_SH = path.join(ROOT, 'scripts', 'macos', 'touchup-vscode.sh');
+  const VSC_PS1 = path.join(ROOT, 'scripts', 'windows', 'vscode.ps1');
+  const MAC_JS = path.join(ROOT, 'scripts', 'macos', 'vscode-settings.js');
+  const MAC_TRAP = path.join(ROOT, 'scripts', 'macos', 'vscode-firstrun.sh');
+  const VSC_SH = path.join(ROOT, 'scripts', 'macos', 'vscode.sh');
+  const mac = require(MAC_JS);
+  const fe = require(path.join(ROOT, 'src', 'failure-explain.js'));
+  const psOk = powershellAvailable();
+
+  // Независимый оракул JSONC: снимаем комментарии и висячие запятые посимвольно
+  // (строки — с учётом экранирования) и отдаём JSON.parse. Ни строчки общей с
+  // проверяемым кодом — иначе тест подтверждал бы сам себя.
+  function parseJsonc(text) {
+    let out = ''; let i = 0; const n = text.length;
+    while (i < n) {
+      const c = text[i];
+      if (c === '"') {
+        // Внутри строки JSONC-сканер VS Code мягче JSON.parse: «\» с чем попало (путь C:\Python312)
+        // и сырой TAB он принимает, поэтому и оракул сводит их к строгому JSON, а не отказывается.
+        let j = i + 1; let lit = '"';
+        while (j < n && text[j] !== '"') {
+          const d = text[j];
+          if (d === '\\') {
+            const e = text[j + 1];
+            if (e !== undefined && /["\\/bfnrt]/.test(e)) { lit += d + e; j += 2; continue; }
+            if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(j + 2, j + 6))) { lit += text.slice(j, j + 6); j += 6; continue; }
+            lit += '\\\\'; j += 1; continue;
+          }
+          lit += d === '\t' ? '\\t' : d; j++;
+        }
+        out += lit + '"'; i = j + 1; continue;
+      }
+      if (c === '/' && text[i + 1] === '/') { while (i < n && text[i] !== '\n') i++; continue; }
+      if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
+      // JSONC-сканер VS Code считает пробелом и BOM, и неразрывный пробел, JSON.parse — нет.
+      out += /[\uFEFF\u00A0\v\f]/.test(c) ? ' ' : c; i++;
+    }
+    return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
+  }
+
+  const q = (p) => "'" + String(p).replace(/'/g, "''") + "'";
+  // Функции скрипта — в боевом Windows PowerShell 5.1 через dot-source (точка входа при
+  // этом не исполняется, см. первый тест секции).
+  function ps(body, env) {
+    const e = Object.assign({}, process.env);
+    delete e.HM_DRY_RUN; delete e.HM_FIRSTRUN_ROOT;
+    Object.assign(e, env || {});
+    return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . " + q(PS1) + "; " + body],
+      { encoding: 'utf8', timeout: 180000, env: e });
+  }
+  // Скрипт целиком — так, как его зовёт установщик (main.js): `& 'script'; exit $LASTEXITCODE`.
+  function runScript(script, env) {
+    const e = Object.assign({}, process.env);
+    delete e.HM_DRY_RUN; delete e.HM_FIRSTRUN_ROOT;
+    Object.assign(e, env || {});
+    return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & " + q(script) +
+      "; if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }"],
+      { encoding: 'utf8', timeout: 180000, env: e });
+  }
+  // Песочница с раскладкой настоящего профиля (так её видит Get-HmPaths при HM_FIRSTRUN_ROOT).
+  // Короткие имена в sb.p(): user — папка settings.json, dot — ~/.vscode, la — %LOCALAPPDATA%,
+  // desk — рабочий стол, progs — меню «Пуск», appdata — %APPDATA%, home — профиль.
+  function mkSandbox(tag) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-' + tag + '-'));
+    const ALIAS = {
+      user: 'home\\AppData\\Roaming\\Code\\User', dot: 'home\\.vscode', la: 'home\\AppData\\Local',
+      desk: 'home\\Desktop', progs: 'home\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs',
+      appdata: 'home\\AppData\\Roaming'
+    };
+    const p = (rel) => {
+      const i = rel.indexOf('\\');
+      const head = i < 0 ? rel : rel.slice(0, i);
+      return path.join(base, (ALIAS[head] || head) + (i < 0 ? '' : rel.slice(i)));
+    };
+    ['user', 'dot\\extensions', 'la', 'desk', 'progs'].forEach((d) => fs.mkdirSync(p(d), { recursive: true }));
+    return {
+      base, p,
+      // «VS Code стоит»: установщик его не ставит и vscode.ps1 не запускает — именно такого человека.
+      vscode: () => {
+        fs.mkdirSync(p('la\\Programs\\Microsoft VS Code'), { recursive: true });
+        fs.writeFileSync(p('la\\Programs\\Microsoft VS Code\\Code.exe'), '');
+      },
+      cleanup: () => { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    };
+  }
+  function firstRun(sb, env) { return ps('Invoke-HmVsCodeFirstRun', Object.assign({ HM_FIRSTRUN_ROOT: sb.base }, env)); }
+  function touchup(sb, env) { return runScript(TOUCH_PS1, Object.assign({ HM_FIRSTRUN_ROOT: sb.base }, env)); }
+  const listDir = (d) => fs.readdirSync(d).sort();
+  const nonEmptyLines = (s) => String(s || '').split(/\r?\n/).filter((l) => l.trim());
+  const lastLine = (s) => { const a = nonEmptyLines(s); return a[a.length - 1] || ''; };
+  // Найти файл с таким именем где угодно под папкой (проверка «в чужую папку ничего не попало»).
+  function findFile(dir, name) {
+    const hits = [];
+    const walk = (d) => {
+      let es = [];
+      try { es = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+      for (const e of es) {
+        const full = path.join(d, e.name);
+        if (e.name === name || e.name.startsWith(name)) hits.push(full);
+        if (e.isDirectory() && !e.isSymbolicLink()) walk(full);
+      }
+    };
+    walk(dir);
+    return hits;
+  }
+  const LNK = 'Claude Code — мои проекты.lnk';
+  // Настоящие файлы VS Code — с комментариями и висячими запятыми, как их пишут люди.
+  const USER_SETTINGS = [
+    '// мои настройки',
+    '{',
+    '    "editor.fontSize": 14, // keep me',
+    '    "workbench.startupEditor": "welcomePage",',
+    '    /* block',
+    '       comment */',
+    '    "files.autoSave": "afterDelay",',
+    '}',
+    ''
+  ].join('\r\n');
+  const PACK = 'ms-ceintl.vscode-language-pack-ru-1.131.2026090407';
+  function seedRuPack(extDir, withManifest) {
+    fs.mkdirSync(path.join(extDir, PACK), { recursive: true });
+    fs.writeFileSync(path.join(extDir, PACK, 'package.json'), '{"name":"vscode-language-pack-ru"}');
+    if (withManifest) {
+      fs.writeFileSync(path.join(extDir, 'extensions.json'), JSON.stringify([{
+        identifier: { id: 'ms-ceintl.vscode-language-pack-ru' }, version: '1.131.2026090407',
+        location: { $mid: 1, path: '/c:/x/' + PACK, scheme: 'file' }, relativeLocation: PACK
+      }]));
+    }
+  }
+  // argv.json, каким его создаёт сам VS Code: комментарии, табуляция, без locale.
+  const DEFAULT_ARGV = [
+    '// This configuration file allows you to pass permanent command line arguments to VS Code.',
+    '// NOTE: Changing this file requires a restart of VS Code.',
+    '{',
+    '\t// Allows to disable crash reporting.',
+    '\t"enable-crash-reporter": true,',
+    '',
+    '\t// Do not edit this value.',
+    '\t"crash-reporter-id": "00000000-0000-0000-0000-000000000000"',
+    '}'
+  ].join('\n');
+  // Ввод-вывод macOS-версии на настоящих файлах (в самом osascript это ObjC).
+  function fsIo() {
+    return {
+      exists: (p) => fs.existsSync(p),
+      isSymlink: (p) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch (e) { return false; } },
+      readText: (p) => {
+        if (!fs.existsSync(p)) return null;
+        const b = fs.readFileSync(p);
+        const bom = b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF;
+        return { ok: true, text: b.slice(bom ? 3 : 0).toString('utf8'), bom };
+      },
+      writeText: (p, t) => { try { fs.writeFileSync(p, t); return true; } catch (e) { return false; } },
+      copy: (a, b) => { try { fs.copyFileSync(a, b); return true; } catch (e) { return false; } },
+      mkdirp: (d) => { try { fs.mkdirSync(d, { recursive: true }); return true; } catch (e) { return false; } },
+      list: (d) => (fs.existsSync(d) ? fs.readdirSync(d) : []),
+    };
+  }
+  // Песочница macOS: HOME внутри %TEMP%, раскладка ~/Library/Application Support/Code/User.
+  function mkMacHome(tag) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2m-' + tag + '-'));
+    const home = path.join(base, 'home');
+    const user = home + '/Library/Application Support/Code/User';
+    fs.mkdirSync(user, { recursive: true });
+    return { base, home, user, cleanup: () => { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } } };
+  }
+
+  ok('vscode-settings.ps1: UTF-8 BOM; при dot-source точка входа не исполняется; exit 0 — только внутри неё', () => {
+    const b = fs.readFileSync(PS1);
+    assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'первые байты — UTF-8 BOM (кириллица в PS 5.1)');
+    const s = codeOnly(b.toString('utf8'));
+    assert(/\$ErrorActionPreference\s*=/.test(s), '$ErrorActionPreference задан явно');
+    assertOrder(s, "if ($MyInvocation.InvocationName -ne '.')", 'exit 0',
+      'exit стоит ВНУТРИ проверки «не dot-source» — иначе тест, подключивший функции, оборвался бы');
+    assert.strictEqual((s.match(/^\s*exit\b/gm) || []).length, 1, 'ровно один exit, в точке входа');
+  });
+
+  if (psOk) {
+    for (const [label, file] of [['vscode-settings.ps1', PS1], ['touchup-vscode.ps1', TOUCH_PS1]]) {
+      ok(label + ': PowerShell 5.1 парсер без ошибок (синтаксис + BOM)', () => {
+        const b = fs.readFileSync(file);
+        assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, label + ': первые байты — UTF-8 BOM (кириллица в PS 5.1)');
+        const cmd = "$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile(" + q(file) +
+          ",[ref]$null,[ref]$e);if($e -and $e.Count -gt 0){$e|%{[Console]::Error.WriteLine($_.Message)};exit 3};exit 0";
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(r.status, 0, 'ParseFile: ' + (r.stderr || r.stdout || ''));
+      });
+    }
+
+    ok('A2 settings.json: дописаны только недостающие ключи; ключ человека, комментарии и висячая запятая целы; копия рядом', () => {
+      const sb = mkSandbox('merge');
+      try {
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, USER_SETTINGS);
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, 'прогон: ' + r.stdout + r.stderr);
+        const text = fs.readFileSync(sp, 'utf8');
+        const j = parseJsonc(text);
+        assert.strictEqual(j['editor.fontSize'], 14, 'чужой ключ на месте');
+        assert.strictEqual(j['files.autoSave'], 'afterDelay', 'чужой ключ на месте');
+        assert.strictEqual(j['workbench.startupEditor'], 'welcomePage', 'ключ, заданный человеком, НЕ перебит');
+        assert.strictEqual(j['chat.disableAIFeatures'], true, 'чат Copilot скрыт');
+        assert.strictEqual(j['workbench.secondarySideBar.defaultVisibility'], 'hidden', 'правая панель скрыта');
+        assert.strictEqual(j['extensions.ignoreRecommendations'], true, 'без рекомендаций');
+        assert.strictEqual(j['security.workspace.trust.enabled'], false, 'Restricted Mode выключен (решение владельца 06.10)');
+        const prof = j['terminal.integrated.profiles.windows'] && j['terminal.integrated.profiles.windows']['Claude Code'];
+        assert(prof, 'профиль терминала «Claude Code» добавлен');
+        assert.strictEqual(prof.path, '${env:windir}\\System32\\cmd.exe', 'cmd, а не PowerShell (claude.ps1 и ExecutionPolicy)');
+        assert.strictEqual(prof.args, '/d /s /k ""${env:LOCALAPPDATA}\\Programs\\Hamidun\\claude-code.cmd""',
+          'профиль ведёт в лаунчер строкой с удвоенными кавычками (см. тест командной строки node-pty)');
+        assert(!('terminal.integrated.defaultProfile.windows' in j), 'профилем по умолчанию он НЕ становится (решение владельца)');
+        for (const frag of ['// мои настройки', '// keep me', '/* block', '"files.autoSave": "afterDelay",']) {
+          assert(text.includes(frag), 'текст человека сохранён дословно: ' + frag);
+        }
+        assert(text.includes('\r\n') && !/[^\r]\n/.test(text), 'концы строк файла (CRLF) сохранены');
+        assert(/уже задан тобой/.test(r.stdout), 'в логе сказано, что ключ человека не тронут');
+        const files = listDir(sb.p('user'));
+        const baks = files.filter((n) => /^settings\.json\.hm-bak-/.test(n));
+        assert.strictEqual(baks.length, 1, 'ровно одна копия: ' + files.join(', '));
+        assert.strictEqual(fs.readFileSync(sb.p('user\\' + baks[0]), 'utf8'), USER_SETTINGS, 'копия = прежний файл');
+        assert(!files.some((n) => /hm-tmp-/.test(n)), 'временных файлов не осталось: ' + files.join(', '));
+        const marker = JSON.parse(fs.readFileSync(sb.p('user\\.hamidun-applied.json'), 'utf8'));
+        for (const k of ['chat.disableAIFeatures', 'workbench.startupEditor', 'terminal.integrated.profiles.windows#Claude Code']) {
+          assert(marker.settings.includes(k), 'отметка помнит ' + k + ': ' + JSON.stringify(marker));
+        }
+        assert.deepStrictEqual(marker.shortcuts, ['desktop', 'programs'], 'и ярлыки: ' + JSON.stringify(marker));
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 settings.json: доверие к папкам — шаг выключает Restricted Mode, но явное true человека не трогает', () => {
+      // Решение владельца 06.10: в Restricted Mode у новичков молча гасли панель Claude и
+      // задачи. Но человек, который сам включил доверие, его и сохраняет.
+      const sb = mkSandbox('trust');
+      try {
+        const sp = sb.p('user\\settings.json');
+        const mine = '{\r\n    "security.workspace.trust.enabled": true\r\n}\r\n';
+        fs.writeFileSync(sp, mine);
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        const j = parseJsonc(fs.readFileSync(sp, 'utf8'));
+        assert.strictEqual(j['security.workspace.trust.enabled'], true, 'явное true человека не перебито');
+        assert.strictEqual(j['chat.disableAIFeatures'], true, 'остальные ключи дописаны');
+        assert(/= security\.workspace\.trust\.enabled: уже задан тобой — не трогаю/.test(r.stdout), 'в логе сказано почему: ' + r.stdout);
+        const t2 = mac.planFile('settings.json', { ok: true, text: mine }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+        assert.strictEqual(parseJsonc(t2.newText)['security.workspace.trust.enabled'], true, 'macOS-зеркало тоже не перебивает');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 settings.json: повторный прогон идемпотентен — файл байт в байт, новых копий и записей нет', () => {
+      const sb = mkSandbox('idem');
+      try {
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, USER_SETTINGS);
+        assert.strictEqual(firstRun(sb).status, 0);
+        const before = fs.readFileSync(sp);
+        const markerBefore = fs.readFileSync(sb.p('user\\.hamidun-applied.json'));
+        const r2 = firstRun(sb);
+        assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
+        assert(fs.readFileSync(sp).equals(before), 'settings.json не изменился');
+        assert(fs.readFileSync(sb.p('user\\.hamidun-applied.json')).equals(markerBefore), 'отметка не переписывалась');
+        assert.strictEqual(listDir(sb.p('user')).filter((n) => /hm-bak-/.test(n)).length, 1, 'вторая копия не появилась');
+        assert(/всё уже на месте/.test(r2.stdout), 'лог честно говорит, что менять было нечего: ' + r2.stdout);
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 settings.json: ключ, убранный человеком после установки, НЕ возвращается; без отметки — вернулся бы (контроль)', () => {
+      const sb = mkSandbox('marker');
+      try {
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, USER_SETTINGS);
+        assert.strictEqual(firstRun(sb).status, 0);
+        // Так делает сам VS Code, когда в окне настроек значение возвращают к умолчанию.
+        const t = fs.readFileSync(sp, 'utf8');
+        const cut = t.replace(/\r\n[ \t]*"chat\.disableAIFeatures": true,/, '');
+        assert.notStrictEqual(cut, t, 'строка ключа найдена и убрана');
+        fs.writeFileSync(sp, cut);
+        const r2 = firstRun(sb);
+        assert(!('chat.disableAIFeatures' in parseJsonc(fs.readFileSync(sp, 'utf8'))), 'убранный ключ не вернулся');
+        assert(/chat\.disableAIFeatures: этого нет, а установщик раньше уже добавлял — считаю, что ты убрал сам/.test(r2.stdout), 'в логе сказано почему: ' + r2.stdout);
+        // Контроль: держит именно отметка. Без неё тот же прогон ключ возвращает.
+        fs.unlinkSync(sb.p('user\\.hamidun-applied.json'));
+        firstRun(sb);
+        assert.strictEqual(parseJsonc(fs.readFileSync(sp, 'utf8'))['chat.disableAIFeatures'], true,
+          'без отметки ключ дописан снова — значит, удержала его именно отметка');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 settings.json: откат файла целиком (пропали сразу ≥4 наших ключа) — ключи возвращаются с пояснением; один пропавший — нет', () => {
+      // Settings Sync, восстановленная копия settings.json.hm-bak-*, ручной откат: файл заменён
+      // старым, и «убрал сам» неверно — обвинять человека и терять настройки навсегда нельзя.
+      const sb = mkSandbox('restore');
+      try {
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, '{"editor.fontSize": 14}');
+        assert.strictEqual(firstRun(sb).status, 0);
+        assert.strictEqual(parseJsonc(fs.readFileSync(sp, 'utf8'))['chat.disableAIFeatures'], true);
+        fs.writeFileSync(sp, '{"editor.fontSize": 14}');          // откат целиком
+        const r2 = firstRun(sb);
+        const j2 = parseJsonc(fs.readFileSync(sp, 'utf8'));
+        for (const k of ['chat.disableAIFeatures', 'workbench.secondarySideBar.defaultVisibility', 'extensions.ignoreRecommendations',
+          'workbench.startupEditor', 'security.workspace.trust.enabled']) {
+          assert.notStrictEqual(j2[k], undefined, 'после отката вернулся ' + k);
+        }
+        assert(j2['terminal.integrated.profiles.windows'] && j2['terminal.integrated.profiles.windows']['Claude Code'], 'и профиль терминала');
+        assert(/похоже на откат файла целиком/.test(r2.stdout), 'и об этом сказано прямо: ' + r2.stdout);
+        assert(!/считаю, что ты убрал сам/.test(r2.stdout), 'человека не обвиняем');
+        // macOS-зеркало решает так же: 4 пропавших — откат, 3 — выбор человека.
+        const mk = (n) => new Set(mac.HM_SETTINGS.slice(0, n).map(([k]) => 'settings:' + k));
+        assert(mac.planFile('settings.json', { ok: true, text: '{}' }, mac.HM_SETTINGS, mk(4), 'settings', '\n').restored, 'mac: 4 → откат');
+        assert(!mac.planFile('settings.json', { ok: true, text: '{}' }, mac.HM_SETTINGS, mk(3), 'settings', '\n').restored, 'mac: 3 → выбор человека');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 settings.json: неразбираемый файл не трогается вовсе — байт в байт, без копий и временных файлов', () => {
+      const bad = {
+        'нет закрывающей скобки': Buffer.from('{\r\n  "editor.fontSize": 14,\r\n', 'utf8'),
+        'мусор после объекта': Buffer.from('{"a": 1} garbage', 'utf8'),
+        'незакрытый комментарий': Buffer.from('{"a": 1 /* oops }', 'utf8'),
+        'UTF-16': Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('{"a": 1}', 'utf16le')]),
+        'не UTF-8': Buffer.from([0x7B, 0x22, 0xE9, 0x22, 0x3A, 0x31, 0x7D]),
+      };
+      for (const name of Object.keys(bad)) {
+        const sb = mkSandbox('bad');
+        try {
+          const sp = sb.p('user\\settings.json');
+          fs.writeFileSync(sp, bad[name]);
+          const r = firstRun(sb);
+          assert.strictEqual(r.status, 0, name + ': ' + r.stdout + r.stderr);
+          assert(fs.readFileSync(sp).equals(bad[name]), name + ': файл не изменился ни на байт');
+          assert(!listDir(sb.p('user')).some((n) => /hm-bak-|hm-tmp-/.test(n)), name + ': ни копий, ни временных файлов: ' + listDir(sb.p('user')).join(', '));
+          assert(/оставляю (его|файл) как есть/.test(r.stdout), name + ': в логе сказано, что файл не тронут: ' + r.stdout);
+        } finally { sb.cleanup(); }
+      }
+    });
+
+    ok('A2 разбор: путь с одиночными «\\» и сырой TAB в строке не делают файл неразбираемым — ключи дописаны, текст человека нетронут', () => {
+      // Красная волна в редакторе, но VS Code такой файл читает; раньше установщик признавал
+      // его «неразбираемым» — и ровно те, кто вставляет пути из учебника, оставались с Copilot.
+      const mine = '{\r\n    "python.defaultInterpreterPath": "C:\\Python312\\python.exe",\r\n' +
+        '    "terminal.integrated.cwd": "C:\\Users\\me\\projects",\r\n    "note": "с\tтабом"\r\n}\r\n';
+      const sb = mkSandbox('esc');
+      try {
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, mine);
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(!/разобрать файл не вышло/.test(r.stdout), 'файл разобрался: ' + r.stdout);
+        const text = fs.readFileSync(sp, 'utf8');
+        for (const frag of ['"python.defaultInterpreterPath": "C:\\Python312\\python.exe",', '"terminal.integrated.cwd": "C:\\Users\\me\\projects",', '"note": "с\tтабом"']) {
+          assert(text.includes(frag), 'строка человека не переписана: ' + frag);
+        }
+        assert(/"chat\.disableAIFeatures": true/.test(text), 'ключи дописаны');
+      } finally { sb.cleanup(); }
+      // Структурные ошибки по-прежнему отвергаются — мягкость только внутри строк.
+      assert(!mac.jsoncShape('{"a": 1,, }').ok && !mac.jsoncShape('{"a": "x').ok && !mac.jsoncShape('{"a": "C:\\\n"}').ok, 'структура проверяется по-прежнему');
+      // macOS-зеркало читает такой файл так же.
+      const plan = mac.planFile('settings.json', { ok: true, text: mine }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+      assert(plan.write && !plan.skipped && plan.newText.includes('"C:\\Python312\\python.exe"'), 'mac: ключи дописаны, путь цел');
+      assert.deepStrictEqual(mac.jsoncShape(mine).keys, ['python.defaultInterpreterPath', 'terminal.integrated.cwd', 'note']);
+    });
+
+    ok('A2: сквозь ссылки под админом не пишем — hardlink вместо settings.json, junction вместо папки лаунчера', () => {
+      const sb = mkSandbox('links');
+      try {
+        // hardlink: запись «в settings.json» ушла бы в чужой файл.
+        const victim = sb.p('victim.json');
+        fs.writeFileSync(victim, '{"victim": true}');
+        fs.linkSync(victim, sb.p('user\\settings.json'));
+        // junction: лаунчер ушёл бы в чужую папку.
+        fs.mkdirSync(sb.p('la\\Programs'), { recursive: true });
+        fs.mkdirSync(sb.p('elsewhere'));
+        fs.symlinkSync(sb.p('elsewhere'), sb.p('la\\Programs\\Hamidun'), 'junction');
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert.strictEqual(fs.readFileSync(victim, 'utf8'), '{"victim": true}', 'файл за hardlink не тронут');
+        assert.deepStrictEqual(listDir(sb.p('elsewhere')), [], 'в папку за junction ничего не записано');
+        assert.deepStrictEqual(listDir(sb.p('desk')), [], 'без лаунчера нет и ярлыка');
+        assert(/по ссылке/.test(r.stdout), 'в логе названа причина: ' + r.stdout);
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2: junction на ЛЮБОМ уровне пути от %APPDATA% вниз (сам %APPDATA%, Code, User) — запись отвергается, в чужую папку не попадает ничего', () => {
+      // Проверка «папка и файл» не видела обычный файл, достигнутый ЧЕРЕЗ junction выше по
+      // цепочке: ссылкой он не выглядит. Теперь идём по всему пути от якоря вниз.
+      for (const level of ['appdata', 'appdata\\Code', 'appdata\\Code\\User']) {
+        const sb = mkSandbox('walk');
+        try {
+          fs.renameSync(sb.p(level), sb.p('elsewhere'));
+          fs.symlinkSync(sb.p('elsewhere'), sb.p(level), 'junction');
+          const r = firstRun(sb);
+          assert.strictEqual(r.status, 0, level + ': ' + r.stdout + r.stderr);
+          assert.deepStrictEqual(findFile(sb.p('elsewhere'), 'settings.json'), [], level + ': settings.json не попал за ссылку');
+          assert.deepStrictEqual(findFile(sb.p('elsewhere'), '.hamidun-applied'), [], level + ': отметка не попала за ссылку');
+          assert.deepStrictEqual(findFile(sb.p('elsewhere'), 'Claude Code'), [], level + ': ярлык не попал за ссылку');
+          assert(/по ссылке/.test(r.stdout), level + ': в логе названа причина: ' + r.stdout);
+          assert(/применены не полностью/.test(lastLine(r.stdout)), level + ': итог не рапортует успех: ' + lastLine(r.stdout));
+        } finally { sb.cleanup(); }
+      }
+    });
+
+    ok('A2: запись перепроверяет путь САМА, сразу перед созданием файла, — ссылка, появившаяся после проверки вызывающего, не пропускается', () => {
+      // Между проверкой в начале шага и записью проходят секунды (повторы при «файл занят»).
+      // Функция записи зовётся здесь напрямую по пути через junction — без проверки в
+      // вызывающем: старая версия записала бы в чужую папку.
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-recheck-'));
+      try {
+        const real = path.join(base, 'real'); const link = path.join(base, 'link');
+        fs.mkdirSync(real); fs.symlinkSync(real, link, 'junction');
+        const r = ps("$w = Write-HmFileSafely -Path " + q(path.join(link, 'f.json')) + " -Text '{}' -Bom $false -Backup $false -Anchor " + q(base) +
+          " -IncludeAnchor $true; 'R ' + $w.Ok + ' ' + $w.Error");
+        assert(/^R False путь стал ссылкой/m.test(r.stdout), 'запись отказала словами шага: ' + r.stdout + r.stderr);
+        assert.deepStrictEqual(listDir(real), [], 'в папку за junction ничего не записано (ни файла, ни временного)');
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+
+    ok('A2: владельца файла возвращаем через дескриптор СВОЕГО файла, а не по пути (сторож + подлог + поведение)', () => {
+      // Смена владельца по пути идёт за подложенной ссылкой и отдаёт пользователю чужой
+      // (системный) файл — привилегированная операция, поэтому её делаем на открытом
+      // дескрипторе только что созданного нами временного файла.
+      const owners = (text) => codeOnly(text).split(/\r?\n/).filter((l) =>
+        /SetAccessControl\s*\(|Set-Acl|icacls|\btakeown(?:\.exe)?\s|\.SetOwner\s*\(/i.test(l) && !/\$fs\.SetAccessControl\(|\$sec\.SetOwner\(/.test(l));
+      assert.deepStrictEqual(owners(fs.readFileSync(PS1, 'utf8')), [], 'в шаге нет смены владельца по пути');
+      assert(/\$fs\.SetAccessControl\(/.test(fs.readFileSync(PS1, 'utf8')), 'смена владельца через дескриптор на месте');
+      for (const evil of ['(New-Object System.IO.FileInfo($Path)).SetAccessControl($sec)', '$fi.SetAccessControl($sec)', 'Set-Acl -Path $p -AclObject $a',
+        'icacls $p /setowner *S-1-5-32-544', '$di.SetAccessControl($sec)']) {
+        assert.strictEqual(owners('$x = 1\n' + evil + '\n').length, 1, 'сторож пропустил: ' + evil);
+      }
+      if (psOk) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-owner-'));
+        try {
+          const f = path.join(dir, 'f.json');
+          const r = ps("$w = Write-HmFileSafely -Path " + q(f) + " -Text '{}' -Bom $false -Backup $false -Anchor " + q(dir) + " -IncludeAnchor $true; " +
+            "$o = (New-Object System.IO.FileInfo(" + q(f) + ")).GetAccessControl([System.Security.AccessControl.AccessControlSections]::Owner).GetOwner([System.Security.Principal.SecurityIdentifier]); " +
+            "'OK ' + $w.Ok + ' OWNED ' + $w.Owned + ' SAME ' + ($o -eq [System.Security.Principal.WindowsIdentity]::GetCurrent().User)");
+          assert(/^OK True OWNED True SAME True$/m.test(r.stdout), 'файл записан, владелец — пользователь: ' + r.stdout + r.stderr);
+        } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+      }
+    });
+
+    ok('A2: без лаунчера профиль терминала в settings.json не пишется (он вёл бы в пустоту)', () => {
+      const sb = mkSandbox('noprof');
+      try {
+        fs.mkdirSync(sb.p('la\\Programs'), { recursive: true });
+        fs.mkdirSync(sb.p('elsewhere'));
+        fs.symlinkSync(sb.p('elsewhere'), sb.p('la\\Programs\\Hamidun'), 'junction');
+        assert.strictEqual(firstRun(sb).status, 0);
+        const j = parseJsonc(fs.readFileSync(sb.p('user\\settings.json'), 'utf8'));
+        assert.strictEqual(j['chat.disableAIFeatures'], true, 'остальные ключи записаны');
+        assert(!('terminal.integrated.profiles.windows' in j), 'профиля без лаунчера нет');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 профиль терминала: «Claude Code» вставляется В существующий terminal.integrated.profiles.windows — чужие профили и комментарии целы, повтор молчит, убранный не возвращается', () => {
+      const sb = mkSandbox('prof');
+      try {
+        const sp = sb.p('user\\settings.json');
+        const mine = [
+          '{',
+          '    "editor.fontSize": 14,',
+          '    "terminal.integrated.profiles.windows": {',
+          '        "Git Bash": { "source": "Git Bash", "icon": "terminal-bash" } // мой',
+          '    },',
+          '    "files.autoSave": "off"',
+          '}', ''].join('\r\n');
+        fs.writeFileSync(sp, mine);
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        const text = fs.readFileSync(sp, 'utf8');
+        const j = parseJsonc(text);
+        const profs = j['terminal.integrated.profiles.windows'];
+        assert.deepStrictEqual(Object.keys(profs), ['Git Bash', 'Claude Code'], 'свой профиль на месте, наш добавлен рядом: ' + text);
+        assert.deepStrictEqual(profs['Git Bash'], { source: 'Git Bash', icon: 'terminal-bash' }, 'чужой профиль не тронут');
+        assert(text.includes('{ "source": "Git Bash", "icon": "terminal-bash" }, // мой'), 'строка и комментарий человека целы, запятая встала перед комментарием');
+        assert(!('terminal.integrated.defaultProfile.windows' in j), 'профилем по умолчанию не становится');
+        assert(/\n {8}"Claude Code": \{\r\n {12}"path"/.test(text), 'отступы по образцу файла: ' + text);
+        assert(/\+ terminal\.integrated\.profiles\.windows -> «Claude Code»/.test(r.stdout), 'в логе назван профиль: ' + r.stdout);
+        // Повтор: байт в байт, без новых копий.
+        const before = fs.readFileSync(sp);
+        const r2 = firstRun(sb);
+        assert(fs.readFileSync(sp).equals(before), 'повторный прогон файл не трогает');
+        assert(/всё уже на месте/.test(r2.stdout), r2.stdout);
+        // Человек убрал наш профиль (родитель остался) — не возвращаем.
+        const withoutOurs = JSON.parse(JSON.stringify(j));
+        delete withoutOurs['terminal.integrated.profiles.windows']['Claude Code'];
+        fs.writeFileSync(sp, JSON.stringify(withoutOurs, null, 4));
+        const r3 = firstRun(sb);
+        assert(!('Claude Code' in parseJsonc(fs.readFileSync(sp, 'utf8'))['terminal.integrated.profiles.windows']), 'убранный профиль не вернулся');
+        assert(/профиль «Claude Code»|Claude Code»: этого нет|-> «Claude Code»: этого нет/.test(r3.stdout), 'и об этом сказано: ' + r3.stdout);
+      } finally { sb.cleanup(); }
+      // Особые случаи: свой «Claude Code» — не трогаем; значение не объект — не трогаем; пустой {} в одну строку.
+      const cases = {
+        'свой профиль с таким именем': ['{"terminal.integrated.profiles.windows": {"Claude Code": {"path": "C:\\\\mine.exe"}}}',
+          (j) => assert.deepStrictEqual(j['terminal.integrated.profiles.windows'], { 'Claude Code': { path: 'C:\\mine.exe' } })],
+        'значение — не объект': ['{"terminal.integrated.profiles.windows": null}',
+          (j) => assert.strictEqual(j['terminal.integrated.profiles.windows'], null)],
+        'пустой объект в одну строку': ['{"terminal.integrated.profiles.windows": {}}',
+          (j) => assert.deepStrictEqual(Object.keys(j['terminal.integrated.profiles.windows']), ['Claude Code'])],
+        'задан вложенной записью': ['{"terminal": {"integrated": {"profiles": {"windows": {}}}}}',
+          (j) => assert(!('terminal.integrated.profiles.windows' in j), 'рядом свой ключ не создаём')],
+      };
+      for (const name of Object.keys(cases)) {
+        const sb2 = mkSandbox('profcase');
+        try {
+          const sp2 = sb2.p('user\\settings.json');
+          fs.writeFileSync(sp2, cases[name][0]);
+          const r = firstRun(sb2);
+          assert.strictEqual(r.status, 0, name + ': ' + r.stdout + r.stderr);
+          assert(!/разобрать файл не вышло|самопроверку/.test(r.stdout), name + ': файл обработан: ' + r.stdout);
+          cases[name][1](parseJsonc(fs.readFileSync(sp2, 'utf8')));
+          assert.strictEqual(parseJsonc(fs.readFileSync(sp2, 'utf8'))['chat.disableAIFeatures'], true, name + ': остальные ключи дописаны');
+        } finally { sb2.cleanup(); }
+      }
+    });
+
+    ok('A2 командная строка профиля: лаунчер запускается при ЛЮБЫХ именах папки профиля (пробел, &, ^, ;, ,, %, кириллица); массивы args — нет (контроль)', () => {
+      // Функция сборки командной строки — дословная копия argsToCommandLine из node-pty,
+      // которым VS Code запускает терминал (node_modules.asar VS Code 1.141,
+      // node-pty/lib/windowsPtyAgent.js). Массив args она экранирует как \" — cmd.exe этого
+      // не понимает; строка идёт в командную строку как есть.
+      const repeatText = (t, n) => { let r = ''; for (let i = 0; i < n; i++) r += t; return r; };
+      const xOr = (a, b) => (a && !b) || (!a && b);
+      function argsToCommandLine(file, args) {
+        if (typeof args === 'string') return args.length === 0 ? file : argsToCommandLine(file, []) + ' ' + args;
+        const argv = [file].concat(args); let result = '';
+        for (let ai = 0; ai < argv.length; ai++) {
+          if (ai > 0) result += ' ';
+          const arg = argv[ai];
+          const lop = xOr(arg[0] !== '"', arg[arg.length - 1] !== '"');
+          const noq = arg[0] !== '"' && arg[arg.length - 1] !== '"';
+          const quote = arg === '' || (arg.indexOf(' ') !== -1 || arg.indexOf('\t') !== -1) && (arg.length > 1 && (lop || noq));
+          if (quote) result += '"';
+          let bs = 0;
+          for (let i = 0; i < arg.length; i++) {
+            const c = arg[i];
+            if (c === '\\') bs++;
+            else if (c === '"') { result += repeatText('\\', bs * 2 + 1) + '"'; bs = 0; }
+            else { result += repeatText('\\', bs) + c; bs = 0; }
+          }
+          result += quote ? repeatText('\\', bs * 2) + '"' : repeatText('\\', bs);
+        }
+        return result;
+      }
+      const sb = mkSandbox('pty');
+      try {
+        assert.strictEqual(firstRun(sb).status, 0);
+        const prof = parseJsonc(fs.readFileSync(sb.p('user\\settings.json'), 'utf8'))['terminal.integrated.profiles.windows']['Claude Code'];
+        const cmdExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+        assert.strictEqual(prof.path.replace('${env:windir}', process.env.SystemRoot || 'C:\\Windows').toLowerCase(), cmdExe.toLowerCase(), 'path профиля — настоящий cmd.exe');
+        const names = ['plain', 'John Smith', 'Name (2)', 'Ivan & Maria', 'A^B', 'Tom;Home', 'a,b', '100%', 'Иван Иванов'];
+        const outcome = { fromProfile: {}, oldArray: {} };
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-pty-'));
+        try {
+          for (const n of names) {
+            const la = path.join(base, n, 'AppData', 'Local');
+            const launcher = path.join(la, 'Programs', 'Hamidun', 'claude-code.cmd');
+            fs.mkdirSync(path.dirname(launcher), { recursive: true });
+            fs.writeFileSync(launcher, '@echo LAUNCHER-RAN\r\n');
+            const run = (args) => {
+              const full = argsToCommandLine(cmdExe, args);
+              const r = spawnSync(cmdExe, [full.slice(cmdExe.length + 1)], { input: 'exit\r\n', encoding: 'utf8', timeout: 20000, windowsVerbatimArguments: true });
+              return /LAUNCHER-RAN/.test((r.stdout || '') + (r.stderr || ''));
+            };
+            outcome.fromProfile[n] = run(prof.args.split('${env:LOCALAPPDATA}').join(la));
+            outcome.oldArray[n] = run(['/d', '/k', launcher]);
+          }
+        } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+        assert.deepStrictEqual(Object.keys(outcome.fromProfile).filter((n) => !outcome.fromProfile[n]), [],
+          'профиль из settings.json запускает лаунчер при всех именах: ' + JSON.stringify(outcome.fromProfile));
+        // Контроль чувствительности: прежняя форма (массив) на «грязных» именах не работает.
+        for (const bad of ['Ivan & Maria', 'A^B', 'Tom;Home', 'a,b']) assert.strictEqual(outcome.oldArray[bad], false, 'контроль: массив ломается на «' + bad + '»');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 argv.json: locale=ru только при русском пакете на диске; выбор человека и снятый пакет не трогаем', () => {
+      // 1) Пакета нет — argv.json не создаётся.
+      let sb = mkSandbox('argv0');
+      try {
+        const r = firstRun(sb);
+        assert(!fs.existsSync(sb.p('dot\\argv.json')), 'без пакета argv.json не создан');
+        assert(/Русского языкового пакета VS Code на диске нет/.test(r.stdout), 'в логе сказано почему');
+      } finally { sb.cleanup(); }
+      // 2) Пакет стоит (реестр extensions.json + папка) — locale дописан в файл VS Code, комментарии целы.
+      sb = mkSandbox('argv1');
+      try {
+        seedRuPack(sb.p('dot\\extensions'), true);
+        fs.writeFileSync(sb.p('dot\\argv.json'), DEFAULT_ARGV);
+        const r = firstRun(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        const t = fs.readFileSync(sb.p('dot\\argv.json'), 'utf8');
+        assert.strictEqual(parseJsonc(t).locale, 'ru', 'locale=ru дописан: ' + r.stdout);
+        assert(t.includes('// Do not edit this value.') && t.includes('"crash-reporter-id"'), 'файл VS Code сохранён');
+        assert(/\n\t"locale": "ru"\n\}$/.test(t), 'отступ и концы строк — как у VS Code: ' + JSON.stringify(t.slice(-40)));
+      } finally { sb.cleanup(); }
+      // 3) Человек выбрал английский — не перебиваем.
+      sb = mkSandbox('argv2');
+      try {
+        seedRuPack(sb.p('dot\\extensions'), true);
+        const mine = '{\n\t"locale": "en"\n}';
+        fs.writeFileSync(sb.p('dot\\argv.json'), mine);
+        firstRun(sb);
+        assert.strictEqual(fs.readFileSync(sb.p('dot\\argv.json'), 'utf8'), mine, 'выбор человека не тронут');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 argv.json: пакет считается стоящим по реестру extensions.json, а без реестра — по папкам и .obsolete', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-pack-'));
+      try {
+        const mk = (name) => { const d = path.join(base, name); fs.mkdirSync(d); return d; };
+        const viaManifest = mk('manifest'); seedRuPack(viaManifest, true);
+        const notInManifest = mk('orphan'); seedRuPack(notInManifest, false);
+        fs.writeFileSync(path.join(notInManifest, 'extensions.json'), '[]');
+        const folderOnly = mk('folder'); seedRuPack(folderOnly, false);
+        const obsolete = mk('obsolete'); seedRuPack(obsolete, false);
+        fs.writeFileSync(path.join(obsolete, '.obsolete'), JSON.stringify({ [PACK]: true }));
+        const noPkgJson = mk('nopkg'); fs.mkdirSync(path.join(noPkgJson, PACK));
+        const empty = mk('empty');
+        const r = ps([viaManifest, notInManifest, folderOnly, obsolete, noPkgJson, empty, path.join(base, 'missing')]
+          .map((d) => '[string](Test-HmRuLanguagePack ' + q(d) + ')').join('; '));
+        assert.deepStrictEqual(r.stdout.trim().split(/\r?\n/).map((s) => s.trim()),
+          ['True', 'False', 'True', 'False', 'False', 'False', 'False'],
+          'реестр / сирота / папка / .obsolete / без package.json / пусто / нет папки: ' + r.stdout + r.stderr);
+        // macOS-зеркало решает так же.
+        const io = {
+          exists: (p) => fs.existsSync(p),
+          readText: (p) => (fs.existsSync(p) ? { ok: true, text: fs.readFileSync(p, 'utf8') } : null),
+          list: (d) => (fs.existsSync(d) ? fs.readdirSync(d) : []),
+        };
+        assert.deepStrictEqual([viaManifest, notInManifest, folderOnly, obsolete, noPkgJson, empty, path.join(base, 'missing')]
+          .map((d) => mac.ruPackInstalled(io, d)), [true, false, true, false, false, false, false], 'macOS решает так же');
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+
+    ok('A2 запись: «файл занят» (антивирус проверяет свежий файл) переживается повтором; долгий захват — честный отказ, файл прежний', () => {
+      // Замер 06.10 на этой машине: без повтора подмена argv.json срывалась в 2 прогонах из 6 —
+      // только что записанный файл держал антивирус. Держатель здесь — свой поток .NET,
+      // который отпускает файл через заданное время: сценарий детерминированный.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-busy-'));
+      try {
+        const f = path.join(dir, 'f.json');
+        const anchor = " -Anchor " + q(dir) + " -IncludeAnchor $true";
+        const r = ps("Add-Type -TypeDefinition 'using System.IO; using System.Threading; public static class HmHold { public static void CloseLater(Stream s, int ms) { var t = new Thread(() => { Thread.Sleep(ms); s.Dispose(); }); t.IsBackground = true; t.Start(); } }'; " +
+          "$p = " + q(f) + "; [IO.File]::WriteAllText($p, '{\"old\": 1}'); " +
+          "$h = [IO.File]::Open($p, 'Open', 'Read', 'Read'); [HmHold]::CloseLater($h, 1200); " +
+          "$a = Write-HmFileSafely -Path $p -Text '{\"new\": 2}' -Bom $false -Backup $false" + anchor + "; " +
+          "'SHORT ' + $a.Ok + ' ' + [IO.File]::ReadAllText($p); " +
+          "$h2 = [IO.File]::Open($p, 'Open', 'Read', 'Read'); [HmHold]::CloseLater($h2, 9000); " +
+          "$b = Write-HmFileSafely -Path $p -Text '{\"newer\": 3}' -Bom $false -Backup $true" + anchor + "; " +
+          "'LONG ' + $b.Ok + ' ' + $b.Error + ' ' + [IO.File]::ReadAllText($p); " +
+          "'FILES ' + ((Get-ChildItem -LiteralPath " + q(dir) + " | ForEach-Object Name) -join ',')");
+        const out = r.stdout || '';
+        assert(/^SHORT True \{"new": 2\}$/m.test(out), 'короткий захват пережит повтором: ' + out + r.stderr);
+        assert(/^LONG False файл занят другой программой[^\r\n]* \{"new": 2\}$/m.test(out), 'долгий — отказ словами шага, файл прежний: ' + out);
+        assert(/^FILES f\.json$/m.test(out), 'ни копий, ни временных файлов после отказа: ' + out);
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+    ok('A2 ярлык «Claude Code — мои проекты»: ведёт в лаунчер с --projects, флага «от имени администратора» нет', () => {
+      const sb = mkSandbox('lnk');
+      try {
+        assert.strictEqual(firstRun(sb).status, 0);
+        const launcher = sb.p('la\\Programs\\Hamidun\\claude-code.cmd');
+        for (const d of ['desk', 'progs']) {
+          const lnk = sb.p(d + '\\' + LNK);
+          assert(fs.existsSync(lnk), 'ярлык создан в ' + d);
+          const b = fs.readFileSync(lnk);
+          assert.strictEqual(b.readUInt32LE(0), 0x4C, 'это .lnk (ShellLinkHeader)');
+          // LinkFlags (смещение 0x14), бит RunAsUser = 0x2000: «запускать от имени администратора».
+          assert.strictEqual(b.readUInt32LE(0x14) & 0x2000, 0, 'ярлык НЕ просит прав администратора');
+          const r = ps("$s=(New-Object -ComObject WScript.Shell).CreateShortcut(" + q(lnk) + "); $s.TargetPath; $s.Arguments; $s.WorkingDirectory");
+          const [target, args, wd] = r.stdout.trim().split(/\r?\n/).map((s) => s.trim());
+          assert.strictEqual(target.toLowerCase(), launcher.toLowerCase(), 'цель — лаунчер, а не claude напрямую');
+          assert.strictEqual(args, '--projects', 'лаунчер уводит в HamidunStart');
+          assert.strictEqual(wd.toLowerCase(), sb.p('home').toLowerCase(), 'рабочая папка — профиль');
+        }
+        const lb = fs.readFileSync(launcher);
+        assert(!(lb[0] === 0xEF && lb[1] === 0xBB), 'лаунчер без BOM — cmd спотыкается на нём');
+        const lt = lb.toString('utf8');
+        assert(!/[^\r]\n/.test(lt), 'концы строк CRLF');
+        const lines = lt.split('\r\n');
+        assert.deepStrictEqual(lines.slice(0, 3), ['@echo off', 'set "NoDefaultCurrentDirectoryInExePath=1"', 'chcp 65001 >nul'],
+          'cwd не участвует в поиске; до смены кодовой страницы — только ASCII');
+        assert(/^call claude$/m.test(lt), 'claude зовётся через call (npm ставит claude.cmd)');
+        assert(/^where \$PATH:claude >nul 2>nul$/m.test(lt) && !/^where claude/m.test(lt), 'наличие claude проверяется только по PATH: where без $PATH: смотрит и текущую папку');
+        assert(/%USERPROFILE%\\\.local\\bin/.test(lt) && /%APPDATA%\\npm/.test(lt), 'PATH как у кнопки «Войти в Claude»');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 лаунчер в деле: с --projects запускает claude в HamidunStart (создав её), без ключа — в текущей папке', () => {
+      const sb = mkSandbox('launch');
+      try {
+        assert.strictEqual(firstRun(sb).status, 0);
+        const launcher = sb.p('la\\Programs\\Hamidun\\claude-code.cmd');
+        fs.mkdirSync(sb.p('home\\.local\\bin'), { recursive: true });
+        fs.writeFileSync(sb.p('home\\.local\\bin\\claude.cmd'), '@echo FAKE-CLAUDE CWD=%CD%\r\n@exit /b 0\r\n');
+        fs.mkdirSync(sb.p('cwd'));
+        const env = Object.assign({}, process.env, { USERPROFILE: sb.p('home') });
+        const run = (args) => spawnSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'),
+          ['/d', '/c', 'call', launcher].concat(args), { cwd: sb.p('cwd'), encoding: 'utf8', timeout: 30000, env, windowsHide: true });
+        const a = run(['--projects']);
+        assert(fs.existsSync(sb.p('home\\HamidunStart')), 'папка HamidunStart создана лаунчером');
+        assert(a.stdout.includes('FAKE-CLAUDE CWD=' + sb.p('home\\HamidunStart')), 'claude стартовал в HamidunStart: ' + a.stdout + a.stderr);
+        const b = run([]);
+        assert(b.stdout.includes('FAKE-CLAUDE CWD=' + sb.p('cwd')), 'без ключа — в папке, откуда позвали (профиль VS Code): ' + b.stdout + b.stderr);
+        // Порядок поиска — родной для cmd: первая папка PATH решает, а не расширение. Устаревший
+        // claude.exe где-то дальше по PATH не должен обгонять claude.cmd из первой папки (так
+        // вела себя первая версия лаунчера, перебиравшая расширения). Подставной .exe — копия whoami.
+        fs.mkdirSync(sb.p('stale'));
+        fs.copyFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe'), sb.p('stale\\claude.exe'));
+        const envStale = {};
+        Object.keys(process.env).filter((k) => !/^path$/i.test(k)).forEach((k) => { envStale[k] = process.env[k]; });
+        Object.assign(envStale, { USERPROFILE: sb.p('home'), Path: sb.p('stale') + ';' + (process.env.PATH || '') });
+        const c = spawnSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'), ['/d', '/c', 'call', launcher],
+          { cwd: sb.p('cwd'), encoding: 'utf8', timeout: 30000, env: envStale, windowsHide: true });
+        assert(c.stdout.includes('FAKE-CLAUDE CWD=' + sb.p('cwd')), 'решает первая папка PATH, а не расширение: ' + c.stdout + c.stderr);
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 лаунчер: claude.bat/claude.cmd из ТЕКУЩЕЙ папки (скачанный репозиторий) не исполняется — идёт настоящий claude из PATH (контроль: прежний лаунчер исполнял)', () => {
+      // Профиль терминала «Claude Code» стартует в папке, открытой в редакторе, а доверие к
+      // папкам выключено: репозиторий с claude.bat в корне исполнился бы вместо настоящего.
+      const sb = mkSandbox('cwdattack');
+      try {
+        assert.strictEqual(firstRun(sb).status, 0);
+        const launcher = sb.p('la\\Programs\\Hamidun\\claude-code.cmd');
+        fs.mkdirSync(sb.p('home\\.local\\bin'), { recursive: true });
+        fs.writeFileSync(sb.p('home\\.local\\bin\\claude.cmd'), '@echo REAL-CLAUDE\r\n@exit /b 0\r\n');
+        fs.mkdirSync(sb.p('repo'));
+        fs.writeFileSync(sb.p('repo\\claude.bat'), '@echo EVIL-BAT\r\n@exit /b 0\r\n');
+        fs.writeFileSync(sb.p('repo\\claude.cmd'), '@echo EVIL-CMD\r\n@exit /b 0\r\n');
+        // Прежний лаунчер (до рецензии 09.10) — контроль чувствительности теста.
+        const OLD = ['@echo off', 'chcp 65001 >nul', 'set "PATH=%USERPROFILE%\\.local\\bin;%APPDATA%\\npm;%ProgramFiles%\\nodejs;%PATH%"',
+          'title Claude Code', 'where claude >nul 2>nul', 'if errorlevel 1 goto noclaude', 'call claude', 'if errorlevel 1 pause',
+          'goto :eof', ':noclaude', 'echo no claude', 'pause'].join('\r\n') + '\r\n';
+        fs.writeFileSync(sb.p('old-launcher.cmd'), OLD);
+        const env = Object.assign({}, process.env, { USERPROFILE: sb.p('home') });
+        delete env.NoDefaultCurrentDirectoryInExePath;
+        const cmdExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+        const run = (l) => spawnSync(cmdExe, ['/d', '/c', 'call', l], { cwd: sb.p('repo'), encoding: 'utf8', timeout: 30000, env, windowsHide: true });
+        const good = run(launcher);
+        assert(/REAL-CLAUDE/.test(good.stdout) && !/EVIL/.test(good.stdout), 'настоящий claude, не файл из репозитория: ' + good.stdout + good.stderr);
+        const control = run(sb.p('old-launcher.cmd'));
+        assert(/EVIL/.test(control.stdout), 'контроль: прежний лаунчер исполнял файл из текущей папки — тест чувствителен: ' + control.stdout + control.stderr);
+        // Настоящего claude нет нигде, а в текущей папке лежит claude.bat: человек видит объяснение
+        // установщика, а не чужой файл. PATH — только системные папки, профиль — пустой.
+        const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+        const envNone = {};
+        Object.keys(process.env).filter((k) => !/^(path|appdata|userprofile)$/i.test(k)).forEach((k) => { envNone[k] = process.env[k]; });
+        Object.assign(envNone, { Path: path.join(sysRoot, 'System32') + ';' + sysRoot, APPDATA: sb.p('nohome\\AppData\\Roaming'), USERPROFILE: sb.p('nohome') });
+        const none = spawnSync(cmdExe, ['/d', '/c', 'call', launcher], { cwd: sb.p('repo'), encoding: 'utf8', timeout: 30000, env: envNone, windowsHide: true });
+        assert(!/EVIL|REAL-CLAUDE/.test(none.stdout), 'ни чужой файл, ни чей-то claude не запущены: ' + none.stdout + none.stderr);
+        assert(/пока нет/.test(none.stdout), 'вместо этого — объяснение установщика: ' + none.stdout + none.stderr);
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 ярлыки: не пересоздаются, если человек их удалил (отметка), и не переписываются, если на месте; без отметки — вернулись бы (контроль)', () => {
+      const sb = mkSandbox('lnkkeep');
+      try {
+        assert.strictEqual(firstRun(sb).status, 0);
+        const desk = sb.p('desk\\' + LNK); const prog = sb.p('progs\\' + LNK);
+        assert(fs.existsSync(desk) && fs.existsSync(prog), 'оба ярлыка созданы');
+        const progBefore = fs.statSync(prog).mtimeMs;
+        fs.unlinkSync(desk);                                  // человек убрал значок с рабочего стола
+        const r2 = firstRun(sb);
+        assert(!fs.existsSync(desk), 'удалённый ярлык не вернулся');
+        assert(/Ярлык \(Рабочий стол\): тебя он, похоже, не устроил/.test(r2.stdout), 'и об этом сказано: ' + r2.stdout);
+        assert.strictEqual(fs.statSync(prog).mtimeMs, progBefore, 'ярлык, который на месте, не переписывается');
+        fs.unlinkSync(sb.p('user\\.hamidun-applied.json'));
+        firstRun(sb);
+        assert(fs.existsSync(desk), 'контроль: без отметки ярлык вернулся — значит, удержала именно она');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 HM_DRY_RUN: только строки [dry-run], на диске ничего не появляется', () => {
+      const sb = mkSandbox('dry');
+      try {
+        const r = firstRun(sb, { HM_DRY_RUN: '1' });
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(/\[dry-run\] WOULD/.test(r.stdout), 'превью напечатано');
+        for (const d of ['user', 'desk', 'progs', 'la', 'dot\\extensions']) assert.deepStrictEqual(listDir(sb.p(d)), [], d + ' пуст');
+        sb.vscode();
+        const t = touchup(sb, { HM_DRY_RUN: '1' });
+        assert.strictEqual(t.status, 0);
+        assert.strictEqual(t.stdout.trim(), '', 'тихий ход в dry-run молчит: ' + t.stdout);
+        assert.deepStrictEqual(listDir(sb.p('user')), [], 'и ничего не пишет');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 точка входа: без установленного VS Code ничего не пишет и выходит с 0', () => {
+      const sb = mkSandbox('noeditor');
+      try {
+        const r = runScript(PS1, { HM_FIRSTRUN_ROOT: sb.base });
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(/редактора на этом компьютере нет/.test(r.stdout), r.stdout);
+        for (const d of ['user', 'desk', 'progs', 'la', 'dot\\extensions']) assert.deepStrictEqual(listDir(sb.p(d)), [], 'шаг ничего не создал в ' + d);
+        for (const rel of ['la\\Programs', 'home\\.vscode\\argv.json', 'home\\HamidunStart']) assert(!fs.existsSync(sb.p(rel)), 'шаг ничего не создал: ' + rel);
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 HM_FIRSTRUN_ROOT работает только внутри %TEMP%: вне него переменная игнорируется и пути — настоящие', () => {
+      const inside = path.join(os.tmpdir(), 'hm-a2-root-check');
+      const r = ps("$env:HM_FIRSTRUN_ROOT = 'C:\\hm-a2-not-in-temp'; $a = Get-HmPaths; " +
+        "'OUT sandbox=' + $a.Sandbox + ' appdata-real=' + ($a.AppData -eq $env:APPDATA); " +
+        "$env:HM_FIRSTRUN_ROOT = " + q(inside) + "; $b = Get-HmPaths; " +
+        "'IN sandbox=' + $b.Sandbox + ' appdata=' + $b.AppData + ' pf=' + $b.ProgramFiles");
+      assert(/^OUT sandbox=False appdata-real=True$/m.test(r.stdout), 'вне %TEMP% — настоящие пути: ' + r.stdout + r.stderr);
+      assert(r.stdout.includes('IN sandbox=True appdata=' + path.join(inside, 'home', 'AppData', 'Roaming') + ' pf=' + path.join(inside, 'pf')), 'внутри — песочница: ' + r.stdout);
+    });
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // Отдельный вход touchup-vscode.ps1: проверка зовёт его при КАЖДОМ запуске установщика — и
+  // тогда, когда карточка VS Code снята («уже установлено») и vscode.ps1 не стартует.
+  // ------------------------------------------------------------------------------------------
+  if (psOk) {
+    ok('A2 touchup-vscode.ps1: у человека с уже стоящим VS Code (карточка снята) настройки, лаунчер, ярлыки и русский язык появляются сами одной строкой ОБНОВЛЕНО; второй запуск молчит', () => {
+      const sb = mkSandbox('touch');
+      try {
+        sb.vscode();
+        fs.writeFileSync(sb.p('user\\settings.json'), USER_SETTINGS);
+        seedRuPack(sb.p('dot\\extensions'), true);
+        fs.writeFileSync(sb.p('dot\\argv.json'), DEFAULT_ARGV);
+        const a = touchup(sb);
+        assert.strictEqual(a.status, 0, a.stdout + a.stderr);
+        const lines = nonEmptyLines(a.stdout);
+        assert.strictEqual(lines.length, 1, 'ровно одна строка вывода: ' + JSON.stringify(a.stdout));
+        assert(/^ОБНОВЛЕНО: /.test(lines[0]), lines[0]);
+        for (const frag of ['лаунчер Claude Code', 'настройки VS Code (+5)', 'русский интерфейс VS Code', 'ярлык «Claude Code — мои проекты» (Рабочий стол, меню Пуск)']) {
+          assert(lines[0].includes(frag), 'в строке названо «' + frag + '»: ' + lines[0]);
+        }
+        const j = parseJsonc(fs.readFileSync(sb.p('user\\settings.json'), 'utf8'));
+        assert.strictEqual(j['chat.disableAIFeatures'], true, 'Copilot-чат скрыт');
+        assert.strictEqual(j['workbench.startupEditor'], 'welcomePage', 'ключ человека цел');
+        assert(j['terminal.integrated.profiles.windows']['Claude Code'], 'профиль терминала на месте');
+        assert.strictEqual(parseJsonc(fs.readFileSync(sb.p('dot\\argv.json'), 'utf8')).locale, 'ru');
+        assert(fs.existsSync(sb.p('la\\Programs\\Hamidun\\claude-code.cmd')), 'лаунчер на месте');
+        assert(fs.existsSync(sb.p('desk\\' + LNK)) && fs.existsSync(sb.p('progs\\' + LNK)), 'оба ярлыка на месте');
+        // Второй запуск: ни строки, ни единого изменения.
+        const snap = () => ['user\\settings.json', 'user\\.hamidun-applied.json', 'dot\\argv.json', 'la\\Programs\\Hamidun\\claude-code.cmd']
+          .map((rel) => fs.readFileSync(sb.p(rel)));
+        const before = snap(); const baksBefore = listDir(sb.p('user'));
+        const lnkTime = fs.statSync(sb.p('desk\\' + LNK)).mtimeMs;
+        const b = touchup(sb);
+        assert.strictEqual(b.status, 0, b.stdout + b.stderr);
+        assert.strictEqual(b.stdout.trim(), '', 'второй запуск молчит: ' + JSON.stringify(b.stdout));
+        snap().forEach((buf, i) => assert(buf.equals(before[i]), 'файл #' + i + ' не изменился'));
+        assert.deepStrictEqual(listDir(sb.p('user')), baksBefore, 'новых копий нет');
+        assert.strictEqual(fs.statSync(sb.p('desk\\' + LNK)).mtimeMs, lnkTime, 'ярлык не переписан');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 touchup-vscode.ps1: без VS Code на диске — ни строки вывода, ничего не создано, exit 0', () => {
+      const sb = mkSandbox('touchnone');
+      try {
+        fs.writeFileSync(sb.p('user\\settings.json'), USER_SETTINGS);
+        const r = touchup(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert.strictEqual(r.stdout.trim(), '', 'молчит: ' + JSON.stringify(r.stdout));
+        assert.strictEqual(fs.readFileSync(sb.p('user\\settings.json'), 'utf8'), USER_SETTINGS, 'настройки человека не тронуты');
+        assert.deepStrictEqual(listDir(sb.p('user')), ['settings.json'], 'ни копий, ни отметки');
+        assert.deepStrictEqual(listDir(sb.p('la')), [], 'лаунчера нет');
+        assert.deepStrictEqual([listDir(sb.p('desk')), listDir(sb.p('progs'))], [[], []], 'ярлыков нет');
+      } finally { sb.cleanup(); }
+    });
+
+    ok('A2 touchup-vscode.ps1: что не вышло — одна строка «пропущено: …» и exit 0 (неразбираемый файл, крупный файл, нет файла функций, сбой внутри)', () => {
+      // Файл, который не разобрался: в строке названа причина, файл как был. Лаунчер и ярлыки
+      // при этом ставятся — это «ОБНОВЛЕНО» с хвостом «пропущено», всё равно ОДНА строка;
+      // на следующем запуске менять нечего, и остаётся только «[touchup-vscode] пропущено».
+      let sb = mkSandbox('touchbad');
+      try {
+        sb.vscode();
+        const bad = Buffer.from('{\r\n  "editor.fontSize": 14,\r\n', 'utf8');
+        fs.writeFileSync(sb.p('user\\settings.json'), bad);
+        const a = touchup(sb);
+        assert.strictEqual(a.status, 0, a.stdout + a.stderr);
+        assert.strictEqual(nonEmptyLines(a.stdout).length, 1, 'одна строка: ' + a.stdout);
+        assert(/^ОБНОВЛЕНО: .*; пропущено: settings\.json — разобрать файл не вышло/.test(a.stdout.trim()), a.stdout);
+        assert(fs.readFileSync(sb.p('user\\settings.json')).equals(bad), 'файл не тронут');
+        const b = touchup(sb);
+        assert.strictEqual(b.status, 0);
+        assert(/^\[touchup-vscode\] пропущено: settings\.json — разобрать файл не вышло/.test(b.stdout.trim()) && nonEmptyLines(b.stdout).length === 1, b.stdout);
+      } finally { sb.cleanup(); }
+      // Крупный файл (потолок 256 КБ) пропускается сразу, без разбора: шаг обязан уложиться в секунды.
+      sb = mkSandbox('touchbig');
+      try {
+        sb.vscode();
+        const big = '{"cspell.words": [' + new Array(30000).fill('"abcdefghij"').join(',') + ']}';
+        assert(big.length > 262144, 'файл действительно крупнее потолка');
+        fs.writeFileSync(sb.p('user\\settings.json'), big);
+        const t0 = Date.now();
+        const r = touchup(sb);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        assert(/пропущено: settings\.json — файл слишком большой/.test(r.stdout), r.stdout);
+        assert.strictEqual(fs.readFileSync(sb.p('user\\settings.json'), 'utf8'), big, 'файл не тронут');
+        assert(Date.now() - t0 < 30000, 'потолок времени: ' + (Date.now() - t0) + ' мс');
+      } finally { sb.cleanup(); }
+      // Нет файла функций рядом / сбой внутри: строка и exit 0, а не падение проверки.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-tuscripts-'));
+      try {
+        fs.copyFileSync(TOUCH_PS1, path.join(dir, 'touchup-vscode.ps1'));
+        const noFile = runScript(path.join(dir, 'touchup-vscode.ps1'));
+        assert.strictEqual(noFile.status, 0, noFile.stdout + noFile.stderr);
+        assert(/^\[touchup-vscode\] пропущено: нет файла vscode-settings\.ps1 рядом$/m.test(noFile.stdout), noFile.stdout);
+        fs.writeFileSync(path.join(dir, 'vscode-settings.ps1'), '\uFEFFthrow \'boom\'\r\n');
+        const boom = runScript(path.join(dir, 'touchup-vscode.ps1'));
+        assert.strictEqual(boom.status, 0, boom.stdout + boom.stderr);
+        assert(/^\[touchup-vscode\] пропущено: внутренний сбой/m.test(boom.stdout) && nonEmptyLines(boom.stdout).length === 1, boom.stdout);
+        assert(!/boom/.test(boom.stdout + boom.stderr), 'чужой текст исключения в вывод не просачивается');
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+
+    ok('A2 итоговая строка не врёт: неразбираемый, hardlink, только для чтения и слишком крупный settings.json — «применены не полностью», а не «всё уже на месте»', () => {
+      const cases = {
+        'неразбираемый': (sb, sp) => fs.writeFileSync(sp, '{"a": 1'),
+        'hardlink': (sb, sp) => { const v = sb.p('victim.json'); fs.writeFileSync(v, '{}'); fs.linkSync(v, sp); },
+        'только для чтения': (sb, sp) => { fs.writeFileSync(sp, '{}'); fs.chmodSync(sp, 0o444); },
+        'слишком крупный': (sb, sp) => fs.writeFileSync(sp, '{"w": [' + new Array(30000).fill('"abcdefghij"').join(',') + ']}'),
+      };
+      for (const name of Object.keys(cases)) {
+        const sb = mkSandbox('honest');
+        const sp = sb.p('user\\settings.json');
+        try {
+          cases[name](sb, sp);
+          const r = firstRun(sb);
+          assert.strictEqual(r.status, 0, name + ': ' + r.stdout + r.stderr);
+          assert(/Настройки VS Code для новичка: применены не полностью — .*settings\.json/.test(lastLine(r.stdout)), name + ': итог называет файл: ' + lastLine(r.stdout));
+          assert(!/всё уже на месте/.test(r.stdout), name + ': нет ложного «всё на месте»');
+        } finally { try { fs.chmodSync(sp, 0o666); } catch (e) { /* ignore */ } sb.cleanup(); }
+      }
+      // Контроль: в здоровом случае итог — «добавлено …», без «не полностью».
+      const ok1 = mkSandbox('honestok');
+      try {
+        const r = firstRun(ok1);
+        assert(/добавлено \d+, оставлено как было \d+/.test(lastLine(r.stdout)) && !/не полностью/.test(r.stdout), lastLine(r.stdout));
+      } finally { ok1.cleanup(); }
+    });
+  }
+
+  ok('A2 безопасность: шаг ничего не запускает — ни лаунчер, ни ярлык (сторож + подлог)', () => {
+    // Лаунчер и ярлык лежат в пользовательских папках, а установщик работает под
+    // администратором: исполнить их отсюда = исполнить под админом то, что мог подменить
+    // процесс того же пользователя. Ни одного способа запуска в коде шага быть не должно.
+    const EXEC_RE = /Start-Process|Invoke-Item|Invoke-Expression|\biex\b|ShellExecute|\.Run\(|\.Exec\(|\bcmd(\.exe)?\s+\/[ck]\b|&\s*\$(?!isLive\b)\w+/i;
+    const offenders = (text) => codeOnly(text).split(/\r?\n/).filter((l) => EXEC_RE.test(l));
+    assert.deepStrictEqual(offenders(fs.readFileSync(PS1, 'utf8')), [], 'в шаге нет запуска чего-либо');
+    assert.deepStrictEqual(offenders(fs.readFileSync(TOUCH_PS1, 'utf8')), [], 'и во входе touchup тоже');
+    // Подлог: каждый способ запуска сторож обязан поймать — иначе он ничего не сторожит.
+    for (const evil of ['Start-Process -FilePath $launcher', '& $Launcher --projects', 'cmd.exe /c $launcher',
+      'Invoke-Item $lnk', '$ws.Run($launcher)', '& $hmFirstRun']) {
+      assert.strictEqual(offenders('$x = 1\n' + evil + '\n').length, 1, 'сторож пропустил: ' + evil);
+    }
+    // Ярлык не получает флаг «от имени администратора» нигде в коде.
+    assert(!/RunAs|0x2000|SLDF_RUNAS/i.test(codeOnly(fs.readFileSync(PS1, 'utf8'))), 'флаг RunAs не выставляется');
+  });
+
+  ok('A2 документы: предпосылка про доверие исправлена — extensions.supportUntrustedWorkspaces существует и названа, решение владельца 06.10 не пересмотрено', () => {
+    // VS Code (1.131 и 1.141, документация «Workspace Trust») даёт настройку, которая
+    // снимает ограничение с ОДНОГО расширения и оставляет Restricted Mode для остального.
+    // Запись «узкого способа нет» была неверной и скрывала более дешёвый вариант.
+    const docs = {
+      'THREAT-MODEL.md': fs.readFileSync(path.join(ROOT, 'THREAT-MODEL.md'), 'utf8'),
+      'vs-code-dva-rasshireniya.md': fs.readFileSync(path.join(ROOT, 'docs', 'specs', 'vs-code-dva-rasshireniya.md'), 'utf8'),
+      'vscode-settings.ps1': fs.readFileSync(PS1, 'utf8'),
+      'vscode-settings.js': fs.readFileSync(MAC_JS, 'utf8'),
+    };
+    for (const name of Object.keys(docs)) {
+      assert(/supportUntrustedWorkspaces/.test(docs[name]), name + ': названа настройка extensions.supportUntrustedWorkspaces');
+      assert(!/узкого способа нет/i.test(docs[name]), name + ': ложное «узкого способа нет» убрано');
+    }
+    assert(/security\.workspace\.trust\.enabled/.test(docs['THREAT-MODEL.md']) && /06\.10/.test(docs['THREAT-MODEL.md']), 'решение владельца 06.10 по-прежнему записано');
+  });
+
+  // Строки, которые обвязка vscode.ps1 печатает на деле (собирает прогон finally ниже) —
+  // для проверки разбора провала: из исходника их не достать, там подстановки $(…).
+  const A2_FINALLY_LINES = [];
+
+  ok('A2 vscode.ps1: шаг настроек вызывается в finally ПОСЛЕ уборки vsix, обёрнут в try/catch и проверку наличия файла', () => {
+    const s = codeOnly(fs.readFileSync(VSC_PS1, 'utf8'));
+    const fin = s.slice(s.lastIndexOf('} finally {'));
+    assert(fin.length < s.length, 'блок finally найден');
+    assertOrder(fin, 'Remove-HmVsixTemps', '$hmFirstRun = Join-Path', 'вызов — в finally, после уборки копий vsix');
+    assertOrder(fin, "Join-Path $PSScriptRoot 'vscode-settings.ps1'", 'try { & $hmFirstRun } catch {', 'путь — рядом со скриптом, вызов — под try');
+    assert(/if \(-not \(Test-Path -LiteralPath \$hmFirstRun\)\) \{ Write-Host/.test(fin), 'нет файла — строка в логе, а не падение');
+  });
+
+  if (psOk) {
+    ok('A2 vscode.ps1 (прогон PS 5.1): finally с шагом настроек не меняет код выхода — ни exit 0 шага, ни его сбой, ни отсутствие файла', () => {
+      // Блок finally берём из НАСТОЯЩЕГО vscode.ps1 и подставляем в синтетический скрипт:
+      // проверяется именно эта обвязка, а не логика расширений вокруг неё.
+      const src = fs.readFileSync(VSC_PS1, 'utf8').replace(/^\uFEFF/, '');
+      const fin = src.slice(src.lastIndexOf('} finally {'));
+      assert(/vscode-settings\.ps1/.test(fin), 'в finally есть вызов шага настроек');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-fin-'));
+      try {
+        const mk = (name, outerExit, stub) => {
+          const dir = path.join(base, name); fs.mkdirSync(dir);
+          fs.writeFileSync(path.join(dir, 'host.ps1'), '\uFEFFfunction Remove-HmVsixTemps { }\r\ntry {\r\n    exit ' + outerExit + '\r\n' + fin);
+          if (stub !== null) fs.writeFileSync(path.join(dir, 'vscode-settings.ps1'), '\uFEFF' + stub);
+          const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & " + q(path.join(dir, 'host.ps1')) +
+            "; if ($null -eq $LASTEXITCODE) { exit 1 } else { exit $LASTEXITCODE }"], { encoding: 'utf8', timeout: 60000 });
+          return { r, dir };
+        };
+        const ran = "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'ran.txt') -Value 'ran'\r\nexit 0\r\n";
+        const keep = (r) => String(r.stdout || '').split(/\r?\n/).filter((l) => /Настройки VS Code для новичка/.test(l))
+          .forEach((l) => A2_FINALLY_LINES.push(l));
+        const a = mk('fail-ran', 1, ran);
+        assert.strictEqual(a.r.status, 1, 'провал шага VS Code остаётся провалом: ' + a.r.stdout + a.r.stderr);
+        assert(fs.existsSync(path.join(a.dir, 'ran.txt')), 'настройки отработали и при провале расширений');
+        const b = mk('ok-ran', 0, ran);
+        assert.strictEqual(b.r.status, 0, 'успех остаётся успехом');
+        assert(fs.existsSync(path.join(b.dir, 'ran.txt')), 'настройки отработали при успехе');
+        const c = mk('throws', 1, "throw 'boom'\r\n");
+        assert.strictEqual(c.r.status, 1, 'исключение шага настроек не меняет код: ' + c.r.stdout + c.r.stderr);
+        assert(/шаг остановлен/.test(c.r.stdout), 'и печатается строкой: ' + c.r.stdout);
+        keep(c.r);
+        const d = mk('missing', 0, null);
+        assert.strictEqual(d.r.status, 0, 'нет файла — код прежний');
+        assert(/нет в этой сборке/.test(d.r.stdout), 'и об этом есть строка: ' + d.r.stdout);
+        keep(d.r);
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+  }
+
+  ok('A2: строки шага настроек не подменяют этап и причину провала расширений (failure-explain)', () => {
+    // Шаг печатает ПОСЛЕ «Не установились расширения…». Строка с многоточием на конце
+    // стала бы «этапом», а «не найден»/«отказано в доступе» — причиной всего шага VS Code.
+    const base = [
+      'Проверяю VS Code...',
+      'VS Code уже установлен — доставлю только расширения.',
+      'Ставлю расширение anthropic.claude-code в VS Code (от имени пользователя, без прав администратора)...',
+      '  anthropic.claude-code: не подтвердилось.',
+      'Ставлю расширение openai.chatgpt в VS Code (от имени пользователя, без прав администратора)...',
+      '  openai.chatgpt: не подтвердилось.',
+      "Не установились расширения: Claude Code (anthropic.claude-code), Codex (openai.chatgpt). Открой VS Code -> Extensions -> найди их по имени -> Install. Claude Code также работает в терминале командой 'claude'.",
+    ];
+    const kind0 = fe.explainScriptFailure(base).kind;
+    const s0 = fe.summarizeFailure(base, { code: 1 });
+    assert.strictEqual(kind0, 'editor-extension', 'исходный разбор');
+    // Строки шага: из реальных прогонов (Windows) + из macOS-зеркала + из обвязок.
+    const ours = [];
+    const takeOut = (txt) => String(txt || '').split(/\r?\n/).filter((l) => l.trim() && !/^HM-RECEIPT\b/.test(l)).forEach((l) => ours.push(l));
+    if (psOk) {
+      let sb = mkSandbox('fe1');
+      try { fs.writeFileSync(sb.p('user\\settings.json'), USER_SETTINGS); seedRuPack(sb.p('dot\\extensions'), true); takeOut(firstRun(sb).stdout); takeOut(firstRun(sb).stdout); } finally { sb.cleanup(); }
+      sb = mkSandbox('fe2');
+      try { fs.writeFileSync(sb.p('user\\settings.json'), '{"a": 1'); takeOut(firstRun(sb).stdout); } finally { sb.cleanup(); }
+      sb = mkSandbox('fe3');
+      try {
+        // Файл «только для чтения»: подмена откажет — причина должна прийти словами шага,
+        // а не английским «Access to the path is denied» (его ловит правило file-locked).
+        const sp = sb.p('user\\settings.json');
+        fs.writeFileSync(sp, '{}'); fs.chmodSync(sp, 0o444);
+        takeOut(firstRun(sb).stdout);
+        assert(/нет прав на запись/.test(ours.join('\n')), 'случай записи без прав действительно прогнан: ' + ours.join(' | '));
+        fs.chmodSync(sp, 0o666);
+      } finally { sb.cleanup(); }
+      sb = mkSandbox('fe4');
+      try {
+        // Через ссылку и крупный файл: итоговая строка «применены не полностью» тоже не должна
+        // выглядеть этапом или причиной.
+        fs.writeFileSync(sb.p('user\\settings.json'), '{"w": [' + new Array(30000).fill('"abcdefghij"').join(',') + ']}');
+        takeOut(firstRun(sb).stdout);
+        assert(/применены не полностью/.test(ours.join('\n')), 'итог «не полностью» прогнан');
+      } finally { sb.cleanup(); }
+    }
+    const plan = mac.planFile('settings.json', { ok: true, text: USER_SETTINGS }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+    plan.lines.forEach((l) => ours.push(l));
+    mac.planFile('settings.json', { ok: true, text: '{"a": 1' }, mac.HM_SETTINGS, new Set(), 'settings', '\n').lines.forEach((l) => ours.push(l));
+    ours.push(mac.run([]));   // в Node нет ObjC — это ровно ветка «шаг остановлен»
+    // Обвязки: vscode-firstrun.sh — дословно из файла (подстановок в его echo нет),
+    // vscode.ps1 — то, что напечатал настоящий прогон finally выше.
+    (fs.readFileSync(MAC_TRAP, 'utf8').match(/Настройки VS Code для новичка:[^"\r\n]*/g) || []).forEach((l) => ours.push(l));
+    A2_FINALLY_LINES.forEach((l) => ours.push(l));
+    if (psOk) assert(A2_FINALLY_LINES.length >= 2, 'строки обвязки vscode.ps1 собраны прогоном: ' + A2_FINALLY_LINES.length);
+    assert(ours.length >= 10, 'строк набрано достаточно: ' + ours.length);
+    for (const l of ours) {
+      assert(!/(\.\.\.|…)\s*$/.test(l), 'строка шага не выглядит «этапом»: ' + l);
+    }
+    const tail = base.concat(ours);
+    assert.strictEqual(fe.explainScriptFailure(tail).kind, kind0, 'причина провала прежняя: ' + JSON.stringify(fe.explainScriptFailure(tail)));
+    const s1 = fe.summarizeFailure(tail, { code: 1 });
+    assert.strictEqual(s1.phase, s0.phase, 'этап прежний');
+    assert.deepStrictEqual(s1.lines, s0.lines, 'в выжимку не попала ни одна строка шага: ' + JSON.stringify(s1.lines));
+  });
+
+  // ---------------- macOS-зеркало ----------------
+  ok('vscode-settings.js (macOS): синтаксис; ключи те же, что у Windows (кроме профиля терминала)', () => {
+    const r = spawnSync(process.execPath, ['--check', MAC_JS], { encoding: 'utf8', timeout: 30000 });
+    assert.strictEqual(r.status, 0, 'node --check: ' + r.stderr);
+    assert.deepStrictEqual(mac.HM_SETTINGS.map((e) => e[0]),
+      ['chat.disableAIFeatures', 'workbench.secondarySideBar.defaultVisibility', 'extensions.ignoreRecommendations',
+        'workbench.startupEditor', 'security.workspace.trust.enabled']);
+    const ps1 = fs.readFileSync(PS1, 'utf8');
+    for (const [k, v] of mac.HM_SETTINGS) {
+      const lit = v === true ? '$true' : v === false ? '$false' : "'" + v + "'";
+      assert(ps1.includes("$s['" + k + "'] = " + lit), 'Windows пишет то же значение: ' + k + ' = ' + lit);
+    }
+  });
+
+  ok('vscode-settings.js (macOS): ключ человека цел, отметка не даёт вернуть убранное, неразбираемое не трогается', () => {
+    const p1 = mac.planFile('settings.json', { ok: true, text: USER_SETTINGS }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+    assert(p1.write, 'есть что дописать');
+    const j = parseJsonc(p1.newText);
+    assert.strictEqual(j['workbench.startupEditor'], 'welcomePage', 'ключ человека не перебит');
+    assert.strictEqual(j['chat.disableAIFeatures'], true);
+    assert.strictEqual(j['security.workspace.trust.enabled'], false, 'Restricted Mode выключен и на macOS');
+    assert(p1.newText.includes('// keep me') && p1.newText.includes('/* block'), 'комментарии на месте');
+    const p2 = mac.planFile('settings.json', { ok: true, text: '{}' }, mac.HM_SETTINGS,
+      new Set(['settings:chat.disableAIFeatures']), 'settings', '\n');
+    assert(!('chat.disableAIFeatures' in parseJsonc(p2.newText)), 'убранный после установки ключ не вернулся');
+    const p3 = mac.planFile('settings.json', { ok: true, text: '{"a": 1' }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+    assert(!p3.write && p3.skipped && /оставляю его как есть/.test(p3.lines.join('\n')), 'неразбираемый файл не трогаем');
+    const p4 = mac.planFile('settings.json', { ok: true, text: p1.newText }, mac.HM_SETTINGS, new Set(), 'settings', '\n');
+    assert(!p4.write, 'второй прогон ничего не пишет');
+  });
+
+  ok('vscode-settings.js (macOS): тихий ход — ОДНА строка «ОБНОВЛЕНО» и тишина на втором запуске; сбой — «[touchup-vscode] пропущено»; итог подробного хода не врёт', () => {
+    const m = mkMacHome('touch');
+    try {
+      const sp = m.user + '/settings.json';
+      fs.writeFileSync(sp, USER_SETTINGS.replace(/\r\n/g, '\n'));
+      const a = mac.hmMain([m.home, 'touchup'], fsIo());
+      assert.strictEqual(a.length, 1, 'одна строка: ' + JSON.stringify(a));
+      assert(/^ОБНОВЛЕНО: настройки VS Code \(\+4\)$/.test(a[0]), a[0]);
+      assert.strictEqual(parseJsonc(fs.readFileSync(sp, 'utf8'))['chat.disableAIFeatures'], true);
+      const before = fs.readFileSync(sp);
+      const markerBefore = fs.readFileSync(m.user + '/.hamidun-applied.json');
+      assert.deepStrictEqual(mac.hmMain([m.home, 'touchup'], fsIo()), [], 'второй запуск молчит');
+      assert(fs.readFileSync(sp).equals(before) && fs.readFileSync(m.user + '/.hamidun-applied.json').equals(markerBefore), 'и файлы не меняет');
+      // Неразбираемый и крупный: «пропущено» одной строкой, файл как был; подробный ход — итог «не полностью».
+      for (const [label, content, what] of [['неразбираемый', '{"a": 1', /разобрать файл не вышло/], ['крупный', '{"w": [' + new Array(30000).fill('"abcdefghij"').join(',') + ']}', /файл слишком большой/]]) {
+        const m2 = mkMacHome('bad');
+        try {
+          fs.writeFileSync(m2.user + '/settings.json', content);
+          const t = mac.hmMain([m2.home, 'touchup'], fsIo());
+          assert(t.length === 1 && /^\[touchup-vscode\] пропущено: settings\.json — /.test(t[0]) && what.test(t[0]), label + ': ' + JSON.stringify(t));
+          assert.strictEqual(fs.readFileSync(m2.user + '/settings.json', 'utf8'), content, label + ': файл как был');
+          const v = mac.hmMain([m2.home], fsIo());
+          assert(/применены не полностью/.test(v[v.length - 1]) && !/всё уже на месте/.test(v.join('\n')), label + ': итог: ' + v[v.length - 1]);
+        } finally { m2.cleanup(); }
+      }
+      // Ссылка на пути (часто — dotfiles): junction вместо Code/User — отказ, в чужую папку ничего не попало.
+      const m3 = mkMacHome('link');
+      try {
+        const real = path.join(m3.base, 'dotfiles'); fs.mkdirSync(real);
+        fs.rmSync(m3.user, { recursive: true });
+        fs.symlinkSync(real, m3.user, 'junction');
+        const t = mac.hmMain([m3.home, 'touchup'], fsIo());
+        assert(t.length === 1 && /пропущено: settings\.json — путь ведёт по ссылке/.test(t[0]), JSON.stringify(t));
+        assert.deepStrictEqual(fs.readdirSync(real), [], 'в папку за ссылкой ничего не записано');
+      } finally { m3.cleanup(); }
+    } finally { m.cleanup(); }
+  });
+
+  ok('vscode-settings.js (macOS): откат целиком возвращает ключи; путь с «\\» и крупный файл обрабатываются как в Windows-версии', () => {
+    const m = mkMacHome('restore');
+    try {
+      const sp = m.user + '/settings.json';
+      fs.writeFileSync(sp, '{"editor.fontSize": 14}');
+      mac.hmMain([m.home], fsIo());
+      fs.writeFileSync(sp, '{"editor.fontSize": 14}');
+      const out = mac.hmMain([m.home], fsIo());
+      assert(/похоже на откат файла целиком/.test(out.join('\n')), out.join('\n'));
+      assert.strictEqual(parseJsonc(fs.readFileSync(sp, 'utf8'))['workbench.startupEditor'], 'none', 'ключи вернулись');
+      const mine = '{"python.defaultInterpreterPath": "C:\\Python312\\python.exe"}';
+      fs.writeFileSync(sp, mine);
+      fs.unlinkSync(m.user + '/.hamidun-applied.json');
+      mac.hmMain([m.home, 'touchup'], fsIo());
+      assert(fs.readFileSync(sp, 'utf8').includes('"C:\\Python312\\python.exe"') && /chat\.disableAIFeatures/.test(fs.readFileSync(sp, 'utf8')), 'путь цел, ключи дописаны');
+    } finally { m.cleanup(); }
+  });
+
+  if (psOk) {
+    ok('A2: Windows (PowerShell) и macOS (JS) дают байт-в-байт одинаковый результат на одном наборе файлов', () => {
+      const corpus = ['', '  \r\n', '// hello\r\n/* x */', '{}', '{\r\n}', '{"a":1}', '{\n\t"a": 1,\n}',
+        '{\r\n  "a": [1, 2] // c\r\n}', '{"a": {"b": null} /* c */}', '{"workbench": {"startupEditor": "none"}}',
+        '{"chat\\u002edisableAIFeatures": false}', '{"a": "строка с \\"кавычками\\" и \\\\ слэшем"}', '{\uFEFF}',
+        USER_SETTINGS, DEFAULT_ARGV, '{"a": 1', '{"a": 1} x', '[1,2]', '{"a":1 /* oops }', '{"a":1,,}', '{"a": tru}',
+        '{"a": 01}', '{"a" 1}', '{\n  "a": [1,]\n}',
+        // мягкость внутри строк (рецензия 09.10) и разные отступы
+        '{"python.defaultInterpreterPath": "C:\\Python312\\python.exe"}', '{"note": "с\tтабом"}', '{"a": "C:\\\n"}',
+        '{\n          "deep": 1\n}', '{\n\t\t"two-tabs": 1\n}', '{\r\n  "k\\u0041\\P": 1\r\n}'];
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-parity-'));
+      try {
+        corpus.forEach((t, i) => fs.writeFileSync(path.join(dir, i + '.txt'), t, 'utf8'));
+        const body = "$out = @(); foreach ($i in 0.." + (corpus.length - 1) + ") { " +
+          "$t = [IO.File]::ReadAllText((Join-Path " + q(dir) + " ($i.ToString() + '.txt')), (New-Object Text.UTF8Encoding($false))); " +
+          "$s = Get-HmJsoncShape $t; $res = ''; " +
+          "if ($s.Ok) { $w = [ordered]@{}; foreach ($k in @('chat.disableAIFeatures','workbench.startupEditor')) { if (-not (Test-HmKeyCovered $s.Keys $k)) { $w[$k] = $(if ($k -eq 'chat.disableAIFeatures') { $true } else { 'none' }) } }; " +
+          "if ($w.Count -gt 0) { $res = Add-HmJsoncKeys -Text $t -Shape $s -Entries $w -DefaultEol \"`r`n\" } }; " +
+          "$out += [pscustomobject]@{ ok = $s.Ok; err = $s.Error; keys = @($s.Keys); text = $res } }; " +
+          "[IO.File]::WriteAllText((Join-Path " + q(dir) + " 'ps.json'), (ConvertTo-Json -InputObject $out -Depth 5 -Compress), (New-Object Text.UTF8Encoding($false)))";
+        const r = ps(body);
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        const psRes = JSON.parse(fs.readFileSync(path.join(dir, 'ps.json'), 'utf8'));
+        corpus.forEach((t, i) => {
+          const s = mac.jsoncShape(t);
+          let text = '';
+          if (s.ok) {
+            const w = [['chat.disableAIFeatures', true], ['workbench.startupEditor', 'none']].filter(([k]) => !mac.keyCovered(s.keys, k));
+            if (w.length) text = mac.addKeys(t, s, w, '\r\n');
+          }
+          const p = psRes[i];
+          const label = '#' + i + ' ' + JSON.stringify(t.slice(0, 40));
+          assert.strictEqual(p.ok, s.ok, label + ': разобрался ли');
+          assert.strictEqual(p.err || '', s.error, label + ': причина');
+          assert.deepStrictEqual([].concat(p.keys || []), s.keys, label + ': ключи');
+          assert.strictEqual(p.text || '', text, label + ': текст после вставки');
+          if (text) parseJsonc(text);   // и результат — настоящий JSONC
+        });
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+  }
+
+  ok('vscode.sh: настройки подключены строкой CODE_CLI ДО первого exit; ловушка EXIT не зовёт exit', () => {
+    const sh = fs.readFileSync(VSC_SH, 'utf8');
+    assert(/^CODE_CLI="\$APP\/Contents\/Resources\/app\/bin\/code"; source "\$DIR\/vscode-firstrun\.sh"/m.test(sh),
+      'подключение — в той же строке, что CODE_CLI (номера строк для спек не сдвигаются)');
+    assertOrder(sh, 'vscode-firstrun.sh', 'exit 120', 'ловушка стоит до первого выхода');
+    const trap = codeOnly(fs.readFileSync(MAC_TRAP, 'utf8'));
+    assert(/^trap hm_vscode_firstrun EXIT$/m.test(trap), 'ловушка EXIT поставлена');
+    assert(!/\bexit\b/.test(trap), 'в ловушке нет exit — иначе она перебила бы код шага');
+    assert(/hm_jxa "\$\{DIR:-\.\}\/vscode-settings\.js" "\$HOME"/.test(trap), 'JS-зеркало зовётся через hm_jxa из _lib.sh (osascript живёт только там)');
+    assertOrder(sh, 'source "$DIR/_lib.sh"', 'vscode-firstrun.sh', 'hm_jxa определён до подключения ловушки');
+  });
+
+  if (bashAvailable()) {
+    ok('vscode-firstrun.sh (прогон bash): код выхода шага сохраняется — и без редактора, и когда osascript недоступен', () => {
+      const r1 = spawnSync('bash', ['-n', MAC_TRAP], { encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r1.status, 0, 'bash -n: ' + r1.stderr);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-trap-'));
+      try {
+        const unix = (p) => p.replace(/\\/g, '/');
+        // Как в vscode.sh: сначала _lib.sh (там hm_jxa), потом ловушка.
+        const harness = (app, code) => 'set -uo pipefail\nDIR="' + unix(path.dirname(MAC_TRAP)) + '"\nsource "$DIR/_lib.sh"\nDRY=""\nHOME="' + unix(dir) +
+          '"\nAPP="' + unix(app) + '"\nsource "$DIR/vscode-firstrun.sh"\necho body\nexit ' + code + '\n';
+        fs.writeFileSync(path.join(dir, 'a.sh'), harness(path.join(dir, 'no-app'), 7));
+        const a = spawnSync('bash', [path.join(dir, 'a.sh')], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(a.status, 7, 'код 7 сохранён: ' + a.stdout + a.stderr);
+        assert(/редактора на этом компьютере нет/.test(a.stdout), a.stdout);
+        fs.mkdirSync(path.join(dir, 'app'));
+        fs.writeFileSync(path.join(dir, 'b.sh'), harness(path.join(dir, 'app'), 3));
+        const b = spawnSync('bash', [path.join(dir, 'b.sh')], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(b.status, 3, 'код 3 сохранён: ' + b.stdout + b.stderr);
+        if (process.platform === 'darwin') {
+          // На Mac — настоящий osascript: settings.json появляется в песочнице HOME.
+          const sp = path.join(dir, 'Library', 'Application Support', 'Code', 'User', 'settings.json');
+          assert.strictEqual(parseJsonc(fs.readFileSync(sp, 'utf8'))['chat.disableAIFeatures'], true, 'настройки записаны osascript: ' + b.stdout);
+        } else {
+          assert(/шаг остановлен/.test(b.stdout), 'без osascript — строка, а не падение: ' + b.stdout);
+        }
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+
+    ok('touchup-vscode.sh (прогон bash): без приложения — тишина; не затирает чужие переменные при source; всегда код 0; сбой osascript — одна строка «пропущено»', () => {
+      const r1 = spawnSync('bash', ['-n', TOUCH_SH], { encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r1.status, 0, 'bash -n: ' + r1.stderr);
+      const src = codeOnly(fs.readFileSync(TOUCH_SH, 'utf8'));
+      assert(!/osascript/.test(src) && /hm_jxa/.test(src), 'osascript — только через hm_jxa из _lib.sh');
+      assert(/^return 0 2>\/dev\/null \|\| exit 0$/m.test(src), 'и при source, и при запуске отдельным процессом код 0');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a2-tush-'));
+      try {
+        const unix = (p) => p.replace(/\\/g, '/');
+        const home = unix(path.join(dir, 'home')); fs.mkdirSync(home);
+        const run = (extra) => spawnSync('bash', ['-c', extra + 'bash "' + unix(TOUCH_SH) + '"; echo "rc=$?"'],
+          { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home }) });
+        const none = run('');
+        assert.strictEqual(none.stdout.trim(), 'rc=0', 'без приложения ни строки: ' + none.stdout + none.stderr);
+        // Подключение через source: переменные вызывающего целы, выполнение продолжается.
+        const sourced = spawnSync('bash', ['-c', 'DIR=keep; APP=keep; DRY=keep; source "' + unix(TOUCH_SH) + '"; echo "after rc=$? DIR=$DIR APP=$APP DRY=$DRY"'],
+          { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home }) });
+        assert(/^after rc=0 DIR=keep APP=keep DRY=keep$/m.test(sourced.stdout), 'после source: ' + sourced.stdout + sourced.stderr);
+        // Приложение есть, osascript нет (не Mac) — одна строка, код 0.
+        fs.mkdirSync(path.join(dir, 'home', 'Applications', 'Visual Studio Code.app'), { recursive: true });
+        if (process.platform !== 'darwin') {
+          const noOsa = run('');
+          assert.deepStrictEqual(nonEmptyLines(noOsa.stdout), ['[touchup-vscode] пропущено: скрипт настройки не запустился или завершился с ошибкой', 'rc=0'], noOsa.stdout + noOsa.stderr);
+        } else {
+          const real = run('');
+          const lines = nonEmptyLines(real.stdout);
+          assert(lines.length <= 2 && lines[lines.length - 1] === 'rc=0', 'на Mac — настоящий osascript: ' + real.stdout);
+        }
+        // HM_DRY_RUN — тишина и на нормальной машине.
+        const dry = spawnSync('bash', ['-c', 'HM_DRY_RUN=1 bash "' + unix(TOUCH_SH) + '"; echo "rc=$?"'], { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home }) });
+        assert.strictEqual(dry.stdout.trim(), 'rc=0', 'в dry-run молчит: ' + dry.stdout);
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    });
+  }
 })();
