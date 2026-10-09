@@ -3189,6 +3189,12 @@ function winRegDeleteValue(t) {
   const q0 = regQueryValueTyped(keyPath, t.value);
   if (!q0.ok) return { status: 'failed', message: 'чтение реестра: ' + q0.error };
   if (!q0.found) return { status: 'absent', message: 'значения нет' };
+  // onlyIfValueIs: имя совпало, но под ним может лежать ЧУЖОЕ значение (своя запись человека).
+  // Снимаем только запись, которая ведёт на наш exe, — так же рассуждает и установка
+  // при повторном запуске (scripts/windows/_mascot.ps1).
+  if (t.onlyIfValueIs && !uninstallExec.runValueIsOurs(q0.data, t.onlyIfValueIs)) {
+    return { status: 'kept', message: 'значение ведёт не на нашу программу (' + q0.data + ') — оставлено' };
+  }
   const del = regDeleteValueTyped(keyPath, t.value);
   if (!del.ok) return { status: 'failed', message: 'удаление значения: ' + del.error };
   const q1 = regQueryValueTyped(keyPath, t.value);
@@ -3345,7 +3351,7 @@ function describeTarget(t) {
     case 'reg': return 'реестр HKCU\\' + t.key + ' → ' + t.value;
     case 'pathentry': return 'запись PATH ' + t.dir + ' (только если каталог исчез)';
     case 'profileline': return 'точная строка «' + t.line + '» из ' + t.file;
-    case 'hookurl': return 'hook-url «' + t.from + '» → «' + t.to + '» в ' + t.file +
+    case 'hookentries': return 'записи хуков скрепки (http://127.0.0.1:' + t.port + '/hook) из ' + t.file +
       (t.why ? ' (' + t.why + ')' : '');
     case 'launchagent': return 'LaunchAgent ' + t.label + ' (' + t.plist + ')';
     case 'appbundle': return '.app ' + t.path + ' (при совпадении идентичности)';
@@ -3361,6 +3367,9 @@ function executeUninstallTarget(t, guardOpts) {
       // P0-1: gated shim — удаляем ТОЛЬКО при подтверждённом нашем ownership-маркере
       // (наш venv), иначе файл не наш (собственный uv-tool пользователя) → kept.
       if (t.onlyIfOwnerMarker) return uninstallExec.removeFileGated(t.path, guardOpts, t.onlyIfOwnerMarker);
+      // bestEffort (ярлык скрепки в меню «Пуск»): отказ защиты или сбой — «оставлен», а не провал
+      // всего удаления компонента.
+      if (t.bestEffort) return uninstallExec.removeFileBestEffort(t.path, guardOpts);
       return uninstallExec.removeFile(t.path, guardOpts);
     case 'emptydir': return uninstallExec.removeEmptyDir(t.path, guardOpts);
     case 'dirtree': {
@@ -3372,11 +3381,11 @@ function executeUninstallTarget(t, guardOpts) {
       return uninstallExec.removeDirTree(t.path, guardOpts);
     }
     case 'profileline': return uninstallExec.removeProfileLine(t.file, t.line, guardOpts);
-    // Не удаление, а обратная правка: hook-url скрепки возвращается к плейсхолдеру
-    // пака. Свой узкий допуск внутри restoreHookUrl (ровно ~/.claude/settings.json),
-    // потому что checkTarget закрывает весь ~/.claude — и правильно делает: там
-    // нельзя УДАЛЯТЬ. Здесь ничего и не удаляется.
-    case 'hookurl': return uninstallExec.restoreHookUrl(t.file, t.from, t.to, guardOpts);
+    // Правка одного файла, а не удаление файла: из settings.json убираются записи хуков
+    // скрепки (по адресу), всё остальное остаётся. Свой узкий допуск внутри
+    // removeMascotHooks (ровно ~/.claude/settings.json), потому что checkTarget закрывает
+    // весь ~/.claude — и правильно делает: там нельзя УДАЛЯТЬ файлы.
+    case 'hookentries': return uninstallExec.removeMascotHooks(t.file, t.port, guardOpts);
     case 'launchagent': {
       if (!IS_MAC) return { status: 'failed', message: 'launchagent вне macOS' };
       // P1-3: guard plist ПЕРВЫМ — для подозрительной цели launchctl не дёргаем.

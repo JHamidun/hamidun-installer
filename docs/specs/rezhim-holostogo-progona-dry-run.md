@@ -4,7 +4,7 @@
 
 - **Раздел:** Сопутствующее
 - **Код:** `src/main.js:183-193`, `src/main.js:930-937`, `src/main.js:990-991`, `src/main.js:1164-1166`, `src/main.js:1332-1368`, `src/main.js:1454-1506`, `src/main.js:3038-3053`, `src/main.js:3186-3222`, `src/install-receipts.js:30-38`, `src/install-receipts.js:124-128`, `src/install-manifest.js:74-110`, `src/install-env.js:21-30`, `src/uninstall-exec.js:525-563`, `src/renderer/app.js:1264-1309`, `test/clean-machine-test.ps1:6-9`, `scripts/windows/uv.ps1:17-23`, `scripts/windows/config.ps1:24-71`, `scripts/windows/git.ps1:26-114`, `scripts/windows/node.ps1:91-158`, `scripts/windows/nomad.ps1:66-317`, `scripts/windows/mascot.ps1:4-17`, `scripts/windows/bridge.ps1`, `scripts/windows/chatgpt-desktop.ps1`, `scripts/windows/claude-desktop.ps1`, `scripts/windows/claude.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/pydeps.ps1`, `scripts/windows/vscode.ps1`, `scripts/macos/config.sh:41-56`, `scripts/macos/uv.sh:17-24`, `scripts/macos/nomad.sh:6-222`, `scripts/macos/mascot.sh:9-80`, `scripts/macos/bridge.sh`, `scripts/macos/chatgpt-desktop.sh`, `scripts/macos/claude-desktop.sh`, `scripts/macos/course.sh`, `scripts/macos/handy.sh`, `scripts/macos/vscode.sh`, `scripts/macos/claude.sh`, `scripts/macos/cursor.sh`, `scripts/macos/extension.sh`, `scripts/macos/git.sh`, `scripts/macos/node.sh`, `scripts/macos/pydeps.sh`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`
-- **Тесты:** «main.js (source): HM_DRY_RUN авторитетно из process.env И payload; в dry-run — ни деактивации, ни целей, ни лога», «P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи install.log», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «config.sh: dry-run БЕЗ bundled → никакого clone, ~/.claude НЕ создан, exit 0», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «manifest: dryRun ничего не пишет на диск», «receipts: маркер {id, version, installedAt} БЕЗ artifacts; round-trip; битый/чужой id → null», «Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, цели авторитетно из main», «restoreHookUrl: подлоги отбиты — чужой путь, symlink, битый JSON; dry-run не пишет»
+- **Тесты:** «main.js (source): HM_DRY_RUN авторитетно из process.env И payload; в dry-run — ни деактивации, ни целей, ни лога», «P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи install.log», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «config.sh: dry-run БЕЗ bundled → никакого clone, ~/.claude НЕ создан, exit 0», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «manifest: dryRun ничего не пишет на диск», «receipts: маркер {id, version, installedAt} БЕЗ artifacts; round-trip; битый/чужой id → null», «Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, цели авторитетно из main», «removeMascotHooks: подлоги отбиты — чужой путь, symlink/junction, битый JSON, нечисловой порт; dry-run не пишет; файл изменился под руками — отказ»
 
 ## Что обещает человеку
 
@@ -117,11 +117,11 @@ renderer-env только ключи из явного аллоулиста, и 
 **Второй, не подключённый механизм.** В чистых модулях есть собственная опция
 `opts.dryRun`: `writeManifest` (`src/install-manifest.js:110`) и `writeReceipt`
 (`src/install-receipts.js:128`) возвращают `{ ok: true, path, dryRun: true }` без
-записи, а `restoreHookUrl` принимает пятым аргументом `dry` и при нём возвращает
-`[dry-run] WOULD вернуть hook-url к плейсхолдеру пака` (`src/uninstall-exec.js:525-563`).
+записи, а `removeMascotHooks` принимает четвёртым аргументом `dry` и при нём возвращает
+`[dry-run] WOULD убрать записей хуков скрепки: N` (`src/uninstall-exec.js:671-731`).
 Из `main.js` ни одна из этих опций не передаётся: `manifest.recordInstall` вызывается
 четырьмя аргументами (`src/main.js:1359`), `receipts.writeReceipt` — тремя
-(`src/main.js:1364`), `restoreHookUrl` — четырьмя (`src/main.js:3077`). Защита в
+(`src/main.js:1364`), `removeMascotHooks` — тремя (`src/main.js:3219`). Защита в
 проде держится на ранних гейтах, описанных выше; модульные опции живут для тестов.
 
 **Отдельный вход для Windows.** `test/clean-machine-test.ps1` при `-DryRun`
@@ -273,9 +273,9 @@ renderer-env только ключи из явного аллоулиста, и 
    `main.js`; перебора всех файлов `scripts/*/` с проверкой «скрипт читает `HM_DRY_RUN`»
    в `test/run-tests.js` не обнаружено. Именно поэтому пробел из пункта 1 существует
    молча.
-5. **Параметр `dry` у `restoreHookUrl` в проде мёртв.** Функция объявлена как
-   `restoreHookUrl(settingsFile, from, to, opts, dry)` (`src/uninstall-exec.js:525`), а
-   вызывается четырьмя аргументами (`src/main.js:3077`) — пятый всегда `undefined`.
+5. **Параметр `dry` у `removeMascotHooks` в проде мёртв.** Функция объявлена как
+   `removeMascotHooks(settingsFile, port, opts, dry)` (`src/uninstall-exec.js:671`), а
+   вызывается тремя аргументами (`src/main.js:3219`) — четвёртый всегда `undefined`.
    Сегодня это безвредно (до исполнения целей dry-run не доходит), но выглядит как
    работающая защита и может быть принято за неё при следующей правке.
 6. **Renderer-половина условия недостижима.** `rendererEnv.HM_DRY_RUN` в

@@ -55,6 +55,10 @@ const UNINSTALL_DISABLED = new Set(['nomad']);
 // Пин издателя маскота (Apple Team ID) — как в scripts/macos/mascot.sh.
 const MASCOT_TEAM_ID = '3VN93XA9DY';
 
+// Порт, на котором скрепка слушает хуки Claude Code (PORT в её lib.rs; mascot.ps1/.sh ждут health
+// именно на нём). По адресу с этим портом в settings.json опознаются её записи.
+const MASCOT_HOOK_PORT = 45832;
+
 // P0-6: ТОЧНАЯ installer-строка CLI-прокси моста — verbatim BRIDGE_RC_LINE из
 // scripts/macos/bridge.sh. Деинсталляция убирает из rc ТОЛЬКО строки, целиком
 // равные ей (после trim); строки, лишь СОДЕРЖАЩИЕ маркер-текст, не трогаются.
@@ -198,27 +202,26 @@ function uninstallTargets(id, ctx) {
     }
 
     case 'mascot': {
-      // Хуки в ~/.claude/settings.json прописала САМА установка скрепки
-      // (mascot.ps1 §4 / mascot.sh: плейсхолдер VSCODE_PORT → её порт 45832).
-      // Снять их при удалении обязана она же, иначе четырнадцать хук-записей
-      // навсегда остаются указывать на порт, где никто не слушает. Замер:
-      // обращение на закрытый локальный порт под Windows отбивается НЕ мгновенно
-      // (SYN уходит в повтор) — 2,2 с на попытку, то есть около полуминуты
-      // мёртвого ожидания в КАЖДОЙ сессии Claude Code. Самолечение живёт внутри
-      // самой скрепки и после удаления сработать не может.
+      // Хуки в ~/.claude/settings.json прописывает само приложение скрепки при запуске
+      // (четырнадцать http-записей на её порт 45832); установщик лишь подставляет порт в
+      // плейсхолдер пака, если пак его несёт (mascot.ps1 §4 / mascot.sh). Снять их при
+      // удалении надо, иначе записи навсегда остаются указывать на порт, где никто не
+      // слушает. Замер: обращение на закрытый локальный порт под Windows отбивается НЕ
+      // мгновенно (SYN уходит в повтор) — 2,2 с на попытку, то есть около полуминуты
+      // мёртвого ожидания в КАЖДОЙ сессии Claude Code. Самолечение живёт внутри самой
+      // скрепки и после удаления сработать не может.
       //
-      // Возвращаем плейсхолдер, а не вырезаем записи: это ровно обратная операция
-      // к установке, она приводит конфиг к тому виду, в котором его раздаёт пак, и
-      // следующая установка скрепки снова подставит порт. Вырезание записей было бы
-      // необратимым и трогало бы чужой конфиг сильнее необходимого.
+      // Записи УДАЛЯЮТСЯ (только скрепочные — по адресу, см. isMascotHookUrl). Раньше адрес
+      // возвращали к плейсхолдеру пака `127.0.0.1:VSCODE_PORT/hook`, но это не URL
+      // (new URL бросает ERR_INVALID_URL): Claude Code видел в settings.json невалидный хук и
+      // показывал Settings Error — удаление воспроизводило поломку, ради которой его ждали.
       //
       // Операция платформонезависимая: файл один и тот же на Windows и macOS.
       targets.push({
-        type: 'hookurl',
+        type: 'hookentries',
         file: P.join(home, '.claude', 'settings.json'),
-        from: '127.0.0.1:45832/hook',
-        to: '127.0.0.1:VSCODE_PORT/hook',
-        why: 'hook-url скрепки в settings.json вернуть к плейсхолдеру пака'
+        port: MASCOT_HOOK_PORT,
+        why: 'записи хуков скрепки (адрес http://127.0.0.1:' + MASCOT_HOOK_PORT + '/hook) убрать из settings.json'
       });
       if (isWin) {
         const destDir = P.join(winLocalAppData(home), 'Programs', 'ClaudeMascot');
@@ -227,8 +230,20 @@ function uninstallTargets(id, ctx) {
         targets.push({ type: 'dirtree', path: destDir, why: 'каталог приложения скрепки' });
         targets.push({ type: 'file', path: P.join(home, '.claude-mascot', '.installed') });
         targets.push({ type: 'emptydir', path: P.join(home, '.claude-mascot') });
-        targets.push({ type: 'reg', hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', value: 'ClaudeMascot' });
+        // Ярлык в меню «Пуск»: с 06.10.2026 mascot.ps1 кладёт его ВМЕСТО автозапуска
+        // (решение владельца, строка A26). Корень — от home, как у остальных целей.
+        // bestEffort: профиль, где AppData\Roaming лежит за junction, установка обходит молча
+        // (ярлыка там нет), и обязательная цель делала бы каждое «Удалить» невыполнимым из-за
+        // файла, которого нет. Ярлык, оставленный перенаправлением папки, — косметика.
+        targets.push({ type: 'file', bestEffort: true, path: P.join(winRoamingAppData(home), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Claude Mascot.lnk') });
+        // Автозапуск прошлых версий: до 06.10.2026 установка прописывала его всегда, и у
+        // людей со старой установкой он есть — снять его при удалении всё ещё наша работа.
+        // onlyIfValueIs: имя ClaudeMascot могло занять и чужое значение — снимаем, только если оно
+        // ведёт на наш exe (установка при повторном запуске рассуждает так же: _mascot.ps1).
+        targets.push({ type: 'reg', hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', value: 'ClaudeMascot', onlyIfValueIs: P.join(destDir, 'claude-mascot.exe') });
       } else {
+        // LaunchAgent прошлых версий (с 06.10.2026 mascot.sh его не ставит, а оставшийся
+        // от старой установки снимает) — у старых установок он есть, удалить его нужно.
         targets.push({
           type: 'launchagent', label: 'com.hamidun.claude-mascot',
           plist: P.join(home, 'Library', 'LaunchAgents', 'com.hamidun.claude-mascot.plist')
@@ -249,7 +264,7 @@ function uninstallTargets(id, ctx) {
         targets.push({ type: 'file', path: P.join(home, '.claude-mascot', '.installed') });
         targets.push({ type: 'emptydir', path: P.join(home, '.claude-mascot') });
       }
-      notes.push('Хуки в ~/.claude/settings.json НЕ трогаю (там могут быть твои правки).');
+      notes.push('Из ~/.claude/settings.json убираю только записи хуков скрепки (адрес http://127.0.0.1:' + MASCOT_HOOK_PORT + '/hook); твои хуки и остальные настройки НЕ трогаю.');
       break;
     }
 
@@ -274,4 +289,4 @@ function uninstallTargets(id, ctx) {
   return { targets, preserve, notes };
 }
 
-module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, BRIDGE_RC_LINE, UNINSTALL_DISABLED };
+module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, MASCOT_HOOK_PORT, BRIDGE_RC_LINE, UNINSTALL_DISABLED };

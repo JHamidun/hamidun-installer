@@ -3886,127 +3886,400 @@ ok('P0-3 (функц.): маркер-symlink НЕ считается валид�
 
 console.log('== Удаление скрепки снимает и её хуки (полминуты в каждой сессии) ==');
 
-// Установка скрепки правит ~/.claude/settings.json: подставляет её порт вместо
-// плейсхолдера пака. Удаление сносило только файлы — четырнадцать хук-записей
-// оставались указывать на порт, где никто не слушает.
+// Хуки в ~/.claude/settings.json прописывает само приложение скрепки: четырнадцать
+// http-записей на её порт 45832. Удаление сносило только файлы — записи оставались
+// указывать на порт, где никто не слушает.
 //
 // Цена ИЗМЕРЕНА, а не оценена: обращение на закрытый локальный порт под Windows не
 // отбивается мгновенно (SYN уходит в повтор) — 2,2 с на попытку, около полуминуты
 // мёртвого ожидания в каждой сессии Claude Code. Самолечение живёт внутри самой
 // скрепки и после удаления сработать не может.
+//
+// Первая редакция возвращала адрес к «плейсхолдеру пака» (127.0.0.1:VSCODE_PORT/hook), но
+// это не URL, и Claude Code показывал Settings Error (строки A25 и B01 разбора диалогов
+// поддержки): удаление воспроизводило поломку. Теперь записи скрепки УДАЛЯЮТСЯ, и только они.
 
-const HOOK_FROM = '127.0.0.1:45832/hook';
-const HOOK_TO = '127.0.0.1:VSCODE_PORT/hook';
-const hookSettings = (url) => JSON.stringify({
-  hooks: { PreToolUse: [{ hooks: [{ type: 'command', url: 'http://' + url }] }] },
+const HOOK_PORT = 45832;
+const MASCOT_URL = 'http://127.0.0.1:45832/hook?src=claude-mascot';   // как пишет приложение сейчас
+const LEGACY_URL = 'http://127.0.0.1:45832/hook';                      // прежние версии: без метки
+const hookGroup = (url, timeout) => ({ matcher: '', hooks: [{ type: 'http', url, timeout: timeout || 1 }] });
+// Файл человека: записи скрепки вперемешку с его хуками и ловушками.
+const richSettings = () => ({
+  env: { FOO: 'bar' },
   permissions: { allow: ['Bash(ls)'] },
-  ownKey: 'не трогать',
-}, null, 2);
+  hooks: {
+    // запись скрепки рядом с хуком человека: остаётся его группа
+    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user-pre' }] }, hookGroup(MASCOT_URL)],
+    // одно лишь скрепочное, прежний адрес без метки: событие опустеет из-за нас — ключ уйдёт
+    PostToolUse: [hookGroup(LEGACY_URL)],
+    // команда, ПОХОЖАЯ на скрепочную: поля url нет — это не запись скрепки
+    Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'curl -s ' + MASCOT_URL }] }],
+    // запись скрепки в ОДНОЙ группе с хуком человека: остаётся группа с его хуком
+    Notification: [{ matcher: '', hooks: [{ type: 'http', url: MASCOT_URL, timeout: 1 }, { type: 'command', command: 'notify-send hi' }] }],
+    // пустой массив был ещё до нас: не наш, остаётся
+    SessionStart: [],
+    // чужой хук на нашем порту и хук на чужом порту
+    SubagentStop: [{ matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:45832/other-tool' }] }],
+    PreCompact: [{ matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:45832/hook/proxy' }] }],
+    SessionEnd: [{ matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:45999/hook' }] }]
+  },
+  ownKey: 'не трогать'
+});
+// То, что обязано получиться из richSettings() после снятия (порядок ключей тоже важен).
+const richSettingsAfter = () => {
+  const w = richSettings();
+  delete w.hooks.PostToolUse;
+  w.hooks.PreToolUse = [w.hooks.PreToolUse[0]];
+  w.hooks.Notification = [{ matcher: '', hooks: [{ type: 'command', command: 'notify-send hi' }] }];
+  return w;
+};
+const hookJson = (obj) => JSON.stringify(obj, null, 2) + '\n';
 function mkHookHome(content) {
   const home = mkHomeDir();
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   if (content !== null) fs.writeFileSync(path.join(home, '.claude', 'settings.json'), content, 'utf8');
   return home;
 }
+const hookOpts = (home) => ({ home, platform: process.platform });
 
-ok('цель hookurl заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё', () => {
+ok('цель hookentries заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё', () => {
   const w = utMod.uninstallTargets('mascot', { home: 'C:/Users/probe', platform: 'win32' });
   const m = utMod.uninstallTargets('mascot', { home: '/Users/probe', platform: 'darwin' });
-  const hooks = (p) => ((p && p.targets) || []).filter((t) => t.type === 'hookurl');
+  const hooks = (p) => ((p && p.targets) || []).filter((t) => t.type === 'hookentries');
   [['win32', w], ['darwin', m]].forEach(([name, plan]) => {
     const h = hooks(plan);
-    assert.strictEqual(h.length, 1, name + ': ожидалась ровно одна цель hookurl, получено ' + h.length);
-    assert.strictEqual(h[0].from, HOOK_FROM, name + ': не тот порт-источник');
-    assert.strictEqual(h[0].to, HOOK_TO, name + ': не тот плейсхолдер');
+    assert.strictEqual(h.length, 1, name + ': ожидалась ровно одна цель hookentries, получено ' + h.length);
+    assert.strictEqual(h[0].port, HOOK_PORT, name + ': не тот порт');
+    assert.strictEqual(utMod.MASCOT_HOOK_PORT, HOOK_PORT, 'порт скрепки в экспорте плана');
+    assert(!('from' in h[0]) && !('to' in h[0]), name + ': остались from/to прежней подстановки');
     assert(/[\\/]\.claude[\\/]settings\.json$/.test(h[0].file), name + ': не тот файл: ' + h[0].file);
+    // Цель идёт ПЕРВОЙ: правка конфига не должна зависеть от того, дошли ли до неё остальные.
+    assert.strictEqual(plan.targets[0].type, 'hookentries', name + ': цель хуков не первая');
+    assert(!plan.targets.some((t) => t.type === 'hookurl'), name + ': осталась цель прежнего вида hookurl');
   });
   // Чужим компонентам эта цель не положена: они хуков не писали.
   ['git', 'node', 'course', 'nomad'].forEach((id) => {
     const p = utMod.uninstallTargets(id, { home: 'C:/Users/probe', platform: 'win32' });
-    assert.strictEqual(hooks(p).length, 0, id + ': завелась чужая цель hookurl');
+    assert.strictEqual(hooks(p).length, 0, id + ': завелась чужая цель hookentries');
   });
 });
 
-ok('restoreHookUrl (реальная ФС): порт снят, чужие ключи целы, повтор идемпотентен', () => {
-  let home = mkHookHome(hookSettings(HOOK_FROM));
+ok('isMascotHookUrl: только адрес скрепки — чужие хуки на том же порту, другой порт, мусор и не-URL не наши', () => {
+  const ours = [MASCOT_URL, LEGACY_URL, '  ' + LEGACY_URL + '  ', 'http://127.0.0.1:45832/hook?x=1&src=claude-mascot'];
+  ours.forEach((u) => assert.strictEqual(uxMod.isMascotHookUrl(u, HOOK_PORT), true, 'свой адрес не опознан: ' + u));
+  const foreign = [
+    'http://127.0.0.1:45832/hook/proxy', 'http://127.0.0.1:45832/other-tool', 'http://127.0.0.1:45832/',
+    'http://127.0.0.1:45832/hook/', 'http://127.0.0.1:45832/hook?src=other-tool', 'http://127.0.0.1:45832/hook?x=1',
+    'http://127.0.0.1:45999/hook', 'http://localhost:45832/hook', 'https://127.0.0.1:45832/hook',
+    'http://user:pw@127.0.0.1:45832/hook', 'http://127.0.0.1/hook',
+    'http://127.0.0.1:VSCODE_PORT/hook', '', 'не url', null, undefined, 45832, { url: LEGACY_URL },
+    'curl -s ' + LEGACY_URL   // текст команды — не адрес
+  ];
+  foreign.forEach((u) => assert.strictEqual(uxMod.isMascotHookUrl(u, HOOK_PORT), false, 'чужое принято за своё: ' + String(u)));
+});
+
+ok('removeMascotHooks (реальная ФС): записи скрепки сняты, чужие хуки (в том числе хук-команда, похожая на скрепочную) и ключи целы, повтор идемпотентен', () => {
+  let home = mkHookHome(hookJson(richSettings()));
   try {
     const f = path.join(home, '.claude', 'settings.json');
-    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
     assert.strictEqual(r.status, 'removed', JSON.stringify(r));
-    const after = fs.readFileSync(f, 'utf8');
-    assert(after.indexOf(HOOK_FROM) === -1, 'мёртвый порт остался в конфиге');
-    assert(after.indexOf(HOOK_TO) !== -1, 'плейсхолдер пака не вернулся');
-    assert.strictEqual(JSON.parse(after).ownKey, 'не трогать', 'чужой ключ пострадал');
-    const junk = fs.readdirSync(path.join(home, '.claude')).filter((n) => /hm-un|\.bak$/.test(n));
+    const after = JSON.parse(fs.readFileSync(f, 'utf8'));
+    assert.strictEqual(JSON.stringify(after), JSON.stringify(richSettingsAfter()),
+      'результат не тот: чужое тронуто или скрепочное осталось\n' + JSON.stringify(after));
+    assert.strictEqual(uxMod.countMascotHooks(after, HOOK_PORT), 0, 'записи скрепки остались');
+    assert.deepStrictEqual(after.hooks.SessionStart, [], 'пустой массив, бывший до нас, тронут');
+    assert.strictEqual(after.ownKey, 'не трогать', 'чужой ключ пострадал');
+    const junk = fs.readdirSync(path.join(home, '.claude')).filter((n) => /hm-un|\.bak$|\.tmp$/.test(n));
     assert.deepStrictEqual(junk, [], 'остались временные файлы: ' + junk.join(','));
+    // Повтор: нечего менять → absent, файл байт-в-байт прежний.
+    const before = fs.readFileSync(f, 'utf8');
+    const r2 = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
+    assert.strictEqual(r2.status, 'absent', JSON.stringify(r2));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'файл тронут вхолостую');
   } finally { dropDir(home); }
 
-  // Повтор: нечего менять → absent, файл байт-в-байт прежний.
-  home = mkHookHome(hookSettings(HOOK_TO));
+  // Файла нет вообще → absent, ничего не создаём.
+  home = mkHookHome(null);
   try {
     const f = path.join(home, '.claude', 'settings.json');
-    const before = fs.readFileSync(f, 'utf8');
-    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
     assert.strictEqual(r.status, 'absent', JSON.stringify(r));
-    assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'файл тронут вхолостую');
+    assert(!fs.existsSync(f), 'settings.json появился из ничего');
   } finally { dropDir(home); }
 });
 
-ok('restoreHookUrl: подлоги отбиты — чужой путь, symlink, битый JSON; dry-run не пишет', () => {
+ok('removeMascotHooks: вид файла сохраняется (отступ, CRLF, завершающий перевод строки); опустевшее событие и hooks убираются, пустой массив до нас остаётся', () => {
+  // Файл, который создала только скрепка: после снятия не должно остаться и пустого hooks.
+  const onlyMascot = () => ({ env: { A: '1' }, hooks: { Stop: [hookGroup(MASCOT_URL)], PreToolUse: [hookGroup(LEGACY_URL, 5)] } });
+  const variants = [
+    ['4 пробела, CRLF, без финального перевода', '    ', '\r\n', false],
+    ['табы, LF, с финальным переводом', '\t', '\n', true],
+    ['2 пробела, CRLF, с финальным переводом', '  ', '\r\n', true],
+  ];
+  variants.forEach(([name, indent, eol, finalNl]) => {
+    const render = (o) => JSON.stringify(o, null, indent).replace(/\n/g, eol) + (finalNl ? eol : '');
+    const home = mkHookHome(render(onlyMascot()));
+    try {
+      const f = path.join(home, '.claude', 'settings.json');
+      const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
+      assert.strictEqual(r.status, 'removed', name + ': ' + JSON.stringify(r));
+      const got = fs.readFileSync(f, 'utf8');
+      assert.strictEqual(got, render({ env: { A: '1' } }), name + ': вид файла изменился, получено ' + JSON.stringify(got));
+    } finally { dropDir(home); }
+  });
+  // Минифицированный файл остаётся однострочным.
+  const home = mkHookHome(JSON.stringify(onlyMascot()));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    assert.strictEqual(uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home)).status, 'removed');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), JSON.stringify({ env: { A: '1' } }), 'минифицированный файл раздулся');
+  } finally { dropDir(home); }
+  // hooks, пустой ещё до нас, не наш: остаётся (а record без скрепки — тем более).
+  const keep = mkHookHome(hookJson({ hooks: {} }));
+  try {
+    const f = path.join(keep, '.claude', 'settings.json');
+    assert.strictEqual(uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(keep)).status, 'absent');
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), hookJson({ hooks: {} }));
+  } finally { dropDir(keep); }
+});
+
+ok('removeMascotHooks: плейсхолдер VSCODE_PORT в конфиг не возвращается — это не URL (A25/B01); прежняя подстановка ловится подлогом', () => {
+  const home = mkHookHome(hookJson(richSettings()));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    assert.strictEqual(uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home)).status, 'removed');
+    const text = fs.readFileSync(f, 'utf8');
+    assert(text.indexOf('VSCODE_PORT') === -1, 'в конфиге снова плейсхолдер VSCODE_PORT');
+    const urls = [];
+    (function walk(v) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') Object.keys(v).forEach((k) => { if (k === 'url' && typeof v[k] === 'string') urls.push(v[k]); else walk(v[k]); });
+    })(JSON.parse(text));
+    assert(urls.length >= 3, 'в файле остались чужие url-хуки, их и проверяем: ' + urls.length);
+    urls.forEach((u) => assert.doesNotThrow(() => new URL(u), 'невалидный адрес хука в settings.json: ' + u));
+    // Контроль самой проверки: прежняя правка («вернуть плейсхолдер») даёт адрес, на котором new URL падает.
+    const oldWay = hookJson(richSettings()).split('127.0.0.1:45832/hook').join('127.0.0.1:VSCODE_PORT/hook');
+    const bad = [];
+    (function walk(v) {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') Object.keys(v).forEach((k) => { if (k === 'url' && typeof v[k] === 'string') bad.push(v[k]); else walk(v[k]); });
+    })(JSON.parse(oldWay));
+    assert(bad.some((u) => { try { new URL(u); return false; } catch (e) { return true; } }),
+      'проверка не отличает прежнюю подстановку плейсхолдера от нормального конфига');
+  } finally { dropDir(home); }
+});
+
+ok('removeMascotHooks: подлоги отбиты — чужой путь, symlink/junction, битый JSON, нечисловой порт; dry-run не пишет; файл изменился под руками — отказ', () => {
   // (1) Чужой путь. Допуск ровно один — ~/.claude/settings.json.
-  let home = mkHookHome(hookSettings(HOOK_FROM));
+  let home = mkHookHome(hookJson(richSettings()));
   try {
     const foreign = path.join(home, 'foreign-settings.json');
-    fs.writeFileSync(foreign, hookSettings(HOOK_FROM), 'utf8');
-    const r = uxMod.restoreHookUrl(foreign, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    fs.writeFileSync(foreign, hookJson(richSettings()), 'utf8');
+    const r = uxMod.removeMascotHooks(foreign, HOOK_PORT, hookOpts(home));
     assert.strictEqual(r.status, 'failed', 'чужой файл принят: ' + JSON.stringify(r));
-    assert(fs.readFileSync(foreign, 'utf8').indexOf(HOOK_FROM) !== -1, 'чужой файл всё-таки изменён');
+    assert.strictEqual(fs.readFileSync(foreign, 'utf8'), hookJson(richSettings()), 'чужой файл всё-таки изменён');
+    const f = path.join(home, '.claude', 'settings.json');
+    assert.strictEqual(uxMod.removeMascotHooks(f, 'x', hookOpts(home)).status, 'failed', 'нечисловой порт принят');
+    assert.strictEqual(uxMod.removeMascotHooks(f, 0, hookOpts(home)).status, 'failed', 'порт 0 принят');
   } finally { dropDir(home); }
 
-  // (2) settings.json подменён symlink-ом на чужой файл — писать через ссылку нельзя.
+  // (2) ~/.claude — junction/symlink на чужую папку: писать через ссылку нельзя. Junction
+  // создаётся без прав администратора, поэтому проверка живая и на Windows.
   home = mkHookHome(null);
   try {
-    const victim = path.join(home, 'victim.json');
-    fs.writeFileSync(victim, hookSettings(HOOK_FROM), 'utf8');
-    const f = path.join(home, '.claude', 'settings.json');
+    const realDir = path.join(home, 'elsewhere');
+    fs.mkdirSync(realDir);
+    fs.writeFileSync(path.join(realDir, 'settings.json'), hookJson(richSettings()), 'utf8');
+    fs.rmSync(path.join(home, '.claude'), { recursive: true, force: true });
     let linked = false;
-    try { fs.symlinkSync(victim, f, 'file'); linked = true; } catch (e) { linked = false; }
-    if (!linked) { console.log('     (symlink недоступен — этот подлог пропущен)'); }
+    try { fs.symlinkSync(realDir, path.join(home, '.claude'), 'junction'); linked = true; } catch (e) { linked = false; }
+    if (!linked) { console.log('     (ни junction, ни symlink на каталог создать нельзя — этот подлог пропущен)'); }
     else {
-      const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
-      assert.strictEqual(r.status, 'failed', 'symlink принят: ' + JSON.stringify(r));
-      assert(fs.readFileSync(victim, 'utf8').indexOf(HOOK_FROM) !== -1, 'через ссылку записали в чужой файл');
+      const r = uxMod.removeMascotHooks(path.join(home, '.claude', 'settings.json'), HOOK_PORT, hookOpts(home));
+      assert.strictEqual(r.status, 'failed', '~/.claude за ссылкой принят: ' + JSON.stringify(r));
+      assert.strictEqual(fs.readFileSync(path.join(realDir, 'settings.json'), 'utf8'), hookJson(richSettings()), 'через ссылку записали в чужой каталог');
     }
   } finally { dropDir(home); }
 
-  // (3) Битый JSON не трогаем вовсе: чинить чужой сломанный конфиг — не наша работа,
-  // а испортить сильнее — легко.
-  home = mkHookHome('{ это не json ' + HOOK_FROM);
+  // (2б) сам settings.json — symlink на чужой файл (на Windows нужны права: там пропуск без шума).
+  home = mkHookHome(null);
+  try {
+    const victim = path.join(home, 'victim.json');
+    fs.writeFileSync(victim, hookJson(richSettings()), 'utf8');
+    const f = path.join(home, '.claude', 'settings.json');
+    let linked = false;
+    try { fs.symlinkSync(victim, f, 'file'); linked = true; } catch (e) { linked = false; }
+    if (linked) {
+      const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
+      assert.strictEqual(r.status, 'failed', 'symlink принят: ' + JSON.stringify(r));
+      assert.strictEqual(fs.readFileSync(victim, 'utf8'), hookJson(richSettings()), 'через ссылку записали в чужой файл');
+    }
+  } finally { dropDir(home); }
+
+  // (3) Битый JSON с нашим адресом не трогаем вовсе; без нашего адреса — просто absent.
+  home = mkHookHome('{ это не json ' + LEGACY_URL);
   try {
     const f = path.join(home, '.claude', 'settings.json');
     const before = fs.readFileSync(f, 'utf8');
-    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform });
+    const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home));
     assert.strictEqual(r.status, 'failed', JSON.stringify(r));
     assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'битый конфиг всё-таки переписан');
   } finally { dropDir(home); }
+  home = mkHookHome('{ это не json, адреса скрепки тут нет');
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    assert.strictEqual(uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home)).status, 'absent', 'чужой битый конфиг без нашего адреса — не отказ');
+  } finally { dropDir(home); }
 
   // (4) dry-run обязан НИЧЕГО не писать.
-  home = mkHookHome(hookSettings(HOOK_FROM));
+  home = mkHookHome(hookJson(richSettings()));
   try {
     const f = path.join(home, '.claude', 'settings.json');
     const before = fs.readFileSync(f, 'utf8');
-    const r = uxMod.restoreHookUrl(f, HOOK_FROM, HOOK_TO, { home, platform: process.platform }, true);
+    const r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home), true);
     assert.strictEqual(r.status, 'removed', JSON.stringify(r));
+    assert(/dry-run/.test(r.message), 'dry-run не помечен');
     assert.strictEqual(fs.readFileSync(f, 'utf8'), before, 'dry-run записал в файл');
+  } finally { dropDir(home); }
+
+  // (5) Файл изменили, пока мы работали (его пишут и Claude Code, и скрепка): чужую правку не затираем.
+  home = mkHookHome(hookJson(richSettings()));
+  try {
+    const f = path.join(home, '.claude', 'settings.json');
+    const origRead = fs.readFileSync;
+    let reads = 0;
+    fs.readFileSync = function (p, ...rest) {
+      const v = origRead.call(fs, p, ...rest);
+      return (String(p) === f && ++reads === 2) ? v + ' ' : v;   // второе чтение видит «чужую правку»
+    };
+    let r;
+    try { r = uxMod.removeMascotHooks(f, HOOK_PORT, hookOpts(home)); } finally { fs.readFileSync = origRead; }
+    assert.strictEqual(r.status, 'failed', 'правка поверх чужой свежей принята: ' + JSON.stringify(r));
+    assert.strictEqual(fs.readFileSync(f, 'utf8'), hookJson(richSettings()), 'файл переписан вопреки отказу');
   } finally { dropDir(home); }
 });
 
-ok('main.js: hookurl подключён и к описанию, и к исполнению (иначе цель молча ничья)', () => {
+ok('main.js: hookentries подключён и к описанию, и к исполнению (иначе цель молча ничья)', () => {
   const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  assert(/case 'hookurl': return uninstallExec\.restoreHookUrl\(/.test(m),
-    'main.js не исполняет hookurl — цель попадёт в план и не будет выполнена');
-  assert(/case 'hookurl': return 'hook-url/.test(m),
-    'main.js не описывает hookurl — человек увидит в плане пустую строку');
+  assert(/case 'hookentries': return uninstallExec\.removeMascotHooks\(t\.file, t\.port, guardOpts\)/.test(m),
+    'main.js не исполняет hookentries — цель попадёт в план и не будет выполнена');
+  assert(/case 'hookentries': return 'записи хуков скрепки/.test(m),
+    'main.js не описывает hookentries — человек увидит в плане пустую строку');
+  assert(m.indexOf("'hookurl'") === -1 && m.indexOf('restoreHookUrl') === -1, 'в main.js остался прежний hookurl/restoreHookUrl');
+  assert(typeof uxMod.removeMascotHooks === 'function' && typeof uxMod.restoreHookUrl === 'undefined',
+    'прежняя restoreHookUrl должна быть заменена, а не жить рядом');
+});
+
+ok('verifyPostconditions: hookentries — остались записи скрепки или нечитаемый конфиг с нашим адресом — проблема; чужие хуки и отсутствие файла — нет', () => {
+  const check = (content) => {
+    const home = mkHookHome(content);
+    try {
+      const f = path.join(home, '.claude', 'settings.json');
+      return uxMod.verifyPostconditions({ targets: [{ type: 'hookentries', file: f, port: HOOK_PORT }] }, hookOpts(home), {});
+    } finally { dropDir(home); }
+  };
+  let v = check(hookJson(richSettings()));
+  assert.strictEqual(v.ok, false, 'записи скрепки остались, а пост-проверка молчит');
+  assert(/хуки скрепки остались/.test(v.problems.join(';')), v.problems.join(';'));
+  v = check(hookJson(richSettingsAfter()));
+  assert.strictEqual(v.ok, true, 'чужие хуки и «похожая» команда приняты за остатки: ' + v.problems.join(';'));
+  v = check(null);
+  assert.strictEqual(v.ok, true, 'нет файла — это успех: ' + v.problems.join(';'));
+  v = check('{ не json ' + LEGACY_URL);
+  assert.strictEqual(v.ok, false, 'нечитаемый конфиг с нашим адресом принят за чистый');
+  v = check('{ не json, адреса нет');
+  assert.strictEqual(v.ok, true, 'чужой нечитаемый конфиг без нашего адреса — не наша проблема');
+});
+
+console.log('== Удаление скрепки: ярлык «Пуск» — по возможности, запись автозапуска — только наша ==');
+
+const RUN_EXE = 'C:\\Users\\t\\AppData\\Local\\Programs\\ClaudeMascot\\claude-mascot.exe';
+// Одна таблица для JS (удаление) и PowerShell (установка и touchup): «своё» обязаны считать одинаково.
+const RUN_VALUE_CASES = [
+  ['в кавычках, как писала прошлая версия', '"' + RUN_EXE + '"', true],
+  ['без кавычек', RUN_EXE, true],
+  ['другой регистр', '"' + RUN_EXE.toUpperCase() + '"', true],
+  ['пробелы по краям', '  "' + RUN_EXE + '"  ', true],
+  ['чужой каталог', '"C:\\Other\\ClaudeMascot\\claude-mascot.exe"', false],
+  ['наш exe, но с аргументами', '"' + RUN_EXE + '" --tray', false],
+  ['другое имя рядом', '"' + RUN_EXE.replace('claude-mascot.exe', 'evil.exe') + '"', false],
+  ['пусто', '', false],
+  ['одни пробелы', '   ', false],
+];
+
+ok('runValueIsOurs и verifyPostconditions: запись Run снимается и считается снятой только если она наша; чужая с тем же именем остаётся законно', () => {
+  RUN_VALUE_CASES.forEach(([name, value, want]) => {
+    assert.strictEqual(uxMod.runValueIsOurs(value, RUN_EXE), want, name);
+  });
+  assert.strictEqual(uxMod.runValueIsOurs(null, RUN_EXE), false, 'значения нет — не наше');
+  assert.strictEqual(uxMod.runValueIsOurs(RUN_EXE, ''), false, 'не знаем свой путь — своим ничего не считаем');
+  // План: у скрепки в Run ограничитель есть, у моста (его значение несёт аргументы) — нет.
+  const w = utMod.uninstallTargets('mascot', { home: 'C:\\Users\\t', platform: 'win32' });
+  const reg = w.targets.find((t) => t.type === 'reg');
+  assert(reg && reg.value === 'ClaudeMascot', 'цель Run скрепки на месте');
+  assert.strictEqual(reg.onlyIfValueIs, RUN_EXE, 'ограничитель — ровно путь к установленному exe');
+  const b = utMod.uninstallTargets('bridge', { home: 'C:\\Users\\t', platform: 'win32' });
+  assert(!('onlyIfValueIs' in b.targets.find((t) => t.type === 'reg')), 'ограничитель попал и мосту — у него значение с аргументами');
+  // Пост-проверка: чужое значение — законный остаток; своё — провал; цель без ограничителя — как раньше.
+  const post = (data, target) => uxMod.verifyPostconditions({ targets: [target] }, { home: 'C:\\Users\\t', platform: 'win32' },
+    { regQuery: () => ({ ok: true, found: true, type: 'REG_SZ', data }) });
+  assert.strictEqual(post('"C:\\Elsewhere\\x.exe"', reg).ok, true, 'чужое значение принято за остаток нашего');
+  assert.strictEqual(post('"' + RUN_EXE + '"', reg).ok, false, 'своё значение осталось, а пост-проверка молчит');
+  assert.strictEqual(post('"C:\\Elsewhere\\x.exe"', { type: 'reg', hive: 'HKCU', key: reg.key, value: 'X' }).ok, false,
+    'цель без ограничителя перестала требовать удаления');
+});
+
+ok('removeFileBestEffort: ярлык за junction — kept, а не failed; обычный удаляется; оставшийся ярлык пост-проверку не краснит', () => {
+  const home = mkHomeDir();
+  try {
+    const realRoaming = path.join(home, 'moved-roaming');
+    const startDir = path.join(realRoaming, 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    fs.mkdirSync(startDir, { recursive: true });
+    fs.writeFileSync(path.join(startDir, 'Claude Mascot.lnk'), 'LNK');
+    fs.mkdirSync(path.join(home, 'AppData'));
+    let linked = false;
+    try { fs.symlinkSync(realRoaming, path.join(home, 'AppData', 'Roaming'), 'junction'); linked = true; } catch (e) { linked = false; }
+    if (!linked) { console.log('     (junction создать нельзя — профиль с перенесённым Roaming не воспроизвести)'); }
+    else {
+      const lnk = path.join(home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Claude Mascot.lnk');
+      const o = hookOpts(home);
+      const hard = uxMod.removeFile(lnk, o);
+      assert.strictEqual(hard.status, 'failed', 'обязательная цель за junction должна отказывать (так и было): ' + JSON.stringify(hard));
+      const soft = uxMod.removeFileBestEffort(lnk, o);
+      assert.strictEqual(soft.status, 'kept', 'по возможности — оставлен, а не провал: ' + JSON.stringify(soft));
+      assert(/не критично/.test(soft.message), 'причина не названа: ' + soft.message);
+      assert(fs.existsSync(path.join(startDir, 'Claude Mascot.lnk')), 'файл за junction тронут');
+      // Пост-проверка: с флагом остаток законен, без флага — проблема (контроль).
+      const plan = (extra) => ({ targets: [Object.assign({ type: 'file', path: lnk }, extra)] });
+      assert.strictEqual(uxMod.verifyPostconditions(plan({ bestEffort: true }), o, {}).ok, true, 'оставшийся ярлык покраснил пост-проверку');
+      assert.strictEqual(uxMod.verifyPostconditions(plan({}), o, {}).ok, false, 'без bestEffort остаток обязан быть проблемой');
+    }
+  } finally { dropDir(home); }
+
+  // Обычный профиль: ярлык удаляется как раньше.
+  const home2 = mkHomeDir();
+  try {
+    const dir = path.join(home2, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    fs.mkdirSync(dir, { recursive: true });
+    const lnk = path.join(dir, 'Claude Mascot.lnk');
+    fs.writeFileSync(lnk, 'LNK');
+    assert.strictEqual(uxMod.removeFileBestEffort(lnk, hookOpts(home2)).status, 'removed');
+    assert(!fs.existsSync(lnk), 'ярлык остался');
+    assert.strictEqual(uxMod.removeFileBestEffort(lnk, hookOpts(home2)).status, 'absent', 'повтор');
+  } finally { dropDir(home2); }
+});
+
+ok('main.js: bestEffort-файл и ограничитель onlyIfValueIs подключены к исполнению (ограничитель — ДО удаления значения)', () => {
+  const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert(/if \(t\.bestEffort\) return uninstallExec\.removeFileBestEffort\(t\.path, guardOpts\);/.test(m),
+    'main.js не передаёт bestEffort-цель исполнителю по возможности');
+  const i = m.indexOf('function winRegDeleteValue(t)');
+  assert(i > 0, 'winRegDeleteValue на месте');
+  const body = m.slice(i, m.indexOf('\n}\n', i));
+  assert(body.includes('uninstallExec.runValueIsOurs(q0.data, t.onlyIfValueIs)'), 'ограничитель не вызывается');
+  assert(body.includes("status: 'kept'"), 'чужое значение должно давать kept, а не failed');
+  assertOrder(body, 'runValueIsOurs(q0.data, t.onlyIfValueIs)', 'regDeleteValueTyped(keyPath, t.value)', 'сверка «наше ли» стоит ДО удаления значения');
 });
 
 console.log('== Возврат из карантина: транзиентный EPERM больше не стоит чужой папки ==');
@@ -5034,8 +5307,11 @@ ok('install-скрипты: легаси HM-RECEIPT эмиссии (фильтр
   const musts = [
     ['scripts/windows/uv.ps1', /HM-RECEIPT path \$dest/, /HM-RECEIPT pathentry \$dest/],
     ['scripts/macos/uv.sh', /HM-RECEIPT path \$DEST\/uv/],
-    ['scripts/windows/mascot.ps1', /HM-RECEIPT path \$destDir/, /HM-RECEIPT reg HKCU\|Software\\Microsoft\\Windows\\CurrentVersion\\Run\|ClaudeMascot/],
-    ['scripts/macos/mascot.sh', /HM-RECEIPT path \$DEST/, /HM-RECEIPT bundleid/, /HM-RECEIPT teamid \$MASCOT_TEAM_ID/, /HM-RECEIPT launchagent com\.hamidun\.claude-mascot\|\$LA/],
+    // Скрепка с 06.10.2026 без автозапуска (решение владельца, строка A26): у Windows
+    // вместо реестровой квитанции Run — ярлык в меню «Пуск», у macOS квитанции
+    // LaunchAgent нет совсем. Что старых строк больше нет — проверяется ниже.
+    ['scripts/windows/mascot.ps1', /HM-RECEIPT path \$destDir/, /HM-RECEIPT path \$lnkPath/],
+    ['scripts/macos/mascot.sh', /HM-RECEIPT path \$DEST/, /HM-RECEIPT bundleid/, /HM-RECEIPT teamid \$MASCOT_TEAM_ID/],
     ['scripts/windows/bridge.ps1', /HM-RECEIPT path \$dst/, /HM-RECEIPT reg HKCU\|Software\\Microsoft\\Windows\\CurrentVersion\\Run\|HamidunBridge/],
     ['scripts/macos/bridge.sh', /HM-RECEIPT path \$DST/, /HM-RECEIPT launchagent com\.hamidun\.bridge\|\$LA/, /HM-RECEIPT profileline \$RC\|\$BRIDGE_RC_MARK/],
     // vendor-only: клона больше нет → $src/$SRC (клон-исходник) в квитанцию НЕ пишется;
@@ -5048,6 +5324,11 @@ ok('install-скрипты: легаси HM-RECEIPT эмиссии (фильтр
     if (!s) return; // файл может отсутствовать в редакции (например course в free)
     res.forEach((re) => assert(re.test(s), file + ': нет эмиссии ' + re));
   });
+  // Квитанций автозапуска, которого скрепка больше не ставит, тоже быть не должно.
+  assert(!/HM-RECEIPT reg/.test(read('scripts/windows/mascot.ps1')),
+    'mascot.ps1: реестровая квитанция Run больше не эмитится — автозапуск не прописывается');
+  assert(!/HM-RECEIPT launchagent/.test(read('scripts/macos/mascot.sh')),
+    'mascot.sh: квитанция LaunchAgent больше не эмитится — агент не ставится');
   // course-скрипты есть только в course-редакции
   const cps = read('scripts/windows/course.ps1');
   if (cps) assert(/HM-RECEIPT path \$courseDir/.test(cps) && /HM-RECEIPT path \$lnkPath/.test(cps), 'course.ps1 эмитит пути');
@@ -10649,7 +10930,7 @@ ok('config.json в репозитории без сборочных маркер
   // Библиотеки, а не компоненты: их подключают через точку (dot-source), они
   // НЕ запускаются обёрткой и своего кода возврата не отдают. Требовать от них
   // финальный exit — требовать неверного.
-  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1', '_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1']);
+  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1', '_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', '_mascot.ps1', '_touchups.ps1']);
 
   const listScripts = () => fs.readdirSync(path.join(ROOT, 'scripts', 'windows'))
     .filter((f) => f.endsWith('.ps1'))
@@ -15307,4 +15588,815 @@ ok('config.json в репозитории без сборочных маркер
       } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
     });
   }
+})();
+
+// ===========================================================================
+// Скрепка без автозапуска (решение владельца 06.10.2026, строка A26 разбора
+// диалогов поддержки): люди не понимали, что за скрепка появляется при входе в
+// систему и почему. Теперь ни HKCU\Run, ни LaunchAgent; запись прошлых версий
+// снимается, только если она НАША, — и не только установкой, но и подправкой
+// touchup-mascot, которая идёт при каждом запуске установщика (сама установка при
+// повторном запуске не выполняется: «уже установлено» снято по умолчанию). На Windows
+// вместо автозапуска — ярлык в меню «Пуск», и пишется он так, чтобы подложенная ссылка
+// или перенаправленная папка не увели запись из-под админа.
+// Логика исполняется настоящими PowerShell 5.1 и bash (функции берутся из самих файлов);
+// у статических сторожей — отрицательный контроль на подлоге.
+// ===========================================================================
+(function mascotNoAutostartTests() {
+  console.log('\n== Скрепка: без автозапуска, старый снимается только свой (и при повторном запуске установщика), ярлык в «Пуске» ==');
+  const WIN = (n) => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', n), 'utf8');
+  const MAC = (n) => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', n), 'utf8');
+  const PS1 = () => WIN('mascot.ps1');
+  const LIB = () => WIN('_mascot.ps1');
+  const TOUCH = () => WIN('touchup-mascot.ps1');
+  const SH = () => MAC('mascot.sh');
+  const SHLIB = () => MAC('_mascot.sh');
+  const TOUCHSH = () => MAC('touchup-mascot.sh');
+  const LIB_PATH = path.join(ROOT, 'scripts', 'windows', '_mascot.ps1');
+  const TOUCH_PATH = path.join(ROOT, 'scripts', 'windows', 'touchup-mascot.ps1');
+  const PS51 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const posix = (p) => p.replace(/\\/g, '/');
+  const WIN_FILES = () => [['mascot.ps1', PS1()], ['_mascot.ps1', LIB()], ['touchup-mascot.ps1', TOUCH()]];
+  const MAC_FILES = () => [['mascot.sh', SH()], ['_mascot.sh', SHLIB()], ['touchup-mascot.sh', TOUCHSH()]];
+
+  // Сторожа — функциями, чтобы тот же код прогнать и на подлоге. Комментарии
+  // вырезаются: скрипты нарочно цитируют старое поведение в пояснениях.
+  const psAutostartHits = (src) => {
+    const c = codeOnly(src);
+    const hits = [];
+    if (/\b(New|Set)-ItemProperty\b/i.test(c)) hits.push('запись в реестр (New/Set-ItemProperty)');
+    if (/\breg(\.exe)?\s+add\b/i.test(c)) hits.push('reg add');
+    if (/GetFolderPath\(\s*'(Common)?Startup'\s*\)|Start Menu\\Programs\\Startup/i.test(c)) hits.push('папка «Автозагрузка»');
+    if (/Register-ScheduledTask|schtasks/i.test(c)) hits.push('задача планировщика');
+    return hits;
+  };
+  const shAutostartHits = (src) => {
+    const c = codeOnly(src);
+    const hits = [];
+    if (/RunAtLoad/.test(c)) hits.push('RunAtLoad');
+    if (/launchctl\s+(load|bootstrap|submit|enable)\b/.test(c)) hits.push('launchctl load/bootstrap/submit/enable');
+    if (/login item|LoginItems|SMAppService/i.test(c)) hits.push('объект входа');
+    return hits;
+  };
+  // Прямой запуск того, что лежит в каталоге пользователя (exe или ярлык на него), из
+  // процесса под админом — ровно то, что модель безопасности запрещает.
+  const psElevatedLaunchHits = (src) => {
+    const m = /Start-Process\s+(-FilePath\s+)?["']?\$(dest|lnkPath)\b|&\s*["']?\$(dest|lnkPath)\b|Invoke-Item\b[^\n]*\$(dest|lnkPath)|\.Run\(|ShellExecute/i
+      .exec(codeOnly(src));
+    return m ? [m[0]] : [];
+  };
+  // Правила всех touchup-*: ни сети, ни ожиданий, ни ненулевого кода возврата.
+  const touchOffenses = (src, kind) => {
+    const c = codeOnly(src);
+    const hits = [];
+    if (kind === 'ps') {
+      if (/Invoke-WebRequest|Invoke-RestMethod|Net\.WebClient|Start-BitsTransfer|Test-NetConnection|Resolve-DnsName|\bcurl\b|\bwget\b|\biwr\b|\birm\b/i.test(c)) hits.push('сеть');
+      if (/Start-Sleep|Wait-Process|\.WaitForExit|Start-Process[^\n]*-Wait/i.test(c)) hits.push('ожидание');
+      if (/\bexit\s+([1-9]|\$)/.test(c)) hits.push('ненулевой exit');
+    } else {
+      if (/\b(curl|wget|ssh|scp|nc)\s/.test(c)) hits.push('сеть');
+      if (/\b(sleep|wait)\b/.test(c)) hits.push('ожидание');
+      if (/\bexit\s+([1-9]|\$)/.test(c) || /^\s*set\s+-[a-z]*e/m.test(c)) hits.push('ненулевой exit / set -e');
+    }
+    return hits;
+  };
+
+  ok('скрепка: автозапуск не ставится никаким путём (Run, папка автозагрузки, планировщик, LaunchAgent, объекты входа), тексты его не обещают', () => {
+    WIN_FILES().forEach(([n, s]) => assert.deepStrictEqual(psAutostartHits(s), [], n + ' снова ставит автозапуск'));
+    MAC_FILES().forEach(([n, s]) => assert.deepStrictEqual(shAutostartHits(s), [], n + ' снова ставит автозапуск'));
+    // Раньше запасная фраза говорила «стартует при следующем входе» — теперь это неправда.
+    WIN_FILES().concat(MAC_FILES()).forEach(([n, s]) => {
+      assert(!/стартует при следующем входе|\(автозапуск\)|Run-автозапуск|LaunchAgent автозапуск/.test(codeOnly(s)),
+        n + ': текст для человека всё ещё обещает автозапуск');
+    });
+    // Вместо обещания человеку говорят, откуда открыть скрепку потом.
+    assert(PS1().includes("$reopen = if ($lnkPath) { 'меню «Пуск» → Claude Mascot' } else { $dest }"),
+      'mascot.ps1: подсказка «меню «Пуск» → Claude Mascot» (а без ярлыка — путь к exe)');
+    assert(/REOPEN="Программы → \$MASCOT_NAME/.test(SH()), 'mascot.sh: подсказка «Программы → …»');
+  });
+
+  ok('скрепка: сторожа автозапуска и прямого запуска краснеют на подлоге и не путают комментарий с кодом', () => {
+    const ps = PS1(), sh = SH();
+    const runLine = "New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'ClaudeMascot' -Value x";
+    assert(psAutostartHits(ps + '\r\n' + runLine + '\r\n').length, 'возврат записи Run пойман');
+    assert(psAutostartHits(LIB() + '\r\n' + runLine + '\r\n').length, 'возврат записи Run в общую библиотеку пойман');
+    assert(psAutostartHits(TOUCH() + '\r\n' + runLine + '\r\n').length, 'возврат записи Run в touchup пойман');
+    assert(psAutostartHits(ps + "\r\n$s = [Environment]::GetFolderPath('Startup')\r\n").length, 'ярлык в «Автозагрузку» пойман');
+    assert(psAutostartHits(ps + '\r\nschtasks /Create /SC ONLOGON /TN m /TR x\r\n').length, 'задача «при входе» поймана');
+    assert.deepStrictEqual(psAutostartHits(ps + '\r\n# ' + runLine + '\r\n'), [], 'закомментированная строка — не код');
+    assert(shAutostartHits(sh + '\n  <key>RunAtLoad</key><true/>\n').length, 'возврат RunAtLoad пойман');
+    assert(shAutostartHits(SHLIB() + '\nlaunchctl load "$LA"\n').length, 'возврат launchctl load в общую библиотеку пойман');
+    assert.deepStrictEqual(shAutostartHits(sh + '\n# <key>RunAtLoad</key><true/>\n'), [], 'закомментированная строка — не код');
+    WIN_FILES().forEach(([n, s]) => assert.deepStrictEqual(psElevatedLaunchHits(s), [], n + ' запускает exe или ярлык напрямую из-под админа'));
+    ['Start-Process -FilePath $dest', 'Start-Process "$dest"', '& $dest', 'Invoke-Item $lnkPath', '$ws.Run($dest)']
+      .forEach((bad) => assert(psElevatedLaunchHits(ps + '\r\n' + bad + '\r\n').length, 'не пойман прямой запуск: ' + bad));
+  });
+
+  ok('mascot.ps1 (статика): снятие старого Run и ярлык подключены к настоящим ключу, папке и exe; квитанция ярлыка — только когда он есть', () => {
+    const c = codeOnly(PS1());
+    assert(c.includes("_mascot.ps1"), 'mascot.ps1 не подключает общую библиотеку');
+    assert(c.includes("$null = Remove-HmMascotOldAutorun 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' $dest"),
+      'снятие зовётся на настоящем ключе Run и на нашем exe');
+    // Папка ярлыков — от профиля, сверенная с ответом оболочки; тот же вызов повторяется перед каждым переносом.
+    assert(c.includes('$progsDir = Get-HmMascotProgramsDir'), 'папка ярлыков не берётся от профиля');
+    assert(c.includes('$lnkPath = New-HmMascotShortcut $progsDir $dest { $null = Get-HmMascotProgramsDir }'),
+      'ярлык создаётся не в проверенную папку или без повторной сверки перед переносом');
+    assert(!/GetFolderPath\(\s*'Programs'\s*\)/.test(c), 'mascot.ps1 снова берёт папку «Programs» напрямую у оболочки (реестр, куда пишет любая программа)');
+    assertOrder(c, 'Copy-Item -Force $src $dest', '$lnkPath = New-HmMascotShortcut', 'ярлык создаётся ПОСЛЕ копирования exe');
+    assert(c.includes('if ($lnkPath) { Write-Host "HM-RECEIPT path $lnkPath" }'), 'квитанция ярлыка — только если он реально создан');
+    assertOrder(c, '$lnkPath = New-HmMascotShortcut', 'HM-RECEIPT path $lnkPath', 'квитанция идёт после создания');
+    // Правило «чьё» определено один раз — в библиотеке; копия в mascot.ps1 разошлась бы с touchup.
+    ['Test-HmMascotRunValueOurs', 'Remove-HmMascotOldAutorun', 'New-HmMascotShortcut', 'Get-HmMascotProgramsDir'].forEach((fn) => {
+      assert(!new RegExp('function\\s+' + fn).test(c), 'mascot.ps1 определяет ' + fn + ' сам — расхождение с touchup неизбежно');
+      assert(new RegExp('function\\s+' + fn).test(codeOnly(LIB())), fn + ' не определена в _mascot.ps1');
+    });
+  });
+
+  ok('mascot.sh (статика): скрепка запускается один раз через open — после снятия старого агента', () => {
+    const c = codeOnly(SH());
+    assert(/if open "\$DEST" 2>\/dev\/null; then\n\s*LAUNCHED=1/.test(c), 'запуск один раз через open');
+    // Порядок не косметический: если процесс старого агента пережил pkill, open лишь
+    // вывел бы его на передний план, а выгрузка агента следом убила бы его — и человек
+    // остался бы без скрепки при LAUNCHED=1.
+    assertOrder(c, "remove_old_mascot_autostart 'com.hamidun.claude-mascot'", 'if open "$DEST"',
+      'старый агент снимается ДО запуска');
+    assert(c.includes('source "$DIR/_mascot.sh"'), 'mascot.sh не подключает общую библиотеку');
+    assert(!/remove_old_mascot_autostart\(\)/.test(c), 'mascot.sh определяет функцию сам — расхождение с touchup неизбежно');
+    assert(/remove_old_mascot_autostart\(\) \{/.test(codeOnly(SHLIB())), 'функция не определена в _mascot.sh');
+  });
+
+  ok('targets: mascot — win32 убирает ярлык из меню Пуск и автозапуск прошлых версий; darwin — LaunchAgent прошлых версий', () => {
+    const w = utMod.uninstallTargets('mascot', { platform: 'win32', home: 'C:\\Users\\t' });
+    const lnk = path.win32.join('C:\\Users\\t', 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Claude Mascot.lnk');
+    assert(w.targets.some((t) => t.type === 'file' && t.path === lnk && t.bestEffort === true),
+      'ярлык в плане удаления — и не как обязательная цель: ' + JSON.stringify(w.targets));
+    assert(w.targets.some((t) => t.type === 'reg' && t.hive === 'HKCU' &&
+      t.key === 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' && t.value === 'ClaudeMascot' &&
+      t.onlyIfValueIs === 'C:\\Users\\t\\AppData\\Local\\Programs\\ClaudeMascot\\claude-mascot.exe'),
+      'запись Run от прошлых версий снимается, но только если ведёт на наш exe');
+    // Имя и папка у установки и удаления одни и те же — иначе удаление искало бы не тот файл.
+    assert(LIB().includes("$lnk = Join-Path $Dir 'Claude Mascot.lnk'"), '_mascot.ps1 кладёт ярлык под тем же именем');
+    const m = utMod.uninstallTargets('mascot', { platform: 'darwin', home: '/Users/t', mascotMac: null });
+    assert(m.targets.some((t) => t.type === 'launchagent' && t.label === 'com.hamidun.claude-mascot' &&
+      t.plist === '/Users/t/Library/LaunchAgents/com.hamidun.claude-mascot.plist'), 'LaunchAgent прошлых версий снимается при удалении');
+    assert(SH().includes("remove_old_mascot_autostart 'com.hamidun.claude-mascot' \"$HOME/Library/LaunchAgents/com.hamidun.claude-mascot.plist\""),
+      'установка снимает агента по той же метке и тому же пути, что и удаление');
+    assert(/remove_old_mascot_autostart 'com\.hamidun\.claude-mascot' "\$plist" quiet/.test(TOUCHSH()), 'touchup снимает агента по той же метке');
+    assert(TOUCHSH().includes('local plist="$HOME/Library/LaunchAgents/com.hamidun.claude-mascot.plist"'), 'touchup: путь агента тот же, что у удаления');
+  });
+
+  ok('touchup-mascot: автономен и короток — подключает общую библиотеку, без сети и ожиданий, выходит с 0, печатает одну строку ОБНОВЛЕНО; правило владения записью определено один раз', () => {
+    assert.deepStrictEqual(touchOffenses(TOUCH(), 'ps'), [], 'touchup-mascot.ps1 нарушает правила touchup');
+    assert.deepStrictEqual(touchOffenses(TOUCHSH(), 'sh'), [], 'touchup-mascot.sh нарушает правила touchup');
+    const tc = codeOnly(TOUCH()), ts = codeOnly(TOUCHSH());
+    assert(tc.includes("(Join-Path $PSScriptRoot '_mascot.ps1')"), 'touchup-mascot.ps1 сам подключает нужное');
+    assert(ts.includes('source "$DIR/_mascot.sh"'), 'touchup-mascot.sh сам подключает нужное');
+    assert(tc.includes("Remove-HmMascotOldAutorun 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' $dest -Quiet"), 'touchup зовёт ту же функцию, что установка');
+    assert(ts.includes("remove_old_mascot_autostart 'com.hamidun.claude-mascot' \"$plist\" quiet"), 'touchup зовёт ту же функцию, что установка');
+    // Тот же путь exe, что у установки: именно на него указывала запись прошлых версий.
+    assert(tc.includes("$dest = Join-Path $env:LOCALAPPDATA 'Programs\\ClaudeMascot\\claude-mascot.exe'"), 'touchup считает exe иначе, чем установка');
+    assert(PS1().includes("$dest    = Join-Path $destDir 'claude-mascot.exe'") && PS1().includes("$destDir = Join-Path $env:LOCALAPPDATA 'Programs\\ClaudeMascot'"),
+      'установка считает exe иначе, чем touchup');
+    // Вся работа внутри try/catch, а последняя исполняемая строка — exit 0.
+    assert(/^try \{/m.test(tc) && /^\} catch \{/m.test(tc), 'touchup-mascot.ps1: работа вне try/catch');
+    const lastPs = tc.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+    const lastSh = ts.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+    assert.strictEqual(lastPs, 'exit 0', 'touchup-mascot.ps1 кончается не exit 0: ' + lastPs);
+    assert.strictEqual(lastSh, 'exit 0', 'touchup-mascot.sh кончается не exit 0: ' + lastSh);
+    // «ОБНОВЛЕНО» — ровно в одном месте: одна строка и только когда что-то изменилось.
+    assert.strictEqual((tc.match(/ОБНОВЛЕНО:/g) || []).length, 1, 'ОБНОВЛЕНО в touchup-mascot.ps1 печатается не в одном месте');
+    assert.strictEqual((ts.match(/ОБНОВЛЕНО:/g) || []).length, 1, 'ОБНОВЛЕНО в touchup-mascot.sh печатается не в одном месте');
+    assert(/-eq 'removed'\)\s*\{\s*\n\s*Write-Host 'ОБНОВЛЕНО:/.test(tc), 'ОБНОВЛЕНО не привязано к исходу removed');
+    assert(/removed\)\s+echo "ОБНОВЛЕНО:/.test(ts), 'ОБНОВЛЕНО не привязано к исходу removed');
+    // Правило «чьё» определено один раз — в библиотеках (две копии разойдутся молча).
+    const winDir = path.join(ROOT, 'scripts', 'windows');
+    ['Test-HmMascotRunValueOurs', 'Remove-HmMascotOldAutorun'].forEach((fn) => {
+      const owners = fs.readdirSync(winDir).filter((f) => /\.ps1$/.test(f) && new RegExp('function\\s+' + fn).test(codeOnly(fs.readFileSync(path.join(winDir, f), 'utf8'))));
+      assert.deepStrictEqual(owners, ['_mascot.ps1'], fn + ' определена не только в _mascot.ps1: ' + owners.join(','));
+    });
+    const macDir = path.join(ROOT, 'scripts', 'macos');
+    const macOwners = fs.readdirSync(macDir).filter((f) => /\.sh$/.test(f) && /remove_old_mascot_autostart\(\) \{/.test(codeOnly(fs.readFileSync(path.join(macDir, f), 'utf8'))));
+    assert.deepStrictEqual(macOwners, ['_mascot.sh'], 'remove_old_mascot_autostart определена не только в _mascot.sh: ' + macOwners.join(','));
+  });
+
+  ok('touchup-mascot: сторож правил краснеет на подлоге (сеть, ожидание, ненулевой код) и не путает комментарий с кодом', () => {
+    const ps = TOUCH(), sh = TOUCHSH();
+    ['\r\nInvoke-WebRequest http://x\r\n', '\r\nStart-Sleep 3\r\n', '\r\nexit 1\r\n', '\r\nStart-Process x -Wait\r\n'].forEach((bad) =>
+      assert(touchOffenses(ps + bad, 'ps').length, 'не пойдено в ps: ' + bad.trim()));
+    ['\ncurl -fsS http://x\n', '\nsleep 3\n', '\nexit 1\n', '\nset -e\n'].forEach((bad) =>
+      assert(touchOffenses(sh + bad, 'sh').length, 'не пойдено в sh: ' + bad.trim()));
+    assert.deepStrictEqual(touchOffenses(ps + '\r\n# Invoke-WebRequest, Start-Sleep, exit 1\r\n', 'ps'), [], 'комментарий принят за код');
+    assert.deepStrictEqual(touchOffenses(sh + '\n# curl, sleep, exit 1, set -e\n', 'sh'), [], 'комментарий принят за код');
+  });
+
+  if (bashAvailable()) {
+    ok('mascot.sh remove_old_mascot_autostart (прогон bash, launchctl-стаб): свой агент выгружен и удалён, чужой файл и пустое место не тронуты; мутант без проверки метки пойман', () => {
+      const lib = SHLIB();
+      const labelCheck = ' || ! grep -qF "$label" "$la" 2>/dev/null';
+      assert(lib.includes(labelCheck), 'проверка метки на месте');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mla-')).replace(/\\/g, '/');
+      try {
+        fs.mkdirSync(base + '/LaunchAgents');
+        const la = base + '/LaunchAgents/com.hamidun.claude-mascot.plist';
+        const log = base + '/launchctl.log';
+        const libFile = posix(path.join(ROOT, 'scripts', 'macos', '_mascot.sh'));
+        const mutFile = base + '/mutant.sh';
+        fs.writeFileSync(mutFile, lib.replace(labelCheck, ''));
+        // Ровно тот plist, что ставила прошлая версия mascot.sh.
+        const ours = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n' +
+          '  <key>Label</key><string>com.hamidun.claude-mascot</string>\n  <key>ProgramArguments</key>\n' +
+          '  <array><string>/Users/t/Applications/Claude Mascot.app/Contents/MacOS/claude-mascot</string></array>\n' +
+          '  <key>RunAtLoad</key><true/>\n</dict></plist>\n';
+        const foreign = '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n' +
+          '  <key>Label</key><string>com.example.other</string>\n</dict></plist>\n';
+        const run = (libf, quiet) => spawnSync('bash', ['-c',
+          'set -uo pipefail\nlaunchctl() { echo "LAUNCHCTL $*" >> "' + log + '"; return 0; }\nsource "' + libf + '"\n' +
+          "remove_old_mascot_autostart 'com.hamidun.claude-mascot' \"" + la + '"' + (quiet ? ' quiet' : '') + '\necho "RC=$? RES=$MASCOT_OLD_AUTOSTART"\n'],
+        { encoding: 'utf8', timeout: 30000 });
+        const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '');
+        // 1) агент прошлой версии — наш
+        fs.writeFileSync(la, ours);
+        let r = run(libFile);
+        assert(/RC=0 RES=removed/.test(r.stdout), 'функция отработала: ' + r.stdout + r.stderr);
+        assert(!fs.existsSync(la), 'наш plist удалён');
+        assert(calls().includes('LAUNCHCTL unload ' + la), 'агент выгружен: ' + calls());
+        assert(/Автозапуск скрепки от прошлой установки снят/.test(r.stdout), 'снятие видно в журнале');
+        // 1б) тихий режим: исход в переменной, строк нет (говорит вызывающий — touchup одной строкой)
+        fs.writeFileSync(la, ours);
+        r = run(libFile, true);
+        assert.strictEqual(r.stdout.trim(), 'RC=0 RES=removed', 'в тихом режиме функция заговорила: ' + r.stdout);
+        // 2) под тем же именем чужой файл
+        fs.writeFileSync(log, '');
+        fs.writeFileSync(la, foreign);
+        r = run(libFile);
+        assert.strictEqual(fs.readFileSync(la, 'utf8'), foreign, 'чужой файл цел');
+        assert.strictEqual(calls(), '', 'чужой агент не выгружался');
+        assert(/RES=foreign/.test(r.stdout) && /не наш автозапуск скрепки/.test(r.stdout), 'отказ виден в журнале: ' + r.stdout);
+        // 3) агента нет — ни вызовов, ни строк в журнале
+        fs.rmSync(la);
+        r = run(libFile);
+        assert.strictEqual(calls(), '', 'без файла launchctl не зовётся');
+        assert.strictEqual(r.stdout.trim(), 'RC=0 RES=absent', 'без файла журнал молчит: ' + r.stdout);
+        // Отрицательный контроль: без проверки метки чужой файл удаляется — тест это видит.
+        fs.writeFileSync(la, foreign);
+        r = run(mutFile);
+        assert(!fs.existsSync(la), 'мутант без проверки метки удалил чужой файл — значит выше его держит именно метка');
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+
+    ok('touchup-mascot.sh (прогон bash, launchctl-стаб): старый агент снят одной строкой при каждом запуске, повтор и чужое молчат, холостой прогон и сбои — код 0', () => {
+      const base = posix(fs.mkdtempSync(path.join(os.tmpdir(), 'hm-tsh-')));
+      try {
+        const script = [
+          'T="$1"; TOUCH="$2"',
+          // PATH собирается из ПОСИКС-путей: двоеточие в «C:/…» разрезало бы запись на две
+          'TP="$(cygpath -u "$T" 2>/dev/null || printf %s "$T")"',
+          'mkdir -p "$T/bin" "$T/bin-norm" "$T/home/Library/LaunchAgents" "$T/solo"',
+          'cat > "$T/bin/launchctl" <<\'EOS\'',
+          '#!/bin/sh',
+          'echo "LAUNCHCTL $*" >> "$HM_T_LOG"',
+          'exit 0',
+          'EOS',
+          'chmod +x "$T/bin/launchctl"',
+          // rm, который ничего не удаляет: имитация «удалить не удалось»
+          'cat > "$T/bin-norm/rm" <<\'EOS\'',
+          '#!/bin/sh',
+          'exit 0',
+          'EOS',
+          'chmod +x "$T/bin-norm/rm"',
+          'PL="$T/home/Library/LaunchAgents/com.hamidun.claude-mascot.plist"',
+          'OURS=\'<plist version="1.0"><dict><key>Label</key><string>com.hamidun.claude-mascot</string><key>RunAtLoad</key><true/></dict></plist>\'',
+          'FOREIGN=\'<plist version="1.0"><dict><key>Label</key><string>com.example.other</string></dict></plist>\'',
+          'go() { local pre="$1"; shift; env HOME="$T/home" PATH="$pre:$PATH" HM_T_LOG="$T/log" "$@"; }',
+          'report() { # имя, rc, вывод',
+          '  local o; o="$(printf "%s" "$3" | tr "\\n" "~")"',
+          '  echo "CASE $1 RC=$2 PL=$([ -e "$PL" ] || [ -L "$PL" ] && echo 1 || echo 0) LOG=[$(tr "\\n" "|" < "$T/log" 2>/dev/null)] OUT=$o"',
+          '}',
+          // S1: агент прошлой версии, он наш
+          ': > "$T/log"; printf "%s\\n" "$OURS" > "$PL"',
+          'out="$(go "$TP/bin" bash "$TOUCH")"; rc=$?; report S1-ours $rc "$out"',
+          // S2: повтор — менять нечего
+          ': > "$T/log"; out="$(go "$TP/bin" bash "$TOUCH")"; rc=$?; report S2-again $rc "$out"',
+          // S3: под тем же именем чужой файл
+          ': > "$T/log"; printf "%s\\n" "$FOREIGN" > "$PL"',
+          'out="$(go "$TP/bin" bash "$TOUCH")"; rc=$?; report S3-foreign $rc "$out"',
+          // S4: ссылка на файл с нашей меткой (если система умеет настоящие symlink)
+          'rm -f "$PL"; printf "%s\\n" "$OURS" > "$T/victim.plist"; ln -s "$T/victim.plist" "$PL" 2>/dev/null',
+          ': > "$T/log"',
+          'if [ -L "$PL" ]; then out="$(go "$TP/bin" bash "$TOUCH")"; rc=$?; report S4-symlink $rc "$out"; echo "VICTIM=$([ -e "$T/victim.plist" ] && echo 1 || echo 0)"; else echo "CASE S4-symlink SKIP"; fi',
+          'rm -f "$PL"',
+          // S4б: на месте plist лежит каталог — не обычный файл, значит не наш
+          'mkdir -p "$PL"; : > "$T/log"',
+          'out="$(go "$TP/bin" bash "$TOUCH")"; rc=$?; report S4b-dir $rc "$out"; rmdir "$PL" 2>/dev/null',
+          // S5: холостой прогон ничего не меняет
+          ': > "$T/log"; printf "%s\\n" "$OURS" > "$PL"',
+          'out="$(go "$TP/bin" HM_DRY_RUN=1 bash "$TOUCH")"; rc=$?; report S5-dry $rc "$out"',
+          // S6: удалить не удалось (rm-пустышка)
+          ': > "$T/log"; out="$(go "$TP/bin-norm:$TP/bin" bash "$TOUCH")"; rc=$?; report S6-rmfails $rc "$out"',
+          'rm -f "$PL"',
+          // S7: общей библиотеки рядом нет
+          'cp "$TOUCH" "$T/solo/touchup-mascot.sh"; printf "%s\\n" "$OURS" > "$PL"; : > "$T/log"',
+          'out="$(go "$TP/bin" bash "$T/solo/touchup-mascot.sh")"; rc=$?; report S7-nolib $rc "$out"',
+        ].join('\n');
+        const r = spawnSync('bash', ['-c', script, 'bash', base, posix(path.join(ROOT, 'scripts', 'macos', 'touchup-mascot.sh'))],
+          { encoding: 'utf8', timeout: 120000 });
+        const out = r.stdout || '';
+        const cs = (name) => {
+          const m = new RegExp('CASE ' + name + ' RC=(\\d+) PL=([01]) LOG=\\[([^\\]]*)\\] OUT=(.*)').exec(out);
+          assert(m, name + ': сценарий не отчитался: ' + out + (r.stderr || ''));
+          return { rc: Number(m[1]), pl: m[2], log: m[3], out: m[4].trim() };
+        };
+        let c = cs('S1-ours');
+        assert.strictEqual(c.rc, 0, 'код возврата не 0');
+        assert.strictEqual(c.pl, '0', 'наш агент не снят');
+        assert(/LAUNCHCTL unload [^|]*com\.hamidun\.claude-mascot\.plist/.test(c.log), 'агент не выгружен: ' + c.log);
+        assert(/^ОБНОВЛЕНО: [^~]+$/.test(c.out), 'ожидалась ОДНА строка ОБНОВЛЕНО: ' + c.out);
+        c = cs('S2-again');
+        assert.deepStrictEqual([c.rc, c.out, c.log], [0, '', ''], 'повтор не молчит или лезет в launchctl: ' + JSON.stringify(c));
+        c = cs('S3-foreign');
+        assert.deepStrictEqual([c.rc, c.pl, c.out, c.log], [0, '1', '', ''], 'чужой файл тронут или поднят шум: ' + JSON.stringify(c));
+        if (/CASE S4-symlink SKIP/.test(out)) console.log('     (настоящие symlink недоступны — сценарий S4 пропущен)');
+        else {
+          c = cs('S4-symlink');
+          assert.deepStrictEqual([c.rc, c.pl, c.out, c.log], [0, '1', '', ''], 'ссылка тронута: ' + JSON.stringify(c));
+          assert(/VICTIM=1/.test(out), 'файл за ссылкой удалён');
+        }
+        c = cs('S4b-dir');
+        assert.deepStrictEqual([c.rc, c.pl, c.out, c.log], [0, '1', '', ''], 'каталог на месте plist тронут или поднят шум: ' + JSON.stringify(c));
+        c = cs('S5-dry');
+        assert.strictEqual(c.rc, 0); assert.strictEqual(c.pl, '1', 'холостой прогон удалил агента'); assert.strictEqual(c.log, '', 'холостой прогон дёрнул launchctl');
+        assert(/^\[dry-run\] /.test(c.out), 'холостой прогон не назвал себя: ' + c.out);
+        c = cs('S6-rmfails');
+        assert.strictEqual(c.rc, 0, 'сбой удаления дал ненулевой код');
+        assert.strictEqual(c.pl, '1', 'пустышка rm не должна была ничего удалить');
+        assert(/^\[touchup-mascot\] пропущено: [^~]+$/.test(c.out), 'сбой не назван одной строкой: ' + c.out);
+        c = cs('S7-nolib');
+        assert.strictEqual(c.rc, 0, 'отсутствие библиотеки дало ненулевой код');
+        assert.strictEqual(c.pl, '1', 'без библиотеки агент не должен трогаться');
+        assert(/^\[touchup-mascot\] пропущено: [^~]+$/.test(c.out), 'отсутствие библиотеки не названо одной строкой: ' + c.out);
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+
+    ok('_mascot.sh и touchup-mascot.sh: bash -n без синтаксических ошибок', () => {
+      ['_mascot.sh', 'touchup-mascot.sh', 'mascot.sh'].forEach((n) => {
+        const r = spawnSync('bash', ['-n', path.join(ROOT, 'scripts', 'macos', n)], { encoding: 'utf8', timeout: 30000 });
+        assert(r.status === 0, n + ' bash -n: ' + (r.stderr || ''));
+      });
+    });
+  }
+
+  if (!powershellAvailable()) {
+    console.log('  ⚠️  powershell недоступен — прогоны функций скрепки (PowerShell 5.1) пропущены.');
+    return;
+  }
+
+  ok('mascot.ps1, _mascot.ps1, touchup-mascot.ps1: PowerShell 5.1 парсер без ошибок (синтаксис + BOM)', () => {
+    const files = ['mascot.ps1', '_mascot.ps1', 'touchup-mascot.ps1'].map((n) => path.join(ROOT, 'scripts', 'windows', n));
+    files.forEach((script) => {
+      const b = fs.readFileSync(script);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, path.basename(script) + ': первые байты — UTF-8 BOM (кириллица в PS 5.1)');
+    });
+    const cmd = "$bad = 0; foreach ($f in $env:HM_T_FILES.Split('|')) { $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$null,[ref]$e); " +
+      "if ($e -and $e.Count -gt 0) { $bad++; $e | ForEach-Object { [Console]::Error.WriteLine($f + ': ' + $_.Message) } } }; exit $bad";
+    const r = spawnSync(PS51, ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HM_T_FILES: files.join('|') }) });
+    assert(r.status === 0, 'ParseFile: ' + (r.stderr || r.stdout || ''));
+  });
+
+  // Гарнесс: файл с BOM, запускается -File; пути и значения — через окружение, а не склейкой кода.
+  const J = (...lines) => lines.join('\r\n') + '\r\n';
+  const runHarness = (dir, body, envAdd) => {
+    const f = path.join(dir, 'harness-' + crypto.randomBytes(4).toString('hex') + '.ps1');
+    fs.writeFileSync(f, '\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
+      "$ErrorActionPreference = 'Continue'\r\n" + body);
+    const r = spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f],
+      { encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, envAdd || {}) });
+    return { out: r.stdout || '', err: r.stderr || '', status: r.status };
+  };
+  // Копия библиотеки с одной сломанной деталью (мутант): проверка обязана это заметить.
+  const mutantLib = (dir, from, to) => {
+    const t = LIB();
+    const m = typeof from === 'string' ? t.split(from).join(to) : t.replace(from, to);
+    assert(m !== t, 'мутация не применилась: ' + String(from).slice(0, 70));
+    const f = path.join(dir, 'mutant-' + crypto.randomBytes(3).toString('hex') + '.ps1');
+    fs.writeFileSync(f, m);
+    return f;
+  };
+  const Q = '[string][char]34';
+
+  ok('Test-HmMascotRunValueOurs (прогон PS 5.1): наша запись Run — только путь ровно к нашему exe; та же таблица, что у runValueIsOurs в удалении', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mrun-'));
+    try {
+      // Значения — файлом, не аргументами: кавычки и пробелы в командной строке
+      // Windows сами по себе меняют строку, и тест проверял бы не то.
+      const data = path.join(dir, 'cases.json');
+      fs.writeFileSync(data, JSON.stringify(RUN_VALUE_CASES.map((c) => c[1])));
+      const r = runHarness(dir, J(
+        '. $env:HM_T_LIB',
+        '$vals = Get-Content -LiteralPath $env:HM_T_CASES -Raw -Encoding UTF8 | ConvertFrom-Json',
+        "$i = 0; foreach ($v in $vals) { Write-Output ('R' + $i + '=' + (Test-HmMascotRunValueOurs $v $env:HM_T_EXE)); $i++ }",
+        "Write-Output ('NULLV=' + (Test-HmMascotRunValueOurs $null $env:HM_T_EXE))",
+        "Write-Output ('NOEXE=' + (Test-HmMascotRunValueOurs $env:HM_T_EXE ''))"
+      ), { HM_T_LIB: LIB_PATH, HM_T_CASES: data, HM_T_EXE: RUN_EXE });
+      RUN_VALUE_CASES.forEach(([name, value, want], i) => {
+        const mm = new RegExp('R' + i + '=(True|False)').exec(r.out);
+        assert(mm, name + ': гарнесс не ответил: ' + r.out + r.err);
+        assert.strictEqual(mm[1] === 'True', want, name + ': ожидалось ' + want);
+        // Удаление (JS) и установка (PowerShell) обязаны считать «своё» одинаково.
+        assert.strictEqual(uxMod.runValueIsOurs(value, RUN_EXE), want, name + ': JS-версия расходится с PowerShell');
+      });
+      assert(/NULLV=False/.test(r.out), 'значения нет — не наше');
+      assert(/NOEXE=False/.test(r.out), 'не знаем свой путь — своим ничего не считаем');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  ok('Remove-HmMascotOldAutorun (прогон PS 5.1, песочный ключ HKCU): своё снято, чужое и соседи целы, итог сверен с реестром; -Quiet молчит; отказ удаления — failed', () => {
+    const exe = 'C:\\Users\\t\\AppData\\Local\\Programs\\ClaudeMascot\\claude-mascot.exe';
+    // Песочный ключ, а не настоящий Run: тест не смеет трогать автозапуск машины.
+    const keySub = 'Software\\HmTestMascotRun-' + crypto.randomBytes(6).toString('hex');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mrm-'));
+    try {
+      const r = runHarness(dir, J(
+        '. $env:HM_T_LIB',
+        "$k = 'HKCU:\\' + $env:HM_T_KEY",
+        'New-Item -Path $k -Force | Out-Null',
+        "New-ItemProperty -Path $k -Name 'Other' -Value 'keep' -PropertyType String -Force | Out-Null",
+        "function Get-Left { $v = (Get-ItemProperty -Path $k -Name 'ClaudeMascot' -ErrorAction SilentlyContinue).ClaudeMascot; if ($null -eq $v) { '<none>' } else { $v } }",
+        'function Q($s) { ' + Q + ' + $s + [char]34 }',
+        'function Invoke-Case($name, $value) {',
+        "  if ($null -ne $value) { New-ItemProperty -Path $k -Name 'ClaudeMascot' -Value $value -PropertyType String -Force | Out-Null }",
+        "  else { Remove-ItemProperty -Path $k -Name 'ClaudeMascot' -ErrorAction SilentlyContinue }",
+        '  $res = Remove-HmMascotOldAutorun $k $env:HM_T_EXE',
+        "  Write-Output ('CASE ' + $name + ' RES=' + $res + ' LEFT=' + (Get-Left) + ' OTHER=' + (Get-ItemProperty -Path $k -Name 'Other').Other)",
+        '}',
+        "Invoke-Case 'ours' (Q $env:HM_T_EXE)",
+        "Invoke-Case 'ourscase' ($env:HM_T_EXE.ToUpper())",
+        "Invoke-Case 'foreign' (Q 'C:\\Elsewhere\\claude-mascot.exe')",
+        "Invoke-Case 'absent' $null",
+        // тихий режим: между маркерами не должно быть ни одной строки
+        "New-ItemProperty -Path $k -Name 'ClaudeMascot' -Value (Q $env:HM_T_EXE) -PropertyType String -Force | Out-Null",
+        "Write-Output 'QUIET_BEGIN'",
+        '$qr = Remove-HmMascotOldAutorun $k $env:HM_T_EXE -Quiet',
+        "Write-Output ('QUIET_END RES=' + $qr + ' LEFT=' + (Get-Left))",
+        // отказ удаления: подставной Remove-ItemProperty ничего не делает
+        'function Remove-ItemProperty { param($Path, $Name, $ErrorAction) }',
+        "New-ItemProperty -Path $k -Name 'ClaudeMascot' -Value (Q $env:HM_T_EXE) -PropertyType String -Force | Out-Null",
+        "Write-Output ('CASE failed RES=' + (Remove-HmMascotOldAutorun $k $env:HM_T_EXE -Quiet) + ' LEFT=' + (Get-Left))",
+        'Remove-Item -Path $k -Recurse -Force',
+        "Write-Output ('KEY_GONE=' + (-not (Test-Path $k)))"
+      ), { HM_T_LIB: LIB_PATH, HM_T_KEY: keySub, HM_T_EXE: exe });
+      const caseOf = (n) => {
+        const mm = new RegExp('CASE ' + n + ' RES=(\\S+) LEFT=(.*?) OTHER=(\\S+)').exec(r.out);
+        assert(mm, 'сценарий ' + n + ' не отчитался: ' + r.out + r.err);
+        return { res: mm[1], left: mm[2], other: mm[3] };
+      };
+      let c = caseOf('ours');
+      assert.strictEqual(c.res, 'removed', 'своя запись снята');
+      assert.strictEqual(c.left, '<none>', 'в реестре её больше нет');
+      assert.strictEqual(c.other, 'keep', 'соседнее значение в ключе цело');
+      c = caseOf('ourscase');
+      assert.strictEqual(c.res, 'removed', 'регистр пути не делает запись чужой');
+      assert.strictEqual(c.left, '<none>', 'и она снята');
+      c = caseOf('foreign');
+      assert.strictEqual(c.res, 'foreign', 'чужой путь распознан');
+      assert.strictEqual(c.left, '"C:\\Elsewhere\\claude-mascot.exe"', 'чужая запись осталась как была');
+      assert.strictEqual(caseOf('absent').res, 'absent', 'записи нет — делать нечего');
+      assert.strictEqual((r.out.match(/Автозапуск скрепки от прошлой установки снят/g) || []).length, 2, 'снятие видно в журнале (два раза: ours и ourscase)');
+      assert(/ведёт не на нашу скрепку/.test(r.out), 'отказ трогать чужое тоже виден в журнале');
+      const q = /QUIET_BEGIN\s*([\s\S]*?)QUIET_END RES=(\S+) LEFT=(\S+)/.exec(r.out);
+      assert(q, 'тихий сценарий не отчитался: ' + r.out);
+      assert.strictEqual(q[1].trim(), '', 'в тихом режиме функция заговорила: ' + q[1]);
+      assert.strictEqual(q[2], 'removed', 'тихий режим снимает так же');
+      assert.strictEqual(q[3], '<none>', 'и в тихом режиме значение снято');
+      const f = /CASE failed RES=(\S+) LEFT=(.*)/.exec(r.out);
+      assert(f && f[1] === 'failed' && f[2].trim() !== '<none>', 'отказ удаления не назван failed: ' + (f ? f[0] : r.out));
+      assert(/KEY_GONE=True/.test(r.out), 'песочный ключ убран за собой');
+    } finally {
+      // Подстраховка: ключ уходит и тогда, когда гарнесс упал посередине.
+      spawnSync('reg.exe', ['delete', 'HKCU\\' + keySub, '/f'], { encoding: 'utf8', timeout: 30000 });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  ok('touchup-mascot.ps1 (прогон PS 5.1, подставной реестр): снимает только свой автозапуск одной строкой ОБНОВЛЕНО, повтор и чужое молчат, холостой прогон ничего не меняет, любой сбой — код 0', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-tchw-'));
+    try {
+      const sd = path.join(base, 'scripts');
+      fs.mkdirSync(sd);
+      fs.copyFileSync(LIB_PATH, path.join(sd, '_mascot.ps1'));
+      fs.copyFileSync(TOUCH_PATH, path.join(sd, 'touchup-mascot.ps1'));
+      const la = path.join(base, 'la');
+      const exe = path.join(la, 'Programs', 'ClaudeMascot', 'claude-mascot.exe');
+      const r = runHarness(base, J(
+        "$touch = Join-Path $env:HM_T_SD 'touchup-mascot.ps1'",
+        '$global:Reg = @{}; $global:RemoveWorks = $true; $global:GetThrows = $false',
+        // «Реестр» в памяти: функции закрывают одноимённые командлеты для вызываемого скрипта.
+        'function Get-ItemProperty { param($Path, $Name, $ErrorAction)',
+        "  if ($global:GetThrows) { throw 'реестр недоступен (подставной отказ)' }",
+        '  if ($global:Reg.ContainsKey($Name)) { $o = New-Object psobject; Add-Member -InputObject $o -NotePropertyName $Name -NotePropertyValue $global:Reg[$Name]; return $o }',
+        '  return $null',
+        '}',
+        'function Remove-ItemProperty { param($Path, $Name, $ErrorAction)',
+        '  if ($global:RemoveWorks) { $global:Reg.Remove($Name) }',
+        '}',
+        'function Q($s) { ' + Q + ' + $s + [char]34 }',
+        'function Case($label, $value, $dry, $localapp) {',
+        '  $global:Reg = @{}; if ($null -ne $value) { $global:Reg["ClaudeMascot"] = $value }',
+        "  $env:LOCALAPPDATA = $localapp; if ($dry) { $env:HM_DRY_RUN = '1' } else { Remove-Item Env:HM_DRY_RUN -ErrorAction SilentlyContinue }",
+        '  $lines = @(& $touch 6>&1 | ForEach-Object { [string]$_ })',
+        '  $left = if ($global:Reg.ContainsKey("ClaudeMascot")) { $global:Reg["ClaudeMascot"] } else { "<none>" }',
+        "  Write-Output ('CASE ' + $label + ' RC=' + $LASTEXITCODE + ' N=' + $lines.Count + ' LEFT=' + $left)",
+        "  foreach ($l in $lines) { Write-Output ('L|' + $label + '|' + $l) }",
+        '}',
+        "Case 'ours' (Q $env:HM_T_EXE) $false $env:HM_T_LA",
+        "Case 'again' $null $false $env:HM_T_LA",
+        "Case 'foreign' (Q 'C:\\Elsewhere\\claude-mascot.exe') $false $env:HM_T_LA",
+        "Case 'dry' (Q $env:HM_T_EXE) $true $env:HM_T_LA",
+        "Case 'emptyla' (Q $env:HM_T_EXE) $false ''",
+        '$global:RemoveWorks = $false',
+        "Case 'removefails' (Q $env:HM_T_EXE) $false $env:HM_T_LA",
+        '$global:RemoveWorks = $true; $global:GetThrows = $true',
+        "Case 'getthrows' (Q $env:HM_T_EXE) $false $env:HM_T_LA"
+      ), { HM_T_SD: sd, HM_T_LA: la, HM_T_EXE: exe });
+      const cs = (n) => {
+        const m = new RegExp('CASE ' + n + ' RC=(\\S+) N=(\\d+) LEFT=(.*)').exec(r.out);
+        assert(m, n + ': сценарий не отчитался: ' + r.out + r.err);
+        const lines = r.out.split(/\r?\n/).filter((l) => l.startsWith('L|' + n + '|')).map((l) => l.slice(('L|' + n + '|').length));
+        return { rc: m[1], n: Number(m[2]), left: m[3].trim(), lines };
+      };
+      let c = cs('ours');
+      assert.deepStrictEqual([c.rc, c.n, c.left], ['0', 1, '<none>'], 'свой автозапуск: ' + JSON.stringify(c));
+      assert(/^ОБНОВЛЕНО: /.test(c.lines[0]), 'строка не начинается с «ОБНОВЛЕНО: »: ' + c.lines[0]);
+      c = cs('again');
+      assert.deepStrictEqual([c.rc, c.n, c.left], ['0', 0, '<none>'], 'повтор не молчит: ' + JSON.stringify(c));
+      c = cs('foreign');
+      assert.deepStrictEqual([c.rc, c.n], ['0', 0], 'чужая запись: поднят шум или код: ' + JSON.stringify(c));
+      assert.strictEqual(c.left, '"C:\\Elsewhere\\claude-mascot.exe"', 'чужая запись тронута');
+      c = cs('dry');
+      assert.deepStrictEqual([c.rc, c.n], ['0', 1], 'холостой прогон: ' + JSON.stringify(c));
+      assert(/^\[dry-run\] /.test(c.lines[0]), 'холостой прогон не назвал себя: ' + c.lines[0]);
+      assert.strictEqual(c.left, '"' + exe + '"', 'холостой прогон снял запись');
+      c = cs('emptyla');
+      assert.deepStrictEqual([c.rc, c.n], ['0', 1], 'пустой LOCALAPPDATA: ' + JSON.stringify(c));
+      assert(/^\[touchup-mascot\] пропущено: /.test(c.lines[0]), 'сбой не назван: ' + c.lines[0]);
+      assert.strictEqual(c.left, '"' + exe + '"', 'без пути к exe запись тронута');
+      c = cs('removefails');
+      assert.deepStrictEqual([c.rc, c.n], ['0', 1], 'отказ удаления: ' + JSON.stringify(c));
+      assert(/^\[touchup-mascot\] пропущено: /.test(c.lines[0]), 'отказ удаления не назван: ' + c.lines[0]);
+      assert.strictEqual(c.left, '"' + exe + '"', 'запись исчезла вопреки отказу');
+      c = cs('getthrows');
+      assert.deepStrictEqual([c.rc, c.n], ['0', 1], 'исключение в реестре: ' + JSON.stringify(c));
+      assert(/^\[touchup-mascot\] пропущено: .*реестр недоступен/.test(c.lines[0]), 'причина исключения не названа: ' + c.lines[0]);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
+  ok('touchup-mascot.ps1 (прогон PS 5.1, отдельные процессы): настоящий код возврата 0 — нет библиотеки, исключение в реестре, обычный прогон по настоящему реестру ничего не меняет', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-tchp-'));
+    try {
+      const solo = path.join(base, 'solo'); const full = path.join(base, 'full');
+      fs.mkdirSync(solo); fs.mkdirSync(full);
+      fs.copyFileSync(TOUCH_PATH, path.join(solo, 'touchup-mascot.ps1'));
+      fs.copyFileSync(TOUCH_PATH, path.join(full, 'touchup-mascot.ps1'));
+      fs.copyFileSync(LIB_PATH, path.join(full, '_mascot.ps1'));
+      const la = path.join(base, 'la');
+      // LOCALAPPDATA подставной: ни при каких условиях он не совпадёт с путём настоящей установки
+      // на этой машине, поэтому прогон по НАСТОЯЩЕМУ реестру ничего в нём не снимет.
+      const env = Object.assign({}, process.env, { LOCALAPPDATA: la });
+      delete env.HM_DRY_RUN;
+      const file = (dir) => spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(dir, 'touchup-mascot.ps1')],
+        { encoding: 'utf8', timeout: 120000, env });
+      // (a) общей библиотеки рядом нет
+      let r = file(solo);
+      assert.strictEqual(r.status, 0, 'нет библиотеки → код ' + r.status + ': ' + r.stdout + r.stderr);
+      assert(/\[touchup-mascot\] пропущено: /.test(r.stdout), 'сбой не назван: ' + r.stdout);
+      // (b) исключение внутри реестра
+      const h = runHarness(base, J(
+        "function Get-ItemProperty { param($Path, $Name, $ErrorAction) throw 'boom: реестр недоступен' }",
+        "& (Join-Path $env:HM_T_SD 'touchup-mascot.ps1')",
+        "Write-Output ('RC=' + $LASTEXITCODE)",
+        'exit $LASTEXITCODE'
+      ), { HM_T_SD: full, LOCALAPPDATA: la });
+      assert.strictEqual(h.status, 0, 'исключение в реестре → код ' + h.status + ': ' + h.out + h.err);
+      assert(/RC=0/.test(h.out), 'скрипт не дошёл до exit 0 (код пуст или не 0): ' + h.out);
+      assert(/\[touchup-mascot\] пропущено: .*boom/.test(h.out), 'причина не названа: ' + h.out);
+      // (c) настоящий реестр, подставной LOCALAPPDATA: ничего не меняется, ничего не печатается
+      r = file(full);
+      assert.strictEqual(r.status, 0, 'обычный прогон → код ' + r.status + ': ' + r.stdout + r.stderr);
+      assert.strictEqual((r.stdout || '').trim(), '', 'обычный прогон без изменений должен молчать: ' + r.stdout);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
+  ok('Get-HmMascotProgramsDir (прогон PS 5.1): папка ярлыков берётся от профиля и сверяется с ответом оболочки; перенаправление — отказ с причиной; мутант без сверки пойман', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mpin-'));
+    try {
+      const mut = mutantLib(dir, 'throw "папка меню «Пуск» перенаправлена ($have вместо $want) — ярлык не создаю"', '$null');
+      const r = runHarness(dir, J(
+        '. $env:HM_T_LIB',
+        'function T($label, $prof, $shell) { try { $r = Get-HmMascotProgramsDir -ProfileDir $prof -ShellDir $shell; Write-Output ("CASE " + $label + " OK=" + $r) } catch { Write-Output ("CASE " + $label + " ERR=" + $_.Exception.Message) } }',
+        "$W = 'AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs'",
+        "T 'same' 'C:\\Users\\u' ('C:\\Users\\u\\' + $W)",
+        "T 'case-slash' 'C:\\USERS\\U\\' 'c:\\users\\u\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\'",
+        "T 'startup' 'C:\\Users\\u' 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp'",
+        "T 'other-user' 'C:\\Users\\u' ('C:\\Users\\v\\' + $W)",
+        "T 'unc' 'C:\\Users\\u' '\\\\srv\\share\\Start Menu\\Programs'",
+        "T 'empty-shell' 'C:\\Users\\u' ''",
+        "T 'relative-profile' 'Users\\u' ('C:\\Users\\u\\' + $W)",
+        // без аргументов значения берутся из системы: либо путь, либо отказ именно «перенаправлена»
+        'try { $r = Get-HmMascotProgramsDir; Write-Output ("CASE real OK=" + $r) } catch { Write-Output ("CASE real ERR=" + $_.Exception.Message) }',
+        // мутант: сверка выкинута — перенаправление проходит молча
+        '. $env:HM_T_MUT',
+        "T 'mutant-startup' 'C:\\Users\\u' 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp'"
+      ), { HM_T_LIB: LIB_PATH, HM_T_MUT: mut });
+      const cs = (n) => {
+        const m = new RegExp('CASE ' + n + ' (OK|ERR)=(.*)').exec(r.out);
+        assert(m, n + ': сценарий не отчитался: ' + r.out + r.err);
+        return { ok: m[1] === 'OK', v: m[2].trim() };
+      };
+      const want = 'C:\\Users\\u\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs';
+      let c = cs('same'); assert(c.ok && c.v === want, 'совпадение отвергнуто: ' + JSON.stringify(c));
+      c = cs('case-slash'); assert(c.ok && c.v.toLowerCase() === want.toLowerCase(), 'регистр и косая черта сломали сверку: ' + JSON.stringify(c));
+      c = cs('startup'); assert(!c.ok && /перенаправлена/.test(c.v), 'каталог «Автозагрузка» принят: ' + JSON.stringify(c));
+      c = cs('other-user'); assert(!c.ok && /перенаправлена/.test(c.v), 'чужой профиль принят: ' + JSON.stringify(c));
+      c = cs('unc'); assert(!c.ok && /перенаправлена/.test(c.v), 'сетевой путь принят: ' + JSON.stringify(c));
+      c = cs('empty-shell'); assert(!c.ok && /оболочка не назвала/.test(c.v), 'пустой ответ оболочки принят: ' + JSON.stringify(c));
+      c = cs('relative-profile'); assert(!c.ok && /профиль/.test(c.v), 'относительный профиль принят: ' + JSON.stringify(c));
+      c = cs('real'); assert(c.ok ? /Start Menu\\Programs$/.test(c.v) : /перенаправлена/.test(c.v), 'без аргументов — неожиданный исход: ' + JSON.stringify(c));
+      c = cs('mutant-startup'); assert(c.ok, 'мутант без сверки отверг перенаправление — тест не отличает сверку от её отсутствия');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  ok('New-HmMascotShortcut (прогон PS 5.1, песочница): ярлык ведёт на exe; повтор заменяет; подложенная жёсткая ссылка чужой файл не портит; временный файл не в папке ярлыков и убран', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mlnk-'));
+    const progs = path.join(base, 'Programs');
+    const tmp = path.join(base, 'tmp');
+    try {
+      fs.mkdirSync(progs); fs.mkdirSync(tmp);
+      const appDir = path.join(base, 'app');
+      fs.mkdirSync(appDir);
+      const exe = path.join(appDir, 'claude-mascot.exe');
+      fs.writeFileSync(exe, 'MZ-stub');   // ярлык ничего не запускает: exe не исполняется
+      const victim = path.join(base, 'victim.txt');
+      fs.writeFileSync(victim, 'VICTIM');
+      const lnk = path.join(progs, 'Claude Mascot.lnk');
+      const r = runHarness(base, J(
+        '. $env:HM_T_LIB',
+        // Временные файлы — в песочницу; у настоящей папки «Programs» атрибут ReadOnly — прогон в тех же условиях.
+        '$env:TEMP = $env:HM_T_TMP; $env:TMP = $env:HM_T_TMP',
+        "Write-Output ('TMPDIR=' + [IO.Path]::GetTempPath())",
+        '$d = Get-Item -LiteralPath $env:HM_T_DIR; $d.Attributes = $d.Attributes -bor [IO.FileAttributes]::ReadOnly',
+        'function Step($tag) { try { $p = New-HmMascotShortcut $env:HM_T_DIR $env:HM_T_EXE; Write-Output ($tag + " PATH=" + $p) } catch { Write-Output ($tag + " ERR=" + $_.Exception.Message) } }',
+        'function Tgt { (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $env:HM_T_DIR "Claude Mascot.lnk")).TargetPath }',
+        'Step "S1"; Write-Output ("S1 TARGET=" + (Tgt))',
+        'Step "S2"; Write-Output ("S2 TARGET=" + (Tgt))',
+        'Remove-Item -LiteralPath (Join-Path $env:HM_T_DIR "Claude Mascot.lnk") -Force',
+        'New-Item -ItemType HardLink -Path (Join-Path $env:HM_T_DIR "Claude Mascot.lnk") -Target $env:HM_T_VICTIM | Out-Null',
+        'Step "S3"; Write-Output ("S3 TARGET=" + (Tgt))'
+      ), { HM_T_LIB: LIB_PATH, HM_T_DIR: progs, HM_T_EXE: exe, HM_T_TMP: tmp, HM_T_VICTIM: victim });
+      const tm = /TMPDIR=(.*)/.exec(r.out);
+      assert(tm && path.resolve(tm[1].trim()) === path.resolve(tmp), 'временная папка не подменена — проверка «убрано» была бы пустой: ' + r.out + r.err);
+      ['S1', 'S2', 'S3'].forEach((s) => {
+        assert(r.out.includes(s + ' PATH=' + lnk), s + ': вернулся путь ярлыка: ' + r.out + r.err);
+        assert(r.out.includes(s + ' TARGET=' + exe), s + ': ярлык ведёт ровно на exe скрепки: ' + r.out);
+      });
+      assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM', 'чужой файл за жёсткой ссылкой переписан');
+      assert.deepStrictEqual(fs.readdirSync(progs).filter((n) => /\.lnk$/i.test(n)), ['Claude Mascot.lnk'], 'в папке ярлыков что-то лишнее');
+      assert.deepStrictEqual(fs.readdirSync(progs), ['Claude Mascot.lnk'], 'в папке ярлыков временные файлы');
+      assert.deepStrictEqual(fs.readdirSync(tmp), [], 'временный ярлык не убран: ' + fs.readdirSync(tmp).join(','));
+      // Ярлык сохраняется вне папки ярлыков — иначе подмена папки между проверкой и Save() уносила бы запись.
+      assert(!/Join-Path \$Dir \('Claude Mascot\.hm-/.test(LIB()) && LIB().includes('[IO.Path]::GetTempPath()'),
+        'временный ярлык снова создаётся рядом с настоящим');
+    } finally {
+      spawnSync('attrib.exe', ['-R', progs], { encoding: 'utf8', timeout: 30000 });
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  ok('отрицательный контроль: наивное сохранение ярлыка поверх жёсткой ссылки пишет сквозь неё — защита в New-HmMascotShortcut не лишняя', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mnaive-'));
+    try {
+      const victim = path.join(base, 'victim.txt');
+      fs.writeFileSync(victim, 'VICTIM');
+      const lnk = path.join(base, 'Claude Mascot.lnk');
+      fs.linkSync(victim, lnk);
+      const r = runHarness(base, J(
+        '$sc = (New-Object -ComObject WScript.Shell).CreateShortcut($env:HM_T_LNK); $sc.TargetPath = $env:HM_T_EXE; $sc.Save()',
+        "Write-Output 'SAVED'"
+      ), { HM_T_LNK: lnk, HM_T_EXE: path.join(base, 'x.exe') });
+      assert(/SAVED/.test(r.out), 'наивный вариант отработал: ' + r.out + r.err);
+      if (fs.readFileSync(victim, 'utf8') === 'VICTIM') {
+        SKIP('на этой системе сохранение ярлыка не пишет сквозь жёсткую ссылку — контроль не различает');
+      }
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
+  ok('New-HmMascotShortcut (прогон PS 5.1): junction в пути и папка на месте ярлыка — отказ без записи; мутант без проверки пути пишет сквозь junction', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mjn-'));
+    const junc = path.join(base, 'Programs');
+    try {
+      const exe = path.join(base, 'claude-mascot.exe');
+      fs.writeFileSync(exe, 'MZ-stub');
+      const real = path.join(base, 'real');
+      fs.mkdirSync(real);
+      fs.symlinkSync(real, junc, 'junction');
+      const p2 = path.join(base, 'P2');
+      fs.mkdirSync(path.join(p2, 'Claude Mascot.lnk'), { recursive: true });
+      const tmp = path.join(base, 'tmp');
+      fs.mkdirSync(tmp);
+      // Мутант: проверка junction в цепочке выброшена целиком (и первая, и повторная).
+      const mut = mutantLib(base, 'throw "в пути к меню «Пуск» есть junction/symlink: $cur"', '$null');
+      const step = (tag, fn, dir) => 'try { $p = ' + fn + ' ' + dir + ' $env:HM_T_EXE; Write-Output ("' + tag + ' PATH=" + $p) } catch { Write-Output ("' + tag + ' ERR=" + $_.Exception.Message) }';
+      const r = runHarness(base, J(
+        '. $env:HM_T_LIB',
+        '$env:TEMP = $env:HM_T_TMP; $env:TMP = $env:HM_T_TMP',
+        step('JUNC', 'New-HmMascotShortcut', '$env:HM_T_JUNC'),
+        step('DIRNAME', 'New-HmMascotShortcut', '$env:HM_T_P2'),
+        step('EMPTY', 'New-HmMascotShortcut', "''"),
+        // Отрицательный контроль идёт ПОСЛЕДНИМ: до него цель junction обязана быть пустой.
+        "Write-Output ('REAL_BEFORE_MUTANT=' + @(Get-ChildItem -LiteralPath $env:HM_T_REAL -Force).Count)",
+        '. $env:HM_T_MUT',
+        step('MUTANT', 'New-HmMascotShortcut', '$env:HM_T_JUNC')
+      ), { HM_T_LIB: LIB_PATH, HM_T_MUT: mut, HM_T_JUNC: junc, HM_T_P2: p2, HM_T_REAL: real, HM_T_EXE: exe, HM_T_TMP: tmp });
+      assert(/JUNC ERR=.*junction/.test(r.out), 'junction в пути — отказ с причиной: ' + r.out + r.err);
+      assert(/REAL_BEFORE_MUTANT=0/.test(r.out), 'в цель junction не записано ничего: ' + r.out);
+      assert(/DIRNAME ERR=.*папка или ссылка/.test(r.out), 'папка на месте ярлыка — отказ: ' + r.out + r.err);
+      assert(fs.statSync(path.join(p2, 'Claude Mascot.lnk')).isDirectory(), 'папка цела');
+      assert.deepStrictEqual(fs.readdirSync(path.join(p2, 'Claude Mascot.lnk')), [], 'внутрь папки ничего не положено');
+      assert.deepStrictEqual(fs.readdirSync(p2), ['Claude Mascot.lnk'], 'в папке ярлыков что-то лишнее');
+      assert(/EMPTY ERR=не найдена папка меню/.test(r.out), 'пустой путь — понятный отказ: ' + r.out + r.err);
+      // Отрицательный контроль: без проверки пути запись уходит сквозь junction.
+      assert(/MUTANT PATH=/.test(r.out), 'мутант без проверки пути отработал: ' + r.out + r.err);
+      assert(fs.readdirSync(real).includes('Claude Mascot.lnk'),
+        'мутант записал ярлык в цель junction — значит отказ выше держит именно проверка пути');
+      assert.deepStrictEqual(fs.readdirSync(tmp), [], 'временный ярлык не убран: ' + fs.readdirSync(tmp).join(','));
+    } finally {
+      try { fs.unlinkSync(junc); } catch (e) { /* уже снят */ }
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  ok('New-HmMascotShortcut (прогон PS 5.1): Move — три попытки (две блокировки переживаются, три — отказ с причиной); проверка повторяется перед Move и ловит подмену папки; мутант без неё пойман', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-mretry-'));
+    try {
+      const exe = path.join(base, 'claude-mascot.exe');
+      fs.writeFileSync(exe, 'MZ-stub');
+      const dir = path.join(base, 'Programs');
+      const evil = path.join(base, 'evil');
+      const tmp = path.join(base, 'tmp');
+      [dir, evil, tmp].forEach((d) => fs.mkdirSync(d));
+      // Мутант: повторная проверка цепочки перед Move выброшена (остаётся только первая).
+      const mut = mutantLib(base, /(if \(\$Recheck\) \{ & \$Recheck \}\r?\n)\s*Assert-HmMascotDirChain \$Dir\r?\n/, '$1');
+      const r = runHarness(base, J(
+        '. $env:HM_T_LIB',
+        '$env:TEMP = $env:HM_T_TMP; $env:TMP = $env:HM_T_TMP',
+        '$script:moves = 0; $script:failFirst = 0',
+        // Move подменён: первые $failFirst вызовов падают так же, как при блокировке файла антивирусом.
+        'function Move-HmMascotFile([string]$From, [string]$To) {',
+        '    $script:moves++',
+        "    if ($script:moves -le $script:failFirst) { throw [System.IO.IOException]::new('занято антивирусом (подстановка)') }",
+        '    [IO.File]::Move($From, $To)',
+        '}',
+        'function Reset-Dir { if (Test-Path -LiteralPath $env:HM_T_DIR) { [IO.Directory]::Delete($env:HM_T_DIR, $true) }; [void](New-Item -ItemType Directory -Path $env:HM_T_DIR) }',
+        'Reset-Dir',
+        'function Run($tag, $re) {',
+        '    $script:moves = 0',
+        '    try { $p = New-HmMascotShortcut $env:HM_T_DIR $env:HM_T_EXE $re; Write-Output ($tag + " OK=" + $p + " MOVES=" + $script:moves) }',
+        '    catch { Write-Output ($tag + " ERR=" + $_.Exception.Message + " MOVES=" + $script:moves) }',
+        '    Write-Output ($tag + " LNK=" + (Test-Path -LiteralPath (Join-Path $env:HM_T_DIR "Claude Mascot.lnk")))',
+        '}',
+        '$swap = { [IO.Directory]::Delete($env:HM_T_DIR, $true); [void](New-Item -ItemType Junction -Path $env:HM_T_DIR -Target $env:HM_T_EVIL) }',
+        '$script:failFirst = 2; Run "R1" $null',
+        'Reset-Dir',
+        '$script:failFirst = 99; Run "R2" $null',
+        '$script:failFirst = 0; Run "R3" { throw "оболочка назвала другую папку" }',
+        'Run "R4" $swap',
+        'Write-Output ("R4 EVIL=" + @(Get-ChildItem -LiteralPath $env:HM_T_EVIL -Force).Count)',
+        'Reset-Dir',
+        // мутант: без повторной проверки подмена проходит и ярлык уходит в чужую папку
+        '. $env:HM_T_MUT',
+        'Run "R5" $swap',
+        'Write-Output ("R5 EVIL=" + (Test-Path -LiteralPath (Join-Path $env:HM_T_EVIL "Claude Mascot.lnk")))'
+      ), { HM_T_LIB: LIB_PATH, HM_T_MUT: mut, HM_T_DIR: dir, HM_T_EVIL: evil, HM_T_EXE: exe, HM_T_TMP: tmp });
+      const line = (tag, key) => { const m = new RegExp(tag + ' ' + key + '=(.*)').exec(r.out); assert(m, tag + ' ' + key + ': нет отчёта: ' + r.out + r.err); return m[1].trim(); };
+      // R1: две блокировки подряд переживаются, на третьей попытке ярлык на месте
+      assert(/^.*Claude Mascot\.lnk MOVES=3$/.test(line('R1', 'OK')), 'R1: ярлык не создан за три попытки: ' + r.out);
+      assert.strictEqual(line('R1', 'LNK'), 'True', 'R1: ярлыка нет');
+      // R2: три блокировки — отказ с причиной, ровно три попытки, ярлыка нет
+      const r2 = line('R2', 'ERR');
+      assert(/3 попытк/.test(r2) && /занято антивирусом/.test(r2) && /MOVES=3$/.test(r2), 'R2: причина или число попыток не те: ' + r2);
+      assert.strictEqual(line('R2', 'LNK'), 'False', 'R2: ярлык появился вопреки отказу');
+      // R3: проверка вызывающего отказала — до Move не дошли (ошибку не про ввод-вывод не повторяем)
+      const r3 = line('R3', 'ERR');
+      assert(/оболочка назвала другую папку/.test(r3) && /MOVES=0$/.test(r3), 'R3: проверка вызывающего не остановила перенос: ' + r3);
+      assert.strictEqual(line('R3', 'LNK'), 'False', 'R3: ярлык появился вопреки отказу');
+      // R4: папку подменили на junction МЕЖДУ первой проверкой и переносом — ловит повторная проверка
+      const r4 = line('R4', 'ERR');
+      assert(/junction/.test(r4) && /MOVES=0$/.test(r4), 'R4: подмена папки перед Move не поймана: ' + r4);
+      assert.strictEqual(line('R4', 'EVIL'), '0', 'R4: в чужую папку что-то записано');
+      // R5: мутант без повторной проверки — ярлык уходит в чужую папку (значит, ловит именно она)
+      assert.strictEqual(line('R5', 'EVIL'), 'True', 'R5: мутант без повторной проверки не записал в чужую папку — тест не отличает проверку от её отсутствия');
+      assert.deepStrictEqual(fs.readdirSync(tmp), [], 'временный ярлык не убран: ' + fs.readdirSync(tmp).join(','));
+    } finally {
+      try { fs.rmSync(path.join(base, 'Programs'), { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
 })();
