@@ -6729,7 +6729,7 @@ if (powershellAvailable()) {
       // ЗАПУСКАЕТ бинарь (симуляция medium) и возвращает его код — как боевой примитив.
       const harness = '﻿' +
         'param([string]$Bin, [string]$Mode)\r\n' +
-        'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+        'function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)\r\n' +
         '  & $Exe @Arguments *> $null\r\n' +
         '  $c = $LASTEXITCODE; if ($null -eq $c) { $c = 0 }\r\n' +
         "  [pscustomobject]@{ Gate = 'medium'; Code = $c }\r\n" +
@@ -7922,7 +7922,7 @@ asyncTests()
     const harness = '\uFEFF' +
       'param([string]$Bin, [string]$Mode)\r\n' +
       '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' +
-      'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+      'function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)\r\n' +
       "  if ($env:HM_T_GATE -eq 'null') { return $null }\r\n" +
       '  [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE }\r\n' +
       '}\r\n' +
@@ -11590,6 +11590,24 @@ ok('config.json в репозитории без сборочных маркер
       assert(sec < 25, 'зависший touch-up держал диспетчер ' + sec + ' с');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
+
+  ok("verify.ps1: диспетчер touch-up'ов идёт после починок профиля и ДО чеклиста; в dry-run только печатает", () => {
+    const s = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'verify.ps1'), 'utf8');
+    assertOrder(s, '# --- end ---', '# --- touch-ups', 'диспетчер — после блока починок профиля (B)');
+    assertOrder(s, 'Invoke-HmTouchups -Dir $PSScriptRoot', 'Write-Host "Финальная проверка установки..."', 'диспетчер — до чеклиста');
+    assert(/if \(\$DRY\) \{\s*\r?\n\s*Write-Host "  \[dry-run\] WOULD: прогнать быстрые[^\r\n]*\r?\n\} else \{\s*\r?\n\s*try \{\s*\r?\n\s*\. \(Join-Path \$PSScriptRoot '_touchups\.ps1'\)\s*\r?\n\s*Invoke-HmTouchups /.test(s),
+      'в dry-run — строка WOULD, запуск только в else');
+    const block = s.slice(s.indexOf('# --- touch-ups'), s.indexOf('# --- end touch-ups ---'));
+    assert(block.length > 300 && !/\bexit\b/.test(codeOnly(block)), 'блок диспетчера не должен завершать verify раньше времени');
+  });
+
+  ok('claude.ps1 и _claudeenv.ps1: проба claude идёт через Invoke-HmDeElevatedSafe (запасной путь), без голого Invoke-HmDeElevated', () => {
+    for (const f of ['claude.ps1', '_claudeenv.ps1']) {
+      const c = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8'));
+      assert(/Invoke-HmDeElevatedSafe \$(bin|psExe) /.test(c), f + ': проба должна идти через Invoke-HmDeElevatedSafe');
+      assert(!/Invoke-HmDeElevated \$/.test(c), f + ': голый Invoke-HmDeElevated не должен остаться — при отказе планировщика (0x80070005) проверка станет «unverified»');
+    }
+  });
 })();
 
 // ===========================================================================
@@ -13225,7 +13243,7 @@ ok('config.json в репозитории без сборочных маркер
         fs.writeFileSync(path.join(noPs, 'claude.exe'), 'x');
         // Де-элевация подставная: Gate/Code из env. Если зовут НЕ powershell.exe с
         // -EncodedCommand (то есть проба снова пошла бы через cmd) — отвечает 99 = broken.
-        const stub = 'function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @())\r\n' +
+        const stub = 'function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)\r\n' +
           "  if ($env:HM_T_GATE -eq 'null') { return $null }\r\n" +
           "  if (-not ($Exe -like '*\\WindowsPowerShell\\v1.0\\powershell.exe') -or ($Arguments -notcontains '-EncodedCommand')) { return [pscustomobject]@{ Gate = 'medium'; Code = 99 } }\r\n" +
           '  [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE }\r\n}\r\n';

@@ -68,7 +68,8 @@ function Find-ClaudeBinary {
 # Поэтому проверяем не код установки, а РАБОТУ: команда обязана ответить на --version.
 # P0-инвариант (тот же, что у editor-CLI в vscode.ps1): claude лежит в user-writable
 # каталоге, а этот скрипт исполняется ELEVATED — запускаем ТОЛЬКО де-элевированно
-# (Invoke-HmDeElevated), НЕ под админом. Возвращает:
+# (Invoke-HmDeElevatedSafe: задача планировщика, а если она доказанно ничего не запустила —
+# токен оболочки Explorer), НЕ под админом. Возвращает:
 #   'works'      — ответил, код 0: бинарь рабочий;
 #   'broken'     — запуск ДОКАЗАННО состоялся (Gate=medium) и вернул НЕ 0: нерабочая обёртка;
 #   'unverified' — де-элевация недоступна/не отчиталась ИЛИ «Last Result» — служебный
@@ -76,7 +77,7 @@ function Find-ClaudeBinary {
 #                  (fail-open к прежней проверке «бинарь на диске»).
 function Test-HmClaudeRuns($bin) {
     if (-not $bin) { return 'broken' }
-    $r = Invoke-HmDeElevated $bin @('--version')
+    $r = Invoke-HmDeElevatedSafe $bin @('--version') -Label 'claude-version' -TimeoutSec 120
     if ($null -eq $r -or $r.Gate -ne 'medium') { return 'unverified' }
     if ($r.Code -eq 0) { return 'works' }
     # «Last Result» задачи планировщика бывает СЛУЖЕБНЫМ СТАТУСОМ ЗАДАЧИ (SCHED_S_*,

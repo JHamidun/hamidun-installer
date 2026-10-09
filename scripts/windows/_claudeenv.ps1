@@ -4,7 +4,7 @@
 # даже если у компонента claude снята галочка — см. там). Библиотека: кода верхнего уровня
 # и своего exit нет. Всё здесь — только чтение/запись HKCU и файлов в профиле пользователя;
 # сам claude (user-writable бинарь) под администратором не запускается: проба из PowerShell
-# идёт только через Invoke-HmDeElevated (его даёт _deelev.ps1, подключает вызывающий).
+# идёт только через Invoke-HmDeElevatedSafe (его даёт _deelev.ps1, подключает вызывающий).
 . (Join-Path $PSScriptRoot '_userpath.ps1')   # Add-HmUserPath, Test-HmIsReparse
 
 # Вердикт запуском пишем в ~/.hamidun-setup/checks.json — финальный чек-лист
@@ -146,7 +146,7 @@ function Test-HmClaudeViaPowerShell($bin) {
     $psExe = Join-Path $sr 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $psExe)) { return 'unverified' }
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes((Get-HmPsProbeScript $dir)))
-    $r = Invoke-HmDeElevated $psExe @('-NoProfile', '-NonInteractive', '-EncodedCommand', $b64)
+    $r = Invoke-HmDeElevatedSafe $psExe @('-NoProfile', '-NonInteractive', '-EncodedCommand', $b64) -Label 'claude-ps-probe' -TimeoutSec 120
     if ($null -eq $r -or $r.Gate -ne 'medium') { return 'unverified' }
     if ($r.Code -eq 0) { return 'works' }
     if ($r.Code -eq 197) { return 'blocked' }
