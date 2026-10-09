@@ -36,6 +36,128 @@ function Test-Selected([string]$id) {
     return ($SelectedIds -contains $id)
 }
 
+# Поиск бинаря claude — тот же, что в claude.ps1 (не доверяем только PATH). Определён ДО блока
+# починок: им пользуются и он, и проверка ниже.
+function Find-ClaudeBinary {
+    $cmd = Get-Command claude -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    # Глобальный npm-prefix: там лежит claude.cmd после `npm install -g`.
+    if (Get-Command npm -ErrorAction SilentlyContinue) {
+        try {
+            $prefix = (npm config get prefix 2>$null | Select-Object -First 1)
+            if ($prefix) { $prefix = $prefix.Trim() }
+            if ($prefix -and (Test-Path $prefix)) {
+                foreach ($name in @('claude.cmd', 'claude.exe', 'claude')) {
+                    $p = Join-Path $prefix $name
+                    if (Test-Path $p) { return $p }
+                }
+            }
+        } catch { }
+    }
+
+    # Нативный установщик кладёт бинарь в ~/.local/bin.
+    $localBin = Join-Path $env:USERPROFILE '.local\bin'
+    foreach ($name in @('claude.exe', 'claude.cmd', 'claude')) {
+        $p = Join-Path $localBin $name
+        if (Test-Path $p) { return $p }
+    }
+
+    return $null
+}
+
+# --- every-run repairs (B) ---
+# === ПОЧИНКИ ПРОФИЛЯ ПОЛЬЗОВАТЕЛЯ — на КАЖДОМ прогоне, независимо от галочек ====================
+# Повторный запуск снимает галочки со всего, что установщик нашёл на диске, — и скрипты
+# компонентов (config.ps1, claude.ps1, nomad.ps1, pydeps.ps1) для таких людей не запускаются
+# ВОВСЕ. А именно им нужны починки, которые живут в этих скриптах: чистка settings.json
+# (плагины без токена, правила, на которые Claude Code ругается при каждом старте), каталог
+# пака CATALOG.md и сводка для финального экрана, политика PowerShell и PATH для claude, PATH
+# для ~/.local\bin (команда nmd) и для Python. Без этого блока исправления получали бы только
+# те, кто сам поставил галочки заново. Шаг verify скрытый, включён по умолчанию и идёт
+# последним — он есть в каждом прогоне.
+# Что здесь можно: только чтение/запись HKCU и файлов в профиле пользователя (settings.json
+# с копией рядом, checks.json, ~/.codex/AGENTS.md, PATH пользователя, политика области
+# CurrentUser). Блок самодостаточен: границы — строки «every-run repairs (B)» и «end». Ни claude,
+# ни python, ни nmd отсюда НЕ запускаются: под администратором это был бы запуск user-writable
+# бинаря. Проба claude из PowerShell остаётся в claude.ps1 (через де-элевацию).
+# Компонент, выбранный в ЭТОМ прогоне, свою починку уже сделал сам — здесь не дублируем (кроме
+# карты конфига для Codex: она идемпотентна, см. п. 5).
+$DRY = [bool]$env:HM_DRY_RUN
+$psVerdictLive = $null      # вердикт «claude из PowerShell», посчитанный ЗДЕСЬ (claude не выбран)
+if ($DRY) {
+    Write-Host "  [dry-run] WOULD: починить в профиле известные дефекты настроек Claude Code, PATH (nmd, python, claude), политику PowerShell и положить AGENTS.md пака для Codex — без галочек, на каждом запуске"
+} else {
+    $repairLibs = $false
+    try {
+        . (Join-Path $PSScriptRoot '_userpath.ps1')
+        . (Join-Path $PSScriptRoot '_cfgmigrate.ps1')
+        . (Join-Path $PSScriptRoot '_claudeenv.ps1')
+        $repairLibs = $true
+    } catch { Write-Host "Починки профиля пропущены: не загрузились вспомогательные скрипты ($($_.Exception.Message))." }
+    if ($repairLibs) {
+        $userHome = $env:USERPROFILE
+        # 1. Настройки Claude Code и опись пака. Нужны, только если config НЕ ставился в этом
+        #    прогоне (иначе их уже сделал config.ps1). CATALOG.md кладём лишь когда пак под
+        #    рукой (в лёгком издании его нет) и в ~/.claude каталога ещё нет: раскладка не
+        #    делалась, и каталог другой версии пака описывал бы не то, что там лежит.
+        $configSelected = Test-Selected 'config'
+        if (-not $configSelected) {
+            try {
+                $sj = Join-Path $userHome '.claude\settings.json'
+                if (Test-Path -LiteralPath $sj -PathType Leaf) {
+                    Invoke-HmSettingsMigration -Path $sj -Fresh $false -MarkerPath (Join-Path $userHome '.hamidun-setup\config-migrations.json')
+                    $packDir = ''
+                    if ($env:HM_BUNDLED_CONFIG -and (Test-Path -LiteralPath (Join-Path $env:HM_BUNDLED_CONFIG 'CATALOG.md') -PathType Leaf)) { $packDir = $env:HM_BUNDLED_CONFIG }
+                    Write-HmConfigSummary -Clone $packDir -ClaudeHome (Join-Path $userHome '.claude') -SetupDir (Join-Path $userHome '.hamidun-setup') -OnlyIfMissing
+                }
+            } catch { Write-Host "Настройки Claude Code: починка не удалась ($($_.Exception.Message)) — на установку это не влияет." }
+        }
+        # 2. Команда nmd: Nomad кладёт шимы в ~/.local\bin, а в PATH пользователя этого каталога
+        #    часто нет («Имя "nmd" не распознано» в новом окне терминала).
+        try {
+            $localBinDir = Join-Path $userHome '.local\bin'
+            if (Test-Path -LiteralPath (Join-Path $localBinDir 'nmd.exe') -PathType Leaf) { [void](Add-HmUserPath $localBinDir) }
+        } catch { Write-Host "PATH для nmd: не удалось ($($_.Exception.Message)) — на установку это не влияет." }
+        # 3. Уже стоящий claude (галочка с него снята, claude.ps1 не запускался): та же починка, что
+        #    делает claude.ps1 после установки, — PATH и политика выполнения PowerShell. Claude,
+        #    про который известно, что он сломан, не трогаем. Без пробы: проба идёт только через
+        #    де-элевацию, а её здесь не подключаем — вердикт 'unverified' или 'blocked'.
+        $claudeSelected = Test-Selected 'claude'
+        if (-not $claudeSelected) {
+            try {
+                $claudeBinFound = Find-ClaudeBinary
+                $lastVerdict = $null
+                try {
+                    $cf0 = Join-Path $userHome '.hamidun-setup\checks.json'
+                    if (Test-Path -LiteralPath $cf0 -PathType Leaf) {
+                        $j0 = Get-Content -Raw -LiteralPath $cf0 | ConvertFrom-Json
+                        if ($j0.claude) { $lastVerdict = [string]$j0.claude.verdict }
+                    }
+                } catch { }
+                if ($claudeBinFound -and $lastVerdict -ne 'broken') {
+                    Write-Host "claude уже стоит ($claudeBinFound) — проверяю для него PATH и политику PowerShell."
+                    $psVerdictLive = Repair-HmClaudeUserEnv -Bin $claudeBinFound
+                    Write-HmCheck 'claude-ps' $psVerdictLive
+                }
+            } catch { Write-Host "claude: починка PATH и политики не удалась ($($_.Exception.Message)) — на установку это не влияет." }
+        }
+        # 4. Команда python: если новый терминал находит заглушку Магазина, а настоящий Python
+        #    стоит в привычном каталоге, он ставится в начало PATH пользователя.
+        try { $knownPy = Find-HmKnownPython; if ($knownPy) { [void](Repair-HmPythonPath $knownPy) } }
+        catch { Write-Host "PATH для python: не удалось ($($_.Exception.Message)) — на установку это не влияет." }
+        # 5. Codex: AGENTS.md пака → ~/.codex/AGENTS.md. Нужен, когда пак под рукой: он вшит в полное
+        #    издание, а в лёгком на руках его нет — тогда файл появится при установке конфига. Зовётся и
+        #    при выбранном config: расширение Codex могло встать ПОЗЖЕ config.ps1 (порядок шагов не задан),
+        #    а повтор безвреден — свой блок узнаётся, файл не меняется. Существующий файл человека не
+        #    перезаписывается (дописывается отмеченный блок); исключений функция не бросает.
+        if ($env:HM_BUNDLED_CONFIG) {
+            [void](Install-HmCodexAgents -Source (Join-Path $env:HM_BUNDLED_CONFIG 'AGENTS.md') -UserHome $userHome)
+        }
+    }
+}
+# --- end ---
+
 Write-Host "Финальная проверка установки..."
 
 # --- Git ---
@@ -66,36 +188,12 @@ if (-not (Test-Selected 'node')) {
     if ($nodeOk) { Write-Host "CHECK ok Node" } else { Write-Host "CHECK fail Node" }
 }
 
-# --- Claude CLI (тот же поиск бинаря, что в claude.ps1 — не доверяем только PATH) ---
-function Find-ClaudeBinary {
-    $cmd = Get-Command claude -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    # Глобальный npm-prefix: там лежит claude.cmd после `npm install -g`.
-    if (Get-Command npm -ErrorAction SilentlyContinue) {
-        try {
-            $prefix = (npm config get prefix 2>$null | Select-Object -First 1)
-            if ($prefix) { $prefix = $prefix.Trim() }
-            if ($prefix -and (Test-Path $prefix)) {
-                foreach ($name in @('claude.cmd', 'claude.exe', 'claude')) {
-                    $p = Join-Path $prefix $name
-                    if (Test-Path $p) { return $p }
-                }
-            }
-        } catch { }
-    }
-
-    # Нативный установщик кладёт бинарь в ~/.local/bin.
-    $localBin = Join-Path $env:USERPROFILE '.local\bin'
-    foreach ($name in @('claude.exe', 'claude.cmd', 'claude')) {
-        $p = Join-Path $localBin $name
-        if (Test-Path $p) { return $p }
-    }
-
-    return $null
-}
+# --- Claude CLI (бинарь ищет Find-ClaudeBinary, определён выше — не доверяем только PATH) ---
 if (-not (Test-Selected 'claude')) {
     Write-Host "CHECK skip Claude CLI"
+    # claude не ставился в этом прогоне, но блок починок выше мог проверить уже стоящий: берём
+    # вердикт оттуда, а не из файла, где может лежать запись давнего прогона.
+    $psVerdict = [string]$psVerdictLive
 } else {
     # ОДИН факт — ОДИН стандарт доказательства. claude.ps1 проверяет claude ЗАПУСКОМ
     # (--version де-элевированно) и пишет вердикт в ~/.hamidun-setup/checks.json.
@@ -124,6 +222,19 @@ if (-not (Test-Selected 'claude')) {
         # broken ИЛИ вердикта нет вовсе (claude.ps1 не дошёл до записи) — не подтверждено.
         Write-Host "CHECK fail Claude CLI"
     }
+    # Второй факт — запуск ИЗ PowerShell (терминал VS Code по умолчанию): там вместо
+    # claude.cmd берётся claude.ps1, и его может не пустить политика выполнения скриптов.
+    # Проверка выше этого не видит — она идёт через cmd. Отдельная строка появляется только
+    # при доказанной беде: «работает» и «не проверено» лишним пунктом экран не засоряют.
+    $psVerdict = ''
+    try { if ($j -and $j.'claude-ps') { $psVerdict = [string]$j.'claude-ps'.verdict } } catch { }
+}
+if ($psVerdict -eq 'blocked') {
+    Write-Host "  в PowerShell claude не запустится: политика выполнения скриптов не пускает claude.ps1 — набирай claude.cmd"
+    Write-Host "CHECK fail Запуск claude в PowerShell"
+} elseif ($psVerdict -eq 'broken') {
+    Write-Host "  в PowerShell claude не ответил на --version (в cmd отвечает) — набирай claude.cmd"
+    Write-Host "CHECK fail Запуск claude в PowerShell"
 }
 
 # --- Конфиг (~/.claude развёрнут?) ---

@@ -33,10 +33,33 @@ def app_dir():
 CFG_PATH = os.path.join(app_dir(), "config.json")
 LOG_PATH = os.path.join(app_dir(), "bridge.log")
 
+# Журнал на Windows — UTF-8 С BOM. Windows PowerShell 5.1 (Get-Content, а за ним и
+# поддержка, которой присылают файл) читает UTF-8 без BOM как ANSI, и кириллица в журнале
+# превращалась в кракозябры. "utf-8-sig" в режиме "a" пишет BOM только в пустой файл —
+# в середину журнала он не попадёт. Журналу, начатому старой версией без BOM, метку
+# ставим один раз в начало. На macOS BOM не нужен — там пишем как было.
+_LOG_ENC = "utf-8-sig" if IS_WIN else "utf-8"
+_log_bom_checked = False
+
+def _ensure_log_bom():
+    global _log_bom_checked
+    if _log_bom_checked or not IS_WIN:
+        return
+    _log_bom_checked = True
+    try:
+        with open(LOG_PATH, "rb") as f:
+            data = f.read()
+        if data and not data.startswith(b"\xef\xbb\xbf"):
+            with open(LOG_PATH, "wb") as f:
+                f.write(b"\xef\xbb\xbf" + data)
+    except Exception:
+        pass
+
 def log(msg):
     line = time.strftime("%H:%M:%S ") + str(msg)
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
+        _ensure_log_bom()
+        with open(LOG_PATH, "a", encoding=_LOG_ENC) as f:
             f.write(line + "\n")
     except Exception:
         pass

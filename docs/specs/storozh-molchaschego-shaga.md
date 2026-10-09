@@ -84,8 +84,8 @@ UI-лога.
    `child.kill`, ни `process.kill`, ни `taskkill` — единственные действия это `send(m)` и
    `logLine(m)`. Дочерний процесс самого шага убивает только `killChildren()`
    (`src/main.js:218-243`), и вызывается она из `window-all-closed` и `before-quit`
-   (`src/main.js:381-387`). Остальные kill в `main.js` к шагу не относятся: 20-секундный
-   таймаут `child.kill()` в `winMakeSecureDir()` (`src/main.js:1714`) прибивает отдельный
+   (`src/main.js:381-387`). Остальные kill в `main.js` к шагу не относятся: таймаут
+   `child.kill()` в `winMakeSecureDir()` (20 с; на пути докачки, `opts.retry`, при молчании примитива вторая попытка — 60 с) (`src/main.js:1727`) прибивает отдельный
    короткий powershell-примитив (`spawn` на `src/main.js:1711`), который `run-component`
    порождает раньше самого шага (вызов на `src/main.js:1023`), а `taskkill /IM` и `pkill -f`
    (`src/main.js:3149`, `3239`) живут в цели удаления `killproc` при деинсталляции.

@@ -47,11 +47,24 @@ if (-not $sshOk) {
     Write-Host "  Установи вручную: Параметры → Приложения → Дополнительные компоненты → Клиент OpenSSH."
 }
 
-# 2. реальный Python (не Store-заглушка)
+# 2. реальный Python (не Store-заглушка) — ТОТ ЖЕ поиск, что у доводки рантайма в
+#    config.ps1: python/python3 мимо WindowsApps, затем известные каталоги установки.
+#    Раньше здесь были только `python` и Python313/312, и мост писал «Python не найден»
+#    там, где соседние шаги Python находили (Python311, Program Files, python3).
 $py = ''
-$c = Get-Command python -ErrorAction SilentlyContinue
-if ($c -and $c.Source -notmatch 'WindowsApps') { $py = $c.Source }
-if (-not $py) { foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python313\python.exe", "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe")) { if (Test-Path $p) { $py = $p; break } } }
+foreach ($name in 'python', 'python3') {
+    $c = Get-Command $name -ErrorAction SilentlyContinue
+    if ($c -and $c.Source -notmatch 'WindowsApps') { $py = $c.Source; break }
+}
+if (-not $py) {
+    foreach ($p in @("$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+                     "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+                     "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+                     "$env:ProgramFiles\Python313\python.exe",
+                     "$env:ProgramFiles\Python312\python.exe")) {
+        if (Test-Path -LiteralPath $p) { $py = $p; break }
+    }
+}
 if (-not $py) { Write-Host "Python не найден — выберите компонент «Python-пакеты»."; exit 1 }
 $pyw = Join-Path (Split-Path $py) 'pythonw.exe'
 
