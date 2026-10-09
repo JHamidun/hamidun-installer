@@ -56,18 +56,33 @@ if [ -e "$HOME/.local/bin/claude" ] || [ -L "$HOME/.local/bin/claude" ]; then PR
 # говорим правду ДО того, как потратим минуту на заведомо пустую установку.
 CLAUDE_PLAT_PKG="claude-code-darwin-$(arch_tag)"
 OFFLINE_HAS_ARCH=0
+OFFLINE_VER=""
+OFFLINE_WHY=""   # почему вшитой копией воспользоваться нельзя — для итогового сообщения
 if [ -n "${HM_VENDOR:-}" ] && [ -d "$HM_VENDOR/npm-cache" ]; then
   if hm_npm_cache_has_tarball "$HM_VENDOR/npm-cache" "$CLAUDE_PLAT_PKG"; then
-    OFFLINE_HAS_ARCH=1
+    # Архив под эту арх есть — но той ли версии? `npm install --offline` без версии
+    # берёт latest из закешированных метаданных, а они бывают новее архивов (живой
+    # случай 23.09.2026: архивы 2.1.197, latest 2.1.278 → ENOTCACHED → интернет).
+    # Ставим ровно ту версию, для которой в кеше лежат ОБА архива — основной пакет и
+    # платформенный под эту арх (hm_claude_offline_version).
+    OFFLINE_VER="$(hm_claude_offline_version "$HM_VENDOR/npm-cache" "$(arch_tag)")"
+    if [ -n "$OFFLINE_VER" ]; then
+      OFFLINE_HAS_ARCH=1
+    else
+      echo "Офлайн-копия Claude Code в этой сборке неполная: основной и платформенный пакеты разных версий."
+      echo "Это не ошибка компьютера: сейчас установлю Claude Code онлайн (нужно рабочее подключение)."
+      OFFLINE_WHY="вшитая копия Claude Code в этой сборке неполная (пакеты разных версий)"
+    fi
   else
     echo "Офлайн-копия Claude Code в этой сборке собрана только под $(hm_arch_human "$(hm_other_arch)")."
     echo "Твой Mac — на $(hm_arch_human), поэтому этот компонент нужно скачать из интернета."
     echo "Это не ошибка: сейчас установлю Claude Code онлайн (нужно рабочее подключение)."
+    OFFLINE_WHY="офлайн-копии под $(hm_arch_human) в этой сборке нет"
   fi
 fi
 
 if [ "$OFFLINE_HAS_ARCH" -eq 1 ] && have npm; then
-  echo "Claude Code CLI из встроенного npm-кеша (офлайн)..."
+  echo "Claude Code CLI $OFFLINE_VER из встроенного npm-кеша (офлайн)..."
   # npm ТРЕБУЕТ записываемый кэш: он пишет туда логи, локи и _cacache/tmp даже в режиме
   # --offline. На macOS vendor лежит на ОБРАЗЕ ТОЛЬКО ДЛЯ ЧТЕНИЯ (/Volumes/...), поэтому
   # прямой --cache на него давал «ENOTCACHED» и «Log files were not written to
@@ -79,7 +94,7 @@ if [ "$OFFLINE_HAS_ARCH" -eq 1 ] && have npm; then
     # Права на копии доводим явно: файлы на образе могут прийти без права записи, и
     # тогда npm упрётся в то же самое уже во временном каталоге.
     chmod -R u+w "$NPMTMP/npm-cache" 2>/dev/null || true
-    if npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' \
+    if npm install -g --prefix "$HOME/.local" "@anthropic-ai/claude-code@$OFFLINE_VER" \
          --offline --cache "$NPMTMP/npm-cache" --no-audit --no-fund; then
       # Проверка не кодом npm, а РАБОТОЙ (claude_install_ok выше): в кеше может не быть
       # платформенного бинаря — обёртка-пустышка удаляется там же.
@@ -98,21 +113,38 @@ if [ "$OFFLINE_HAS_ARCH" -eq 1 ] && have npm; then
 fi
 
 if [ "$INSTALLED" -eq 0 ]; then
-  echo "Устанавливаю Claude Code CLI (нативный установщик, онлайн)..."
-  # Таймауты обязательны: curl без --max-time на РФ-DPI виснет молча навсегда.
-  # ОБА онлайн-пути гейтятся claude_install_ok: скрипт claude.ai и npm умеют
-  # отчитаться успехом, оставив нерабочий артефакт (тот же класс сбоя, что офлайн).
-  # При провале проверки нерабочая обёртка уже удалена — следующий путь стартует чисто.
-  if curl -fsSL --connect-timeout 20 --max-time 900 --retry 3 --retry-connrefused https://claude.ai/install.sh | bash \
-     && claude_install_ok; then
-    INSTALLED=1
-  elif have npm && npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' --no-audit --no-fund \
-     && claude_install_ok; then
-    INSTALLED=1
+  echo "Устанавливаю Claude Code CLI из интернета..."
+  # Без VPN из России claude.ai не отвечает, и прежний curl к нему висел МОЛЧА: до 15
+  # минут на каждую из четырёх попыток, ни строчки в журнале (живой случай 23.09.2026 —
+  # человек ждал больше получаса и решил, что всё сломалось). Теперь: короткая проба
+  # claude.ai → нативный установщик под сторожем времени → npm (registry.npmjs.org из
+  # России обычно доступен и без VPN) → итог словами, что делать.
+  # ОБА пути гейтятся claude_install_ok: скрипт claude.ai и npm умеют отчитаться
+  # успехом, оставив нерабочий артефакт (тот же класс сбоя, что офлайн). При провале
+  # проверки нерабочая обёртка уже удалена — следующий путь стартует чисто.
+  if curl -fsS -o /dev/null --connect-timeout 10 --max-time 20 https://claude.ai/install.sh; then
+    echo "  claude.ai доступен — ставлю нативным установщиком Anthropic (до 10 минут)..."
+    if hm_run_with_timeout 600 bash -c 'curl -fsSL --connect-timeout 20 --max-time 120 --retry 2 https://claude.ai/install.sh | bash' \
+       && claude_install_ok; then
+      INSTALLED=1
+    else
+      echo "  Нативный установщик не уложился в 10 минут или завершился ошибкой — пробую npm."
+    fi
   else
-    echo "Сеть недоступна, очень медленная или установка не дала РАБОТАЮЩИЙ claude — повтори установку этого компонента."
-    if [ "$OFFLINE_HAS_ARCH" -eq 0 ]; then
-      echo "Важно: офлайн-копии под $(hm_arch_human) в этой сборке нет, поэтому без интернета этот компонент не поставить."
+    echo "  claude.ai не отвечает (часто это значит, что нужен VPN) — нативный установщик пропускаю, ставлю другим способом, через npm."
+  fi
+  if [ "$INSTALLED" -eq 0 ] && have npm; then
+    echo "  Качаю Claude Code через npm (registry.npmjs.org): обычно 1-5 минут, вывода в это время нет."
+    if hm_run_with_timeout 900 npm install -g --prefix "$HOME/.local" '@anthropic-ai/claude-code' --no-audit --no-fund \
+       && claude_install_ok; then
+      INSTALLED=1
+    fi
+  fi
+  if [ "$INSTALLED" -eq 0 ]; then
+    echo "Не удалось скачать Claude Code из интернета (или установка не дала РАБОТАЮЩИЙ claude)."
+    echo "  Чаще всего серверы недоступны без VPN: включи VPN в режиме «весь компьютер» (TUN или системный) и нажми «Повторить» на этом шаге."
+    if [ -n "$OFFLINE_WHY" ]; then
+      echo "Важно: $OFFLINE_WHY, поэтому без интернета этот компонент не поставить."
     fi
   fi
 fi
@@ -156,13 +188,64 @@ PY
   return 0
 }
 
+# Финальный факт — НОВОЕ окно Терминала находит claude и запускает его (hm_fresh_shell_run
+# в _lib.sh). Живой случай 10.09.2026: отчёт ok=True, а в Терминале «zsh: command not
+# found: claude». Проверка шла в окружении установщика, где ~/.local/bin уже стоит в PATH,
+# — и потому проходила всегда.
+# Коды: 0 — находит и запускает (или проверить нечем: не zsh/bash, таймаут); 1 — не
+# находит; 3 — находит, но не запускает. Находит/запускает — разные ответы оболочки
+# (41 и 42), потому что и лечатся по-разному: PATH дописывают, а «не запускается» — нет.
+CLAUDE_FRESH_CMD='command -v claude >/dev/null 2>&1 || exit 41; v="$(claude --version 2>&1)" || exit 42; printf "%s\n" "$v"'
+claude_new_terminal_gate() {
+  local out rc
+  out="$(mktemp "${TMPDIR:-/tmp}/hm-claude-fresh.XXXXXX" 2>/dev/null || echo '')"
+  if [ -z "$out" ]; then echo "  (проверку новым окном пропускаю: не создать временный файл)"; return 0; fi
+  hm_fresh_shell_run i "$CLAUDE_FRESH_CMD" >"$out" 2>/dev/null
+  rc=$?
+  if [ "$rc" -eq 41 ]; then
+    # Попытка починить: строка PATH в ~/.zprofile — его читает ЛЮБАЯ оболочка входа zsh,
+    # даже если ~/.zshrc недоступен на запись или выходит раньше нашей строки.
+    persist_local_bin_zprofile
+    hm_fresh_shell_run n "$CLAUDE_FRESH_CMD" >"$out" 2>/dev/null
+    rc=$?
+    if [ "$rc" -eq 0 ]; then echo "  Новое окно не находило claude — дописал PATH в $(hm_login_profile_name), теперь находит."; fi
+  fi
+  case "$rc" in
+    0)   echo "  Проверка новым окном Терминала: $(tail -n 1 "$out" 2>/dev/null)" ;;
+    2)   echo "  Оболочка входа — не zsh и не bash: проверить новое окно не могу. Если claude там не найдётся, добавь ~/.local/bin в PATH этой оболочки." ;;
+    124) echo "  Новое окно Терминала не ответило вовремя — проверку пропускаю (сам claude запускается)." ;;
+  esac
+  rm -f "$out" 2>/dev/null
+  case "$rc" in
+    0|2|124) return 0 ;;
+    42)      return 3 ;;
+    *)       return 1 ;;
+  esac
+}
+
 export PATH="$HOME/.local/bin:$PATH"
 if claude_install_ok; then
   persist_local_bin_path
+  # Сам claude отвечает — это факт, и он не зависит от нового окна: вердикт «работает»
+  # пишем до проверки окна. Не нашёл его новый Терминал — это НЕ провал компонента (иначе
+  # он тянул бы за собой конфиг, библиотеки, курс и скрепку, которым claude нужен лишь как
+  # установленный), а частичный успех: код 121, одна строка «ЧАСТИЧНО:» с тем, что делать.
   hm_write_check claude works
+  claude_new_terminal_gate
+  GATE_RC=$?
   if have claude; then echo "OK: $(claude --version 2>&1 | head -n1)"
   else echo "OK: claude установлен, PATH прописан — открой НОВЫЙ терминал для команды claude."; fi
-  exit 0
+  case "$GATE_RC" in
+    0)
+      echo "  Окна Терминала и VS Code, открытые до установки, увидят claude только после перезапуска."
+      exit 0 ;;
+    3)
+      echo "ЧАСТИЧНО: claude установлен, но в новом окне Терминала не запускается — открой новое окно, набери claude --version и пришли ошибку в поддержку"
+      exit 121 ;;
+    *)
+      echo "ЧАСТИЧНО: claude установлен, но новый Терминал его не видит — выполни в Терминале: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> $(hm_login_profile_name) и открой новое окно"
+      exit 121 ;;
+  esac
 else
   hm_write_check claude broken
   echo "ОШИБКА: Claude Code CLI не установился или не запускается — смотри лог выше."; exit 1

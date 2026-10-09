@@ -2395,7 +2395,7 @@ if (bashAvailable()) {
       seedHome(home);
       const r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '{"user":"custom"}', 'settings.json юзера НЕ перезаписан (add-missing)');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { user: 'custom', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing): миграция лишь добавила выключатель опроса');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'недостающий файл доложен');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл доложен');
       assertUserDataIntact(home);
@@ -2409,7 +2409,7 @@ if (bashAvailable()) {
       seedHome(home);
       const r = runCfgSh(home, clone, {});   // HM_ADDITIVE удалён → repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '{"fresh":"base"}', 'settings.json (наш базовый) перезаписан свежим (repair)');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { fresh: 'base', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair) + значения по умолчанию миграции');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'свежие правила разложены');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл разложен');
       assertUserDataIntact(home);   // пользовательское НЕ тронуто даже в repair
@@ -3281,8 +3281,8 @@ ok('nomad.sh: на Intel-маке cryptography ограничена версие
   assert(/cryptography>=[\d.]+,<49/.test(nsh), 'пин cryptography <49 присутствует');
   // Ключевое: пин обязан ехать ФАЙЛОМ ОГРАНИЧЕНИЙ. `uv tool install` резолвит
   // зависимости заново и uv.lock игнорирует — версия из lock сама не подхватится.
-  assert(/uv tool install --python 3\.12 -c "\$CONSTRAINTS" "\$BUILD_SRC"/.test(nsh),
-    'пин едет файлом ограничений прямо в команде установки');
+  assert(/uv tool install --python 3\.12 --no-build -c "\$CONSTRAINTS" "\$NOMAD_REQ"/.test(nsh),
+    'пин едет файлом ограничений прямо в команде установки (Intel = только готовые сборки)');
   // Ветки РАЗДЕЛЬНЫЕ, без массива аргументов: скрипт под `set -u`, а /bin/bash на маке
   // версии 3.2 — там "${arr[@]}" при пустом массиве считается неустановленной
   // переменной и роняет установку. Первый заход именно так и сломал Apple Silicon.
@@ -3290,7 +3290,7 @@ ok('nomad.sh: на Intel-маке cryptography ограничена версие
   assert(/uv tool install --python 3\.12 "\$BUILD_SRC"/.test(nsh),
     'ветка без ограничений сохранена дословно (arm64 ставит как раньше)');
   // И только на Intel: на arm64 колёса есть для всех версий, старить библиотеку незачем.
-  const i = nsh.indexOf('CONSTRAINTS="');
+  const i = nsh.indexOf('CONSTRAINTS="$BUILD_SRC');
   const guard = nsh.slice(Math.max(0, i - 400), i);
   assert(/arch_tag/.test(guard) && /x64/.test(guard), 'ограничение только для x64-ветки');
 });
@@ -3566,18 +3566,18 @@ const NOMAD_FAKE_GIT =
   'exit 0\n';
 const NOMAD_FAKE_UV =
   '#!/bin/sh\n' +
-  ': > "$HOME/.hm-uv-called"\n' +
+  ': > "$HOME/.hm-uv-called"; echo "$*" >> "$HOME/.hm-uv-args"\n' +
   'case "$1" in\n' +
   '  --version) echo "uv 0.0.0-fake" ;;\n' +
   '  python) exit 0 ;;\n' +
   '  tool)\n' +
-  '    mkdir -p "$HOME/.local/share/uv/tools/nomad-agent"\n' +
+  '    if [ -n "$HM_FAKE_UV_FAIL" ]; then echo "$HM_FAKE_UV_FAIL"; exit 1; fi; mkdir -p "$HOME/.local/share/uv/tools/nomad-agent"\n' +
   '    for c in nmd nomad-agent nomad-acp; do\n' +
   '      printf \'#!/bin/sh\\necho "%s 9.9-fake"\\n\' "$c" > "$HOME/.local/bin/$c"\n' +
   '      chmod +x "$HOME/.local/bin/$c"\n' +
   '    done\n' +
   '    ;;\n' +
-  '  *) exit 0 ;;\n' +
+  '  build) o=""; p=""; for a in "$@"; do [ "$p" = "--out-dir" ] && o="$a"; p="$a"; done; [ -n "$o" ] && mkdir -p "$o" && : > "$o/nomad_agent-9.9-py3-none-any.whl" ;; *) exit 0 ;;\n' +
   'esac\n' +
   'exit 0\n';
 // Подставной curl. БЕЗ него эти тесты зависели от НАСТОЯЩЕЙ сети раннера:
@@ -6884,7 +6884,7 @@ asyncTests()
     const off = CLAUDE_SH.slice(CLAUDE_SH.indexOf('--offline --cache'), CLAUDE_SH.indexOf('онлайн-фолбэк."'));
     assertOrder(off, 'claude_install_ok', 'INSTALLED=1', 'офлайн: INSTALLED=1 только после гейта');
     // curl-путь: тот же гейт в ОДНОЙ команде с bash (&&), успех curl сам по себе ничего не решает
-    assert(/install\.sh \| bash \\\n\s+&& claude_install_ok; then/.test(CLAUDE_SH),
+    assert(/install\.sh \| bash' \\\n\s+&& claude_install_ok; then/.test(CLAUDE_SH),
       'curl-путь гейтится claude_install_ok');
     // npm-фолбэк: тоже
     assert(/--no-audit --no-fund \\\n\s+&& claude_install_ok; then/.test(CLAUDE_SH),
@@ -10740,5 +10740,2339 @@ ok('config.json в репозитории без сборочных маркер
     assert.throws(() => assertOrder(swapped, 'status, thumb = authenticode(p)', 's3.upload_file('));
     assert.throws(() => assertOrder('s3.upload_file(p)', 'status, thumb = authenticode(p)', 's3.upload_file('),
       'пропавшая проверка тоже обязана ронять тест');
+  });
+})();
+
+// ===========================================================================
+// macOS: готовые сборки вместо компиляции (Intel / Rosetta / без Xcode CLT),
+// офлайн-кеш Claude Code одной версии, «новое окно Терминала», владелец VS Code.
+// ===========================================================================
+// Живые случаи 23.09.2026 (Mac на Intel, офлайн-издание): pip пошёл собирать
+// cryptography из исходников (докачал Rust, грел ноутбук, упал), Nomad дёрнул
+// системный cc — окно «требуются инструменты разработчика»; офлайн-кеш Claude Code
+// отдал ENOTCACHED, а онлайн-фолбэк молча висел без VPN; 10.09 — ok=True при
+// «zsh: command not found: claude»; VS Code в /Applications принадлежал root и
+// просил пароль на каждом самообновлении.
+//
+// Всё ниже ИСПОЛНЯЕТСЯ настоящим bash с подставными системными командами (uname,
+// xcode-select, sysctl, python3, uv, stat, id, chown) — Mac для этого не нужен.
+// Подставное всегда стоит ПЕРВЫМ в PATH, а настоящий интерпретатор недостижим: один
+// прогон-черновик этого набора ушёл в настоящий pip, потому что путь C:/… в PATH
+// MSYS режет по двоеточию. Отсюда mp() и проба «подставное — первое» перед запуском.
+(function macPrebuiltAndFreshShellTests() {
+  console.log('== macOS: готовые сборки вместо компиляции, офлайн-кеш Claude Code, новое окно Терминала, владелец VS Code ==');
+  if (!bashAvailable()) { console.log('  ⚠️  bash недоступен — проверки этого блока пропущены.'); return; }
+
+  const LIB = path.join(ROOT, 'scripts', 'macos', '_lib.sh').replace(/\\/g, '/');
+  const MACDIR = path.join(ROOT, 'scripts', 'macos');
+  const readMac = (f) => fs.readFileSync(path.join(MACDIR, f), 'utf8');
+  // C:/x → /c/x: в PATH MSYS режет «C:» по двоеточию, и каталог пропадает молча.
+  const mp = (p) => String(p).split('\\').join('/').replace(/^([A-Za-z]):\//, (m, d) => '/' + d.toLowerCase() + '/');
+  const mkTmp = (pfx) => fs.mkdtempSync(path.join(os.tmpdir(), pfx)).replace(/\\/g, '/');
+  const exe = (file, text) => { fs.writeFileSync(file, text); fs.chmodSync(file, 0o755); };
+  // Фрагмент bash с подключённым _lib.sh. bin — каталог подставных команд, ПЕРВЫЙ в PATH.
+  function libRun(body, bin, env) {
+    const script = 'export PATH="' + (bin ? mp(bin) + ':' : '') + '$PATH"\n. "' + LIB + '"\n' + body + '\n';
+    let r = null;
+    // Каждый фрагмент здесь обязан что-то напечатать. Пустой вывод — не результат, а
+    // сбой запуска процесса под нагрузкой машины (так и было при параллельных прогонах
+    // соседних наборов): повторяем, а не выдаём его за вердикт.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      r = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, env || {}),
+      });
+      if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+      if (r.status === null) SKIP('bash убит по таймауту — проверка не выполнена');
+      if ((r.stdout || '').trim()) break;
+    }
+    return r;
+  }
+  // Подставная uname: arm64 | x86_64.
+  const fakeUname = (bin, arch) => exe(bin + '/uname',
+    '#!/bin/sh\n[ "$1" = "-m" ] && { echo ' + arch + '; exit 0; }\necho Darwin\n');
+  // Подставной xcode-select: с инструментами (каталог с исполняемым clang) или без.
+  function fakeXcodeSelect(bin, base, withClt) {
+    if (!withClt) {
+      exe(bin + '/xcode-select', '#!/bin/sh\necho "xcode-select: error: unable to get active developer directory" >&2\nexit 2\n');
+      return;
+    }
+    fs.mkdirSync(base + '/CLT/usr/bin', { recursive: true });
+    // Сам «компилятор» оставляет след, если его ЗАПУСТИТЬ: проверка CLT не должна его звать.
+    exe(base + '/CLT/usr/bin/clang', '#!/bin/sh\n: > "' + mp(base) + '/clang-was-run"\nexit 0\n');
+    exe(bin + '/xcode-select', '#!/bin/sh\n[ "$1" = "-p" ] && { echo "' + mp(base) + '/CLT"; exit 0; }\nexit 1\n');
+  }
+  const fakeSysctl = (bin, translated) => exe(bin + '/sysctl',
+    '#!/bin/sh\n[ "$2" = "sysctl.proc_translated" ] && { echo ' + translated + '; exit 0; }\nexit 1\n');
+
+  // ---- Решение «собирать ли из исходников» ----
+  ok('hm_build_policy: полная матрица арх × Rosetta × инструменты разработчика', () => {
+    const r = libRun('for a in arm64 x64; do for t in 0 1; do for c in 0 1; do ' +
+      'echo "$a $t $c $(hm_build_policy "$a" "$t" "$c")"; done; done; done');
+    const want = {
+      'arm64 0 0': 'wheels-only:no-clt', 'arm64 0 1': 'allow-build',
+      'arm64 1 0': 'wheels-only:rosetta', 'arm64 1 1': 'wheels-only:rosetta',
+      'x64 0 0': 'wheels-only:intel', 'x64 0 1': 'wheels-only:intel',
+      'x64 1 0': 'wheels-only:rosetta', 'x64 1 1': 'wheels-only:rosetta',
+    };
+    const got = {};
+    (r.stdout || '').trim().split('\n').forEach((l) => { const p = l.split(' '); got[p.slice(0, 3).join(' ')] = p[3]; });
+    assert.deepStrictEqual(got, want, 'матрица решений: ' + r.stdout + r.stderr);
+    // Компилировать разрешено РОВНО в одной клетке из восьми.
+    assert.strictEqual(Object.values(got).filter((v) => v === 'allow-build').length, 1);
+  });
+
+  ok('hm_build_policy_note: у каждого «только готовые» есть строка для человека, у allow-build — тишина', () => {
+    const r = libRun('for p in wheels-only:intel wheels-only:rosetta wheels-only:no-clt allow-build; do ' +
+      'printf "%s=[%s]\\n" "$p" "$(hm_build_policy_note "$p")"; done');
+    const out = r.stdout || '';
+    assert(/wheels-only:intel=\[\s+Mac на Intel/.test(out), 'Intel: ' + out);
+    assert(/wheels-only:rosetta=\[\s+.*Rosetta/.test(out), 'Rosetta: ' + out);
+    assert(/wheels-only:no-clt=\[\s+.*Command Line Tools/.test(out), 'без CLT: ' + out);
+    assert(/allow-build=\[\]/.test(out), 'allow-build молчит: ' + out);
+  });
+
+  ok('hm_clt_flag / hm_rosetta_flag: только xcode-select и sysctl, компилятор НЕ запускается', () => {
+    const base = mkTmp('hm-clt-');
+    try {
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      fakeXcodeSelect(bin, base, true);
+      let r = libRun('echo "clt=$(hm_clt_flag)"', bin);
+      assert(/clt=1/.test(r.stdout), 'каталог с clang → 1: ' + r.stdout + r.stderr);
+      assert(!fs.existsSync(base + '/clang-was-run'), 'проверка CLT запустила clang — это и есть окно «требуются инструменты»');
+      fs.rmSync(base + '/CLT/usr/bin/clang');
+      r = libRun('echo "clt=$(hm_clt_flag)"', bin);
+      assert(/clt=0/.test(r.stdout), 'xcode-select указывает на каталог без компилятора (CLT удалены) → 0: ' + r.stdout);
+      fakeXcodeSelect(bin, base, false);
+      r = libRun('echo "clt=$(hm_clt_flag)"', bin);
+      assert(/clt=0/.test(r.stdout), 'xcode-select без инструментов → 0: ' + r.stdout);
+      fakeSysctl(bin, 1);
+      r = libRun('echo "ros=$(hm_rosetta_flag)"', bin);
+      assert(/ros=1/.test(r.stdout), 'proc_translated=1 → Rosetta: ' + r.stdout);
+      fakeSysctl(bin, 0);
+      r = libRun('echo "ros=$(hm_rosetta_flag)"', bin);
+      assert(/ros=0/.test(r.stdout), 'родной процесс → 0: ' + r.stdout);
+      exe(bin + '/sysctl', '#!/bin/sh\necho "sysctl: unknown oid" >&2\nexit 1\n');
+      r = libRun('echo "ros=$(hm_rosetta_flag)"', bin);
+      assert(/ros=0/.test(r.stdout), 'Intel (ключа нет) → 0: ' + r.stdout);
+    } finally { dropDir(base); }
+  });
+
+  ok('классификаторы провала pip/uv и имена библиотек: «нет готовой сборки» ≠ сеть ≠ место ≠ компиляция', () => {
+    const base = mkTmp('hm-kind-');
+    try {
+      const w = (n, t) => fs.writeFileSync(base + '/' + n, t);
+      w('nowheel', 'ERROR: Could not find a version that satisfies the requirement pikepdf (from img2pdf) (from versions: none)\nERROR: No matching distribution found for pikepdf\n');
+      w('network', "WARNING: Retrying after connection broken by 'NewConnectionError: Failed to establish a new connection'\nERROR: No matching distribution found for requests>=2.31\n");
+      w('build', 'error: could not compile `cryptography`\nnote: cargo\nFailed to build cryptography\n');
+      w('disk', 'OSError: [Errno 28] No space left on device\n');
+      w('uvwheel', '  ╰─▶ Because argon2-cffi-bindings==26.1.0 has no usable wheels and building from source is disabled, we can conclude that nomad-agent cannot be used.\n');
+      w('uvnet', 'error: Failed to fetch: `https://pypi.org/simple/argon2-cffi-bindings/`\n  Caused by: error sending request for url\n');
+      const B = mp(base);
+      const r = libRun([
+        'for f in nowheel network build disk missing; do echo "kind $f $(hm_pip_failure_kind "' + B + '/$f")"; done',
+        'echo "miss [$(hm_pip_missing_names "' + B + '/nowheel")] [$(hm_pip_missing_names "' + B + '/network")]"',
+        'for f in uvwheel uvnet nowheel; do if hm_uv_no_wheel "' + B + '/$f"; then echo "uv $f yes"; else echo "uv $f no"; fi; done',
+      ].join('\n'));
+      const out = r.stdout || '';
+      ['kind nowheel no-wheel', 'kind network network', 'kind build build', 'kind disk disk', 'kind missing other',
+        'uv uvwheel yes', 'uv uvnet no', 'uv nowheel no'].forEach((line) => assert(out.indexOf(line) !== -1, 'нет «' + line + '»: ' + out));
+      assert(/miss \[pikepdf\] \[requests\]/.test(out), 'имена без версий: ' + out);
+    } finally { dropDir(base); }
+  });
+
+  // ---- pydeps.sh целиком: подставные python3/uname/xcode-select/sysctl ----
+  const FAKE_PY = [
+    '#!/bin/sh',
+    'echo "$*" >> "$HOME/.hm-py-args"',
+    'case "$*" in',
+    '  *"-m pip install"*"--upgrade pip"*) exit 0 ;;',
+    '  *"-m pip install"*)',
+    '    case "$*" in *--no-index*) mode="${FAKE_PIP_OFFLINE:-$FAKE_PIP}" ;; *) mode="$FAKE_PIP" ;; esac',
+    '    case "$mode" in',
+    '      ok) echo "Successfully installed requests"; exit 0 ;;',
+    '      nowheel) echo "ERROR: Could not find a version that satisfies the requirement pikepdf (from versions: none)"; echo "ERROR: No matching distribution found for pikepdf"; exit 1 ;;',
+    '      network) echo "WARNING: Retrying after connection broken by NewConnectionError: Failed to establish a new connection"; echo "ERROR: No matching distribution found for requests>=2.31"; exit 1 ;;',
+    '      disk) echo "ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device"; exit 1 ;;',
+    '    esac ;;',
+    '  *"-m playwright"*) exit 0 ;;',
+    '  *setup_runtime.py*) : > "$HOME/.hm-runtime-ran"; exit 0 ;;',
+    'esac',
+    'exit 0',
+    ''].join('\n');
+  function mkPydeps(arch, clt, translated) {
+    const base = mkTmp('hm-pyd-');
+    fs.mkdirSync(base + '/scripts/macos', { recursive: true });
+    ['pydeps.sh', '_lib.sh'].forEach((f) => fs.copyFileSync(path.join(MACDIR, f), base + '/scripts/macos/' + f));
+    const home = base + '/home';
+    fs.mkdirSync(home + '/.claude/scripts', { recursive: true });
+    fs.writeFileSync(home + '/.claude/scripts/setup_runtime.py', '# подставной рантайм\n');
+    fs.mkdirSync(base + '/cfg');
+    fs.writeFileSync(base + '/cfg/requirements.txt', 'requests>=2.31\nimg2pdf\ntelethon>=1.36\n');
+    fs.mkdirSync(base + '/vendor/pywheels', { recursive: true });
+    fs.writeFileSync(base + '/vendor/pywheels/pyaes-1.6.1.tar.gz', 'x');
+    fs.writeFileSync(base + '/vendor/pywheels/requests-2.32.0-py3-none-any.whl', 'x');
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/python3', FAKE_PY);
+    fakeUname(bin, arch);
+    fakeXcodeSelect(bin, base, clt);
+    fakeSysctl(bin, translated ? 1 : 0);
+    // Проба: подставной python3 обязан находиться ПЕРВЫМ. Иначе скрипт позвал бы
+    // настоящий pip — и поставил бы библиотеки в систему того, кто гоняет тесты.
+    const probe = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; command -v python3', 'x', mp(bin)], { encoding: 'utf8' });
+    if ((probe.stdout || '').trim() !== mp(bin) + '/python3') {
+      dropDir(base);
+      SKIP('подставной python3 не первый в PATH (' + (probe.stdout || probe.stderr || '').trim() + ') — настоящий pip не трогаем');
+    }
+    // pydeps.sh берёт framework-Python 3.12 по абсолютному пути раньше PATH. Если он на
+    // машине есть (бывает на CI-образах macOS), подставить его нельзя — честный пропуск.
+    if (fs.existsSync('/Library/Frameworks/Python.framework/Versions/3.12/bin/python3')) {
+      dropDir(base);
+      SKIP('на машине есть framework-Python 3.12 — pydeps.sh возьмёт его, а не подставной');
+    }
+    return { base, home, bin };
+  }
+  function runPydeps(t, env) {
+    const r = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; exec bash "$2"', 'x', mp(t.bin), t.base + '/scripts/macos/pydeps.sh'], {
+      encoding: 'utf8', timeout: 300000,
+      // Страховка на случай, если подставное всё же проиграет: пользовательские
+      // пакеты и браузеры — во временный каталог, индекс PyPI выключен.
+      env: Object.assign({}, process.env, {
+        HOME: t.home, HM_VENDOR: t.base + '/vendor', HM_BUNDLED_CONFIG: t.base + '/cfg',
+        PYTHONUSERBASE: t.base + '/pyuser', PIP_NO_INDEX: '1',
+        PLAYWRIGHT_BROWSERS_PATH: t.base + '/pw', PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+      }, env || {}),
+    });
+    if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+    if (r.status === null) SKIP('bash убит по таймауту 300 с — проверка не выполнена');
+    let args = '';
+    try { args = fs.readFileSync(t.home + '/.hm-py-args', 'utf8'); } catch (e) { /* python3 не звали */ }
+    assert(args, 'подставной python3 не вызывался — скрипт ушёл мимо него: ' + (r.stdout || '').slice(-300));
+    const pip = args.split('\n').filter((l) => /-m pip install/.test(l) && !/--upgrade pip/.test(l));
+    const lines = (r.stdout || '').trim().split('\n');
+    return { r, pip, last: lines[lines.length - 1] || '', out: r.stdout || '', runtime: fs.existsSync(t.home + '/.hm-runtime-ran') };
+  }
+
+  ok('pydeps.sh (функц.): Intel, готовой сборки нет → пропуск 120 с понятной строкой, без компиляции, рантайм доведён', () => {
+    const t = mkPydeps('x86_64', false, false);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'nowheel' });
+      assert.strictEqual(o.r.status, 120, 'Intel без готовой сборки — осознанный пропуск, а не красный провал: ' + o.out.slice(-400));
+      assert(/^Python-библиотеки пропущены: под этот Mac нет готовых сборок \(requests, img2pdf, telethon\)/.test(o.last),
+        'последняя строка — причина пропуска со ВСЕМИ именами (поштучная установка): ' + o.last);
+      assert(o.pip.length === 5, 'офлайн-попытка, онлайн-попытка и по одной на каждую из трёх библиотек: ' + o.pip.join(' | '));
+      o.pip.forEach((l) => {
+        assert(/--only-binary=:all:/.test(l), 'pip обязан получить --only-binary=:all: (никакой компиляции): ' + l);
+        assert(/--no-binary=pyaes\b/.test(l), 'исключение только для вшитого чистого Python (pyaes): ' + l);
+        assert(!/--prefer-binary/.test(l), 'на Intel не «предпочтение», а запрет: ' + l);
+      });
+      assert(o.runtime, 'доводка рантайма (маркетплейсы плагинов) нужна и без библиотек — она на чистом Python');
+      assert(/Mac на Intel: библиотеки ставлю только готовыми сборками/.test(o.out), 'в журнале сказано почему');
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (функц.): Intel без сети → красный провал с советом про интернет, НЕ «пропуск»', () => {
+    const t = mkPydeps('x86_64', false, false);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'network', FAKE_PIP_OFFLINE: 'nowheel' });
+      assert.strictEqual(o.r.status, 1, 'без сети повтор поможет — это провал, не пропуск: ' + o.out.slice(-300));
+      assert(/нет связи с сервером библиотек \(PyPI\)/.test(o.out), 'названа сеть: ' + o.out.slice(-300));
+      assert(!/пропущены/.test(o.out), 'сетевой сбой не выдаётся за «нет готовой сборки»');
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (функц.): причину судим по ОНЛАЙН-попытке — офлайн «нет версии» + онлайн «нет места» = провал, не пропуск', () => {
+    const t = mkPydeps('x86_64', false, false);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'disk', FAKE_PIP_OFFLINE: 'nowheel' });
+      assert.strictEqual(o.r.status, 1, 'место на диске — провал с советом, а не тихий пропуск: ' + o.out.slice(-300));
+      assert(/закончилось место/.test(o.out), 'названа настоящая причина: ' + o.out.slice(-300));
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (функц.): Apple Silicon без Xcode CLT → только готовые сборки; нет сборки → пропуск 120 (без окна про cc)', () => {
+    const t = mkPydeps('arm64', false, false);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'nowheel' });
+      assert.strictEqual(o.r.status, 120, 'без инструментов разработчика компиляция невозможна → пропуск: ' + o.out.slice(-300));
+      o.pip.forEach((l) => assert(/--only-binary=:all:/.test(l), 'без CLT — только готовые: ' + l));
+      assert(/Command Line Tools/.test(o.out), 'в журнале названа причина (нет инструментов разработчика)');
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (функц.): Apple Silicon С инструментами — компиляция разрешена, готовое в приоритете; провал = красный (негативный контроль)', () => {
+    const t = mkPydeps('arm64', true, false);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'nowheel' });
+      assert.strictEqual(o.r.status, 1, 'пропуск 120 только для режима «только готовые»: ' + o.out.slice(-300));
+      o.pip.forEach((l) => {
+        assert(/--prefer-binary/.test(l), 'готовая сборка в приоритете: ' + l);
+        assert(!/--only-binary/.test(l), 'компиляцию здесь не запрещаем: ' + l);
+      });
+      const ok2 = runPydeps(mkPydepsReuse(t), { FAKE_PIP: 'ok' });
+      assert.strictEqual(ok2.r.status, 0, 'штатная установка: ' + ok2.out.slice(-300));
+      assert(/OK: Python-зависимости установлены/.test(ok2.last), ok2.last);
+    } finally { dropDir(t.base); }
+  });
+  // Повторный прогон в том же дереве: чистим только следы прошлого запуска.
+  function mkPydepsReuse(t) {
+    ['.hm-py-args', '.hm-runtime-ran'].forEach((f) => { try { fs.rmSync(t.home + '/' + f, { force: true }); } catch (e) { /* */ } });
+    return t;
+  }
+
+  ok('pydeps.sh (функц.): Rosetta на Apple Silicon = как Intel (процессы идут x86_64)', () => {
+    const t = mkPydeps('x86_64', true, true);
+    try {
+      const o = runPydeps(t, { FAKE_PIP: 'ok', FAKE_PIP_OFFLINE: 'nowheel' });
+      assert.strictEqual(o.r.status, 0, o.out.slice(-300));
+      assert(/запущен через Rosetta/.test(o.out), 'Rosetta названа: ' + o.out.slice(0, 400));
+      o.pip.forEach((l) => assert(/--only-binary=:all:/.test(l), 'под Rosetta — только готовые: ' + l));
+    } finally { dropDir(t.base); }
+  });
+
+  // ---- nomad.sh: зависимости только готовыми сборками ----
+  // Тот же стенд, что у функциональных прогонов nomad.sh выше (mkNomadTree/фейки).
+  function nomadRun(arch, clt, extraEnv) {
+    const tr = mkNomadTree();
+    const bin = tr.home + '/.local/bin';
+    if (!writeNomadFakes(bin)) { dropDir(tr.base); SKIP('fake-exec недоступен'); }
+    if (!sealNomadVendor(tr.base)) { dropDir(tr.base); SKIP('shasum/seal недоступен'); }
+    fakeUname(bin, arch);
+    fakeXcodeSelect(bin, tr.base, clt);
+    fakeSysctl(bin, 0);
+    const r = runNomadSh(tr.home, tr.script, Object.assign({
+      HERMES_HOME: tr.home + '/.hermes', HM_NOMAD_SRC: tr.vsrc, HM_VENDOR: tr.base + '/vendor',
+    }, extraEnv || {}));
+    try { requireFakeCurl(tr.home, r); } catch (e) { dropDir(tr.base); throw e; }
+    let args = '';
+    try { args = fs.readFileSync(tr.home + '/.hm-uv-args', 'utf8'); } catch (e) { /* */ }
+    if (!args) { dropDir(tr.base); SKIP('подставной uv проиграл гонку PATH — проверка зависела бы от настоящего uv'); }
+    // Решение о сборке принимается по подставным uname/xcode-select. Если их перехватил
+    // настоящий (brew раньше в PATH nomad.sh) — проверялась бы политика этой машины.
+    const out = r.stdout || '';
+    const wantNote = arch === 'arm64' ? !/только готовыми сборками/.test(out) : /Mac на Intel: библиотеки ставлю только готовыми сборками/.test(out);
+    if (!wantNote) { dropDir(tr.base); SKIP('подставные uname/xcode-select проиграли гонку PATH: ' + out.slice(-200)); }
+    return { tr, r, args, out, nmd: fs.existsSync(bin + '/nmd') };
+  }
+
+  ok('nomad.sh (функц.): Intel → пакет Nomad собран отдельно, зависимости только готовыми (--no-build), пин cryptography', () => {
+    const o = nomadRun('x86_64', false);
+    try {
+      assert.strictEqual(o.r.status, 0, o.out.slice(-400) + (o.r.stderr || ''));
+      assert(/^build --wheel --python 3\.12 --out-dir \S+ \S+/m.test(o.args), 'сам Nomad собран в .whl: ' + o.args);
+      assert(/^tool install --python 3\.12 --no-build -c \S+\.hm-constraints\.txt nomad-agent @ file:\/\/\S+\.whl$/m.test(o.args),
+        'установка из готового .whl с --no-build и пином: ' + o.args);
+      assert(!/^tool install --python 3\.12 \/\S+hm-nomad-build/m.test(o.args), 'нет установки из исходного каталога (её запрещает --no-build): ' + o.args);
+      assert(o.nmd, 'шим nmd создан');
+    } finally { dropDir(o.tr.base); }
+  });
+
+  ok('nomad.sh (функц.): Intel, у библиотеки нет готовой сборки → пропуск 120 с понятной строкой, шимов нет', () => {
+    const o = nomadRun('x86_64', false, {
+      HM_FAKE_UV_FAIL: '  ╰─▶ Because argon2-cffi-bindings==26.1.0 has no usable wheels and building from source is disabled, we can conclude that nomad-agent cannot be used.',
+    });
+    try {
+      assert.strictEqual(o.r.status, 120, 'нет готовой сборки — осознанный пропуск: ' + o.out.slice(-400));
+      const lines = o.out.trim().split('\n');
+      assert(/^Nomad пропущен: под этот Mac нет готовых сборок/.test(lines[lines.length - 1]), 'последняя строка — причина: ' + lines[lines.length - 1]);
+      assert(!o.nmd, 'шим nmd не создан');
+    } finally { dropDir(o.tr.base); }
+  });
+
+  ok('nomad.sh (функц.): Intel, сетевой сбой uv → красный провал, НЕ пропуск (негативный контроль)', () => {
+    const o = nomadRun('x86_64', false, { HM_FAKE_UV_FAIL: 'error: Failed to fetch: `https://pypi.org/simple/argon2-cffi-bindings/`' });
+    try {
+      assert(o.r.status !== 0 && o.r.status !== 120, 'сеть — провал с кодом uv: ' + o.r.status + ' ' + o.out.slice(-300));
+      assert(/установка Nomad не удалась/.test(o.out), o.out.slice(-300));
+    } finally { dropDir(o.tr.base); }
+  });
+
+  ok('nomad.sh (функц.): Apple Silicon с инструментами разработчика → установка как раньше (из каталога, без --no-build)', () => {
+    const o = nomadRun('arm64', true);
+    try {
+      assert.strictEqual(o.r.status, 0, o.out.slice(-400));
+      assert(/^tool install --python 3\.12 \S+hm-nomad-build\.\S+$/m.test(o.args), 'прежняя команда: ' + o.args);
+      assert(!/--no-build/.test(o.args) && !/^build /m.test(o.args), 'ни запрета сборки, ни отдельной сборки пакета: ' + o.args);
+    } finally { dropDir(o.tr.base); }
+  });
+
+  // ---- Офлайн-кеш Claude Code: пара «основной + платформенный» одной версии ----
+  function mkNpmCache(keys) {
+    const base = mkTmp('hm-npmc-');
+    const dir = base + '/cache/_cacache/index-v5/ab/cd';
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(dir + '/0123456789', keys.map((k) =>
+      'f00d\t' + JSON.stringify({ key: 'make-fetch-happen:request-cache:https://registry.npmjs.org/' + k, integrity: 'sha512-x', time: 1, size: 1 })).join('\n') + '\n');
+    return base;
+  }
+  const TGZ = (name, v) => '@anthropic-ai/' + name + '/-/' + name + '-' + v + '.tgz';
+
+  ok('hm_claude_offline_version: ставим версию, для которой в кеше ОБА архива (живой случай: архивы 2.1.197, latest 2.1.278)', () => {
+    const base = mkNpmCache([
+      '@anthropic-ai%2fclaude-code',                                  // packument — не архив
+      TGZ('claude-code', '2.1.197'), TGZ('claude-code-darwin-arm64', '2.1.197'), TGZ('claude-code-darwin-x64', '2.1.197'),
+      TGZ('claude-code', '2.1.30'), TGZ('claude-code-darwin-arm64', '2.1.30'),
+      TGZ('claude-code-darwin-x64', '2.1.278'),                       // платформенный без основного той же версии
+    ]);
+    try {
+      const C = mp(base) + '/cache';
+      const r = libRun('echo "arm=[$(hm_claude_offline_version "' + C + '" arm64)] x64=[$(hm_claude_offline_version "' + C + '" x64)] ' +
+        'none=[$(hm_claude_offline_version "' + C + '.missing" x64)] vers=[$(hm_npm_cache_tarball_versions "' + C + '" claude-code | tr "\\n" " ")]"');
+      const out = r.stdout || '';
+      assert(/arm=\[2\.1\.197\]/.test(out), 'самая новая ПОЛНАЯ пара для arm64 — 2.1.197 (не 2.1.30 по строковому сравнению): ' + out + r.stderr);
+      assert(/x64=\[2\.1\.197\]/.test(out), '2.1.278 без основного пакета не годится: ' + out);
+      assert(/none=\[\]/.test(out), 'кеша нет — пусто: ' + out);
+      assert(/vers=\[2\.1\.30 2\.1\.197 \]/.test(out), 'версии по возрастанию как semver: ' + out);
+    } finally { dropDir(base); }
+  });
+
+  ok('hm_claude_offline_version: пары нет вовсе (только чужая арх / только метаданные) → пусто, офлайн не пытаемся', () => {
+    const base = mkNpmCache(['@anthropic-ai%2fclaude-code-darwin-x64', TGZ('claude-code', '2.1.289'), TGZ('claude-code-darwin-arm64', '2.1.289')]);
+    try {
+      const C = mp(base) + '/cache';
+      const r = libRun('echo "x64=[$(hm_claude_offline_version "' + C + '" x64)] arm=[$(hm_claude_offline_version "' + C + '" arm64)]"');
+      assert(/x64=\[\] arm=\[2\.1\.289\]/.test(r.stdout || ''), r.stdout + r.stderr);
+    } finally { dropDir(base); }
+  });
+
+  ok('claude.sh: офлайн ставит ЗАКРЕПЛЁННУЮ полную версию; онлайн — проба claude.ai, сторож времени, npm, совет про VPN', () => {
+    const s = readMac('claude.sh');
+    const c = codeOnly(s);
+    assert(/OFFLINE_VER="\$\(hm_claude_offline_version "\$HM_VENDOR\/npm-cache" "\$\(arch_tag\)"\)"/.test(c), 'версия из кеша, а не latest');
+    assert(/"@anthropic-ai\/claude-code@\$OFFLINE_VER" \\\n\s+--offline --cache/.test(c), 'npm --offline с явной версией');
+    assert(!/npm install -g --prefix "\$HOME\/\.local" '@anthropic-ai\/claude-code' \\\n\s+--offline/.test(c), 'офлайн без версии (ENOTCACHED) убран');
+    assertOrder(c, 'curl -fsS -o /dev/null --connect-timeout 10 --max-time 20 https://claude.ai/install.sh',
+      "hm_run_with_timeout 600 bash -c 'curl", 'короткая проба claude.ai — ДО нативного установщика');
+    assert(!/--max-time 900 --retry 3/.test(c), 'прежний молчаливый curl на 15 минут × 4 попытки убран');
+    assert(/hm_run_with_timeout 900 npm install -g --prefix "\$HOME\/\.local" '@anthropic-ai\/claude-code'/.test(c), 'npm под сторожем времени');
+    assert(/VPN в режиме «весь компьютер»/.test(c), 'итог провала говорит про VPN словами');
+    assertOrder(c, 'hm_write_check claude works\n  claude_new_terminal_gate', 'exit 121',
+      'вердикт «работает» пишется ДО проверки окна, провал окна — частичный успех (121), не красный');
+    assert(!/if ! claude_new_terminal_gate; then/.test(c), 'прежний жёсткий провал (exit 1 на весь компонент) убран');
+  });
+
+  ok('hm_run_with_timeout: код команды сквозной; по времени — 124 и обрыв ВСЕЙ группы процессов (без сирот)', () => {
+    const base = mkTmp('hm-to-');
+    try {
+      // Число в аргументе sleep собирается арифметикой: ни в одной командной строке (самого
+      // теста, bash -c с текстом скрипта) нет подстроки «sleep 4429» — она есть только у
+      // настоящих sleep, и поиск по списку процессов не ловит сам себя.
+      const r = libRun([
+        's=$SECONDS; hm_run_with_timeout 20 bash -c "exit 7"; echo "rc1=$? t1=$((SECONDS - s))"',
+        'hm_run_with_timeout 2 bash -c \'(sleep $((4400 + 29)); true) & sleep $((4400 + 29))\'; echo "rc2=$?"',
+      ].join('\n'));
+      const out = r.stdout || '';
+      assert(/rc1=7 t1=[0-9]\b/.test(out), 'код возврата команды не подменяется: ' + out + r.stderr);
+      assert(/rc2=124/.test(out), 'по истечении времени — 124: ' + out + r.stderr);
+      spawnSync('bash', ['-c', 'sleep 1'], { timeout: 10000 });
+      const ps = spawnSync('ps', ['-ef'], { encoding: 'utf8', timeout: 60000 });
+      assert(!/sleep 4429\b/.test(ps.stdout || ''), 'дочерние процессы команды убиты вместе с ней (иначе curl качал бы в фоне):\n' +
+        (ps.stdout || '').split('\n').filter((l) => /sleep 4429\b/.test(l)).join('\n'));
+    } finally { dropDir(base); }
+  });
+
+  // ---- «Новое окно Терминала»: проверка в чистом окружении оболочкой входа ----
+  const CLAUDE_SRC = readMac('claude.sh');
+  const fnFrom = (src, name) => {
+    const i = src.indexOf(name + '() {');
+    assert(i !== -1, 'нет функции ' + name);
+    const j = src.indexOf('\n}', i);
+    assert(j !== -1, 'функция ' + name + ' не закрыта');
+    return src.slice(i, j + 2);
+  };
+  function freshShellCase(prep) {
+    const base = mkTmp('hm-fresh-');
+    const home = base + '/home';
+    fs.mkdirSync(home + '/.local/bin', { recursive: true });
+    exe(home + '/.local/bin/claude', '#!/bin/sh\n[ "$1" = "--version" ] && { echo "9.9.9 (Claude Code)"; exit 0; }\nexit 1\n');
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');   // учётку не читаем — оболочку задаёт SHELL ниже
+    const bashPath = (spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout || '').trim();
+    if (!/\/bash$/.test(bashPath)) { dropDir(base); SKIP('не нашёл bash для оболочки входа: ' + bashPath); }
+    prep(home);
+    const freshCmdLine = CLAUDE_SRC.split('\n').filter((l) => l.indexOf('CLAUDE_FRESH_CMD=') === 0)[0];
+    assert(freshCmdLine, 'в claude.sh нет CLAUDE_FRESH_CMD');
+    const body = [
+      'persist_local_bin_path() { :; }',
+      freshCmdLine,   // persist_local_bin_zprofile живёт в _lib.sh (общая с touchup-claude-path.sh)
+      fnFrom(CLAUDE_SRC, 'claude_new_terminal_gate'),
+      // Как в установщике: в СВОЁМ окружении ~/.local/bin уже есть — проверка обязана
+      // этого не заметить (иначе она прошла бы всегда, как до 10.09).
+      'export PATH="$HOME/.local/bin:$PATH"',
+      'claude_new_terminal_gate; echo "gate=$?"',
+    ].join('\n');
+    const r = libRun(body, bin, { HOME: home, SHELL: bashPath, HM_FRESH_SHELL_TIMEOUT: '20' });
+    return { base, out: (r.stdout || '') + (r.stderr || '') };
+  }
+
+  ok('claude.sh (поведение): новое окно с PATH в профиле → проверка зелёная и печатает версию', () => {
+    const c = freshShellCase((home) => fs.writeFileSync(home + '/.bash_profile', 'export PATH="$HOME/.local/bin:$PATH"\n'));
+    try {
+      assert(/gate=0/.test(c.out), c.out);
+      assert(/Проверка новым окном Терминала: 9\.9\.9 \(Claude Code\)/.test(c.out), c.out);
+    } finally { dropDir(c.base); }
+  });
+
+  ok('claude.sh (поведение): новое окно НЕ видит claude → проверка красная, хотя у установщика PATH есть (живой случай 10.09)', () => {
+    const c = freshShellCase(() => { /* профиль без строки PATH */ });
+    try {
+      // Если на машине стоит СВОЙ claude в системном PATH, чистая оболочка найдёт его —
+      // и проверка законно зелёная. Это не то, что мы проверяем: честный пропуск.
+      if (/Проверка новым окном Терминала:/.test(c.out) && !/9\.9\.9/.test(c.out)) {
+        SKIP('на машине есть системный claude — негативный случай не воспроизвести: ' + c.out.slice(-160));
+      }
+      assert(/gate=1/.test(c.out), 'ok=True при «command not found» больше невозможно: ' + c.out);
+    } finally { dropDir(c.base); }
+  });
+
+  ok('hm_fresh_shell_run: оболочка не zsh/bash → 2 (проверить нечем), зависшая оболочка → 124', () => {
+    const base = mkTmp('hm-fsh-');
+    try {
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');
+      exe(bin + '/fish', '#!/bin/sh\nexit 0\n');
+      exe(bin + '/bash', '#!/bin/sh\nsleep 30\n');
+      const r = libRun('SHELL="' + mp(bin) + '/fish" hm_fresh_shell_run i true; echo "odd=$?"\n' +
+        'SHELL="' + mp(bin) + '/bash" HM_FRESH_SHELL_TIMEOUT=2 hm_fresh_shell_run i true; echo "hang=$?"', bin, { HOME: base });
+      assert(/odd=2/.test(r.stdout || ''), r.stdout + r.stderr);
+      assert(/hang=124/.test(r.stdout || ''), r.stdout + r.stderr);
+    } finally { dropDir(base); }
+  });
+
+  // ---- Владелец VS Code: не root, а человек за экраном ----
+  ok('hm_console_user: хозяин экрана; root/экран входа/мусор → тот, кто запустил; оба негодны → отказ', () => {
+    const base = mkTmp('hm-cu-');
+    try {
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/stat', '#!/bin/sh\necho "$FAKE_CONSOLE"\n');
+      exe(bin + '/id', '#!/bin/sh\n[ "$1" = "-un" ] && { echo "$FAKE_ID"; exit 0; }\nexit 1\n');
+      const cases = [
+        ['alice', 'bob', 'alice:0'], ['root', 'bob', 'bob:0'], ['loginwindow', 'bob', 'bob:0'], ['', 'bob', 'bob:0'],
+        ['bad name', 'bob', 'bob:0'], ['-R', 'bob', 'bob:0'], ['root', 'root', ':1'], ['_mbsetupuser', '', ':1'],
+      ];
+      cases.forEach(([cu, id, want]) => {
+        const r = libRun('u="$(hm_console_user)"; echo "res=$u:$?"', bin, { FAKE_CONSOLE: cu, FAKE_ID: id });
+        assert((r.stdout || '').indexOf('res=' + want) !== -1, 'console=' + JSON.stringify(cu) + ' id=' + JSON.stringify(id) + ': ' + r.stdout + r.stderr);
+      });
+    } finally { dropDir(base); }
+  });
+
+  ok('_lib.sh (функц.): HM_VSCODE_INSTALL_SH отдаёт проверенный .app человеку; без годного имени chown не зовётся; провал chown не валит установку', () => {
+    let SCRIPT = '';
+    for (let attempt = 0; attempt < 3 && !SCRIPT; attempt++) {   // пустой вывод = сбой запуска под нагрузкой
+      const ext = spawnSync('bash', ['-c', '. "$1"; printf "%s" "$HM_VSCODE_INSTALL_SH"', 'x', LIB], { encoding: 'utf8', timeout: 30000 });
+      SCRIPT = ext.status === 0 ? (ext.stdout || '') : '';
+    }
+    assert(/mktemp -d \/var\/root\/hm_vsc/.test(SCRIPT), 'HM_VSCODE_INSTALL_SH извлечён');
+    assertOrder(SCRIPT, '/usr/bin/xattr -dr com.apple.quarantine "$3"', '/usr/sbin/chown -R -h "$4":staff "$3"',
+      'владелец меняется ПОСЛЕ проверки подписи и копирования');
+    const work = mkTmp('hm-vsc-own-');
+    try {
+      const stage = work + '/stage'; fs.mkdirSync(stage);
+      const apps = work + '/Apps'; fs.mkdirSync(apps);
+      const log = work + '/log';
+      const zip = work + '/vscode.zip'; fs.writeFileSync(zip, 'ZIP');
+      const dest = apps + '/Visual Studio Code.app';
+      exe(work + '/ditto', '#!/bin/sh\nfor a in "$@"; do dst="$a"; done\nmkdir -p "$dst/Visual Studio Code.app/Contents" || exit 1\nexit 0\n');
+      exe(work + '/codesign', '#!/bin/sh\n[ "$CS" = bad ] && exit 1\nexit 0\n');
+      exe(work + '/spctl', '#!/bin/sh\nexit 0\n');
+      exe(work + '/xattr', '#!/bin/sh\nexit 0\n');
+      exe(work + '/id', '#!/bin/sh\n[ "$2" = "$KNOWN" ] && { echo 501; exit 0; }\nexit 1\n');
+      exe(work + '/chown', '#!/bin/sh\necho "chown $*" >> "' + log + '"\n[ "$CHOWN_FAIL" = 1 ] && exit 1\nexit 0\n');
+      const T = SCRIPT
+        .split('/usr/bin/ditto').join(work + '/ditto')
+        .split('/usr/bin/codesign').join(work + '/codesign')
+        .split('/usr/sbin/spctl').join(work + '/spctl')
+        .split('/usr/bin/xattr').join(work + '/xattr')
+        .split('/usr/bin/id').join(work + '/id')
+        .split('/usr/sbin/chown').join(work + '/chown')
+        .split('/var/root/hm_vsc.XXXXXX').join(stage + '/hm_vsc.XXXXXX');
+      const run = (owner, env) => {
+        try { fs.rmSync(dest, { recursive: true, force: true }); fs.rmSync(log, { force: true }); } catch (e) { /* */ }
+        const r = spawnSync('bash', ['-c', T, 'hm_vscode_install', zip, 'UBF8T346G9', dest, owner],
+          { encoding: 'utf8', timeout: 30000, env: Object.assign({}, process.env, { KNOWN: 'alice' }, env || {}) });
+        let lg = ''; try { lg = fs.readFileSync(log, 'utf8'); } catch (e) { /* chown не звали */ }
+        return { r, lg };
+      };
+      let o = run('alice');
+      assert.strictEqual(o.r.status, 0, 'установка прошла: ' + (o.r.stderr || ''));
+      assert(o.lg.indexOf('chown -R -h alice:staff ' + dest) !== -1, 'приложение отдано человеку: ' + o.lg);
+      ['', 'root', '-R', 'bad name', 'ghost'].forEach((owner) => {
+        o = run(owner);
+        assert.strictEqual(o.r.status, 0, 'без годного владельца установка всё равно успешна (' + JSON.stringify(owner) + ')');
+        assert.strictEqual(o.lg, '', 'chown не зовётся для ' + JSON.stringify(owner) + ': ' + o.lg);
+      });
+      o = run('alice', { CHOWN_FAIL: '1' });
+      assert.strictEqual(o.r.status, 0, 'провал chown не превращает установленный VS Code в «не установлен»');
+      assert(fs.existsSync(dest), 'приложение на месте');
+      o = run('alice', { CS: 'bad' });
+      assert(o.r.status !== 0 && o.lg === '', 'подпись не прошла — ни установки, ни смены владельца (fail-closed)');
+    } finally { dropDir(work); }
+  });
+
+  ok('vscode.sh: владелец — hm_console_user, уходит 4-м позиционным; факт сверяется по диску после установки', () => {
+    const c = codeOnly(readMac('vscode.sh'));
+    assert(/VSCODE_OWNER="\$\(hm_console_user \|\| true\)"/.test(c), 'владелец вычислен до пароля');
+    assert(/admin_run \/bin\/sh -c "\$HM_VSCODE_INSTALL_SH" hm_vscode_install "\$ZIP" "\$VSCODE_TEAM_ID" "\$APP" "\$VSCODE_OWNER"/.test(c),
+      'имя уходит позиционным параметром, не подстановкой в текст root-скрипта');
+    assertOrder(c, 'admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH"', 'APP_OWNER_NOW="$(stat -f %Su "$APP"', 'проверка владельца по диску — после установки');
+  });
+
+  ok('fetch-vendor-mac.sh: сборка падает, если в npm-кеше нет пары «основной + платформенный» ОДНОЙ версии для обеих арх', () => {
+    const fv = codeOnly(fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8'));
+    assert(/CC_OFF_ARM="\$\(hm_claude_offline_version "\$ROOT\/vendor\/npm-cache" arm64\)"/.test(fv), 'пара для arm64');
+    assert(/CC_OFF_X64="\$\(hm_claude_offline_version "\$ROOT\/vendor\/npm-cache" x64\)"/.test(fv), 'пара для x64');
+    const i = fv.indexOf('CC_OFF_X64="');
+    const gate = fv.slice(i, i + 1200);
+    assert(/"\$CC_OFF_ARM" != "\$CC_OFF_X64"/.test(gate) && /"\$CC_OFF_ARM" != "\$CC_VER"/.test(gate), 'обе арх и основной пакет — одной версии');
+    assert(/FATAL: npm-cache Claude Code/.test(gate) && /exit 1/.test(gate), 'расхождение валит сборку');
+    assertOrder(fv, 'npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER"', 'CC_OFF_ARM="', 'проверяем ПОСЛЕ докладки платформенных пакетов');
+    assertOrder(fv, 'prune-npm-cache.js', 'CC_OFF_ARM="', 'и после чистки кеша — проверяется итоговый кеш');
+  });
+})();
+
+// ===========================================================================
+// macOS: правка settings.json прошлых версий пака (scripts/macos/_cfgmigrate.js)
+// ===========================================================================
+// Зеркало Windows-миграции (_cfgmigrate.ps1): обычный повтор установки существующий
+// settings.json не трогал, и маки, поставленные раньше, навсегда оставались с плагинами
+// без токена, правилами Write(путь), опросом и HTTP-хуками VSCODE_PORT. Правила те же,
+// отметка шага та же, формат записи тот же. Проверки ИСПОЛНЯЮТ модуль (node) и config.sh
+// (bash) на настоящих файлах; главная — на настоящих settings.json пака до и после
+// исправления (5cf4a39): старый файл обязан превратиться ровно в новый, байт в байт.
+(function macSettingsMigrationTests() {
+  console.log('== macOS: settings.json прошлых версий пака — те же правила, что на Windows ==');
+  const MIG = path.join(ROOT, 'scripts', 'macos', '_cfgmigrate.js');
+  const FIX = path.join(ROOT, 'test', 'fixtures');
+  const loadMig = (file) => { delete require.cache[require.resolve(file)]; return require(file); };
+  const mig = loadMig(MIG);
+  const migBad = () => ({
+    model: 'opus', effortLevel: 'xhigh', cleanupPeriodDays: 99999, autoCompactWindow: 0.85,
+    env: { MCP_TIMEOUT: '30000', NOTE: 'русский <тег> & "кавычки"\tтаб' },
+    permissions: {
+      defaultMode: 'bypassPermissions',
+      allow: ['Bash(*)', 'Write', 'Write(*)', 'Edit(*)', 'Write(~/notes/**)', 'Glob(src/**)', 'Read(*)',
+        'MultiEdit(*)', 'Write(.claude/**)', 'Edit(.claude/**)', 'Bash(git *:*)'],
+      deny: ['Bash(*format C:*)', 'Write(~/.ssh/**)', 'Bash(rm -rf /)'],
+      ask: [],
+    },
+    hooks: {
+      PreToolUse: [
+        { matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.js', timeout: 5 },
+          { type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] },
+      ],
+      Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:VSCODE_PORT/hook' }] }],
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo мой хук' }] }],
+    },
+    enabledPlugins: {
+      'greptile@claude-plugins-official': true, 'hookify@claude-plugins-official': true,
+      'github@claude-plugins-official': true, 'semgrep@claude-plugins-official': true,
+      'slack@claude-plugins-official': true, 'sentry@claude-plugins-official': true, 'figma@claude-plugins-official': true,
+      'huggingface-skills@claude-plugins-official': true, 'legalzoom@claude-plugins-official': true,
+      'adspirer-ads-agent@claude-plugins-official': true,
+      'linear@claude-plugins-official': false, 'my-plugin@my-market': true, 'code-review@claude-plugins-official': true,
+    },
+    statusLine: { type: 'command', command: 'node x.js', padding: 0 },
+    mcpServers: { a: { command: 'npx', args: ['-y', 'a'] } },
+    nested: { list: [[1, 2], [], {}], flag: null, n: -3, big: 12345678901 },
+  });
+  const migWant = () => {
+    const w = migBad();
+    w.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
+    w.env.MCP_TIMEOUT = '120000';
+    // allow: Write(~/notes/**) и Glob(src/**) остаются как есть — «близнецов» (Edit/Read) в списке нет, замена
+    // выдала бы разрешение, которого человек не давал; убран только дубль Write(.claude/**) (Edit(.claude/**) уже есть).
+    w.permissions.allow = ['Bash(*)', 'Write', 'Write(*)', 'Edit(*)', 'Write(~/notes/**)', 'Glob(src/**)', 'Read(*)',
+      'MultiEdit(*)', 'Edit(.claude/**)', 'Bash(git *:*)'];
+    w.permissions.deny = ['Bash(*format C*)', 'Edit(~/.ssh/**)', 'Bash(rm -rf /)'];
+    w.hooks.PreToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/.claude/hooks/guard.js', timeout: 5 }] }];
+    delete w.hooks.Stop;
+    ['greptile', 'hookify', 'github', 'semgrep', 'slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom', 'adspirer-ads-agent']
+      .forEach((n) => { w.enabledPlugins[n + '@claude-plugins-official'] = false; });
+    delete w.mcpServers;
+    return w;
+  };
+  function migHome(pfx) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), pfx));
+    const cdir = path.join(base, '.claude');
+    fs.mkdirSync(cdir);
+    return { base, cdir, file: path.join(cdir, 'settings.json'), marker: path.join(base, '.hamidun-setup', 'config-migrations.json') };
+  }
+  const runMig = (m, file, fresh, marker) => {
+    const out = [];
+    const res = m.migrateFile(file, fresh, marker, (s) => out.push(s));
+    return { res, out: out.join('\n') };
+  };
+  const baks = (dir) => fs.readdirSync(dir).filter((n) => n.startsWith('settings.json.hamidun-bak-'));
+
+  ok('macOS-миграция: settings.json пака 4223dd9 превращается ровно в settings.json пака 5cf4a39 (байт в байт), повтор без изменений', () => {
+    const h = migHome('hm-macmig-pack-');
+    try {
+      const before = fs.readFileSync(path.join(FIX, 'settings-pack-4223dd9.json'));
+      const after = fs.readFileSync(path.join(FIX, 'settings-pack-5cf4a39.json'), 'utf8');
+      fs.writeFileSync(h.file, before);
+      let r = runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(r.res, 'changed', r.out);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), after, 'итог = файл свежей установки (пак 5cf4a39):\n' + r.out);
+      // Тронутые ключи — явно, чтобы провал называл, ЧТО разошлось.
+      const s = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+      ['greptile', 'sourcegraph', 'coderabbit', 'hookify', 'github', 'linear', 'notion', 'telegram'].forEach((n) =>
+        assert.strictEqual(s.enabledPlugins[n + '@claude-plugins-official'], false, n + ' выключен'));
+      assert.strictEqual(s.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY, '1', 'опрос выключен');
+      assert(!s.permissions.allow.some((x) => /^(Write|MultiEdit|NotebookEdit|Glob)\((?!\*\))/.test(x)), 'нет Write(путь) в allow');
+      assert(s.permissions.deny.indexOf('Bash(*format C*)') !== -1 && s.permissions.deny.indexOf('Bash(*format C:*)') === -1, 'deny исправлен');
+      const old = JSON.parse(before.toString('utf8'));
+      assert.strictEqual(s.model, old.model, 'модель не тронута (решение владельца 06.10)');
+      assert.strictEqual(s.effortLevel, old.effortLevel, 'effortLevel не тронут');
+      assert.strictEqual(s.permissions.defaultMode, old.permissions.defaultMode, 'defaultMode не тронут');
+      assert.strictEqual(baks(h.cdir).length, 1, 'одна копия до правки');
+      assert(fs.readFileSync(path.join(h.cdir, baks(h.cdir)[0])).equals(before), 'копия — исходный файл байт в байт');
+      r = runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(r.res, 'clean', 'повтор: ' + r.out);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), after, 'повтор не меняет файл');
+      assert.strictEqual(baks(h.cdir).length, 1, 'повтор не плодит копии');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: старый settings.json — исправлено ровно известное, формат пака, копия до правки, повтор без изменений (те же правила, что _cfgmigrate.ps1)', () => {
+    const h = migHome('hm-macmig-');
+    try {
+      const original = JSON.stringify(migBad(), null, 2);
+      fs.writeFileSync(h.file, original);
+      let r = runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), JSON.stringify(migWant(), null, 2),
+        'исправлено ровно известное, остальное и формат — как в паке:\n' + r.out);
+      assert.strictEqual(baks(h.cdir).length, 1, 'одна копия до правки');
+      assert.strictEqual(fs.readFileSync(path.join(h.cdir, baks(h.cdir)[0]), 'utf8'), original, 'копия — исходный файл');
+      ['выключил плагины', 'hookify', 'semgrep', 'adspirer-ads-agent', 'permissions.allow', 'permissions.deny', 'VSCODE_PORT', 'mcpServers',
+        'CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY', 'MCP_TIMEOUT'].forEach((w) => assert(r.out.indexOf(w) !== -1, 'в журнале названо: ' + w));
+      // allow-правила без «близнеца» не меняем, но говорим о них человеку (подсказка, а не правка)
+      assert(r.out.indexOf('Write(~/notes/**) не действует') !== -1 && r.out.indexOf('замени сам на Edit(~/notes/**)') !== -1, 'подсказка про Write(~/notes/**): ' + r.out);
+      assert(r.out.indexOf('Glob(src/**) не действует') !== -1 && r.out.indexOf('замени сам на Read(src/**)') !== -1, 'подсказка про Glob(src/**): ' + r.out);
+      const marker = JSON.parse(fs.readFileSync(h.marker, 'utf8'));
+      assert(marker[mig.DEFAULTS_STEP_ID], 'отметка шага значений по умолчанию записана (тот же идентификатор, что на Windows)');
+      assert(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(marker[mig.DEFAULTS_STEP_ID]), 'время — местное без пояса, как у Windows ((Get-Date).ToString("s")): ' + marker[mig.DEFAULTS_STEP_ID]);
+      const stamped = new Date(marker[mig.DEFAULTS_STEP_ID]).getTime();
+      assert(Math.abs(Date.now() - stamped) < 10 * 60 * 1000, 'и это сейчас, а не UTC-сдвиг: ' + marker[mig.DEFAULTS_STEP_ID]);
+      r = runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), JSON.stringify(migWant(), null, 2), 'повтор не меняет файл');
+      assert.strictEqual(baks(h.cdir).length, 1, 'повтор не плодит копии');
+      assert(/устаревших правок в settings\.json нет/.test(r.out), 'повтор честно говорит, что править нечего');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: выбор человека после миграции уважается (отметка), свежий файл пака — значения по умолчанию; мутант без отметки пойман', () => {
+    const h = migHome('hm-macmig2-');
+    try {
+      fs.writeFileSync(h.file, JSON.stringify(migBad(), null, 2));
+      runMig(mig, h.file, false, h.marker);
+      const mine = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+      mine.enabledPlugins['github@claude-plugins-official'] = true;     // поставил токен и включил сам
+      delete mine.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY;              // вернул опрос
+      const mineText = JSON.stringify(mine, null, 2);
+      fs.writeFileSync(h.file, mineText);
+      runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), mineText, 'повторный запуск не откатывает выбор человека');
+      runMig(mig, h.file, true, h.marker);
+      const fresh = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+      assert.strictEqual(fresh.enabledPlugins['github@claude-plugins-official'], false, 'свежий файл: github выключен');
+      assert.strictEqual(fresh.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY, '1', 'свежий файл: опрос выключен');
+      // Обе правки, скорее всего, уложились в одну секунду: копии не затирают друг друга.
+      const copies = baks(h.cdir).sort();
+      assert.strictEqual(copies.length, 2, 'по копии на каждую правку: ' + copies.join(', '));
+      assert.strictEqual(fs.readFileSync(path.join(h.cdir, copies[0]), 'utf8'), JSON.stringify(migBad(), null, 2), 'первая копия — исходный файл');
+      // Отрицательный контроль: без отметки шаг применялся бы каждый раз.
+      const src = fs.readFileSync(MIG, 'utf8');
+      const mutSrc = src.replace('const defaults = !!fresh || !has(applied, DEFAULTS_STEP_ID);', 'const defaults = true;');
+      assert(mutSrc !== src, 'мутация применилась');
+      const mutFile = path.join(h.base, 'mut-cfgmigrate.js');
+      fs.writeFileSync(mutFile, mutSrc);
+      fs.writeFileSync(h.file, mineText);
+      runMig(loadMig(mutFile), h.file, false, h.marker);
+      assert.strictEqual(JSON.parse(fs.readFileSync(h.file, 'utf8')).enabledPlugins['github@claude-plugins-official'], false,
+        'мутант без отметки снова выключает плагин человека — тест это различает');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: неразбираемый, не-UTF-8, массив и файл без дефектов не трогаются (байт в байт, без копии)', () => {
+    const h = migHome('hm-macmig3-');
+    try {
+      const cases = [
+        [Buffer.from('{"mcpServers": {"a": {}}, "permissions": {"allow": ["Write(~/x/**)"]}'), /не разбирается/],
+        [Buffer.from('not json at all'), /не разбирается/],
+        [Buffer.from('[{"mcpServers": {}}]'), /не разбирается/],
+        [Buffer.from([0x7B, 0x22, 0xFF, 0x22, 0x3A, 0x31, 0x7D]), /прочитать не удалось/],
+        [Buffer.from('{"model":"opus","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n'), /правок в settings\.json нет/],
+      ];
+      cases.forEach(([buf, says], i) => {
+        fs.writeFileSync(h.file, buf);
+        const r = runMig(mig, h.file, false, path.join(h.base, 'm' + i + '.json'));
+        assert(fs.readFileSync(h.file).equals(buf), 'случай ' + i + ': файл не тронут');
+        assert.strictEqual(baks(h.cdir).length, 0, 'случай ' + i + ': копий нет');
+        assert(says.test(r.out), 'случай ' + i + ': причина в журнале: ' + r.out);
+      });
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: ~/.claude-ссылка и settings.json-ссылка не трогаются (правка ушла бы во внешнюю цель)', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-macmig4-'));
+    try {
+      const real = path.join(base, 'real'); fs.mkdirSync(real);
+      const bad = JSON.stringify(migBad(), null, 2);
+      fs.writeFileSync(path.join(real, 'settings.json'), bad);
+      const link = path.join(base, 'linked');
+      fs.symlinkSync(real, link, 'junction');   // на POSIX тип не важен — обычная ссылка на каталог
+      let r = runMig(mig, path.join(link, 'settings.json'), false, path.join(base, 'mj.json'));
+      assert.strictEqual(fs.readFileSync(path.join(real, 'settings.json'), 'utf8'), bad, 'файл за ссылкой на каталог не тронут');
+      assert(/ссылка/.test(r.out), 'причина названа: ' + r.out);
+      // Ссылка на сам файл: на Windows без прав разработчика её не создать — тогда только каталог.
+      const cdir = path.join(base, 'c'); fs.mkdirSync(cdir);
+      let fileLinked = false;
+      try { fs.symlinkSync(path.join(real, 'settings.json'), path.join(cdir, 'settings.json'), 'file'); fileLinked = true; } catch (e) { fileLinked = false; }
+      if (fileLinked) {
+        r = runMig(mig, path.join(cdir, 'settings.json'), false, path.join(base, 'mf.json'));
+        assert.strictEqual(fs.readFileSync(path.join(real, 'settings.json'), 'utf8'), bad, 'файл за ссылкой не тронут');
+        assert(/ссылка/.test(r.out), 'причина названа: ' + r.out);
+      }
+    } finally { dropDir(base); }
+  });
+
+  ok('macOS-миграция: BOM и CRLF исходного файла сохраняются; копия — с правами оригинала', () => {
+    const h = migHome('hm-macmig5-');
+    try {
+      const src = { a: 1, env: { X: 'y' }, mcpServers: { s: {} } };
+      fs.writeFileSync(h.file, '﻿' + JSON.stringify(src, null, 2).replace(/\n/g, '\r\n') + '\r\n');
+      if (process.platform !== 'win32') fs.chmodSync(h.file, 0o600);
+      runMig(mig, h.file, false, h.marker);
+      const b = fs.readFileSync(h.file);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'BOM на месте');
+      const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+      assert.strictEqual(b.toString('utf8').slice(1), JSON.stringify(want, null, 2).replace(/\n/g, '\r\n') + '\r\n', 'CRLF и финальный перевод строки сохранены');
+      if (process.platform !== 'win32') {
+        const bak = path.join(h.cdir, baks(h.cdir)[0]);
+        assert.strictEqual(fs.statSync(bak).mode & 0o777, 0o600, 'копия не шире оригинала (в env бывают ключи)');
+      }
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: allow-правило Write/Glob(путь) без «близнеца» не превращается в разрешение — остаётся с подсказкой; в deny/ask — близнец; дубль убирается; мутант пойман', () => {
+    const h = migHome('hm-macmig-allow-');
+    try {
+      const bad = {
+        permissions: {
+          allow: ['Write(~/mine/**)', 'Glob(docs/**)', 'Write(~/dup/**)', 'Edit(~/dup/**)', 'MultiEdit(/tmp/x)', 'Read(*)'],
+          deny: ['Write(~/.ssh/**)', 'Glob(secrets/**)'],
+          ask: ['NotebookEdit(~/nb/**)'],
+        },
+      };
+      fs.writeFileSync(h.file, JSON.stringify(bad, null, 2));
+      const r = runMig(mig, h.file, false, h.marker);
+      const s = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+      assert.deepStrictEqual(s.permissions.allow, ['Write(~/mine/**)', 'Glob(docs/**)', 'Edit(~/dup/**)', 'MultiEdit(/tmp/x)', 'Read(*)'],
+        'allow: без «близнеца» правило остаётся как есть (замена выдала бы разрешение, которого человек не давал), дубль убран:\n' + r.out);
+      assert.deepStrictEqual(s.permissions.deny, ['Edit(~/.ssh/**)', 'Read(secrets/**)'], 'deny: правило заменено «близнецом» — запрет только ужесточается');
+      assert.deepStrictEqual(s.permissions.ask, ['Edit(~/nb/**)'], 'ask: то же');
+      ['Write(~/mine/**) не действует', 'замени сам на Edit(~/mine/**)', 'Glob(docs/**) не действует', 'замени сам на Read(docs/**)',
+        'MultiEdit(/tmp/x) не действует', 'замени сам на Edit(/tmp/x)'].forEach((w) => assert(r.out.indexOf(w) !== -1, 'подсказка называет: ' + w + '\n' + r.out));
+      assert(r.out.indexOf('Write(~/dup/**) убрал (Edit(~/dup/**) уже есть)') !== -1, 'дубль назван в журнале правок');
+      // Файл, где есть ТОЛЬКО такие allow-правила, не переписывается вовсе: подсказка — не правка.
+      const onlyAllow = JSON.stringify({ env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, permissions: { allow: ['Write(~/mine/**)'] } }, null, 2);
+      fs.writeFileSync(h.file, onlyAllow);
+      const before = baks(h.cdir).length;
+      const r2 = runMig(mig, h.file, false, path.join(h.base, 'm2.json'));
+      assert.strictEqual(r2.res, 'clean', r2.out);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), onlyAllow, 'файл не тронут');
+      assert.strictEqual(baks(h.cdir).length, before, 'копии не плодятся');
+      assert(r2.out.indexOf('Write(~/mine/**) не действует') !== -1, 'подсказка есть и без правки файла');
+      // Отрицательный контроль: прежняя реализация (замена «близнецом» и в allow) эту проверку проваливает.
+      const src = fs.readFileSync(MIG, 'utf8');
+      const mutSrc = src.replace("if (listName === 'allow') {", 'if (false) {');
+      assert(mutSrc !== src, 'мутация применилась');
+      const mutFile = path.join(h.base, 'mut-allow.js');
+      fs.writeFileSync(mutFile, mutSrc);
+      fs.writeFileSync(h.file, JSON.stringify(bad, null, 2));
+      runMig(loadMig(mutFile), h.file, false, path.join(h.base, 'm3.json'));
+      assert(JSON.parse(fs.readFileSync(h.file, 'utf8')).permissions.allow.indexOf('Edit(~/mine/**)') !== -1,
+        'мутант с заменой в allow выдаёт новое разрешение — тест это различает');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: MCP_TIMEOUT поднимается только если это ровно строка "30000" и один раз (под отметкой); число, чужая строка и пробелы не трогаются', () => {
+    const h = migHome('hm-macmig-mcp-');
+    try {
+      // Своя папка на каждый прогон: имя копии — с точностью до секунды, а свободных имён в секунду
+      // девять. В одной папке десять быстрых прогонов упирались в «имена заняты», файл оставался
+      // нетронутым, и проверки «не откатываем» проходили впустую.
+      let nRun = 0;
+      const run = (env, marker) => {
+        const cdir = path.join(h.base, 'c' + (++nRun)); fs.mkdirSync(cdir);
+        const file = path.join(cdir, 'settings.json');
+        fs.writeFileSync(file, JSON.stringify({ env }, null, 2));
+        const r = runMig(mig, file, false, marker || path.join(h.base, 'fresh-' + nRun + '.json'));
+        return { env: JSON.parse(fs.readFileSync(file, 'utf8')).env, out: r.out, res: r.res };
+      };
+      let r = run({ MCP_TIMEOUT: '30000' });
+      assert.strictEqual(r.env.MCP_TIMEOUT, '120000', 'строка "30000" поднята до "120000"');
+      assert(r.out.indexOf('MCP_TIMEOUT') !== -1, 'в журнале названо');
+      [[30000, 'число 30000 — выбор человека'], ['30000 ', 'строка с пробелом'], ['045000', 'чужая строка'], ['45000', 'чужое значение'],
+        ['120000', 'уже новое'], ['', 'пустая строка'], [null, 'null']].forEach(([v, why]) => {
+        const x = run({ MCP_TIMEOUT: v });
+        assert.deepStrictEqual(x.env.MCP_TIMEOUT, v, why + ' не трогаем');
+      });
+      r = run({ A: '1' });
+      assert(!Object.prototype.hasOwnProperty.call(r.env, 'MCP_TIMEOUT'), 'ключа нет — не создаём');
+      // Шаг одноразовый: вернул "30000" сам после миграции — повторный запуск не откатывает.
+      const marker = path.join(h.base, 'once.json');
+      r = run({ MCP_TIMEOUT: '30000' }, marker);
+      assert.strictEqual(r.res, 'changed', 'первый прогон под отметкой правит файл: ' + r.out);
+      assert.strictEqual(r.env.MCP_TIMEOUT, '120000');
+      r = run({ MCP_TIMEOUT: '30000', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, marker);
+      assert.strictEqual(r.res, 'clean', 'второй прогон под отметкой ничего не правит: ' + r.out);
+      assert.strictEqual(r.env.MCP_TIMEOUT, '30000', 'под отметкой значение человека уважается');
+      // Свежий файл пака (fresh) отметку игнорирует — это наш файл.
+      fs.writeFileSync(h.file, JSON.stringify({ env: { MCP_TIMEOUT: '30000' } }, null, 2));
+      runMig(mig, h.file, true, marker);
+      assert.strictEqual(JSON.parse(fs.readFileSync(h.file, 'utf8')).env.MCP_TIMEOUT, '120000', 'свежий файл: поднят всегда');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: выключаемые плагины = пак + semgrep + шесть коннекторов июня–августа; true → false только у @claude-plugins-official', () => {
+    const want = ['greptile', 'sourcegraph', 'coderabbit', 'github', 'linear', 'notion', 'telegram', 'hookify', 'semgrep',
+      'slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom', 'adspirer-ads-agent'];
+    assert.deepStrictEqual(mig.OFF_PLUGINS, want, 'тот же список, что у Windows-миграции');
+    const h = migHome('hm-macmig-plug-');
+    try {
+      const ep = {};
+      want.forEach((n) => { ep[n + '@claude-plugins-official'] = true; });
+      ep['slack@my-market'] = true;                          // чужой каталог с тем же именем
+      ep['figma'] = true;                                    // без суффикса
+      ep['sentry@claude-plugins-official'] = 'true';         // не булево значение — не наше
+      ep['legalzoom@claude-plugins-official'] = false;       // уже выключен
+      ep['code-review@claude-plugins-official'] = true;      // не из списка
+      ep['context7@claude-plugins-official'] = true;         // тоже не из списка
+      fs.writeFileSync(h.file, JSON.stringify({ permissions: { allow: ['mcp__*', 'Edit(*)'] }, enabledPlugins: ep }, null, 2));
+      runMig(mig, h.file, false, h.marker);
+      const s = JSON.parse(fs.readFileSync(h.file, 'utf8')).enabledPlugins;
+      want.forEach((n) => {
+        const k = n + '@claude-plugins-official';
+        if (n === 'sentry') assert.strictEqual(s[k], 'true', 'не булево — не трогаем');
+        else assert.strictEqual(s[k], false, n + ' выключен');
+      });
+      assert.strictEqual(s['slack@my-market'], true, 'чужой каталог не трогаем');
+      assert.strictEqual(s.figma, true, 'имя без суффикса не трогаем');
+      assert.strictEqual(s['code-review@claude-plugins-official'], true, 'плагин вне списка не трогаем');
+      assert.strictEqual(s['context7@claude-plugins-official'], true, 'и этот тоже');
+      const parsed = JSON.parse(fs.readFileSync(h.file, 'utf8'));
+      assert.deepStrictEqual(parsed.permissions.allow, ['mcp__*', 'Edit(*)'], 'правило mcp__* Claude Code не считает предупреждающим — остаётся как было');
+      // Выбор человека после миграции уважается: включил slack сам (поставил вход) — повтор его не выключает.
+      parsed.enabledPlugins['slack@claude-plugins-official'] = true;
+      const mine = JSON.stringify(parsed, null, 2);
+      fs.writeFileSync(h.file, mine);
+      runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), mine, 'повторный запуск выбор человека не откатывает');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: запись через временный файл и rename — права целы, временных файлов нет, файл заменяется целиком; сквозь ссылку не пишем', () => {
+    const h = migHome('hm-macmig-atomic-');
+    try {
+      fs.writeFileSync(h.file, JSON.stringify({ env: { A: '1' }, mcpServers: {} }, null, 2));
+      if (process.platform !== 'win32') fs.chmodSync(h.file, 0o640);
+      const ino0 = fs.statSync(h.file).ino;
+      const r = runMig(mig, h.file, false, h.marker);
+      assert.strictEqual(r.res, 'changed', r.out);
+      const tmps = (d) => fs.readdirSync(d).filter((n) => n.indexOf('.hamidun-tmp-') !== -1);
+      assert.strictEqual(tmps(h.cdir).length, 0, 'временных файлов рядом с settings.json не осталось');
+      assert.strictEqual(tmps(path.dirname(h.marker)).length, 0, 'и рядом с отметкой');
+      if (process.platform !== 'win32') {
+        assert.strictEqual(fs.statSync(h.file).mode & 0o777, 0o640, 'права оригинала сохранены');
+        assert.notStrictEqual(fs.statSync(h.file).ino, ino0, 'файл заменён целиком (rename), а не переписан на месте — обрыв посреди записи не оставит обрубок');
+      }
+      // writeFileSafe напрямую: ссылка на целевом имени и ссылка вместо каталога.
+      assert.strictEqual(typeof mig.writeFileSafe, 'function', 'writeFileSafe экспортирован для проверки');
+      const real = path.join(h.base, 'real.json');
+      fs.writeFileSync(real, 'ORIG');
+      const lnk = path.join(h.cdir, 'lnk.json');
+      let linked = false;
+      try { fs.symlinkSync(real, lnk, 'file'); linked = true; } catch (e) { linked = false; }
+      if (linked) {
+        assert.throws(() => mig.writeFileSafe(lnk, Buffer.from('X')), /ссылка/, 'сквозь ссылку на файл не пишем');
+        assert.strictEqual(fs.readFileSync(real, 'utf8'), 'ORIG', 'внешний файл цел');
+        assert.strictEqual(tmps(h.cdir).length, 0, 'после отказа временных файлов нет');
+      }
+      const realDir = path.join(h.base, 'realdir'); fs.mkdirSync(realDir);
+      const linkDir = path.join(h.base, 'linkdir');
+      fs.symlinkSync(realDir, linkDir, 'junction');
+      assert.throws(() => mig.writeFileSafe(path.join(linkDir, 'x.json'), Buffer.from('X')), /ссылка/, 'сквозь ссылку на каталог не пишем');
+      assert(!fs.existsSync(path.join(realDir, 'x.json')) && fs.readdirSync(realDir).length === 0, 'внешний каталог пуст');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: временный замок на целевом (антивирус, индексатор: rename падает EPERM/EBUSY/EACCES) переживается повторами; постоянная ошибка и каталог на месте файла — отказ сразу; без повторов запись рвётся', () => {
+    const h = migHome('hm-macmig-lock-');
+    const realRename = fs.renameSync;
+    const saved = Object.assign({}, mig.RENAME_RETRY);
+    try {
+      mig.RENAME_RETRY.baseMs = 1;   // паузу между попытками тест не ждёт
+      const target = h.file;
+      fs.writeFileSync(target, 'OLD');
+      // rename падает n раз с кодом code, затем работает; возвращает счётчик вызовов
+      const failN = (n, code) => {
+        let left = n; let calls = 0;
+        fs.renameSync = function (a, b) {
+          calls++;
+          if (left > 0) { left--; const e = new Error(code + ': simulated lock'); e.code = code; throw e; }
+          return realRename.call(fs, a, b);
+        };
+        return () => calls;
+      };
+      let calls = failN(2, 'EPERM');
+      mig.writeFileSafe(target, Buffer.from('NEW1'));
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), 'NEW1', 'после двух EPERM запись прошла');
+      assert.strictEqual(calls(), 3, 'три попытки: две неудачные и одна удачная');
+      ['EBUSY', 'EACCES'].forEach((code) => {
+        calls = failN(1, code);
+        mig.writeFileSafe(target, Buffer.from('NEW-' + code));
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'NEW-' + code, code + ': запись прошла');
+        assert.strictEqual(calls(), 2, code + ': одна повторная попытка');
+      });
+      // замок не снялся — ровно attempts попыток, затем исключение с причиной; прежний файл цел, временного нет
+      calls = failN(100, 'EPERM');
+      assert.throws(() => mig.writeFileSafe(target, Buffer.from('NEVER')), /EPERM/, 'после всех попыток — отказ с причиной');
+      assert.strictEqual(calls(), mig.RENAME_RETRY.attempts, 'ровно столько попыток, сколько положено: ' + mig.RENAME_RETRY.attempts);
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), 'NEW-EACCES', 'прежний файл цел');
+      assert.deepStrictEqual(fs.readdirSync(h.cdir).filter((n) => n.indexOf('.hamidun-tmp-') !== -1), [], 'временного файла нет');
+      // постоянная ошибка (нет места) не повторяется
+      calls = failN(100, 'ENOSPC');
+      assert.throws(() => mig.writeFileSafe(target, Buffer.from('x')), /ENOSPC/);
+      assert.strictEqual(calls(), 1, 'постоянная ошибка — одна попытка');
+      // на месте файла каталог: повторы не помогут — отказ сразу, даже при «временном» коде
+      fs.renameSync = realRename;
+      const dirTarget = path.join(h.cdir, 'AGENTS.md'); fs.mkdirSync(dirTarget);
+      calls = failN(100, 'EPERM');
+      assert.throws(() => mig.writeFileSafe(dirTarget, Buffer.from('x')), /EPERM/);
+      assert.strictEqual(calls(), 1, 'каталог на месте файла — одна попытка');
+      fs.renameSync = realRename;
+      // Отрицательный контроль: без повторов тот же замок рвёт запись.
+      const src = fs.readFileSync(MIG, 'utf8');
+      const mutSrc = src.replace('attempt >= RENAME_RETRY.attempts', 'true');
+      assert(mutSrc !== src, 'мутация применилась');
+      const mutFile = path.join(h.base, 'mut-lock.js');
+      fs.writeFileSync(mutFile, mutSrc);
+      const mutMig = loadMig(mutFile);
+      calls = failN(2, 'EPERM');
+      assert.throws(() => mutMig.writeFileSafe(target, Buffer.from('X')), /EPERM/, 'без повторов замок рвёт запись — тест различает');
+    } finally { fs.renameSync = realRename; Object.assign(mig.RENAME_RETRY, saved); dropDir(h.base); }
+  });
+
+  const lexists = (p) => { try { fs.lstatSync(p); return true; } catch (e) { return false; } };   // существует ли имя само по себе (ссылку не разыменовываем)
+  ok('macOS-миграция: копия — на свободное имя: занятое (файл, каталог, ссылка) не затирается и не прослеживается, берётся следующий суффикс; все девять имён заняты — settings.json не трогаем', () => {
+    const h = migHome('hm-macmig-bak-');
+    const RealDate = Date;
+    try {
+      const FIXED = new RealDate(2026, 9, 9, 12, 0, 0).getTime();
+      // Время зафиксировано: имя копии известно заранее, а значит, его можно занять до прогона.
+      global.Date = class extends RealDate {
+        constructor(...a) { if (a.length) super(...a); else super(FIXED); }
+        static now() { return FIXED; }
+      };
+      const base = h.file + '.hamidun-bak-20261009-120000';
+      fs.writeFileSync(base, 'OCCUPIED');
+      fs.mkdirSync(base + '-2');
+      const ext = path.join(h.base, 'external.txt');
+      fs.writeFileSync(ext, 'EXTERNAL');
+      let linked = false;
+      try { fs.symlinkSync(ext, base + '-3', 'file'); linked = true; } catch (e) { linked = false; }
+      const original = JSON.stringify({ env: { A: '1' }, mcpServers: { s: {} } }, null, 2);
+      fs.writeFileSync(h.file, original);
+      const r = runMig(mig, h.file, false, h.marker);
+      global.Date = RealDate;
+      assert.strictEqual(r.res, 'changed', r.out);
+      const want = base + (linked ? '-4' : '-3');
+      assert(fs.existsSync(want) && fs.readFileSync(want, 'utf8') === original, 'копия легла на первое свободное имя: ' + want + '\n' + r.out);
+      assert.strictEqual(fs.readFileSync(base, 'utf8'), 'OCCUPIED', 'занятый файл не затёрт');
+      assert(fs.statSync(base + '-2').isDirectory(), 'занятый каталог на месте');
+      if (linked) assert.strictEqual(fs.readFileSync(ext, 'utf8'), 'EXTERNAL', 'внешний файл за ссылкой не тронут');
+      // Все девять имён секунды заняты — копию не снять, и settings.json остаётся как был (без копии не правим).
+      global.Date = class extends RealDate {
+        constructor(...a) { if (a.length) super(...a); else super(FIXED); }
+        static now() { return FIXED; }
+      };
+      for (let i = 1; i <= 9; i++) { const nm = i === 1 ? base : base + '-' + i; if (!lexists(nm)) fs.writeFileSync(nm, 'OCCUPIED-' + i); }
+      fs.writeFileSync(h.file, original);
+      const r2 = runMig(mig, h.file, false, path.join(h.base, 'm-exhausted.json'));
+      global.Date = RealDate;
+      assert.strictEqual(r2.res, 'nobackup', 'без копии не правим: ' + r2.out);
+      assert.strictEqual(fs.readFileSync(h.file, 'utf8'), original, 'settings.json не тронут');
+      assert(/копию снять не удалось/.test(r2.out), 'причина названа: ' + r2.out);
+      assert(!fs.existsSync(base + '-10'), 'десятого имени не заводим');
+    } finally { global.Date = RealDate; dropDir(h.base); }
+  });
+
+  ok('macOS-миграция: каталог отметки — ссылка: отметку сквозь неё не пишем, сама правка settings.json всё равно делается', () => {
+    const h = migHome('hm-macmig-mk-');
+    try {
+      const realSetup = path.join(h.base, 'real-setup'); fs.mkdirSync(realSetup);
+      const linkSetup = path.join(h.base, 'link-setup');
+      fs.symlinkSync(realSetup, linkSetup, 'junction');
+      fs.writeFileSync(h.file, JSON.stringify({ mcpServers: {} }, null, 2));
+      const r = runMig(mig, h.file, false, path.join(linkSetup, 'config-migrations.json'));
+      assert.strictEqual(r.res, 'changed', r.out);
+      assert.deepStrictEqual(fs.readdirSync(realSetup), [], 'внешний каталог пуст: отметка сквозь ссылку не записана');
+      assert(!('mcpServers' in JSON.parse(fs.readFileSync(h.file, 'utf8'))), 'settings.json исправлен');
+    } finally { dropDir(h.base); }
+  });
+
+  // ---- опись поставленного: CATALOG.md пака и сводка для финального экрана (зеркало Write-HmConfigSummary) ----
+  function mkClaudeTree(claudeHome) {
+    const w = (rel, text) => { const f = path.join(claudeHome, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text || 'x'); };
+    w('skills/s1/SKILL.md'); w('skills/s2/SKILL.md');
+    w('skills/s3/notes.txt');                       // каталог без SKILL.md — не скилл
+    w('agents/a1.md'); w('agents/workers/w1.md'); w('agents/README.md');
+    w('commands/c1.md'); w('commands/gsd/g1.md'); w('commands/gsd/deep/g2.md');          // глубина 2: три уровня каталогов
+    w('commands/gsd/deep/deeper/four.md');                                                // четвёртый уровень не считается
+  }
+  ok('macOS-опись: CATALOG.md пака ложится в ~/.claude, цифры (навыки с SKILL.md, агенты и команды без README, глубина 2) — в config-summary.json в формате пака', () => {
+    const h = migHome('hm-macsum-');
+    try {
+      const pack = path.join(h.base, 'pack'); fs.mkdirSync(pack);
+      fs.writeFileSync(path.join(pack, 'CATALOG.md'), '# Что внутри пака\n');
+      mkClaudeTree(h.cdir);
+      const setup = path.join(h.base, '.hamidun-setup');
+      const out = [];
+      const r = mig.writeConfigSummary(pack, h.cdir, setup, { say: (s) => out.push(s) });
+      assert.strictEqual(fs.readFileSync(path.join(h.cdir, 'CATALOG.md'), 'utf8'), '# Что внутри пака\n', 'каталог пака в ~/.claude');
+      const raw = fs.readFileSync(path.join(setup, 'config-summary.json'), 'utf8');
+      const sum = JSON.parse(raw);
+      assert.deepStrictEqual([sum.skills, sum.agents, sum.commands], [2, 2, 3], 'навыки 2, агенты 2 (README не считается), команды 3 (глубина 2; четвёртый уровень не в счёт): ' + raw);
+      assert.strictEqual(sum.catalog, path.join(h.cdir, 'CATALOG.md'), 'путь к каталогу для финального экрана');
+      assert(Number.isInteger(sum.at) && sum.at > 1.7e12, 'время — миллисекунды');
+      assert(raw.endsWith('}\n') && raw.indexOf('\n  "skills": 2,') !== -1, 'формат пака: JSON.stringify(…, null, 2) и перевод строки');
+      assert(/навыков 2, агентов 2, команд 3 — перечень в ~\/\.claude\/CATALOG\.md/.test(out.join('\n')), 'цифры названы в журнале: ' + out.join('|'));
+      assert.deepStrictEqual([r.catalogPlaced, r.summaryWritten], [true, true]);
+      // тот же формат читает финальный экран (src/pack-summary.js): ключи skills и agents — неотрицательные целые
+      assert(['skills', 'agents', 'commands'].every((k) => Number.isInteger(sum[k]) && sum[k] >= 0), 'числа целые неотрицательные');
+    } finally { dropDir(h.base); }
+  });
+
+  ok('macOS-опись: только-если-нет (always-run) не заменяет существующий CATALOG.md и не переписывает неизменную сводку; без пака каталог не кладётся, цифры пишутся; ссылки не проходим', () => {
+    const h = migHome('hm-macsum2-');
+    try {
+      const pack = path.join(h.base, 'pack'); fs.mkdirSync(pack);
+      fs.writeFileSync(path.join(pack, 'CATALOG.md'), '# новый каталог пака\n');
+      mkClaudeTree(h.cdir);
+      fs.writeFileSync(path.join(h.cdir, 'CATALOG.md'), '# мой старый каталог\n');
+      const setup = path.join(h.base, '.hamidun-setup');
+      let r = mig.writeConfigSummary(pack, h.cdir, setup, { onlyIfMissing: true, skipUnchanged: true, say: () => {} });
+      assert.strictEqual(fs.readFileSync(path.join(h.cdir, 'CATALOG.md'), 'utf8'), '# мой старый каталог\n', 'существующий каталог не заменён');
+      assert.strictEqual(r.catalogPlaced, false);
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(setup, 'config-summary.json'), 'utf8')).catalog, path.join(h.cdir, 'CATALOG.md'), 'но в сводке он назван');
+      // повтор: сводка не меняется ни на байт (иначе каждый прогон перезаписывал бы файл ради метки времени)
+      const before = fs.readFileSync(path.join(setup, 'config-summary.json'));
+      r = mig.writeConfigSummary(pack, h.cdir, setup, { onlyIfMissing: true, skipUnchanged: true, say: () => {} });
+      assert.strictEqual(r.summaryWritten, false, 'нечего писать');
+      assert(fs.readFileSync(path.join(setup, 'config-summary.json')).equals(before), 'байт в байт');
+      // обычный режим (config.sh) каталог пака заменяет: раскладка только что шла, каталог должен описывать её
+      mig.writeConfigSummary(pack, h.cdir, setup, { say: () => {} });
+      assert.strictEqual(fs.readFileSync(path.join(h.cdir, 'CATALOG.md'), 'utf8'), '# новый каталог пака\n', 'после раскладки каталог пака свежий');
+      // пака под рукой нет (лёгкое издание): каталог не кладём, цифры пишем
+      const h2 = migHome('hm-macsum3-');
+      try {
+        mkClaudeTree(h2.cdir);
+        const out = [];
+        const set2 = path.join(h2.base, '.hamidun-setup');
+        r = mig.writeConfigSummary('', h2.cdir, set2, { say: (s) => out.push(s) });
+        assert(!fs.existsSync(path.join(h2.cdir, 'CATALOG.md')), 'каталога нет');
+        assert.strictEqual(JSON.parse(fs.readFileSync(path.join(set2, 'config-summary.json'), 'utf8')).catalog, '', 'в сводке каталог пуст');
+        assert(/CATALOG\.md пака сейчас недоступен/.test(out.join('\n')), 'причина названа: ' + out.join('|'));
+      } finally { dropDir(h2.base); }
+      // ~/.hamidun-setup — ссылка: сводку сквозь неё не пишем
+      const h3 = migHome('hm-macsum4-');
+      try {
+        mkClaudeTree(h3.cdir);
+        const realSetup = path.join(h3.base, 'real-setup'); fs.mkdirSync(realSetup);
+        const linkSetup = path.join(h3.base, 'link-setup'); fs.symlinkSync(realSetup, linkSetup, 'junction');
+        const out = [];
+        r = mig.writeConfigSummary(pack, h3.cdir, linkSetup, { say: (s) => out.push(s) });
+        assert.deepStrictEqual(fs.readdirSync(realSetup), [], 'внешний каталог пуст');
+        assert(/Сводку конфига записать не удалось/.test(out.join('\n')) && /ссылка/.test(out.join('\n')), 'причина названа: ' + out.join('|'));
+      } finally { dropDir(h3.base); }
+      // ~/.claude — ссылка: каталог пака сквозь неё не пишем
+      const h4 = migHome('hm-macsum5-');
+      try {
+        const realClaude = path.join(h4.base, 'real-claude'); fs.mkdirSync(realClaude);
+        const linkClaude = path.join(h4.base, 'link-claude'); fs.symlinkSync(realClaude, linkClaude, 'junction');
+        const out = [];
+        r = mig.writeConfigSummary(pack, linkClaude, path.join(h4.base, '.hamidun-setup'), { say: (s) => out.push(s) });
+        assert(!fs.existsSync(path.join(realClaude, 'CATALOG.md')), 'сквозь ссылку CATALOG.md не лёг');
+        assert(/ссылка, каталог пака не пишу/.test(out.join('\n')), out.join('|'));
+      } finally { dropDir(h4.base); }
+    } finally { dropDir(h.base); }
+  });
+
+  // ---- карта конфига для Codex: AGENTS.md пака → ~/.codex/AGENTS.md (зеркало Install-HmCodexAgents) ----
+  const PACK_AGENTS = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.\n';
+  const PACK_WANT = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](~/.claude/CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.';
+  const CDX_BEGIN = '<!-- hamidun-pack begin -->';
+  const CDX_END = '<!-- hamidun-pack end -->';
+  function mkCodexBox() {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-macdx-'));
+    const home = path.join(base, 'home'); const pack = path.join(base, 'pack');
+    fs.mkdirSync(home); fs.mkdirSync(pack);
+    fs.writeFileSync(path.join(pack, 'AGENTS.md'), PACK_AGENTS);
+    return { base, home, pack, src: path.join(pack, 'AGENTS.md'), dst: path.join(home, '.codex', 'AGENTS.md') };
+  }
+  const callCodex = (box, m) => { const out = []; const st = (m || mig).installCodexAgents(box.src, box.home, (s) => out.push(s)); return { st, out: out.join('\n') }; };
+  const countOf = (text, needle) => text.split(needle).length - 1;
+
+  ok('macOS-Codex: Codex нет — ничего не создаётся; расширение openai.chatgpt-* или ~/.codex — файл создан с отмеченным блоком, повтор не меняет ни байта и молчит', () => {
+    const box = mkCodexBox();
+    try {
+      let o = callCodex(box);
+      assert.strictEqual(o.st, 'no-codex', 'ни ~/.codex, ни расширения: ' + o.out);
+      assert(!fs.existsSync(path.join(box.home, '.codex')), '~/.codex не создан');
+      // расширения чужого издателя и с похожим именем — не Codex
+      fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'other.chatgpt-1.0.0'), { recursive: true });
+      fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'someone.openai.chatgpt-1.0.0'), { recursive: true });
+      assert.strictEqual(callCodex(box).st, 'no-codex', 'похожие имена расширений не считаются');
+      // настоящее расширение Codex
+      fs.mkdirSync(path.join(box.home, '.vscode', 'extensions', 'openai.chatgpt-26.1002.51308-darwin-arm64'), { recursive: true });
+      o = callCodex(box);
+      assert.strictEqual(o.st, 'created', 'расширение есть — файл создан: ' + o.out);
+      const bytes = fs.readFileSync(box.dst);
+      assert.notStrictEqual(bytes[0], 0xEF, 'без BOM');
+      assert.strictEqual(bytes.toString('utf8'), CDX_BEGIN + '\n' + PACK_WANT + '\n' + CDX_END + '\n', 'блок пака; ссылка на каталог ведёт в ~/.claude/CATALOG.md');
+      assert(/~\/\.codex\/AGENTS\.md/.test(o.out), 'человеку сказано, куда положили: ' + o.out);
+      const before = fs.readFileSync(box.dst);
+      o = callCodex(box);
+      assert.strictEqual(o.st, 'present', 'свой блок узнан');
+      assert(fs.readFileSync(box.dst).equals(before), 'повтор не меняет файл');
+      assert.strictEqual(o.out, '', 'и молчит');
+      assert.deepStrictEqual(fs.readdirSync(path.join(box.home, '.codex')), ['AGENTS.md'], 'временных файлов нет');
+      // каталог ~/.codex есть и без расширения (Codex CLI) — тоже достаточно
+      const box2 = mkCodexBox();
+      try {
+        fs.mkdirSync(path.join(box2.home, '.codex'));
+        assert.strictEqual(callCodex(box2).st, 'created', '~/.codex есть — файл создан');
+      } finally { dropDir(box2.base); }
+      // каталоги расширений других редакторов того же семейства
+      ['.vscode-oss', '.cursor'].forEach((ed) => {
+        const b3 = mkCodexBox();
+        try {
+          fs.mkdirSync(path.join(b3.home, ed, 'extensions', 'openai.chatgpt-1.0.0'), { recursive: true });
+          assert.strictEqual(callCodex(b3).st, 'created', ed + ': расширение Codex найдено');
+        } finally { dropDir(b3.base); }
+      });
+    } finally { dropDir(box.base); }
+  });
+
+  ok('macOS-Codex: чужой ~/.codex/AGENTS.md остаётся байт в байт, в конец дописывается отмеченный блок ровно один раз (BOM/CRLF и отсутствие перевода строки сохранены); без распознавания блока повтор дублирует', () => {
+    const box = mkCodexBox();
+    try {
+      fs.mkdirSync(path.join(box.home, '.codex'));
+      const cases = [
+        ['﻿# Мои правила\r\nбыть вежливым', '\r\n'],          // BOM, CRLF, без финального перевода строки
+        ['# Мои правила\nотвечай коротко\n', '\n'],              // LF с финальным переводом строки
+        ['', '\n'],                                              // пустой файл
+      ];
+      for (const [text, nl] of cases) {
+        fs.writeFileSync(box.dst, text);
+        const orig = fs.readFileSync(box.dst);
+        let o = callCodex(box);
+        assert.strictEqual(o.st, 'appended', JSON.stringify(text) + ': ' + o.out);
+        const after = fs.readFileSync(box.dst);
+        assert(after.slice(0, orig.length).equals(orig), JSON.stringify(text) + ': начало файла человека не тронуто байт в байт');
+        const tail = after.slice(orig.length).toString('utf8');
+        const want = (text && !text.endsWith('\n') ? nl : '') + (text ? nl : '') + CDX_BEGIN + nl + PACK_WANT.replace(/\n/g, nl) + nl + CDX_END + nl;
+        assert.strictEqual(tail, want, JSON.stringify(text) + ': дописан отмеченный блок в стиле файла');
+        assert.strictEqual(countOf(after.toString('utf8'), CDX_BEGIN), 1, 'блок один');
+        assert(/Убрать: удали блок/.test(o.out) && /дописал/.test(o.out), 'человеку сказано, что дописано и как убрать: ' + o.out);
+        o = callCodex(box);
+        assert.strictEqual(o.st, 'present', 'второй запуск узнаёт блок');
+        assert(fs.readFileSync(box.dst).equals(after), JSON.stringify(text) + ': второй запуск не меняет ни байта');
+      }
+      // Отрицательный контроль: без распознавания своего блока повтор дублирует.
+      const src = fs.readFileSync(MIG, 'utf8');
+      const mutSrc = src.replace("if (oldText.indexOf(PACK_BLOCK_BEGIN) !== -1) return 'present';", '');
+      assert(mutSrc !== src, 'мутация применилась');
+      const mutFile = path.join(box.base, 'mut-codex.js');
+      fs.writeFileSync(mutFile, mutSrc);
+      fs.writeFileSync(box.dst, '# чужое\n');
+      const mutMig = loadMig(mutFile);
+      callCodex(box, mutMig); callCodex(box, mutMig);
+      assert.strictEqual(countOf(fs.readFileSync(box.dst, 'utf8'), CDX_BEGIN), 2, 'дефектная версия дублирует блок — тест различает');
+    } finally { dropDir(box.base); }
+  });
+
+  ok('macOS-Codex: ссылка вместо ~/.codex или AGENTS.md, ~/.codex не каталог, файл не в UTF-8, нет AGENTS.md в паке — ничего не пишется', () => {
+    const box = mkCodexBox();
+    try {
+      // ~/.codex — ссылка на чужой каталог
+      const elsewhere = path.join(box.base, 'elsewhere'); fs.mkdirSync(elsewhere);
+      fs.symlinkSync(elsewhere, path.join(box.home, '.codex'), 'junction');
+      let o = callCodex(box);
+      assert.strictEqual(o.st, 'link', o.out);
+      assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'сквозь ссылку ничего не записано');
+      assert(/ссылка/.test(o.out), 'причина названа: ' + o.out);
+      fs.rmdirSync(path.join(box.home, '.codex'));
+      // AGENTS.md — ссылка на чужой файл
+      fs.mkdirSync(path.join(box.home, '.codex'));
+      const ext = path.join(box.base, 'external.md'); fs.writeFileSync(ext, 'EXTERNAL');
+      let fileLinked = false;
+      try { fs.symlinkSync(ext, box.dst, 'file'); fileLinked = true; } catch (e) { fileLinked = false; }
+      if (fileLinked) {
+        o = callCodex(box);
+        assert.strictEqual(o.st, 'link', o.out);
+        assert.strictEqual(fs.readFileSync(ext, 'utf8'), 'EXTERNAL', 'внешний файл цел');
+        fs.rmSync(box.dst);
+      }
+      fs.rmdirSync(path.join(box.home, '.codex'));
+      // ~/.codex — файл
+      fs.writeFileSync(path.join(box.home, '.codex'), 'x');
+      assert.strictEqual(callCodex(box).st, 'skipped', '~/.codex не каталог');
+      assert.strictEqual(fs.readFileSync(path.join(box.home, '.codex'), 'utf8'), 'x', 'файл на месте каталога цел');
+      fs.rmSync(path.join(box.home, '.codex'));
+      // AGENTS.md человека в UTF-16 (не UTF-8)
+      fs.mkdirSync(path.join(box.home, '.codex'));
+      const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('# мои правила\n', 'utf16le')]);
+      fs.writeFileSync(box.dst, utf16);
+      o = callCodex(box);
+      assert.strictEqual(o.st, 'skipped', 'не UTF-8: ' + o.out);
+      assert(fs.readFileSync(box.dst).equals(utf16), 'такой файл не тронут');
+      // пак не в UTF-8 — поломанный пак, а не «нет источника»: статус failed, причина названа, файл не создан
+      const box3 = mkCodexBox();
+      try {
+        fs.mkdirSync(path.join(box3.home, '.codex'));
+        fs.writeFileSync(box3.src, Buffer.from([0x23, 0xFF, 0x0A]));
+        o = callCodex(box3);
+        assert.strictEqual(o.st, 'failed', 'поломанный пак: ' + o.out);
+        assert(/AGENTS\.md пака положить не удалось/.test(o.out), 'причина названа: ' + o.out);
+        assert(!fs.existsSync(box3.dst), 'файл не создан');
+      } finally { dropDir(box3.base); }
+      // в паке нет AGENTS.md
+      fs.rmSync(box.src);
+      assert.strictEqual(callCodex(box).st, 'no-source', 'нет источника');
+      // CODEX_HOME не читается: путь из окружения сделал бы запись произвольной
+      const jsCode = fs.readFileSync(MIG, 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+      assert(!/CODEX_HOME/.test(jsCode), 'переменная CODEX_HOME в коде не используется (только в комментарии)');
+    } finally { dropDir(box.base); }
+  });
+
+  ok('config.sh: карта для Codex зовётся после ~/CLAUDE.md, опись — после фильтра наборов и ПЕРЕД маркером завершённости; сухой прогон называет и опись, и Codex', () => {
+    const c = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8'));
+    assertOrder(c, 'cp "$SRC_CLAUDE_MD" "$HOME/CLAUDE.md"', '_cfgmigrate.js" --codex', 'карта для Codex — после ~/CLAUDE.md');
+    assertOrder(c, 'Скиллы отфильтрованы по выбранным наборам', '_cfgmigrate.js" --summary', 'опись — после фильтра наборов');
+    assertOrder(c, '_cfgmigrate.js" --summary', '.hamidun-config-complete', 'опись — до маркера завершённости');
+    assert(/\[dry-run\] WOULD: убрать из settings\.json[^\n]*CATALOG\.md/.test(c) && /\[dry-run\] WOULD: если на машине есть Codex/.test(c),
+      'сухой прогон называет и опись, и Codex');
+  });
+
+  ok('config.sh: снимок «был ли settings.json» до раскладки, правка — после неё; без node — пропуск строкой', () => {
+    const c = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'config.sh'), 'utf8'));
+    assertOrder(c, 'SETTINGS_EXISTED=1', 'rsync -a --ignore-existing', 'снимок — до раскладки');
+    assertOrder(c, 'rsync -a $PRESERVE_FILE_GLOBS', '"$DIR/_cfgmigrate.js" "$CLAUDE_HOME/settings.json" "$SETTINGS_FRESH"', 'правка — после раскладки');
+    assert(/if \[ "\$SETTINGS_EXISTED" -eq 0 \] \|\| \[ "\$ADDITIVE" -eq 0 \]; then SETTINGS_FRESH=1; fi/.test(c),
+      'свежий = файла не было или repair его перезаписал');
+    assert(/node не найден — правку settings\.json прошлых версий пака пропускаю/.test(c), 'без node — понятная строка, не падение');
+    assert(!/python3[^\n]*_cfgmigrate/.test(c), 'python3 (на чистом маке — заглушка CLT с окном) не используется');
+  });
+
+  if (bashAvailable()) {
+    ok('config.sh (функц.): старый settings.json исправлен с копией, модель и пользовательское не тронуты; повтор — без изменений', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        seedHome(home);
+        const old = { model: 'opus', permissions: { allow: ['Write(~/**)', 'Edit(~/**)'] },
+          enabledPlugins: { 'greptile@claude-plugins-official': true } };
+        fs.writeFileSync(home + '/.claude/settings.json', JSON.stringify(old, null, 2));
+        let r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        const s = JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8'));
+        assert.strictEqual(s.enabledPlugins['greptile@claude-plugins-official'], false, 'плагин без токена выключен');
+        assert.deepStrictEqual(s.permissions.allow, ['Edit(~/**)'], 'Write(~/**) убран — Edit(~/**) уже есть');
+        assert.strictEqual(s.model, 'opus', 'модель человека не тронута');
+        assert.strictEqual(s.env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY, '1', 'опрос выключен');
+        const copies = () => fs.readdirSync(home + '/.claude').filter((n) => n.startsWith('settings.json.hamidun-bak-'));
+        assert.strictEqual(copies().length, 1, 'копия до правки');
+        assert(fs.existsSync(home + '/.hamidun-setup/config-migrations.json'), 'отметка шага записана');
+        assertUserDataIntact(home);
+        const after = fs.readFileSync(home + '/.claude/settings.json', 'utf8');
+        r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'повтор exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), after, 'повтор не меняет файл');
+        assert.strictEqual(copies().length, 1, 'повтор не плодит копии');
+        assert(/устаревших правок в settings\.json нет/.test(r.stdout || ''), 'повтор говорит, что править нечего');
+      } finally { dropDir(base); }
+    });
+
+    ok('config.sh (функц.): allow-правило без «близнеца» остаётся, подсказка в журнале установки', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        seedHome(home);
+        fs.writeFileSync(home + '/.claude/settings.json', JSON.stringify({ model: 'opus', permissions: { allow: ['Write(~/mine/**)', 'Read(*)'] } }, null, 2));
+        const r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        const s = JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8'));
+        assert.deepStrictEqual(s.permissions.allow, ['Write(~/mine/**)', 'Read(*)'], 'правило человека не заменено');
+        assert(/Write\(~\/mine\/\*\*\) не действует/.test(r.stdout || ''), 'подсказка в выводе config.sh: ' + (r.stdout || '').slice(-600));
+        assertUserDataIntact(home);
+      } finally { dropDir(base); }
+    });
+
+    ok('config.sh (функц.): CATALOG.md пака и сводка ложатся после раскладки; карта для Codex — при установленном Codex, чужой файл сохраняется с дописанным блоком; повтор ничего не меняет; без Codex ~/.codex не создаётся', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        fs.writeFileSync(clone + '/AGENTS.md', PACK_AGENTS);
+        fs.writeFileSync(clone + '/CATALOG.md', '# Что внутри пака\n');
+        seedHome(home);
+        fs.mkdirSync(home + '/.codex', { recursive: true });
+        fs.writeFileSync(home + '/.codex/AGENTS.md', '# чужое\n');
+        let r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
+        const t1 = fs.readFileSync(home + '/.codex/AGENTS.md', 'utf8');
+        assert(t1.startsWith('# чужое\n\n' + CDX_BEGIN + '\n'), 'чужое сохранено, блок дописан: ' + JSON.stringify(t1));
+        assert.strictEqual(countOf(t1, CDX_BEGIN), 1, 'блок один');
+        assert.strictEqual(fs.readFileSync(home + '/.claude/CATALOG.md', 'utf8'), '# Что внутри пака\n', 'каталог пака в ~/.claude');
+        const sum = JSON.parse(fs.readFileSync(home + '/.hamidun-setup/config-summary.json', 'utf8'));
+        assert.strictEqual(sum.skills, 2, 'навыки: наш и пользовательский (у обоих SKILL.md)');
+        assert(/CATALOG\.md$/.test(sum.catalog), 'путь к каталогу для финального экрана');
+        assert(/навыков 2, агентов 0, команд 0/.test(r.stdout || ''), 'цифры названы в журнале: ' + (r.stdout || '').slice(-400));
+        assertUserDataIntact(home);
+        r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
+        assert.strictEqual(r.status, 0, 'повтор exit 0');
+        assert.strictEqual(fs.readFileSync(home + '/.codex/AGENTS.md', 'utf8'), t1, 'повторный запуск карту не меняет');
+        // без Codex на машине config.sh ничего в ~/.codex не создаёт
+        const box2 = mkCfgSandbox();
+        try {
+          fs.writeFileSync(box2.clone + '/AGENTS.md', PACK_AGENTS);
+          seedHome(box2.home);
+          const r3 = runCfgSh(box2.home, box2.clone, { HM_ADDITIVE: '1' });
+          assert.strictEqual(r3.status, 0, (r3.stdout || '') + (r3.stderr || ''));
+          assert(!fs.existsSync(box2.home + '/.codex'), 'Codex нет — ~/.codex не создан');
+        } finally { dropDir(box2.base); }
+      } finally { dropDir(base); }
+    });
+
+    ok('config.sh (функц.): без node правка пропущена понятной строкой, settings.json не тронут', () => {
+      const { base, home, clone } = mkCfgSandbox();
+      try {
+        seedHome(home);
+        const old = JSON.stringify({ model: 'opus', enabledPlugins: { 'greptile@claude-plugins-official': true } }, null, 2);
+        fs.writeFileSync(home + '/.claude/settings.json', old);
+        const script = path.join(ROOT, 'scripts', 'macos', 'config.sh').replace(/\\/g, '/');
+        // PATH без node: только системные каталоги (config.sh сам добавит ~/.local/bin,
+        // /usr/local/bin и /opt/homebrew/bin). Если node всё равно находится — проверить
+        // «без node» на этой машине нельзя: честный пропуск.
+        const sh = 'export PATH="/usr/bin:/bin"; ';
+        const env = Object.assign({}, process.env, { HOME: home, HM_BUNDLED_CONFIG: clone, HM_ADDITIVE: '1' });
+        delete env.HM_DRY_RUN; delete env.HM_KEEP_SKILLS; delete env.HM_ALL_PACK_SKILLS;
+        const probe = spawnSync('bash', ['-c', sh + 'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; command -v node'],
+          { encoding: 'utf8', env });
+        if ((probe.stdout || '').trim()) SKIP('node есть в системном PATH этой машины (' + probe.stdout.trim() + ') — случай «без node» не воспроизвести');
+        const r = spawnSync('bash', ['-c', sh + 'exec bash "$1"', 'x', script], { encoding: 'utf8', timeout: 360000, env });
+        if (r.status === null) SKIP('bash убит по таймауту — проверка не выполнена');
+        assert.strictEqual(r.status, 0, 'без node конфиг всё равно ставится: ' + (r.stdout || '') + (r.stderr || ''));
+        assert(/node не найден — правку settings\.json прошлых версий пака пропускаю/.test(r.stdout || ''), 'причина названа: ' + (r.stdout || '').slice(-400));
+        assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), old, 'файл не тронут');
+        assert(!fs.readdirSync(home + '/.claude').some((n) => n.startsWith('settings.json.hamidun-bak-')), 'копий нет — правки не было');
+      } finally { dropDir(base); }
+    });
+  }
+})();
+
+// ===========================================================================
+// macOS: третий заход по ревью ветки (сторож без `set -m`, частичный успех вместо красного,
+// pydeps по одной библиотеке, always-run touchup-скрипты)
+// ===========================================================================
+// Что проверяется и почему это не пустые проверки:
+//  • сторож: команда остаётся в группе процессов скрипта — иначе SIGKILL группы, которым
+//    main.js снимает шаг при закрытии окна (killChildren), её не достаёт, и остаётся сирота
+//    без потолка по времени. Контроль наоборот — прежняя реализация (`set -m`) в том же
+//    стенде даёт другую группу и переживает удар;
+//  • claude.sh целиком (подставные curl/npm/claude): новое окно не видит claude — код 121 и
+//    ровно одна строка «ЧАСТИЧНО:» ≤ 240 знаков, а не красный провал, тянущий конфиг,
+//    библиотеки, курс и скрепку;
+//  • pydeps.sh целиком (подставной python3): отказ общего разбора не обнуляет остальные
+//    библиотеки; чистый Python из списка/проверенных архивов ставится и без вшитого набора;
+//  • touchup-*.sh: автономны, идемпотентны, молчат, когда делать нечего, не падают.
+// Все подставные команды стоят ПЕРВЫМИ в PATH (POSIX-пути: «C:» в PATH режется по
+// двоеточию), а настоящий python недостижим: пользовательские пакеты и браузеры уводятся
+// во временный каталог, индекс PyPI выключен.
+(function macReviewRound3Tests() {
+  console.log('== macOS: ревью ветки D (3-й заход) — сторож, частичный успех, pydeps по одной, touchup-скрипты ==');
+  if (!bashAvailable()) { console.log('  ⚠️  bash недоступен — проверки этого блока пропущены.'); return; }
+
+  const MACDIR = path.join(ROOT, 'scripts', 'macos');
+  const LIB = path.join(MACDIR, '_lib.sh').replace(/\\/g, '/');
+  const readMac = (f) => fs.readFileSync(path.join(MACDIR, f), 'utf8');
+  const mp = (p) => String(p).split('\\').join('/').replace(/^([A-Za-z]):\//, (m, d) => '/' + d.toLowerCase() + '/');
+  const mkTmp = (pfx) => fs.mkdtempSync(path.join(os.tmpdir(), pfx)).replace(/\\/g, '/');
+  const exe = (file, text) => { fs.writeFileSync(file, text); fs.chmodSync(file, 0o755); };
+  const sleepSync = (sec) => spawnSync('bash', ['-c', 'sleep ' + sec], { timeout: (sec + 30) * 1000 });
+  const psLines = () => (spawnSync('ps', ['-ef'], { encoding: 'utf8', timeout: 60000 }).stdout || '').split('\n');
+  const countProcs = (re) => psLines().filter((l) => re.test(l)).length;
+  // Снять оставшиеся процессы по шаблону (Cygwin-pid берём из `ps -ef`, 2-я колонка).
+  const killProcs = (re) => {
+    const pids = psLines().filter((l) => re.test(l)).map((l) => l.trim().split(/\s+/)[1]).filter((x) => /^\d+$/.test(x));
+    if (pids.length) spawnSync('bash', ['-c', 'kill -9 ' + pids.join(' ') + ' 2>/dev/null; true'], { timeout: 30000 });
+  };
+  const fnFrom = (src, name) => {
+    const i = src.indexOf(name + '() {');
+    assert(i !== -1, 'нет функции ' + name);
+    const j = src.indexOf('\n}', i);
+    assert(j !== -1, 'функция ' + name + ' не закрыта');
+    return src.slice(i, j + 2);
+  };
+  // Фрагмент bash с подключённым _lib.sh; bin — каталог подставных команд, ПЕРВЫЙ в PATH.
+  // Пустой вывод — не результат, а сбой запуска процесса под нагрузкой: повторяем.
+  function libRun(body, bin, env) {
+    const script = 'export PATH="' + (bin ? mp(bin) + ':' : '') + '$PATH"\n. "' + LIB + '"\n' + body + '\n';
+    let r = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 180000, env: Object.assign({}, process.env, env || {}) });
+      if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+      if (r.status === null) SKIP('bash убит по таймауту — проверка не выполнена');
+      if ((r.stdout || '').trim()) break;
+    }
+    return r;
+  }
+  const bashPath = (spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout || '').trim();
+
+  // ---- retry3 в сборочном скрипте: промах реестра не должен валить многогигабайтную сборку ----
+  ok('fetch-vendor-mac.sh: retry3 — три попытки, успех на любой, после третьего провала код 1; npm cache add идёт через неё', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8');
+    const fn = fnFrom(src, 'retry3');
+    const base = mkTmp('hm-retry-');
+    try {
+      const cnt = mp(base) + '/n';
+      const run = (okFrom) => {
+        fs.writeFileSync(base + '/n', '0');
+        // sleep подменён функцией: паузу между попытками не ждём
+        const script = 'sleep() { :; }\n' + fn + '\n' +
+          'flaky() { n=$(($(cat "' + cnt + '") + 1)); echo $n > "' + cnt + '"; [ "$n" -ge ' + okFrom + ' ]; }\n' +
+          'retry3 flaky; echo "rc=$? calls=$(cat "' + cnt + '")"\n';
+        return (spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 60000 }).stdout || '');
+      };
+      assert(/rc=0 calls=1/.test(run(1)), 'с первой попытки: ' + run(1));
+      assert(/rc=0 calls=3/.test(run(3)), 'на третьей: ' + run(3));
+      assert(/rc=1 calls=3/.test(run(99)), 'ровно три попытки и код 1: ' + run(99));
+    } finally { dropDir(base); }
+    const c = codeOnly(src);
+    assert(/retry3 npm cache add "@anthropic-ai\/claude-code-darwin-\$CCA@\$CC_VER"/.test(c), 'каждое npm cache add — через retry3');
+    assert(/retry3 npm install '@anthropic-ai\/claude-code'/.test(c), 'и npm install — тоже');
+  });
+
+  // ---- сторож времени ----
+  // Прежняя реализация (с `set -m`) — для контроля наоборот.
+  const OLD_RUN_WITH_TIMEOUT = [
+    'hm_run_with_timeout() {',
+    '  hm_to_secs="$1"; shift',
+    '  hm_to_start=$SECONDS',
+    '  set -m',
+    '  "$@" &',
+    '  hm_to_pid=$!',
+    '  set +m',
+    '  ( while [ $((SECONDS - hm_to_start)) -lt "$hm_to_secs" ]; do sleep 1; kill -0 "$hm_to_pid" 2>/dev/null || exit 0; done',
+    '    kill -TERM -- "-$hm_to_pid" 2>/dev/null; sleep 2; kill -KILL -- "-$hm_to_pid" 2>/dev/null; exit 0 ) &',
+    '  hm_to_wd=$!',
+    '  hm_to_rc=0',
+    '  wait "$hm_to_pid" || hm_to_rc=$?',
+    '  kill "$hm_to_wd" 2>/dev/null || true',
+    '  return "$hm_to_rc"',
+    '}',
+  ].join('\n');
+  // Библиотека с прежним сторожем: _lib.sh, в котором функция заменена старой.
+  function writeOldLib(dir) {
+    const src = fs.readFileSync(path.join(MACDIR, '_lib.sh'), 'utf8');
+    const i = src.indexOf('\nhm_run_with_timeout() {');
+    assert(i !== -1, 'в _lib.sh нет hm_run_with_timeout');
+    const j = src.indexOf('\n}\n', i);
+    const out = src.slice(0, i) + '\n' + OLD_RUN_WITH_TIMEOUT + src.slice(j + 2);
+    fs.writeFileSync(dir + '/oldlib.sh', out);
+    return dir + '/oldlib.sh';
+  }
+  // pgid процесса: `ps -o pgid=` (macOS/Linux) или колонка PGID из `ps -l` (Git Bash).
+  const PGID_FN = 'pgid_of() { local v; v="$(ps -o pgid= -p "$1" 2>/dev/null | tr -d " ")"; if [ -z "$v" ]; then v="$(ps -l -p "$1" 2>/dev/null | awk \'NR==2 {print $3}\')"; fi; echo "$v"; }\n';
+
+  ok('hm_run_with_timeout: никакого `set -m` — команда остаётся в группе скрипта; TERM/INT/HUP перехвачены', () => {
+    const c = codeOnly(readMac('_lib.sh'));
+    const body = fnFrom(c, 'hm_run_with_timeout');
+    assert(!/\bset -m\b/.test(body), 'set -m уводит команду в свою группу: SIGKILL группы скрипта (main.js killChildren) её не достаёт');
+    assert(/trap 'hm_to_abort 143' TERM/.test(body) && /trap 'hm_to_abort 130' INT/.test(body) && /trap 'hm_to_abort 129' HUP/.test(body),
+      'TERM/INT/HUP, пришедшие самому скрипту, снимают дерево команды');
+    assert(/hm_terminate_tree "\$hm_to_pid"/.test(body), 'по таймауту обрывается дерево команды, а не группа (в ней сам скрипт)');
+    // контроль наоборот: прежняя реализация этим правилом ловится
+    assert(/\bset -m\b/.test(OLD_RUN_WITH_TIMEOUT), 'прежний вариант содержит set -m — проверка его различает');
+  });
+
+  ok('hm_run_with_timeout (функц.): группа команды = группе скрипта; прежняя реализация даёт другую', () => {
+    const base = mkTmp('hm-pg-');
+    try {
+      fs.writeFileSync(base + '/child.sh', PGID_FN + 'pgid_of $$ > "$1/childpg"\nsleep 1\n');
+      const inner = (lib) => PGID_FN + '. "' + lib + '"\npgid_of $$ > "$2/mypg"\nhm_run_with_timeout 60 bash "$2/child.sh" "$2"\n';
+      const pg = (lib) => {
+        ['mypg', 'childpg'].forEach((f) => { try { fs.rmSync(base + '/' + f, { force: true }); } catch (e) { /* */ } });
+        fs.writeFileSync(base + '/inner.sh', inner(lib));
+        spawnSync('bash', [base + '/inner.sh', 'x', base], { encoding: 'utf8', timeout: 120000 });
+        const rd = (f) => { try { return fs.readFileSync(base + '/' + f, 'utf8').trim(); } catch (e) { return ''; } };
+        return { mine: rd('mypg'), child: rd('childpg') };
+      };
+      const now = pg(LIB);
+      if (!/^\d+$/.test(now.mine) || !/^\d+$/.test(now.child)) SKIP('ps не отдаёт номер группы процессов: ' + JSON.stringify(now));
+      assert.strictEqual(now.child, now.mine, 'команда в группе скрипта: ' + JSON.stringify(now));
+      const old = pg(writeOldLib(base));
+      assert(/^\d+$/.test(old.child) && old.child !== old.mine, 'контроль наоборот: с `set -m` группа другая: ' + JSON.stringify(old));
+    } finally { dropDir(base); }
+  });
+
+  ok('hm_run_with_timeout (функц.): TERM самому скрипту снимает дерево команды и даёт код 143 — без сирот', () => {
+    const base = mkTmp('hm-term-');
+    try {
+      fs.writeFileSync(base + '/inner.sh', '. "' + LIB + '"\nhm_run_with_timeout 300 bash -c \'sleep $((4400 + 31)) & sleep $((4400 + 31)) & wait\'\necho "дошли до конца" > "' + base + '/survived"\n');
+      const harness = [
+        'bash "' + base + '/inner.sh" &',
+        'SP=$!',
+        // Ждём, пока команда реально запущена: иначе TERM прилетит до ловушек.
+        'i=0; while [ $i -lt 60 ]; do n=$(ps -ef | grep -c "sleep 44[3]1"); [ "$n" -ge 2 ] && break; sleep 0.5; i=$((i+1)); done',
+        'echo "up=$n"',
+        'kill -TERM $SP',
+        'wait $SP; echo "exit=$?"',
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', harness], { encoding: 'utf8', timeout: 180000 });
+      const out = r.stdout || '';
+      const up = /up=(\d+)/.exec(out);
+      if (!up || Number(up[1]) < 2) { killProcs(/sleep 4431\b/); SKIP('команда не поднялась за 30 с: ' + out); }
+      assert(/exit=143/.test(out), 'скрипт вышел кодом 128+SIGTERM: ' + out + (r.stderr || ''));
+      sleepSync(1);
+      const left = countProcs(/sleep 4431\b/);
+      if (left) killProcs(/sleep 4431\b/);
+      assert.strictEqual(left, 0, 'дерево команды снято — сирот нет');
+      assert(!fs.existsSync(base + '/survived'), 'после TERM скрипт дальше не пошёл');
+    } finally { killProcs(/sleep 4431\b/); dropDir(base); }
+  });
+
+  ok('hm_run_with_timeout (функц.): SIGKILL группы скрипта (как main.js killChildren) снимает команду и её детей; с `set -m` — нет', () => {
+    const base = mkTmp('hm-gk-');
+    const attempt = (lib, tag) => {
+      fs.writeFileSync(base + '/inner.sh', '. "' + lib + '"\nhm_run_with_timeout 300 bash -c \'sleep $((4400 + ' + tag + ')) & sleep $((4400 + ' + tag + ')) & wait\'\n');
+      const harness = [
+        'set -m',
+        'bash "' + base + '/inner.sh" &',
+        'SP=$!',
+        'set +m',
+        'i=0; while [ $i -lt 60 ]; do n=$(ps -ef | grep -c "sleep 44[' + String(tag)[0] + ']' + String(tag).slice(1) + '"); [ "$n" -ge 2 ] && break; sleep 0.5; i=$((i+1)); done',
+        'echo "up=$n"',
+        'kill -KILL -- -$SP 2>/dev/null && echo "group-kill" || echo "no-group"',
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', harness], { encoding: 'utf8', timeout: 180000 });
+      const out = r.stdout || '';
+      const up = /up=(\d+)/.exec(out);
+      if (!up || Number(up[1]) < 2 || !/group-kill/.test(out)) return { ok: false, out };
+      sleepSync(2);
+      return { ok: true, left: countProcs(new RegExp('sleep ' + (4400 + tag) + '\\b')) };
+    };
+    try {
+      const now = attempt(LIB, 33);
+      killProcs(/sleep 4433\b/);
+      if (!now.ok) SKIP('стенд с группами процессов не поднялся: ' + now.out);
+      assert.strictEqual(now.left, 0, 'после SIGKILL группы скрипта сирот нет (команда была в той же группе)');
+      // Контроль наоборот: прежний сторож уводил команду в свою группу — удар её не достаёт.
+      const old = attempt(writeOldLib(base), 34);
+      killProcs(/sleep 4434\b/);
+      if (old.ok) assert(old.left > 0, 'контроль наоборот: при `set -m` команда переживает SIGKILL группы скрипта (это и был дефект)');
+    } finally { killProcs(/sleep 443[34]\b/); dropDir(base); }
+  });
+
+  // ---- claude.sh целиком (подставные curl/npm/claude) ----
+  function runClaudeSh(opts) {
+    const base = mkTmp('hm-csh-');
+    const home = base + '/home'; fs.mkdirSync(home, { recursive: true });
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/curl', '#!/bin/sh\nexit 22\n');                // claude.ai не отвечает → путь через npm
+    exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');                // оболочку входа задаёт SHELL
+    exe(bin + '/npm', [
+      '#!/bin/sh',
+      'mkdir -p "$HOME/.local/bin"',
+      'if [ "$FAKE_CLAUDE" = needenv ]; then',
+      '  printf \'#!/bin/sh\\n[ -n "$HM_FAKE_OK" ] || { echo boom >&2; exit 1; }\\necho "9.9.9 (Claude Code)"\\n\' > "$HOME/.local/bin/claude"',
+      'else',
+      '  printf \'#!/bin/sh\\necho "9.9.9 (Claude Code)"\\n\' > "$HOME/.local/bin/claude"',
+      'fi',
+      'chmod +x "$HOME/.local/bin/claude"',
+      'exit 0', ''].join('\n'));
+    if (opts.rcDirs) ['.zshrc', '.zprofile', '.bash_profile'].forEach((f) => fs.mkdirSync(home + '/' + f));   // записать нельзя
+    const probe = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; command -v npm', 'x', mp(bin)], { encoding: 'utf8' });
+    if ((probe.stdout || '').trim() !== mp(bin) + '/npm') { dropDir(base); SKIP('подставной npm не первый в PATH — настоящий не трогаем'); }
+    const r = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; exec bash "$2"', 'x', mp(bin), path.join(MACDIR, 'claude.sh').replace(/\\/g, '/')], {
+      encoding: 'utf8', timeout: 540000,
+      env: Object.assign({}, process.env, { HOME: home, SHELL: bashPath, HM_FRESH_SHELL_TIMEOUT: '30', HM_FAKE_OK: '1',
+        FAKE_CLAUDE: opts.claude || 'plain', HM_VENDOR: '', HM_DRY_RUN: '' }),
+    });
+    if (r.error) { dropDir(base); SKIP('bash не запустился: ' + String(r.error.message || r.error)); }
+    if (r.status === null) { dropDir(base); SKIP('claude.sh убит по таймауту — проверка не выполнена'); }
+    const lines = (r.stdout || '').trim().split('\n');
+    let checks = '';
+    try { checks = fs.readFileSync(home + '/.hamidun-setup/checks.json', 'utf8'); } catch (e) { /* */ }
+    return { base, status: r.status, out: r.stdout || '', last: lines[lines.length - 1] || '', checks };
+  }
+
+  ok('claude.sh (целиком): новое окно видит claude → exit 0, версия напечатана, вердикт «работает»', () => {
+    const o = runClaudeSh({});
+    try {
+      assert.strictEqual(o.status, 0, 'exit 0: ' + o.out.slice(-500));
+      assert(/Проверка новым окном Терминала: 9\.9\.9/.test(o.out), 'проверка окна напечатала версию: ' + o.out.slice(-400));
+      assert(!/ЧАСТИЧНО/.test(o.out), 'частичного успеха нет');
+      assert(/"claude":\{"verdict":"works"/.test(o.checks), 'вердикт: ' + o.checks);
+    } finally { dropDir(o.base); }
+  });
+
+  ok('claude.sh (целиком): новое окно НЕ видит claude (rc-файлы не записать) → exit 121 и ОДНА строка «ЧАСТИЧНО:» ≤ 240, а не красный провал', () => {
+    const o = runClaudeSh({ rcDirs: true });
+    try {
+      assert.strictEqual(o.status, 121, 'частичный успех, не красный (иначе зависимые config/pydeps/course/mascot пропадают): ' + o.status + '\n' + o.out.slice(-600));
+      assert(/^ЧАСТИЧНО: claude установлен, но новый Терминал его не видит — выполни в Терминале: echo 'export PATH="\$HOME\/\.local\/bin:\$PATH"' >> ~\/\.bash_profile /.test(o.last),
+        'последняя строка — ЧАСТИЧНО: чего не хватает и что сделать, файл — по оболочке входа (bash → ~/.bash_profile): ' + o.last);
+      assert(o.last.length <= 240, 'строка ≤ 240 знаков (' + o.last.length + '): ' + o.last);
+      assert.strictEqual(o.out.split('\n').filter((l) => /^ЧАСТИЧНО:/.test(l)).length, 1, 'ровно одна строка ЧАСТИЧНО');
+      assert(!/ОШИБКА:/.test(o.out), 'слова «ОШИБКА» нет — это не провал');
+      assert(/"claude":\{"verdict":"works"/.test(o.checks), 'сам claude работает — вердикт «works»: ' + o.checks);
+      assert(/Новое окно Терминала не находило|OK: 9\.9\.9|OK: claude установлен/.test(o.out), 'человеку сказано, что claude установлен');
+    } finally { dropDir(o.base); }
+  });
+
+  ok('claude.sh (целиком): claude найден, но в новом окне не запускается → exit 121 со своей строкой (не «не видит»)', () => {
+    const o = runClaudeSh({ claude: 'needenv' });
+    try {
+      assert.strictEqual(o.status, 121, o.status + '\n' + o.out.slice(-600));
+      assert(/^ЧАСТИЧНО: claude установлен, но в новом окне Терминала не запускается — /.test(o.last), o.last);
+      assert(o.last.length <= 240, 'строка ≤ 240 знаков (' + o.last.length + ')');
+    } finally { dropDir(o.base); }
+  });
+
+  ok('hm_login_profile_name: файл для подсказки по оболочке входа — zsh → ~/.zprofile, bash → ~/.bash_profile, прочие → ~/.profile', () => {
+    const base = mkTmp('hm-lp-');
+    try {
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');
+      ['zsh', 'bash', 'fish'].forEach((n) => exe(bin + '/' + n, '#!/bin/sh\nexit 0\n'));
+      const r = libRun(['zsh', 'bash', 'fish'].map((n) => 'echo "' + n + '=$(SHELL="' + mp(bin) + '/' + n + '" hm_login_profile_name)"').join('\n'), bin, { HOME: base });
+      const out = r.stdout || '';
+      assert(/zsh=~\/\.zprofile/.test(out) && /bash=~\/\.bash_profile/.test(out) && /fish=~\/\.profile/.test(out), out + (r.stderr || ''));
+    } finally { dropDir(base); }
+  });
+
+  // ---- чистый Python — проверка, а не вера ----
+  function mkSdist(dir, name, files) {
+    const root = dir + '/src-' + name;
+    Object.keys(files).forEach((rel) => {
+      fs.mkdirSync(path.dirname(root + '/' + name + '/' + rel), { recursive: true });
+      fs.writeFileSync(root + '/' + name + '/' + rel, files[rel]);
+    });
+    // Относительные пути из каталога-источника: «C:» в аргументах GNU tar принимает за хост.
+    const r = spawnSync('tar', ['-czf', '../' + name + '.tar.gz', name], { cwd: root, encoding: 'utf8', timeout: 60000 });
+    if (r.status !== 0) SKIP('tar не собрал архив: ' + (r.stderr || r.error));
+    return dir + '/' + name + '.tar.gz';
+  }
+  const SETUP_PURE = 'from setuptools import setup\nsetup(name="x", packages=["x"])\n';
+
+  ok('hm_sdist_is_pure_python / hm_pip_exempt_sdists: исключение из «только готовых» — для чистого Python; компилируемое не пускаем', () => {
+    const base = mkTmp('hm-sd-');
+    try {
+      mkSdist(base, 'okpkg-1.0', { 'setup.py': SETUP_PURE, 'okpkg/__init__.py': 'x = 1\n' });
+      mkSdist(base, 'withc-1.0', { 'setup.py': SETUP_PURE, 'withc/__init__.py': 'x = 1\n', 'src/mod.c': 'int x;\n' });
+      mkSdist(base, 'extmod-1.0', { 'setup.py': 'from setuptools import setup, Extension\nsetup(name="x", ext_modules=[Extension("a", ["a.py"])])\n', 'extmod/__init__.py': 'x = 1\n' });
+      mkSdist(base, 'rusty-1.0', { 'pyproject.toml': '[build-system]\nrequires = ["maturin>=1"]\nbuild-backend = "maturin"\n', 'rusty/__init__.py': 'x = 1\n' });
+      mkSdist(base, 'cargo-1.0', { 'Cargo.toml': '[package]\nname = "c"\n', 'cargo/__init__.py': 'x = 1\n' });
+      mkSdist(base, 'noncode-1.0', { 'README.md': 'docs only\n' });
+      fs.mkdirSync(base + '/wh');
+      ['okpkg-1.0', 'withc-1.0', 'extmod-1.0', 'rusty-1.0', 'cargo-1.0', 'noncode-1.0'].forEach((n) => fs.copyFileSync(base + '/' + n + '.tar.gz', base + '/wh/' + n + '.tar.gz'));
+      // Не архив под видом архива и готовые колёса: первое не читается — значит «не чистый»
+      // (сомнение = нет), вторые не исходники вовсе и в исключение не идут.
+      fs.writeFileSync(base + '/wh/broken-1.0.tar.gz', 'это не архив');
+      fs.writeFileSync(base + '/wh/requests-2.32.0-py3-none-any.whl', 'x');
+      fs.writeFileSync(base + '/wh/pillow-12.3.0-cp312-cp312-macosx_11_0_arm64.whl', 'x');
+      const T = mp(base);
+      const r = libRun([
+        'for n in okpkg withc extmod rusty cargo noncode; do if hm_sdist_is_pure_python "' + T + '/$n-1.0.tar.gz"; then echo "pure $n"; else echo "native $n"; fi; done',
+        'echo "exempt=[$(hm_pip_exempt_sdists "' + T + '/wh")] none=[$(hm_pip_exempt_sdists "' + T + '/nonexistent")]"',
+      ].join('\n'));
+      const out = r.stdout || '';
+      ['pure okpkg', 'native withc', 'native extmod', 'native rusty', 'native cargo', 'native noncode'].forEach((l) =>
+        assert(out.indexOf(l) !== -1, 'нет «' + l + '»: ' + out + (r.stderr || '')));
+      assert(/exempt=\[pyaes,okpkg\]/.test(out), 'в исключении только заведомо чистое и проверенное (нечитаемый архив и колёса — нет): ' + out);
+      assert(/none=\[pyaes\]/.test(out), 'без вшитого набора исключение не пустое — pyaes (у PyPI только исходники): ' + out);
+    } finally { dropDir(base); }
+  });
+
+  ok('hm_requirement_lines / hm_requirement_name / hm_names_summary: разбор requirements.txt и усечение списка имён', () => {
+    const base = mkTmp('hm-req-');
+    try {
+      fs.writeFileSync(base + '/req.txt', 'requests>=2.31   # http\r\n# comment\n\n  pikepdf>=8\nimg2pdf\nnumpy>=1.26 ; python_version >= "3.9"\npkg[extra]>=1\nname @ https://x/y.whl\n-r other.txt\n--index-url https://x\nimageio>=2.34            # skills/slack\n');
+      const r = libRun([
+        'hm_requirement_lines "' + mp(base) + '/req.txt" | while IFS= read -r l; do echo "L [$l] -> [$(hm_requirement_name "$l")]"; done',
+        'echo "S [$(hm_names_summary "a,b,c" 110)] [$(hm_names_summary "alpha,bravo,charlie,delta,echo,foxtrot" 20)] [$(hm_names_summary "" 110)]"',
+      ].join('\n'));
+      const out = r.stdout || '';
+      ['[requests>=2.31] -> [requests]', '[pikepdf>=8] -> [pikepdf]', '[img2pdf] -> [img2pdf]', '-> [numpy]', '[pkg[extra]>=1] -> [pkg]',
+        '[name @ https://x/y.whl] -> [name]', '[imageio>=2.34] -> [imageio]'].forEach((w) => assert(out.indexOf(w) !== -1, 'нет «' + w + '»: ' + out));
+      assert(!/other\.txt|index-url|comment/.test(out), 'строки-опции и комментарии не берутся: ' + out);
+      assert(out.split('\n').filter((l) => /^L /.test(l)).length === 7, 'ровно семь требований: ' + out);
+      assert(/S \[a, b, c\] \[alpha, bravo и ещё 4\] \[\]/.test(out), 'усечение «и ещё N»: ' + out);
+    } finally { dropDir(base); }
+  });
+
+  // ---- pydeps.sh целиком (подставной python3) ----
+  const FAKE_PY2 = [
+    '#!/bin/sh',
+    'echo "$*" >> "$HOME/.hm-py-args"',
+    'for last; do :; done',
+    'case "$*" in',
+    '  *"-m pip install"*"--upgrade pip"*) exit 0 ;;',
+    '  *"-m pip install"*)',
+    '    case "$*" in',
+    '      *" -r "*)',
+    '        if [ -n "$FAKE_BAD" ]; then n="${FAKE_BAD%%,*}"; echo "ERROR: Could not find a version that satisfies the requirement $n (from versions: none)"; echo "ERROR: No matching distribution found for $n"; exit 1; fi',
+    '        echo "Successfully installed all"; exit 0 ;;',
+    '      *)',
+    '        name="$(printf \'%s\' "$last" | sed -E \'s/[[:space:]]*;.*$//; s/\\[[^]]*\\]//; s/[[:space:]]*[<>=!~@].*$//\')"',
+    '        case ",$FAKE_NET," in *",$name,"*) echo "WARNING: Retrying after connection broken by NewConnectionError: Failed to establish a new connection"; echo "ERROR: No matching distribution found for $name"; exit 1 ;; esac',
+    '        case ",$FAKE_BAD," in *",$name,"*) echo "ERROR: Could not find a version that satisfies the requirement $name (from versions: none)"; echo "ERROR: No matching distribution found for $name"; exit 1 ;; esac',
+    '        echo "Successfully installed $name"; exit 0 ;;',
+    '    esac ;;',
+    '  *"-m playwright"*) exit 0 ;;',
+    '  *setup_runtime.py*) : > "$HOME/.hm-runtime-ran"; exit 0 ;;',
+    'esac',
+    'exit 0', ''].join('\n');
+  function mkPydeps2(arch, reqText, wheels) {
+    const base = mkTmp('hm-pyd2-');
+    fs.mkdirSync(base + '/scripts/macos', { recursive: true });
+    ['pydeps.sh', '_lib.sh'].forEach((f) => fs.copyFileSync(path.join(MACDIR, f), base + '/scripts/macos/' + f));
+    const home = base + '/home';
+    fs.mkdirSync(home + '/.claude/scripts', { recursive: true });
+    fs.writeFileSync(home + '/.claude/scripts/setup_runtime.py', '# подставной рантайм\n');
+    fs.mkdirSync(base + '/cfg');
+    fs.writeFileSync(base + '/cfg/requirements.txt', reqText);
+    fs.mkdirSync(base + '/vendor', { recursive: true });
+    if (wheels) {
+      fs.mkdirSync(base + '/vendor/pywheels');
+      Object.keys(wheels).forEach((f) => fs.copyFileSync(wheels[f], base + '/vendor/pywheels/' + f));
+    }
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/python3', FAKE_PY2);
+    exe(bin + '/uname', '#!/bin/sh\n[ "$1" = "-m" ] && { echo ' + arch + '; exit 0; }\necho Darwin\n');
+    exe(bin + '/xcode-select', '#!/bin/sh\necho "xcode-select: error: unable to get active developer directory" >&2\nexit 2\n');
+    exe(bin + '/sysctl', '#!/bin/sh\nexit 1\n');
+    const probe = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; command -v python3', 'x', mp(bin)], { encoding: 'utf8' });
+    if ((probe.stdout || '').trim() !== mp(bin) + '/python3') { dropDir(base); SKIP('подставной python3 не первый в PATH — настоящий pip не трогаем'); }
+    if (fs.existsSync('/Library/Frameworks/Python.framework/Versions/3.12/bin/python3')) { dropDir(base); SKIP('на машине есть framework-Python 3.12 — pydeps.sh возьмёт его'); }
+    return { base, home, bin };
+  }
+  function runPydeps2(t, env) {
+    const r = spawnSync('bash', ['-c', 'export PATH="$1:/usr/bin:/bin"; exec bash "$2"', 'x', mp(t.bin), t.base + '/scripts/macos/pydeps.sh'], {
+      encoding: 'utf8', timeout: 360000,
+      env: Object.assign({}, process.env, {
+        HOME: t.home, HM_BUNDLED_CONFIG: t.base + '/cfg', HM_VENDOR: t.base + '/vendor',
+        PYTHONUSERBASE: t.base + '/pyuser', PIP_NO_INDEX: '1',
+        PLAYWRIGHT_BROWSERS_PATH: t.base + '/pw', PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+      }, env || {}),
+    });
+    if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+    if (r.status === null) SKIP('bash убит по таймауту — проверка не выполнена');
+    let args = '';
+    try { args = fs.readFileSync(t.home + '/.hm-py-args', 'utf8'); } catch (e) { /* python3 не звали */ }
+    assert(args, 'подставной python3 не вызывался — скрипт ушёл мимо него: ' + (r.stdout || '').slice(-300));
+    const pip = args.split('\n').filter((l) => /-m pip install/.test(l) && !/--upgrade pip/.test(l));
+    const lines = (r.stdout || '').trim().split('\n');
+    return { r, pip, out: r.stdout || '', last: lines[lines.length - 1] || '', runtime: fs.existsSync(t.home + '/.hm-runtime-ran') };
+  }
+  const REQ5 = 'requests>=2.31  # http\n# comment\npikepdf>=8\nimg2pdf\ntelethon>=1.36\nnumpy>=1.26 ; python_version >= "3.9"\n';
+
+  ok('pydeps.sh (целиком): одна библиотека без готовой сборки не обнуляет остальные — поштучно, exit 121 и ОДНА строка «ЧАСТИЧНО:» с именами', () => {
+    const t = mkPydeps2('x86_64', REQ5, null);   // без вшитого набора (онлайн-издание)
+    try {
+      const o = runPydeps2(t, { FAKE_BAD: 'pikepdf' });
+      assert.strictEqual(o.r.status, 121, 'часть встала — частичный успех: ' + o.r.status + '\n' + o.out.slice(-500));
+      assert(/^ЧАСТИЧНО: не поставились: pikepdf — /.test(o.last), 'последняя строка — ЧАСТИЧНО с именем: ' + o.last);
+      assert(o.last.length <= 240, 'строка ≤ 240 знаков (' + o.last.length + ')');
+      assert.strictEqual(o.out.split('\n').filter((l) => /^ЧАСТИЧНО:/.test(l)).length, 1, 'ровно одна строка ЧАСТИЧНО');
+      // Общая попытка + по одной на каждое из пяти требований, и КАЖДАЯ — только готовые сборки.
+      assert.strictEqual(o.pip.length, 1 + 5, 'общая и пять поштучных: ' + o.pip.join('\n'));
+      o.pip.forEach((l) => assert(/--only-binary=:all:/.test(l), 'никакой компиляции: ' + l));
+      const single = o.pip.slice(1).map((l) => l.replace(/.*--only-binary=:all: --no-binary=\S+ /, ''));
+      assert.deepStrictEqual(single.map((x) => x.trim()),
+        ['requests>=2.31', 'pikepdf>=8', 'img2pdf', 'telethon>=1.36', 'numpy>=1.26 ; python_version >= "3.9"'], 'строки требований целиком: ' + single.join(' | '));
+      assert(o.runtime, 'доводка рантайма выполнена — остальное на месте');
+      assert(/Не поставились \(нет готовой сборки под этот Mac\): pikepdf\. Остальные библиотеки поставлены/.test(o.out), 'человеку названо, что встало, а что нет');
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (целиком): pyaes (у PyPI только исходники) разрешён в «только готовых» и БЕЗ вшитого набора колёс', () => {
+    const t = mkPydeps2('x86_64', REQ5, null);
+    try {
+      const o = runPydeps2(t, {});
+      assert.strictEqual(o.r.status, 0, o.out.slice(-400));
+      assert.strictEqual(o.pip.length, 1, 'общий разбор прошёл — поштучной установки нет: ' + o.pip.join('\n'));
+      assert(/--only-binary=:all: --no-binary=pyaes\b/.test(o.pip[0]), 'исключение для pyaes есть и без pywheels: ' + o.pip[0]);
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (целиком): вшитые исходники — в исключении только чистый Python, компилируемый архив не пускаем', () => {
+    const base = mkTmp('hm-pyd2w-');
+    let t = null;
+    try {
+      mkSdist(base, 'okpkg-1.0', { 'setup.py': SETUP_PURE, 'okpkg/__init__.py': 'x = 1\n' });
+      mkSdist(base, 'withc-1.0', { 'setup.py': SETUP_PURE, 'withc/__init__.py': 'x = 1\n', 'src/mod.c': 'int x;\n' });
+      t = mkPydeps2('x86_64', REQ5, { 'okpkg-1.0.tar.gz': base + '/okpkg-1.0.tar.gz', 'withc-1.0.tar.gz': base + '/withc-1.0.tar.gz' });
+      const o = runPydeps2(t, {});
+      assert.strictEqual(o.r.status, 0, o.out.slice(-400));
+      const m = /--no-binary=(\S+)/.exec(o.pip[0] || '');
+      assert(m, 'исключение передано pip: ' + o.pip[0]);
+      const names = m[1].split(',');
+      assert(names.indexOf('okpkg') !== -1 && names.indexOf('pyaes') !== -1, 'чистое — в исключении: ' + names.join(','));
+      assert(names.indexOf('withc') === -1, 'архив с .c в исключение НЕ попал (иначе собирался бы на Mac человека): ' + names.join(','));
+    } finally { if (t) dropDir(t.base); dropDir(base); }
+  });
+
+  ok('pydeps.sh (целиком): ни одна библиотека не встала → пропуск 120 со всеми именами; сбой сети посреди поштучной → красный, не «пропуск»', () => {
+    const t = mkPydeps2('x86_64', REQ5, null);
+    try {
+      let o = runPydeps2(t, { FAKE_BAD: 'requests,pikepdf,img2pdf,telethon,numpy' });
+      assert.strictEqual(o.r.status, 120, 'не встало ничего — осознанный пропуск: ' + o.r.status + '\n' + o.out.slice(-400));
+      assert(/^Python-библиотеки пропущены: под этот Mac нет готовых сборок \(requests, pikepdf, img2pdf, telethon, numpy\)/.test(o.last), o.last);
+      assert(o.runtime, 'рантайм доведён и при пропуске');
+      try { fs.rmSync(t.home + '/.hm-py-args', { force: true }); fs.rmSync(t.home + '/.hm-runtime-ran', { force: true }); } catch (e) { /* */ }
+      o = runPydeps2(t, { FAKE_BAD: 'pikepdf', FAKE_NET: 'img2pdf' });
+      assert.strictEqual(o.r.status, 1, 'сеть пропала посреди набора — повтор поможет, это провал: ' + o.r.status + '\n' + o.out.slice(-400));
+      assert(/нет связи с сервером библиотек \(PyPI\)/.test(o.out), 'названа сеть: ' + o.out.slice(-300));
+      assert(!/ЧАСТИЧНО|пропущены/.test(o.out), 'сетевой сбой не выдан за «нет готовой сборки»');
+    } finally { dropDir(t.base); }
+  });
+
+  ok('pydeps.sh (целиком): строка «ЧАСТИЧНО:» укладывается в 240 знаков и при 40 непоставившихся библиотеках', () => {
+    const names = [];
+    for (let i = 1; i <= 41; i++) names.push('averylonglibraryname' + i);
+    const t = mkPydeps2('x86_64', names.join('\n') + '\n', null);
+    try {
+      const o = runPydeps2(t, { FAKE_BAD: names.slice(1).join(',') });   // встала только первая
+      assert.strictEqual(o.r.status, 121, o.r.status + '\n' + o.out.slice(-300));
+      assert(o.last.length <= 240, 'строка ≤ 240 знаков (' + o.last.length + '): ' + o.last);
+      assert(/ и ещё \d+ — /.test(o.last), 'хвост имён усечён «и ещё N»: ' + o.last);
+    } finally { dropDir(t.base); }
+  });
+
+  // ---- touchup-*.sh ----
+  const nodeDir = mp(path.dirname(process.execPath));
+  function touchupRun(script, home, extraEnv, pathHead) {
+    const r = spawnSync('bash', ['-c', 'export PATH="' + (pathHead ? pathHead + ':' : '') + '/usr/bin:/bin"; exec bash "$1"', 'x', path.join(MACDIR, script).replace(/\\/g, '/')], {
+      encoding: 'utf8', timeout: 180000, env: Object.assign({}, process.env, { HOME: home }, extraEnv || {}),
+    });
+    if (r.error) SKIP('bash не запустился: ' + String(r.error.message || r.error));
+    if (r.status === null) SKIP('bash убит по таймауту — проверка не выполнена');
+    return { status: r.status, out: (r.stdout || '').trim(), err: r.stderr || '' };
+  }
+  const linesOf = (s) => (s ? s.split('\n') : []);
+
+  ok('touchup-*.sh: файлы на месте, bash -n чисто; нет sudo / admin_run / сети — только правка и проверка на месте', () => {
+    ['touchup-config.sh', 'touchup-claude-path.sh', 'touchup-vscode-owner.sh'].forEach((f) => {
+      const p = path.join(MACDIR, f);
+      assert(fs.existsSync(p), 'нет ' + f);
+      const r = spawnSync('bash', ['-n', p.replace(/\\/g, '/')], { encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r.status, 0, f + ': bash -n: ' + (r.stderr || ''));
+      const c = codeOnly(fs.readFileSync(p, 'utf8'));
+      assert(!/\b(sudo|admin_run|osascript|curl|wget|git clone|git fetch|npm (install|ci)|pip install)\b/.test(c), f + ': запрещено sudo/сеть/установка в always-run правке');
+      assert(/hm_touchup_begin /.test(c) && /hm_touchup_end/.test(c), f + ': подключён контракт (hm_touchup_begin/end)');
+    });
+    const r = spawnSync('node', ['--check', path.join(MACDIR, '_cfgmigrate.js')], { encoding: 'utf8', timeout: 30000 });
+    assert.strictEqual(r.status, 0, 'node --check: ' + (r.stderr || ''));
+    // контроль наоборот: запрещённое ловится
+    assert(/\b(sudo|curl)\b/.test('sudo chown x\ncurl -s https://x'), 'проверка запрещённого различает');
+  });
+
+  ok('touchup (контракт): неожиданная ошибка скрипта → одна строка «пропущено» и код 0; нормальный выход молчит', () => {
+    const base = mkTmp('hm-tc-');
+    try {
+      fs.writeFileSync(base + '/boom.sh', 'set -u\n. "' + LIB + '"\nhm_touchup_begin demo\necho "$NO_SUCH_VARIABLE"\nhm_touchup_end\n');
+      fs.writeFileSync(base + '/calm.sh', 'set -u\n. "' + LIB + '"\nhm_touchup_begin demo\nhm_touchup_end\n');
+      fs.writeFileSync(base + '/skip.sh', 'set -u\n. "' + LIB + '"\nhm_touchup_begin demo\nhm_touchup_skip "нет чего-то"\nhm_touchup_end\n');
+      const run = (f) => { const r = spawnSync('bash', [base + '/' + f], { encoding: 'utf8', timeout: 60000 }); return { s: r.status, o: (r.stdout || '').trim() }; };
+      const b = run('boom.sh'), c = run('calm.sh'), k = run('skip.sh');
+      assert.strictEqual(b.s, 0, 'код 0 даже при ошибке скрипта');
+      assert.strictEqual(b.o, '[touchup-demo] пропущено: непредвиденная ошибка скрипта', b.o);
+      assert.deepStrictEqual([c.s, c.o], [0, ''], 'нормальный выход молчит');
+      assert.deepStrictEqual([k.s, k.o], [0, '[touchup-demo] пропущено: нет чего-то'], k.o);
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-config.sh: старый settings.json пака → ОДНА строка «ОБНОВЛЕНО:», файл = свежая установка; повтор молчит', () => {
+    const base = mkTmp('hm-tcfg-');
+    try {
+      const home = base + '/home'; fs.mkdirSync(home + '/.claude', { recursive: true });
+      const FIX = path.join(ROOT, 'test', 'fixtures');
+      const before = fs.readFileSync(path.join(FIX, 'settings-pack-4223dd9.json'));
+      fs.writeFileSync(home + '/.claude/settings.json', before);
+      let r = touchupRun('touchup-config.sh', home, {}, nodeDir);
+      assert.strictEqual(r.status, 0, r.out + r.err);
+      assert.strictEqual(linesOf(r.out).length, 1, 'ровно одна строка: ' + r.out);
+      assert(/^ОБНОВЛЕНО: ~\/\.claude\/settings\.json — убрал устаревшее из прошлых версий пака \(.+\); копия до правки: /.test(r.out), r.out);
+      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), fs.readFileSync(path.join(FIX, 'settings-pack-5cf4a39.json'), 'utf8'),
+        'итог = settings.json свежей установки (пак 5cf4a39)');
+      assert(fs.readdirSync(home + '/.claude').some((n) => n.startsWith('settings.json.hamidun-bak-')), 'копия до правки');
+      assert(fs.existsSync(home + '/.hamidun-setup/config-migrations.json'), 'отметка шага записана');
+      const after = fs.readFileSync(home + '/.claude/settings.json');
+      r = touchupRun('touchup-config.sh', home, {}, nodeDir);
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'повтор молчит: ' + r.out);
+      assert(fs.readFileSync(home + '/.claude/settings.json').equals(after), 'повтор не меняет файл');
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-config.sh: нет файла — молчит; не JSON-объект и ссылка — строка «пропущено», файл цел; нет node / node упал — «пропущено»; всегда код 0', () => {
+    const base = mkTmp('hm-tcfg2-');
+    try {
+      const home = base + '/home'; fs.mkdirSync(home + '/.claude', { recursive: true });
+      let r = touchupRun('touchup-config.sh', home, {}, nodeDir);
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'нет settings.json — молчим: ' + r.out);
+      fs.writeFileSync(home + '/.claude/settings.json', '[{"mcpServers": {}}]');
+      r = touchupRun('touchup-config.sh', home, {}, nodeDir);
+      assert.strictEqual(r.status, 0);
+      assert(/^\[touchup-config\] пропущено: settings\.json не разбирается как JSON-объект/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '[{"mcpServers": {}}]', 'файл не тронут');
+      // node есть, но падает
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/node', '#!/bin/sh\nexit 3\n');
+      fs.writeFileSync(home + '/.claude/settings.json', '{"mcpServers": {}}');
+      r = touchupRun('touchup-config.sh', home, {}, mp(bin));
+      assert.strictEqual(r.status, 0, 'код 0, даже если node упал');
+      assert(/^\[touchup-config\] пропущено: правка профиля завершилась ошибкой/.test(r.out), r.out);
+      // нет node вовсе (если на машине он лежит в /usr/local/bin или Homebrew — случай не воспроизвести)
+      const probe = spawnSync('bash', ['-c', 'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; command -v node'], { encoding: 'utf8', env: Object.assign({}, process.env, { HOME: home }) });
+      if (!(probe.stdout || '').trim()) {
+        r = touchupRun('touchup-config.sh', home, {}, '');
+        assert.strictEqual(r.status, 0);
+        assert(/^\[touchup-config\] пропущено: node не найден/.test(r.out), r.out);
+      }
+      // автономность: рядом нет _lib.sh — всё равно код 0 и понятная строка
+      fs.copyFileSync(path.join(MACDIR, 'touchup-config.sh'), base + '/lonely.sh');
+      const lone = spawnSync('bash', [base + '/lonely.sh'], { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home }) });
+      assert.strictEqual(lone.status, 0);
+      assert(/^\[touchup-config\] пропущено: нет _lib\.sh/.test((lone.stdout || '').trim()), lone.stdout);
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-config.sh: settings.json — ссылка: внешний файл не трогаем', () => {
+    const base = mkTmp('hm-tcfg3-');
+    try {
+      const home = base + '/home'; fs.mkdirSync(home + '/.claude', { recursive: true });
+      const real = base + '/real.json';
+      fs.writeFileSync(real, '{"mcpServers": {"a": {}}}');
+      try { fs.symlinkSync(real, home + '/.claude/settings.json', 'file'); } catch (e) { SKIP('symlink недоступен: ' + e.message); }
+      const r = touchupRun('touchup-config.sh', home, {}, nodeDir);
+      assert.strictEqual(r.status, 0);
+      assert(/^\[touchup-config\] пропущено: settings\.json или ~\/\.claude — ссылка/.test(r.out), r.out);
+      assert.strictEqual(fs.readFileSync(real, 'utf8'), '{"mcpServers": {"a": {}}}', 'внешний файл цел');
+    } finally { dropDir(base); }
+  });
+
+  // touchup-claude-path: настоящая оболочка входа (bash -l) в чистом окружении, как у нового окна
+  function claudePathHome(base) {
+    const home = base + '/home'; fs.mkdirSync(home + '/.local/bin', { recursive: true });
+    exe(home + '/.local/bin/claude', '#!/bin/sh\necho "9.9.9 (Claude Code)"\n');
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');   // оболочку входа задаёт SHELL
+    return { home, bin };
+  }
+  ok('touchup-claude-path.sh: новое окно не видит claude → дописывает PATH и проверяет; ОДНА строка «ОБНОВЛЕНО:», повтор молчит', () => {
+    const base = mkTmp('hm-tcp-');
+    try {
+      const { home, bin } = claudePathHome(base);
+      let r = touchupRun('touchup-claude-path.sh', home, { SHELL: bashPath, HM_TOUCHUP_SHELL_TIMEOUT: '20' }, mp(bin));
+      assert.strictEqual(r.status, 0, r.out + r.err);
+      if (r.out === '') SKIP('новое окно уже видит claude (чужая установка в системном PATH) — случай «не видит» не воспроизвести');
+      assert(/^ОБНОВЛЕНО: новое окно Терминала не находило claude — дописал PATH в ~\/\.bash_profile, теперь находит/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      ['.zprofile', '.zshrc', '.bash_profile'].forEach((f) => assert(/HAMIDUN_LOCAL_BIN/.test(fs.readFileSync(home + '/' + f, 'utf8')), f + ': строка PATH есть'));
+      const prof = fs.readFileSync(home + '/.bash_profile', 'utf8');
+      r = touchupRun('touchup-claude-path.sh', home, { SHELL: bashPath, HM_TOUCHUP_SHELL_TIMEOUT: '20' }, mp(bin));
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'повтор молчит: ' + r.out);
+      assert.strictEqual(fs.readFileSync(home + '/.bash_profile', 'utf8'), prof, 'повтор ничего не дописывает');
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-claude-path.sh: нашего claude нет — молчит; оболочка не zsh/bash и зависшая оболочка — «пропущено»; всегда код 0', () => {
+    const base = mkTmp('hm-tcp2-');
+    try {
+      const { home, bin } = claudePathHome(base);
+      // зависшая оболочка входа (имя bash — чтобы подошёл разбор по имени)
+      fs.mkdirSync(base + '/hang');
+      exe(base + '/hang/bash', '#!/bin/sh\nsleep $((4400 + 37))\n');
+      let r = touchupRun('touchup-claude-path.sh', home, { SHELL: base + '/hang/bash', HM_TOUCHUP_SHELL_TIMEOUT: '1' }, mp(bin));
+      killProcs(/sleep 4437\b/);
+      assert.strictEqual(r.status, 0);
+      assert(/^\[touchup-claude-path\] пропущено: новое окно Терминала не ответило за 1 с/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      // чужая оболочка
+      fs.mkdirSync(base + '/odd');
+      exe(base + '/odd/fish', '#!/bin/sh\nexit 0\n');
+      r = touchupRun('touchup-claude-path.sh', home, { SHELL: base + '/odd/fish' }, mp(bin));
+      assert.strictEqual(r.status, 0);
+      assert(/^\[touchup-claude-path\] пропущено: оболочка входа не zsh и не bash/.test(r.out), r.out);
+      // нашего claude нет
+      fs.rmSync(home + '/.local/bin/claude');
+      r = touchupRun('touchup-claude-path.sh', home, { SHELL: bashPath }, mp(bin));
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'чинить нечего — молчим: ' + r.out);
+    } finally { killProcs(/sleep 4437\b/); dropDir(base); }
+  });
+
+  ok('touchup-claude-path.sh: дописали PATH, но окно всё равно не видит — «ОБНОВЛЕНО» с тем, что делать; строка уже была — «пропущено» (подставная оболочка, не находящая claude)', () => {
+    const base = mkTmp('hm-tcp3-');
+    try {
+      const { home, bin } = claudePathHome(base);
+      fs.mkdirSync(base + '/blind');
+      exe(base + '/blind/bash', '#!/bin/sh\nexit 1\n');   // «новое окно», в котором command -v claude не находит ничего
+      let r = touchupRun('touchup-claude-path.sh', home, { SHELL: base + '/blind/bash' }, mp(bin));
+      assert.strictEqual(r.status, 0);
+      assert(/^ОБНОВЛЕНО: дописал PATH в ~\/\.bash_profile, но новое окно Терминала всё равно не находит claude — проверь ~\/\.zshrc \(ZDOTDIR\?\) или выполни вручную: echo 'export PATH="\$HOME\/\.local\/bin:\$PATH"' >> ~\/\.bash_profile$/.test(r.out)
+        && linesOf(r.out).length === 1, r.out);
+      r = touchupRun('touchup-claude-path.sh', home, { SHELL: base + '/blind/bash' }, mp(bin));
+      assert.strictEqual(r.status, 0);
+      assert(/^\[touchup-claude-path\] пропущено: новое окно Терминала не находит claude, а строка PATH в профиле уже есть/.test(r.out) && linesOf(r.out).length === 1, r.out);
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-vscode-owner.sh: VS Code под root → ОДНА строка с точной командой (без sudo в самом скрипте); не root, нет приложения, сбой stat — молчит; код 0', () => {
+    const base = mkTmp('hm-tvo-');
+    try {
+      const home = base + '/home'; fs.mkdirSync(home);
+      const app = base + '/Visual Studio Code.app'; fs.mkdirSync(app);
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/stat', '#!/bin/sh\necho "$FAKE_OWNER"\n');
+      const run = (owner, appPath) => touchupRun('touchup-vscode-owner.sh', home, { FAKE_OWNER: owner, HM_VSCODE_APP: appPath }, mp(bin));
+      let r = run('root', app);
+      assert.strictEqual(r.status, 0);
+      assert.strictEqual(linesOf(r.out).length, 1, 'ровно одна строка: ' + r.out);
+      assert(r.out.indexOf('[touchup-vscode-owner] ВНИМАНИЕ: VS Code принадлежит root — при самообновлении macOS будет спрашивать пароль администратора.') === 0, r.out);
+      assert(r.out.indexOf('sudo chown -R -h "$(whoami)":staff "' + app + '"') !== -1, 'точная команда исправления: ' + r.out);
+      r = run('alice', app);
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'не root — молчим: ' + r.out);
+      r = run('root', base + '/нет-такого.app');
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'приложения нет — молчим: ' + r.out);
+      r = run('', app);
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'stat ничего не отдал — молчим: ' + r.out);
+    } finally { dropDir(base); }
+  });
+
+  ok('vscode.sh: предупреждение про root-владельца — общий текст hm_vscode_owner_hint (его же печатает touchup-vscode-owner.sh)', () => {
+    const c = codeOnly(readMac('vscode.sh'));
+    assert(/hm_app_is_root_owned "\$APP"/.test(c) && /hm_vscode_owner_hint "\$APP"/.test(c), 'vscode.sh берёт текст из _lib.sh');
+    assert(/hm_vscode_owner_hint "\$APP"/.test(codeOnly(readMac('touchup-vscode-owner.sh'))), 'и touchup тоже');
+  });
+
+  // ---- always-run профиль (touchup-config.sh): settings.json + каталог пака + карта для Codex ----
+  const PK_AGENTS = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.\n';
+  const PK_WANT = '# AGENTS.md — карта конфига для агентских харнессов\n\n**Чем искать навык — [CATALOG.md](~/.claude/CATALOG.md).** Дальше `~/.claude/skills/<имя>/SKILL.md`.';
+  const PK_BEGIN = '<!-- hamidun-pack begin -->';
+  const PK_END = '<!-- hamidun-pack end -->';
+  function profileBox(opts) {
+    const o = opts || {};
+    const base = mkTmp('hm-prof-');
+    const home = base + '/home'; fs.mkdirSync(home + '/.claude/skills/s1', { recursive: true });
+    fs.writeFileSync(home + '/.claude/skills/s1/SKILL.md', 'x');
+    const pack = base + '/pack'; fs.mkdirSync(pack);
+    fs.writeFileSync(pack + '/CATALOG.md', '# Что внутри пака\n');
+    fs.writeFileSync(pack + '/AGENTS.md', PK_AGENTS);
+    const bad = {
+      model: 'opus',
+      permissions: { allow: ['Write(~/**)', 'Edit(~/**)', 'Glob(src/**)'], deny: ['Bash(*format C:*)'] },
+      enabledPlugins: { 'greptile@claude-plugins-official': true, 'slack@claude-plugins-official': true, 'my-plugin@my-market': true },
+    };
+    fs.writeFileSync(home + '/.claude/settings.json', JSON.stringify(bad, null, 2));
+    if (o.codex !== false) fs.mkdirSync(home + '/.vscode/extensions/openai.chatgpt-26.1-darwin-arm64', { recursive: true });
+    return { base, home, pack, settings: home + '/.claude/settings.json', catalog: home + '/.claude/CATALOG.md',
+      summary: home + '/.hamidun-setup/config-summary.json', agents: home + '/.codex/AGENTS.md' };
+  }
+  const snapshot = (b) => ['settings', 'catalog', 'summary', 'agents'].map((k) => (fs.existsSync(b[k]) ? fs.readFileSync(b[k]).toString('base64') : null));
+
+  ok('touchup-config.sh (песочница): повторный запуск при снятых галочках чинит settings.json, кладёт каталог пака и карту для Codex ОДНОЙ строкой; повтор молчит и не меняет ни байта', () => {
+    const b = profileBox();
+    try {
+      let r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify' }, nodeDir);
+      assert.strictEqual(r.status, 0, r.out + r.err);
+      assert.strictEqual(linesOf(r.out).length, 1, 'ровно одна строка ОБНОВЛЕНО: ' + r.out);
+      assert(/^ОБНОВЛЕНО: ~\/\.claude\/settings\.json — убрал устаревшее.*; положил ~\/\.claude\/CATALOG\.md.*; ~\/\.codex\/AGENTS\.md — положил карту конфига для Codex$/.test(r.out), r.out);
+      const s = JSON.parse(fs.readFileSync(b.settings, 'utf8'));
+      assert.strictEqual(s.enabledPlugins['greptile@claude-plugins-official'], false, 'плагин без токена выключен');
+      assert.strictEqual(s.enabledPlugins['slack@claude-plugins-official'], false, 'коннектор июня тоже');
+      assert.strictEqual(s.enabledPlugins['my-plugin@my-market'], true, 'чужое не тронуто');
+      assert.deepStrictEqual(s.permissions.allow, ['Edit(~/**)', 'Glob(src/**)'], 'allow: убран только дубль Write(~/**); Glob(src/**) без Read-близнеца остался');
+      assert.deepStrictEqual(s.permissions.deny, ['Bash(*format C*)'], 'deny починен');
+      assert.strictEqual(s.model, 'opus', 'модель человека не тронута');
+      assert(fs.readdirSync(path.dirname(b.settings)).some((n) => n.startsWith('settings.json.hamidun-bak-')), 'копия до правки');
+      assert.strictEqual(fs.readFileSync(b.catalog, 'utf8'), '# Что внутри пака\n', 'каталог пака положен (config не ставился, пак под рукой)');
+      const sum = JSON.parse(fs.readFileSync(b.summary, 'utf8'));
+      assert(/CATALOG\.md$/.test(sum.catalog) && sum.skills === 1, 'сводка для финального экрана записана');
+      assert.strictEqual(fs.readFileSync(b.agents, 'utf8'), PK_BEGIN + '\n' + PK_WANT + '\n' + PK_END + '\n', 'карта для Codex');
+      const snap = snapshot(b);
+      r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify' }, nodeDir);
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'повтор молчит: ' + r.out);
+      assert.deepStrictEqual(snapshot(b), snap, 'повтор не меняет ни настройки, ни каталог, ни сводку, ни карту');
+    } finally { dropDir(b.base); }
+  });
+
+  ok('touchup-config.sh: config выбран в этом прогоне — настройки и каталог не трогает (это работа config.sh), карту для Codex кладёт; лёгкое издание (пака нет) — только настройки', () => {
+    const b = profileBox();
+    try {
+      const before = fs.readFileSync(b.settings, 'utf8');
+      const r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify,config,claude' }, nodeDir);
+      assert.strictEqual(fs.readFileSync(b.settings, 'utf8'), before, 'config выбран — settings.json остаётся его заботе');
+      assert(!fs.existsSync(b.catalog) && !fs.existsSync(b.summary), 'каталог и сводку тоже не кладём');
+      assert(fs.existsSync(b.agents), 'карта для Codex кладётся: расширение могло встать позже config.sh');
+      assert(/^ОБНОВЛЕНО: ~\/\.codex\/AGENTS\.md — положил карту/.test(r.out) && linesOf(r.out).length === 1, r.out);
+    } finally { dropDir(b.base); }
+    const b2 = profileBox();
+    try {
+      const r = touchupRun('touchup-config.sh', b2.home, { HM_BUNDLED_CONFIG: '', HM_SELECTED: 'verify' }, nodeDir);
+      assert(/^ОБНОВЛЕНО: ~\/\.claude\/settings\.json — убрал устаревшее/.test(r.out) && !/CATALOG|Codex/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      assert(!fs.existsSync(b2.catalog) && !fs.existsSync(b2.agents), 'пака на руках нет — ни каталога, ни карты');
+      assert.strictEqual(JSON.parse(fs.readFileSync(b2.summary, 'utf8')).catalog, '', 'сводка с цифрами пишется и без пака');
+    } finally { dropDir(b2.base); }
+  });
+
+  ok('touchup-config.sh: сухой прогон ничего не пишет и говорит, что было бы сделано; без Codex и без settings.json — молчит; мутант без вызова модуля не чинит ничего', () => {
+    const b = profileBox();
+    try {
+      const snap = snapshot(b);
+      const listing = () => JSON.stringify([fs.readdirSync(b.home + '/.claude').sort(), fs.existsSync(b.home + '/.hamidun-setup'), fs.existsSync(b.home + '/.codex')]);
+      const l0 = listing();
+      const r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify', HM_DRY_RUN: '1' }, nodeDir);
+      assert.strictEqual(r.status, 0);
+      assert(/^\[dry-run\] WOULD: .*settings\.json.*CATALOG\.md.*Codex/.test(r.out) && linesOf(r.out).length === 1, 'одна строка WOULD: ' + r.out);
+      assert.deepStrictEqual(snapshot(b), snap, 'dry-run: ничего не записано');
+      assert.strictEqual(listing(), l0, 'dry-run: ни копий, ни каталогов');
+      // Codex нет, настроек нет, пак с картой есть — тишина и ни одного нового файла
+      const b2 = profileBox({ codex: false });
+      try {
+        fs.rmSync(b2.settings);
+        const r2 = touchupRun('touchup-config.sh', b2.home, { HM_BUNDLED_CONFIG: b2.pack, HM_SELECTED: 'verify' }, nodeDir);
+        assert.deepStrictEqual([r2.status, r2.out], [0, ''], 'нечего делать — молчим: ' + r2.out);
+        assert(!fs.existsSync(b2.home + '/.codex') && !fs.existsSync(b2.home + '/.hamidun-setup'), 'ничего не создано');
+      } finally { dropDir(b2.base); }
+      // Отрицательный контроль: скрипт без вызова модуля (прежняя схема «правка только внутри config.sh») не чинит ничего.
+      const mut = mkTmp('hm-prof-mut-');
+      try {
+        ['_lib.sh', '_cfgmigrate.js'].forEach((f) => fs.copyFileSync(path.join(MACDIR, f), mut + '/' + f));
+        const s = fs.readFileSync(path.join(MACDIR, 'touchup-config.sh'), 'utf8');
+        const m = s.replace('"$NODE_BIN" "$DIR/_cfgmigrate.js" --touchup "$HOME" "$PACK" "$CONFIG_SELECTED" ||', 'true ||');
+        assert(m !== s, 'мутация применилась');
+        fs.writeFileSync(mut + '/touchup-config.sh', m);
+        const b3 = profileBox();
+        try {
+          const before = fs.readFileSync(b3.settings, 'utf8');
+          const rr = spawnSync('bash', ['-c', 'export PATH="' + nodeDir + ':/usr/bin:/bin"; exec bash "$1"', 'x', mut + '/touchup-config.sh'], {
+            encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { HOME: b3.home, HM_BUNDLED_CONFIG: b3.pack, HM_SELECTED: 'verify' }),
+          });
+          assert.strictEqual((rr.stdout || '').trim(), '', 'мутант молчит');
+          assert.strictEqual(fs.readFileSync(b3.settings, 'utf8'), before, 'мутант: settings.json не тронут — тест различает');
+          assert(!fs.existsSync(b3.agents), 'мутант: карты для Codex нет');
+        } finally { dropDir(b3.base); }
+      } finally { dropDir(mut); }
+    } finally { dropDir(b.base); }
+  });
+
+  ok('touchup-config.sh: ~/.codex — ссылка, AGENTS.md не UTF-8 — строка «пропущено», чужое не тронуто; settings.json исправлен в том же прогоне', () => {
+    const b = profileBox();
+    try {
+      const elsewhere = b.base + '/elsewhere'; fs.mkdirSync(elsewhere);
+      fs.symlinkSync(elsewhere, b.home + '/.codex', 'junction');
+      let r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify' }, nodeDir);
+      assert.strictEqual(r.status, 0);
+      const ls = linesOf(r.out);
+      assert.strictEqual(ls.length, 2, 'одна строка ОБНОВЛЕНО (настройки, каталог) и одна «пропущено»: ' + r.out);
+      assert(/^ОБНОВЛЕНО: ~\/\.claude\/settings\.json/.test(ls[0]) && !/Codex/.test(ls[0]), ls[0]);
+      assert(/^\[touchup-config\] пропущено: ~\/\.codex или AGENTS\.md в нём — ссылка/.test(ls[1]), ls[1]);
+      assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'сквозь ссылку ничего не записано');
+      fs.rmdirSync(b.home + '/.codex');
+      fs.mkdirSync(b.home + '/.codex');
+      const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('# мои правила\n', 'utf16le')]);
+      fs.writeFileSync(b.agents, utf16);
+      r = touchupRun('touchup-config.sh', b.home, { HM_BUNDLED_CONFIG: b.pack, HM_SELECTED: 'verify' }, nodeDir);
+      assert(/^\[touchup-config\] пропущено: ~\/\.codex\/AGENTS\.md не в UTF-8/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      assert(fs.readFileSync(b.agents).equals(utf16), 'такой файл не тронут');
+    } finally { dropDir(b.base); }
+  });
+
+  // ---- touchup-claude-path.sh: команда nmd, прошлый вердикт broken, claude выбран в этом прогоне, сухой прогон ----
+  function nmdHome(base, opts) {
+    const o = opts || {};
+    const home = base + '/home'; fs.mkdirSync(home + '/.local/bin', { recursive: true });
+    if (o.claude) exe(home + '/.local/bin/claude', '#!/bin/sh\necho "9.9.9 (Claude Code)"\n');
+    if (o.nmd) exe(home + '/.local/bin/nmd', '#!/bin/sh\necho "nmd 1.0"\n');
+    if (o.verdict) { fs.mkdirSync(home + '/.hamidun-setup'); fs.writeFileSync(home + '/.hamidun-setup/checks.json', '{"claude": {"verdict": "' + o.verdict + '", "at": 1}}'); }
+    const bin = base + '/bin'; fs.mkdirSync(bin);
+    exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');
+    return { home, bin };
+  }
+  const rcMarks = (home) => ['.zprofile', '.zshrc', '.bash_profile'].filter((f) => fs.existsSync(home + '/' + f) && /HAMIDUN_LOCAL_BIN/.test(fs.readFileSync(home + '/' + f, 'utf8')));
+  ok('touchup-claude-path.sh: команда nmd из ~/.local/bin находится новым окном так же, как claude; сломанный claude (broken) и claude, выбранный в этом прогоне, не проверяются', () => {
+    const env = { SHELL: bashPath, HM_TOUCHUP_SHELL_TIMEOUT: '20' };
+    // 1) только nmd
+    let base = mkTmp('hm-tnmd-');
+    try {
+      const { home, bin } = nmdHome(base, { nmd: true });
+      let r = touchupRun('touchup-claude-path.sh', home, env, mp(bin));
+      assert.strictEqual(r.status, 0, r.out + r.err);
+      if (r.out === '') SKIP('новое окно уже видит nmd (чужая установка в системном PATH) — случай «не видит» не воспроизвести');
+      assert(/^ОБНОВЛЕНО: новое окно Терминала не находило nmd — дописал PATH в ~\/\.bash_profile, теперь находит/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      assert.strictEqual(rcMarks(home).length, 3, 'строка PATH есть во всех трёх файлах');
+      r = touchupRun('touchup-claude-path.sh', home, env, mp(bin));
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'повтор молчит: ' + r.out);
+    } finally { dropDir(base); }
+    // 2) claude и nmd вместе: в сообщении названы оба
+    base = mkTmp('hm-tnmd2-');
+    try {
+      const { home, bin } = nmdHome(base, { claude: true, nmd: true, verdict: 'works' });
+      const r = touchupRun('touchup-claude-path.sh', home, env, mp(bin));
+      assert(/^ОБНОВЛЕНО: новое окно Терминала не находило claude и nmd — дописал PATH/.test(r.out) && linesOf(r.out).length === 1, r.out);
+    } finally { dropDir(base); }
+    // 3) claude с прошлым вердиктом broken — не трогаем; nmd при этом чинится и назван один
+    base = mkTmp('hm-tnmd3-');
+    try {
+      const { home, bin } = nmdHome(base, { claude: true, verdict: 'broken' });
+      let r = touchupRun('touchup-claude-path.sh', home, env, mp(bin));
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'сломанный claude без nmd: молчим и ничего не пишем: ' + r.out);
+      assert.strictEqual(rcMarks(home).length, 0, 'профили не тронуты');
+      exe(home + '/.local/bin/nmd', '#!/bin/sh\necho nmd\n');
+      r = touchupRun('touchup-claude-path.sh', home, env, mp(bin));
+      assert(/^ОБНОВЛЕНО: новое окно Терминала не находило nmd — /.test(r.out) && !/claude/.test(r.out), 'при сломанном claude назван только nmd: ' + r.out);
+    } finally { dropDir(base); }
+    // 4) claude выбран в этом прогоне — его окно уже проверил claude.sh
+    base = mkTmp('hm-tnmd4-');
+    try {
+      const { home, bin } = nmdHome(base, { claude: true });
+      const r = touchupRun('touchup-claude-path.sh', home, Object.assign({ HM_SELECTED: 'verify,claude' }, env), mp(bin));
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'claude выбран — не дублируем: ' + r.out);
+      assert.strictEqual(rcMarks(home).length, 0, 'профили не тронуты');
+    } finally { dropDir(base); }
+    // 5) сухой прогон: одна строка WOULD, профили не тронуты
+    base = mkTmp('hm-tnmd5-');
+    try {
+      const { home, bin } = nmdHome(base, { claude: true, nmd: true });
+      const r = touchupRun('touchup-claude-path.sh', home, Object.assign({ HM_DRY_RUN: '1' }, env), mp(bin));
+      assert(/^\[dry-run\] WOULD: .*claude или nmd/.test(r.out) && linesOf(r.out).length === 1, r.out);
+      assert.strictEqual(rcMarks(home).length, 0, 'dry-run: профили не тронуты');
+    } finally { dropDir(base); }
+  });
+
+  ok('touchup-vscode-owner.sh: сухой прогон только говорит, VS Code, выбранный в этом прогоне, не дублирует предупреждение vscode.sh', () => {
+    const base = mkTmp('hm-tvo2-');
+    try {
+      const home = base + '/home'; fs.mkdirSync(home);
+      const app = base + '/Visual Studio Code.app'; fs.mkdirSync(app);
+      const bin = base + '/bin'; fs.mkdirSync(bin);
+      exe(bin + '/stat', '#!/bin/sh\necho root\n');
+      const run = (extra) => touchupRun('touchup-vscode-owner.sh', home, Object.assign({ HM_VSCODE_APP: app }, extra), mp(bin));
+      let r = run({});
+      assert(/^\[touchup-vscode-owner\] ВНИМАНИЕ: VS Code принадлежит root/.test(r.out), 'без галочек предупреждение есть: ' + r.out);
+      r = run({ HM_DRY_RUN: '1' });
+      assert(/^\[dry-run\] WOULD: .*VS Code/.test(r.out) && linesOf(r.out).length === 1, 'dry-run: одна строка WOULD: ' + r.out);
+      r = run({ HM_SELECTED: 'verify,vscode' });
+      assert.deepStrictEqual([r.status, r.out], [0, ''], 'vscode выбран — об этом уже сказал vscode.sh: ' + r.out);
+    } finally { dropDir(base); }
   });
 })();

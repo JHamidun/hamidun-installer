@@ -33,6 +33,22 @@ dl() {
   fi
 }
 
+# Транзиентный сбой реестра npm не должен валить многогигабайтную сборку: после шага
+# «пара одной версии для обеих арх» ниже любой промах кладёт всю сборку (FATAL), поэтому
+# каждое обращение к реестру — три попытки с растущей паузой. Вывод глушится, как и был.
+retry3() {
+  local n=1
+  while [ "$n" -le 3 ]; do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    if [ "$n" -lt 3 ]; then
+      echo "    попытка $n/3 не удалась — повтор через $((n * 5)) с: ${1:-} ${2:-} ${3:-}"
+      sleep $((n * 5))
+    fi
+    n=$((n + 1))
+  done
+  return 1
+}
+
 # Вызов api.github.com С аутентификацией, если задан GITHUB_TOKEN (в CI = github.token).
 # Анонимный GitHub API на shared-IP раннера жёстко лимитируется → транзиентные 403
 # (маскот/шрифт «не нашлись» → FATAL). С токеном — лимит 1000-5000/ч. bash 3.2 + set -u
@@ -90,7 +106,7 @@ dl "https://update.code.visualstudio.com/latest/darwin-universal/stable" "$APPS/
 
 echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g, ОБА arch)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
-npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
+retry3 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund || true
 # ГЛАВНОЕ: настоящий бинарь Claude Code едет НЕ в основном пакете, а в платформенном
 # optionalDependency (@anthropic-ai/claude-code-darwin-arm64 | -darwin-x64). `npm install`
 # качает optionalDependency ТОЛЬКО под платформу раннера, а раннер macos-latest — Apple
@@ -109,7 +125,7 @@ except Exception:
 if [ -n "$CC_VER" ]; then
   echo "  версия Claude Code: $CC_VER — докладываю платформенные пакеты обеих арх"
   for CCA in arm64 x64; do
-    if npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER" --cache "$CACHE" >/dev/null 2>&1; then
+    if retry3 npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER" --cache "$CACHE"; then
       echo "    ok claude-code-darwin-$CCA@$CC_VER"
     else
       echo "    ! claude-code-darwin-$CCA@$CC_VER не лёг в кеш — на этой арх офлайн-установка Claude Code работать НЕ будет"
@@ -647,6 +663,22 @@ if [ -n "$MISSING" ]; then
 else
   echo "[vendor-mac] OK: все ключевые артефакты на месте."
 fi
+
+# Claude Code: «архив под арх есть» мало — нужна ПАРА одной версии. claude.sh ставит
+# офлайн ровно ту версию, для которой в кеше лежат и основной пакет, и платформенный
+# под эту арх (hm_claude_offline_version). Живой случай 23.09.2026: в кеше архивы
+# 2.1.197, а latest в метаданных 2.1.278 — на Intel ENOTCACHED, установка ушла в
+# интернет и без VPN повисла. Кеш этого же каталога едет и в lite-компонент
+# claude/darwin, поэтому валим сборку здесь, а не человека потом.
+CC_OFF_ARM="$(hm_claude_offline_version "$ROOT/vendor/npm-cache" arm64)"
+CC_OFF_X64="$(hm_claude_offline_version "$ROOT/vendor/npm-cache" x64)"
+if [ -z "$CC_OFF_ARM" ] || [ "$CC_OFF_ARM" != "$CC_OFF_X64" ] \
+   || { [ -n "${CC_VER:-}" ] && [ "$CC_OFF_ARM" != "$CC_VER" ]; }; then
+  echo "[vendor-mac] FATAL: npm-cache Claude Code неполный: пара для arm64=${CC_OFF_ARM:-нет}, для x64=${CC_OFF_X64:-нет}, основной пакет ${CC_VER:-не определён}."
+  echo "  Нужны архивы @anthropic-ai/claude-code и claude-code-darwin-arm64/-x64 ОДНОЙ версии — перезапусти tools/fetch-vendor-mac.sh."
+  exit 1
+fi
+echo "[vendor-mac] OK: npm-cache Claude Code $CC_OFF_ARM — основной пакет и оба платформенных одной версии."
 
 # Курсовое издание: архив симулятора ОБЯЗАН быть в vendor/course — без него компонент
 # «Курс интенсива» падает у КАЖДОГО покупателя. Валим сборку сразу, а не пользователя.
