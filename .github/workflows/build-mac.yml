@@ -162,6 +162,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx electron-builder --mac --universal --publish never
 
+      # Гейт fuse. Хук afterPack (tools/after-pack.js) гасит RunAsNode, NODE_OPTIONS и --inspect
+      # в Electron Framework до подписи; здесь — независимая сверка по байтам готового .app.
+      # Сборка выше зовёт electron-builder НАПРЯМУЮ, мимо npm-скрипта dist:mac, где стоит тот же гейт.
+      - name: Gate — fuses выключены в .app (RunAsNode, NODE_OPTIONS, --inspect)
+        run: node tools/verify-fuses.js release/mac-universal
+
       # electron-builder нотаризовал+застейплил ЧИСТЫЙ .app (без vendor — иначе notary
       # ругается на неподписанные .so в .whl). Финальный dmg с офлайн-vendor собираем
       # САМИ через hdiutil: том нужного размера (electron-builder сайзит только под .app

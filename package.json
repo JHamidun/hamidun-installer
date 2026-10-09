@@ -17,10 +17,10 @@
     "preflight": "node tools/preflight-build.js",
     "prune:cache": "node tools/prune-npm-cache.js",
     "release:check": "node tools/release-check.js",
-    "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run sync:sizes && npm run beacon:stamp && npm run preflight && electron-builder && node tools/verify-packed-vendor.js",
-    "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run sync:sizes && npm run beacon:stamp && npm run preflight && electron-builder --win && node tools/verify-packed-vendor.js",
+    "dist": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run sync:sizes && npm run beacon:stamp && npm run preflight && electron-builder && node tools/verify-fuses.js && node tools/verify-packed-vendor.js",
+    "dist:win": "npm run assert:clean && npm run fetch:config && npm run fetch:vendor && npm run sync:sizes && npm run beacon:stamp && npm run preflight && electron-builder --win && node tools/verify-fuses.js && node tools/verify-packed-vendor.js",
     "dist:win:lite": "node tools/build-lite.js",
-    "dist:mac": "npm run assert:clean && npm run fetch:config && npm run beacon:stamp && npm run preflight -- --platform darwin && electron-builder --mac",
+    "dist:mac": "npm run assert:clean && npm run fetch:config && npm run beacon:stamp && npm run preflight -- --platform darwin && electron-builder --mac && node tools/verify-fuses.js release/mac-universal",
     "dist:mac:lite": "node tools/build-lite.js --mac",
     "postinstall": "electron-builder install-app-deps",
     "sizes": "node tools/sync-sizes.js",
@@ -30,6 +30,7 @@
     "test": "node test/run-tests.js"
   },
   "devDependencies": {
+    "@electron/fuses": "2.1.3",
     "electron": "44.5.1",
     "electron-builder": "25.1.8",
     "playwright-core": "^1.61.1"
@@ -141,7 +142,7 @@
       "unpackDirName": true
     },
     "beforePack": "tools/before-pack.js",
-    "afterPack": "tools/mac-adhoc-sign.js",
+    "afterPack": "tools/after-pack.js",
     "mac": {
       "icon": "build/icon.png",
       "target": [

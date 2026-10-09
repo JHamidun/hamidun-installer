@@ -27,4 +27,8 @@ exports.default = async function beforePack(context) {
     throw new Error('[preflight] сборка остановлена ДО упаковки — не пройдены гейты: ' + bad
       + '. Причины и как починить — в строках выше.');
   }
+  // Хук afterPack (tools/after-pack.js) гасит в exe RunAsNode и NODE_OPTIONS через пакет
+  // @electron/fuses. Если пакета нет, хук упал бы только ПОСЛЕ получасовой упаковки, а
+  // выпускать exe без этого нельзя — проверяем сейчас, пока ничего не потрачено.
+  await require('./after-pack.js').assertReady();
 };

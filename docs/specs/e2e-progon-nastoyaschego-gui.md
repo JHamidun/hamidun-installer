@@ -62,12 +62,22 @@ netfail-специфичная часть: всего на этом пути о�
 3. В `env` дочернего процесса подменяются `USERPROFILE`, `HOME`, `APPDATA`,
    `LOCALAPPDATA`, добавляется `HM_E2E=1`, и **удаляются** `ELECTRON_RUN_AS_NODE`
    и `NODE_OPTIONS` — унаследованные из терминала внутри Electron-приложения, они
-   ломают старт (`require('electron')` отдаёт строку, `app` не определён).
+   ломают старт заводского бинаря (`require('electron')` отдаёт строку, `app` не
+   определён). У упакованного exe эти переменные игнорируются сами: его fuse
+   `RunAsNode` и `EnableNodeOptionsEnvironmentVariable` выключены хуком
+   `tools/after-pack.js`; удаление там ничего не меняет, но и не мешает.
 
 `launchApp()` поднимает приложение через `playwright-core` (`_electron.launch`),
 подписывается на `stderr` главного процесса, `exit`, `crash` renderer, `pageerror` и
 console-ошибки, и запоминает страницу в `LAST_PAGE` — чтобы аварийный выход
 (`dumpForensics`) оставил скриншот, состояние экрана, список шагов и хвост журнала.
+
+Перед `_electron.launch` в режиме упакованного приложения вызывается `withInspectFuse()`:
+Playwright цепляется к main-процессу через `--inspect=0`, а у упакованного exe этот fuse
+(`EnableNodeCliInspectArguments`) выключен хуком `tools/after-pack.js` — без него `launch()`
+упирается в таймаут. Функция включает ТОЛЬКО его и только во временной копии (`stageApp()`),
+`RunAsNode` и `NODE_OPTIONS` остаются выключенными; файл вне временной папки она править
+отказывается. Source mode (заводской `electron` из `node_modules`) она не трогает.
 
 ### Общий ход одной сессии
 

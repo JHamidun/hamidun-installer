@@ -3,8 +3,8 @@
 <!-- spec-id: predpoletnye-geyty-sborki -->
 
 - **Раздел:** Публикация и издания
-- **Код:** `tools/preflight-build.js:70-74`, `tools/preflight-build.js:159-192`, `tools/preflight-build.js:205-234`, `tools/preflight-build.js:275-355`, `tools/preflight-build.js:390-414`, `tools/before-pack.js:19-30`, `tools/assert-clean.js:39-88`, `tools/fetch-config.js:36-93`, `tools/prune-npm-cache.js`, `tools/release-check.js:136-141`, `tools/release-check.js:314-333`, `tools/audit-pack.js`, `package.json`, `config.json`
-- **Тесты:** «audit-pack не запускает процессов и не ходит в сеть — вердикт детерминирован паком», «preflight: СТОПы пака рушат сборку, обход только явным флагом», «preflight на битом паке останавливает сборку и называет причину», «гейт подключён так, что его нельзя обойти: build.beforePack -> tools/before-pack.js», «dist/dist:win зовут fetch:config И preflight ДО electron-builder», «свежесть: нет штампа .hamidun-config-pack.json -> СТОП (что в exe — недоказуемо)», «свежесть: вшитый коммит == origin/main -> OK», «свежесть: origin ушёл вперёд -> СТОП (это и есть «старый снапшот»)», «свежесть: чужой репозиторий или чужая ветка в штампе -> СТОП», «свежесть: битый sha в штампе -> СТОП (снапшот не идентифицируется)», «свежесть: пин по sha сверяется с пином, а не с HEAD», «свежесть: origin недоступен -> СТОП; с HM_ALLOW_OFFLINE_BUILD=1 -> предупреждение», «свежесть: HM_ALLOW_STALE_CONFIG понижает провал, но НЕ прячет его», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: прогноз против потолка 2 ГиБ различает норму, предупреждение и провал», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «preflight предупреждает о накоплении версий и даёт точную команду чистки», «fetch-config: вшитый конфиг пиннится и оставляет след о версии», «config.json в репозитории без сборочных маркеров»
+- **Код:** `tools/preflight-build.js:70-74`, `tools/preflight-build.js:159-192`, `tools/preflight-build.js:205-234`, `tools/preflight-build.js:275-355`, `tools/preflight-build.js:390-414`, `tools/before-pack.js:19-34`, `tools/assert-clean.js:39-88`, `tools/fetch-config.js:36-93`, `tools/prune-npm-cache.js`, `tools/release-check.js:136-141`, `tools/release-check.js:314-333`, `tools/audit-pack.js`, `package.json`, `config.json`, `tools/after-pack.js`, `tools/verify-fuses.js`, `tools/mac-adhoc-sign.js`, `tools/build-lite.js`, `test/e2e-gui.js`, `.github/workflows/build-mac.yml`
+- **Тесты:** «audit-pack не запускает процессов и не ходит в сеть — вердикт детерминирован паком», «preflight: СТОПы пака рушат сборку, обход только явным флагом», «preflight на битом паке останавливает сборку и называет причину», «гейт подключён так, что его нельзя обойти: build.beforePack -> tools/before-pack.js», «dist/dist:win зовут fetch:config И preflight ДО electron-builder», «свежесть: нет штампа .hamidun-config-pack.json -> СТОП (что в exe — недоказуемо)», «свежесть: вшитый коммит == origin/main -> OK», «свежесть: origin ушёл вперёд -> СТОП (это и есть «старый снапшот»)», «свежесть: чужой репозиторий или чужая ветка в штампе -> СТОП», «свежесть: битый sha в штампе -> СТОП (снапшот не идентифицируется)», «свежесть: пин по sha сверяется с пином, а не с HEAD», «свежесть: origin недоступен -> СТОП; с HM_ALLOW_OFFLINE_BUILD=1 -> предупреждение», «свежесть: HM_ALLOW_STALE_CONFIG понижает провал, но НЕ прячет его», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: прогноз против потолка 2 ГиБ различает норму, предупреждение и провал», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «preflight предупреждает о накоплении версий и даёт точную команду чистки», «fetch-config: вшитый конфиг пиннится и оставляет след о версии», «config.json в репозитории без сборочных маркеров», «fuses: гейт verify-fuses — заводская проводка Electron (три fuse включены) даёт код 1, выключенная — 0», «fuses: гейт не зеленеет без доказательства — removed, чужая версия, обрезанная и короткая проводка дают код 1», «fuses: гейт не зеленеет вхолостую — нет папки, пустая папка, exe без sentinel, файл вместо папки дают код 2», «fuses: гейт на macOS — Electron Framework внутри .app, у universal две проводки и зелёный только при обеих выключенных», «fuses: sentinel на стыке 8 МиБ-кусков находится ровно один раз, на любом смещении у границы», «fuses: CLI verify-fuses — коды выхода настоящего процесса 0, 1 и 2», «fuses: индексы гейта сверены с FuseV1Options пакета @electron/fuses, расхождение ловится», «fuses: хук Windows — гасит ровно три fuse, остальные байты файла те же, повтор ничего не меняет», «fuses: хук macOS — Electron Framework внутри .app, thin и universal (две проводки) гасятся целиком», «fuses: хук отказывает ДО записи — нет sentinel, чужая версия, обрезанная и короткая проводка, лишние sentinel, разные проводки, жёсткая ссылка», «fuses: fuse гасятся ДО ad-hoc подписи mac-adhoc-sign, который остаётся последним шагом хука», «fuses: хук бросает на неподдерживаемой платформе, без бинаря и без пакета @electron/fuses», «fuses: хук повторяет правку при EBUSY и EPERM (антивирус держит свежий файл), но не при прочих ошибках», «fuses: проверка хука ПОСЛЕ правки ловит чужой fuse, сдвиг размера, непогашенную тройку и смену числа проводок», «fuses: package.json — build.afterPack ведёт на tools/after-pack.js, пакет закреплён точно, lock чистый», «fuses: гейт подключён после electron-builder — dist, dist:win, dist:mac, build-lite (обе платформы) и build-mac.yml», «fuses: beforePack проверяет наличие пакета ДО упаковки, а e2e-gui не трогает fuse вне временной копии», «fuses: настоящий Electron 44 — до правки NODE_OPTIONS, ELECTRON_RUN_AS_NODE и --inspect действуют, после неё нет, приложение стартует», «fuses: e2e-gui withInspectFuse включает ТОЛЬКО --inspect в копии, Playwright подключается, вне временной папки отказ»
 
 ## Что обещает человеку
 
@@ -135,6 +135,54 @@
 дерева. При находках печатает нумерованный список, подсказку
 `git checkout package.json config.json && rm -rf vendor-lite` и выходит кодом 1.
 
+**Пятый гейт — fuse упакованного Electron (`afterPack` + `verify-fuses`).** Установщик —
+подписанный exe с `requireAdministrator`, а окружение elevated-процесса пересобирается из
+реестра (`HKCU\Environment`), куда процесс того же пользователя пишет без UAC. С заводскими fuse
+`ELECTRON_RUN_AS_NODE=1` (вместе с `NODE_OPTIONS=--require x.js` или со скриптом-аргументом)
+превращает подписанный exe в Node-интерпретатор и исполняет чужой JS под токеном администратора
+до первой строки кода установщика; `--inspect` открывает отладчик в процессе. Что из этого
+настоящее, проверено запуском на Electron 44.5.1 под именем `Hamidun Setup.exe` (то есть как
+упакованное приложение): `ELECTRON_RUN_AS_NODE=1` + `NODE_OPTIONS=--require` **без единого
+аргумента** (двойной клик) — чужой скрипт исполнен, приложение не стартовало. Одиночный
+`NODE_OPTIONS` в упакованном приложении Electron режет сам («Most NODE_OPTIONs are not supported
+in packaged apps»): он исполняется только под именем `electron.exe`, поэтому находка с одним
+`NODE_OPTIONS` для нашего exe завышена, а цепочка с `ELECTRON_RUN_AS_NODE` — настоящая.
+
+- **`tools/after-pack.js` — единственный вход `afterPack`** (`package.json` → `build.afterPack`).
+  Шаг 1 — гасит `RunAsNode`, `EnableNodeOptionsEnvironmentVariable` и
+  `EnableNodeCliInspectArguments` в Windows-exe (`<appOutDir>/<productFilename>.exe`) и в
+  `Electron Framework` внутри `.app` на macOS (проводка живёт там, а не в основном исполняемом
+  файле; у universal-пакета в файле две проводки, по одной на слайс). Шаг 2 — передаёт управление
+  прежнему `tools/mac-adhoc-sign.js`, который не менялся. Порядок важен: правка идёт до rcedit и
+  подписи (после подписи она сломала бы Authenticode) и до любой подписи на macOS. Хук зовётся
+  electron-builder'ом на macOS трижды (слайс x64, слайс arm64, склеенный universal-пакет); правка
+  идемпотентна.
+- **Байты правит официальный `@electron/fuses`**, закреплённый точно (`2.1.3`: ни зависимостей, ни
+  install-скриптов, в lock одна новая запись из `registry.npmjs.org` с integrity). Хук ему на слово
+  не верит: до правки бинарь читает независимый читатель из `tools/verify-fuses.js` — нет sentinel,
+  чужая версия проводки, проводка короче нужного индекса, два sentinel в exe, две проводки с разным
+  содержимым, жёсткая ссылка на общий кэш Electron → отказ без записи; после правки тот же
+  читатель обязан увидеть три fuse выключенными, а размер файла, число проводок и каждый остальной
+  флаг — прежними (чужие fuse в эту волну не трогаем: `GrantFileProtocolExtraPrivileges` нужен
+  рендереру на `file://`, ASAR-fuse требуют поддержки упаковщика). Любой сбой — бросок, и
+  electron-builder останавливает сборку. Индексы читателя сверяются с `FuseV1Options` пакета при
+  каждом запуске.
+- **`tools/before-pack.js` в конце проверяет, что пакет вообще загружается** (`assertReady`): без
+  него хук упал бы только после получасовой упаковки, а выпускать exe без этой правки нельзя.
+- **Гейт `tools/verify-fuses.js [папка]` — независимая сверка по байтам готовой сборки.** Не
+  импортирует хук и пакет. Ищет sentinel в каждом `*.exe` в корне папки (по умолчанию
+  `release/win-unpacked`) или в `Electron Framework` каждого `.app` (macOS: `release/mac-universal`).
+  Код выхода 0 — во всех найденных проводках три fuse выключены; 1 — хотя бы один включён либо
+  проводку нельзя прочитать (чужая версия, обрезана, состояние «removed»); 2 — проверять нечего
+  (нет папки, бинаря или проводки): зелёного без прочитанных байтов не бывает. Подключён так:
+  `dist` и `dist:win` — после `electron-builder` и до `verify-packed-vendor`; `dist:mac` — на
+  `release/mac-universal`; `tools/build-lite.js` — обе платформы, сразу после `electron-builder`;
+  `build-mac.yml` — отдельным шагом, потому что полная mac-сборка зовёт electron-builder напрямую.
+- **`test/e2e-gui.js` в режиме упакованного приложения** включает обратно ТОЛЬКО
+  `EnableNodeCliInspectArguments` и только в своей временной КОПИИ (`withInspectFuse`):
+  Playwright цепляется к main-процессу через `--inspect=0`, и без этого `launch()` упирается в
+  таймаут (проверено: 25 с против 5 с). Файл вне временной папки функция править отказывается.
+
 ## Инварианты
 
 1. **Хук подключён и бросает.** `package.json` → `build.beforePack` равен
@@ -166,6 +214,16 @@
 10. **Штамп содержит фактический коммит, прочитанный до сноса истории.** `rev-parse HEAD`
     выполняется раньше `fs.rmSync(dest/.git)`, ref до подстановки в git проходит `REF_OK`
     (`fetch-config.js:36-44`, `62-73`, `88-90`).
+
+11. **Хук fuse подключён и бросает.** `package.json` → `build.afterPack` равен
+    `tools/after-pack.js`; он гасит три fuse раньше ad-hoc подписи и бросает при любом отказе
+    (`tools/after-pack.js`, `afterPack()`).
+12. **Гейт fuse не зеленеет без прочитанных байтов.** Нет папки, бинаря или проводки — код 2; любой
+    включённый или недоказанно выключенный fuse — код 1 (`tools/verify-fuses.js`, `checkDir()`).
+13. **Гейт независим от правки.** Он не импортирует ни хук, ни `@electron/fuses`; индексы его
+    читателя совпадают с `FuseV1Options` пакета и с настоящей проводкой Electron (тест).
+14. **Правка не выходит за три fuse.** Размер файла, число проводок и каждый остальной флаг после
+    правки прежние; иначе хук бросает (`postcheck()`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -200,6 +258,17 @@
 10. **Штамп с неверным коммитом или неотфильтрованный ref** — воспроизвести сборку по
     `HM_CONFIG_REF=<sha>` нельзя (в штампе не тот sha), а в худшем случае содержимое
     поля формы `workflow_dispatch` попадает в командную строку `git clone` как команда.
+
+11. **`afterPack` вернули на `mac-adhoc-sign.js`** (или хук не отработал: `electron-builder
+    --prepackaged` хуки пропускает) — exe уезжает подписанным Certum с включённым `RunAsNode`.
+    Любой процесс того же пользователя, записавший в `HKCU\Environment` пару
+    `ELECTRON_RUN_AS_NODE=1` + `NODE_OPTIONS=--require x.js`, получает исполнение своего JS под
+    администратором в тот момент, когда человек принял честный UAC-запрос с «Verified publisher».
+    Приложение при этом не стартует вовсе, и человек видит лишь «не открылся».
+12. **Гейт убрали из `dist*` / `build-lite.js` / `build-mac.yml`** — пункт 11 остаётся незамеченным,
+    пока кто-нибудь не прочитает байты готового exe.
+13. **Правку перенесли после подписи** — Authenticode ломается, а на macOS бинарь с недействительной
+    подписью не запускается («killed: 9»).
 
 ## Границы
 
@@ -251,6 +320,22 @@
   сознательно (`assert-clean.js:48-54`): vendor в `.app` не вшивается, он едет сиблингом
   на томе dmg.
 
+- **Fuse-гейт читает папку сборки, а не итоговый portable-exe**: в нём 7z-архив с папкой
+  `win-unpacked`. Папка и есть то, что упаковывается, но подпись итогового файла проверяет
+  `tools/publish-dist.py`, а не этот гейт.
+- **Что в эту волну НЕ вошло:** `EnableEmbeddedAsarIntegrityValidation` и `OnlyLoadAppFromAsar`
+  (нужна поддержка упаковщика, вслепую включать нельзя — приложение может не стартовать);
+  entitlements macOS (`allow-dyld-environment-variables`, `disable-library-validation`) и песочница
+  рендерера; доставка portable-exe в `%TEMP%` (`THREAT-MODEL.md`). Switch'и Chromium вроде
+  `--remote-debugging-port` fuse не закрывают (проверено на правленом exe: порт отладки открывается и
+  отвечает на `/json/version`), но для этого атакующему нужно самому запустить exe с аргументами и
+  получить клик по UAC; из одного `HKCU\Environment` это недостижимо.
+- **Кэш готового exe в electron-builder** (`release/.cache`) подставил бы в `win-unpacked` старый
+  подписанный exe поверх правленого. Он включается, когда в конфиге или окружении задан сертификат
+  (`certificateFile`, `certificateSha1`, `WIN_CSC_LINK`), вне CI и без `electronDist`, и выключается
+  `ELECTRON_BUILDER_DISABLE_BUILD_CACHE=true`. В этой конфигурации кэш не используется (подпись — хук
+  `tools/sign-win.js`, сертификата в конфиге нет), а если станет, на нём краснеет `verify-fuses`.
+
 ## Риски и открытые вопросы
 
 - **Тестами не покрыты** (проверено поиском по `test/run-tests.js`): `checkNsisLimit()`
@@ -282,3 +367,12 @@
 - **В шапке `preflight-build.js` перечислены флаги CLI, но не сказано**, что `--json`
   отключает печать вердикта `audit-pack`. Расхождение комментария с поведением мелкое,
   но именно этого класса.
+- **macOS проверен на синтетической раскладке, а не на настоящем маке.** Раскладка
+  `Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework`, две проводки
+  universal-слайсов и порядок «правка → подпись» подтверждены тестами на подложенных файлах;
+  настоящий universal-пакет из electron-builder на macOS-раннере не собирался. Если у слайсов x64 и
+  arm64 в настоящем Electron окажутся разные значения чужих fuse, хук откажет («две проводки с
+  РАЗНЫМ содержимым») — это громкий отказ сборки, а не молчаливый пропуск.
+- **Без `@electron/fuses` тесты рантайма и хука пропускаются** (⏭, не ✅): пакет нужен в
+  резолвере — `npm ci` в корне проекта или путь к нему в `NODE_PATH`. Гейт `verify-fuses.js` и его
+  тесты от пакета не зависят.
