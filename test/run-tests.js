@@ -1035,8 +1035,11 @@ ok('chatgpt-desktop.ps1: winget PublisherId 8wekyb3d8bbwe + БЕЗ Get-Command f
   assert(/\^Microsoft\\\.DesktopAppInstaller_/.test(s), 'имя пакета якорится ПОЛНОСТЬЮ (^...$), не подстрока');
   assert(!/Get-Command winget/.test(s), 'УБРАН Get-Command winget fallback (user-writable alias)');
   assert(/--exact/.test(s), 'winget install --exact (нет подмены id по совпадению/монике)');
-  assertOrder(s, 'Test-HmSignerTrusted', '& $winget install',
+  // winget запускается через Process.Start с потолком времени (не `& $winget`): проверка
+  // подписи обязана стоять ДО запуска — сравниваем с ВЫЗОВОМ проверки, а не с объявлением.
+  assertOrder(s, 'Test-HmSignerTrusted -Path $winget', '[System.Diagnostics.Process]::Start($psi)',
     'подпись winget.exe проверяется ДО его запуска');
+  assert(/\$psi\.FileName = \$winget/.test(s), 'запускается ровно тот winget, чья подпись проверена');
   assert(/--source msstore/.test(s) && /9NT1R1C2HH7J/.test(s), 'ставит из Microsoft Store (Store ID)');
   assert(/Test-ChatGptDesktopInstalled/.test(s) && /Get-AppxPackage/.test(s), 'идемпотентность: детект MSIX-пакета');
   assert(/exit 120/.test(s), 'нет winget/нет сети → graceful skip 120');
@@ -10776,28 +10779,48 @@ ok('config.json в репозитории без сборочных маркер
   };
 
   // ---- 1. Предполётные проверки машины -------------------------------------
-  ok('предполётное: предупреждение о месте только НИЖЕ 4 ГБ и ровно с этой цифрой', () => {
+  ok('предполётное: место считается по ВЫБРАННОМУ — «нужно ≈X ГБ, свободно Y ГБ на C:», при нехватке предупреждение с обеими цифрами', () => {
     const H = loadRenderer({ build });
     try {
-      const warn = (gb) => {
-        const old = H.document.getElementById('preflight-warn');
-        if (old) old.remove();
+      // Один выбранный компонент весом ровно 1 ГиБ: нужно = 1 × 2,5 + 0,5 = 3 ГБ.
+      H.run("STATE.platform = 'win32'; STATE.edition = 'offline'; STATE.homeRoot = 'C:\\\\';" +
+        "STATE.byId = { big: { id: 'big', name: 'Big', sizeBytes: { win32: 1073741824 } } };" +
+        'STATE.selected = { big: true };');
+      assert.strictEqual(H.run('diskNeedGB()'), 3, 'оценка по выбранному: 1 ГиБ × 2,5 + 0,5 ГБ');
+      const state = (gb) => {
         H.run('STATE.freeGB = ' + JSON.stringify(gb) + '; renderPreflight();');
-        const el = H.document.getElementById('preflight-warn');
-        return el ? el.innerHTML : null;
+        const w = H.document.getElementById('preflight-warn');
+        const l = H.document.getElementById('disk-line');
+        return { warn: w ? w.innerHTML : null, line: l ? l.textContent : null };
       };
       // null — «не смогли измерить». Пугать человека на догадке нельзя.
-      assert.strictEqual(warn(null), null, 'при неизвестном объёме предупреждения быть не должно');
-      assert.strictEqual(warn(120), null, 'при 120 ГБ предупреждения быть не должно');
-      assert.strictEqual(warn(4), null, 'порог не строгий: ровно 4 ГБ — молчим');
-      const w = warn(3.9);
-      assert(w && w.includes('3.9'), 'при 3.9 ГБ — предупреждение с этой же цифрой, получено: ' + w);
-      assert(warn(0) !== null, 'при нуле — предупреждение');
-      // Идемпотентность: экран перерисовывается не раз, три баннера подряд —
-      // это то, что человек увидит как поломку.
-      H.run('renderPreflight(); renderPreflight();');
+      assert.deepStrictEqual(state(null), { warn: null, line: null }, 'не измерили — ни плашки, ни строки');
+      const roomy = state(120);
+      assert.strictEqual(roomy.warn, null, 'места много — предупреждения нет');
+      assert(roomy.line && /≈3 ГБ/.test(roomy.line) && /120 ГБ на C:/.test(roomy.line),
+        'строка «нужно ≈X, свободно Y на C:»: ' + roomy.line);
+      assert.strictEqual(state(3).warn, null, 'порог не строгий: свободно ровно столько, сколько нужно, — молчим');
+      const w = state(2.9).warn;
+      assert(w && w.includes('2.9') && w.includes('≈3 ГБ') && /на C:/.test(w),
+        'при 2.9 ГБ — предупреждение с обеими цифрами и диском: ' + w);
+      assert(state(0).warn !== null, 'при нуле — предупреждение');
+      // Ничего не выбрано — считать нечего: молчим, а не «нужно 0 ГБ».
+      H.run('STATE.selected = {}; STATE.freeGB = 1; renderPreflight();');
+      assert.strictEqual(H.document.getElementById('preflight-warn'), null, 'пустой выбор — без плашки');
+      assert.strictEqual(H.document.getElementById('disk-line'), null, 'пустой выбор — без строки');
+      // Идемпотентность: строка пересчитывается на каждый клик — второй баннер это поломка.
+      H.run('STATE.selected = { big: true }; STATE.freeGB = 1; renderPreflight(); renderPreflight();');
       const all = H.document.querySelectorAll('#view-select .preflight-warn');
       assert.strictEqual(all.length, 1, 'повторные вызовы плодят баннеры: ' + all.length);
+      // Лёгкое издание: считается по размеру ДОКАЧКИ, а не по вшитому.
+      H.run("STATE.edition = 'lite'; STATE.remoteSizes = { big: 2147483648 };");
+      assert.strictEqual(H.run('diskNeedGB()'), 5.5, 'lite: 2 ГиБ × 2,5 + 0,5 = 5,5 ГБ');
+      // Без буквы диска (macOS) — «на диске», а не «на /».
+      H.run("STATE.homeRoot = '/';");
+      assert.strictEqual(H.run('diskVolumeLabel()'), 'на диске');
+      // Пересчёт привязан к выбору: refreshDerived зовёт renderPreflight.
+      const rd = /function refreshDerived[\s\S]*?\n\}/.exec(fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8'));
+      assert(rd && /renderPreflight\(\)/.test(rd[0]), 'строка места пересчитывается на каждый клик по галочке');
     } finally { H.dispose(); }
   });
 
@@ -16749,3 +16772,1623 @@ ok('config.json в репозитории без сборочных маркер
     }
   });
 })();
+
+// ===========================================================================
+// Исход шага, сторож молчания, отчёт поддержке, связь с Anthropic (06.10.2026).
+// По разбору 283 диалогов помощника: необязательный провал краснел и делал ok=False;
+// живой редактор без необязательной панели выглядел «ничего не встало»; шаги висели
+// часами без кнопки «пропустить»; отчёт уходил ok=False без названного компонента;
+// терминал не видел системный прокси VPN-клиента; до установки никто не говорил про
+// подписку и VPN. Логика вынесена в модули (src/run-outcome.js, src/renderer/run-status.js,
+// src/support-report.js, src/net-check.js, src/pack-summary.js) и проверяется здесь
+// ИСПОЛНЕНИЕМ, а не поиском слов; строковые сторожа — только там, где кода не поднять.
+// ===========================================================================
+(function workerCOutcomeTests() {
+  console.log('\n== Исход шага, сторож молчания, отчёт поддержке, связь с Anthropic ==');
+  const vm = require('vm');
+  const EventEmitter = require('events');
+  const RO = require(path.join(ROOT, 'src', 'run-outcome.js'));
+  const RS = require(path.join(ROOT, 'src', 'renderer', 'run-status.js'));
+  const SR = require(path.join(ROOT, 'src', 'support-report.js'));
+  const NC = require(path.join(ROOT, 'src', 'net-check.js'));
+  const PS = require(path.join(ROOT, 'src', 'pack-summary.js'));
+  const FE = require(path.join(ROOT, 'src', 'failure-explain.js'));
+  const { loadRenderer } = require(path.join(ROOT, 'test', 'dom-harness.js'));
+  const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const APPJS = () => fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  // Строки-комментарии JS — не код: иначе сторож краснел бы от упоминания в пояснении.
+  const codeOnlyJs = (t) => String(t).split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
+  // Кусок app.js по балансу фигурных скобок — чтобы исполнить функцию в vm.
+  const cutBlock = (src, header) => {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в app.js пропало: ' + header);
+    const open = src.indexOf('{', i);
+    let depth = 0;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+    }
+    throw new Error('не нашёл конец блока: ' + header);
+  };
+  const compById = {};
+  components.groups.forEach((g) => g.components.forEach((c) => { compById[c.id] = c; }));
+
+  // ---- код 121 и причина пропуска -----------------------------------------
+  ok('исход шага: код 121 разбирает ОДНА реализация в main; экран берёт res.partialReason, пустой — честная общая фраза', () => {
+    // Код 121 в ответ renderer'у переводит main.js по install-receipts
+    // ({ ok: true, partial: true, partialReason }). Здесь — только зеркало кода для
+    // «Пропустить шаг» и НИКАКОГО второго разборщика строки «ЧАСТИЧНО:».
+    assert.strictEqual(RO.EXIT_PARTIAL, 121, 'контракт со скриптами: частичный успех = 121');
+    assert.strictEqual(RO.isPartialExit(121), true);
+    assert.strictEqual(RO.isPartialExit(0), false);
+    assert.strictEqual(RO.isPartialExit(120), false, '120 — это пропуск, не частичный успех');
+    assert.strictEqual(RO.partialReasonFrom, undefined, 'второй разбор строки «ЧАСТИЧНО:» вернулся в run-outcome.js');
+    assert(!/partialReasonFrom/.test(codeOnlyJs(MAIN())), 'main.js снова разбирает 121 своим способом');
+    // Экран: текст причины — как прислал main; обрывки форматирования не мешают.
+    assert.strictEqual(RS.partialText('  VS Code и панель Claude стоят, панель Codex не установилась '),
+      'VS Code и панель Claude стоят, панель Codex не установилась');
+    assert.strictEqual(RS.partialText('ЧАСТИЧНО: панель Codex не встала'), 'панель Codex не встала',
+      'префикс строки скрипта на экран не тащим');
+    assert.strictEqual(RS.partialText('первая\nвторая'), 'первая вторая', 'одна строка на экране');
+    // Предел 240 остаётся, но режем С КОНЦА (начало — самое важное: скрипт называет
+    // недостающее первым) и обрыв виден многоточием, а не выглядит законченной фразой.
+    const cut = RS.partialText('я'.repeat(500));
+    assert(cut.length <= 240 && /…$/.test(cut), 'длинная причина режется, обрыв виден: ' + cut.length);
+    const head = 'панель Claude Code не встала';
+    assert(RS.partialText(head + ' — ' + 'подробности '.repeat(60)).indexOf(head + ' — подробности') === 0,
+      'при обрезке остаётся НАЧАЛО текста, а не хвост');
+    assert.strictEqual(RS.partialText('я'.repeat(240)), 'я'.repeat(240), 'ровно в предел — без обрезки и без многоточия');
+    // Причины нет (скрипт строку не напечатал, или main её не нашёл) — общая фраза,
+    // без выдуманной конкретики, но с указанием, где подробности.
+    ['', '   ', null, undefined].forEach((v) => {
+      const g = RS.partialText(v);
+      assert(/необязательн/.test(g) && /журнал/.test(g), 'общая фраза для ' + JSON.stringify(v) + ': ' + g);
+    });
+    const r = RS.installReport({ partial: ['vscode'], partialWhy: { vscode: '' }, byId: compById });
+    assert.strictEqual(r.ok, true, 'частичный успех не роняет ok');
+    assert.strictEqual(r.errors[0].stage, 'partial');
+    assert(/^ЧАСТИЧНО: необязательн/.test(r.errors[0].error), 'пустая причина в отчёте — общая фраза: ' + r.errors[0].error);
+  });
+
+  ok('причина пропуска (код 120): ПОСЛЕДНЯЯ строка вывода, а не начало склеенного через запятую хвоста', () => {
+    const tail = [
+      'Скачиваю официальный установщик Claude Desktop (Anthropic) в защищённый кэш...',
+      'Сервер Anthropic отказал в скачивании (HTTP 403) — это не обрыв сети.',
+      '[debug] служебное',
+      '',
+    ];
+    assert.strictEqual(RO.skipReasonFrom(tail), 'Сервер Anthropic отказал в скачивании (HTTP 403) — это не обрыв сети.');
+    // Отрицательный контроль: прежнее выражение main.js (String(массив).split) склеивало
+    // хвост через запятую и отдавало НАЧАЛО вывода — именно это и стояло на финише.
+    const oldWay = (t) => {
+      const ls = String(t || '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^\[(dry-run|debug)\]/i.test(l));
+      return ls.length ? ls[ls.length - 1].slice(0, 240) : '';
+    };
+    assert(/^Скачиваю официальный установщик/.test(oldWay(tail)), 'контроль: старый способ брал начало вывода');
+    assert.strictEqual(RO.skipReasonFrom([]), '', 'пустой вывод — пустая причина, не мусор');
+    assert(RO.skipReasonFrom(['x'.repeat(500)]).length <= 240, 'причина режется до 240 символов');
+    const m = codeOnlyJs(MAIN());
+    assert(/runOutcome\.skipReasonFrom\(outTail\)/.test(m), 'main.js берёт причину пропуска из run-outcome');
+    assert(!/String\(outTail \|\| ''\)\.split/.test(m), 'старое склеивание хвоста через String() вернулось');
+  });
+
+  // ---- сторож молчания ----------------------------------------------------
+  ok('сторож молчания: «Пропустить шаг» — только необязательному, после 8 минут тишины, один раз за эпизод', () => {
+    const MIN = 60000;
+    assert.strictEqual(RO.STALL_SKIP_MIN, 8);
+    assert.strictEqual(RO.stallDecision({ silentMs: 7 * MIN + 59000, optional: true }).offerSkip, false);
+    assert.strictEqual(RO.stallDecision({ silentMs: 8 * MIN, optional: true }).offerSkip, true);
+    assert.strictEqual(RO.stallDecision({ silentMs: 30 * MIN, optional: true, offered: true }).offerSkip, false,
+      'кнопка уже предложена — не дублируем');
+    // Обязательный — никогда (убить установку редактора посреди хуже, чем подождать).
+    assert.strictEqual(RO.stallDecision({ silentMs: 90 * MIN, optional: false }).offerSkip, false);
+    assert.strictEqual(RO.stallDecision({ silentMs: 90 * MIN }).offerSkip, false, 'нет признака — обязательный');
+    // Предупреждение в журнал — как было: на 10-й, 20-й… минуте, для всех.
+    assert.strictEqual(RO.stallDecision({ silentMs: 9 * MIN }).warn, false);
+    assert.strictEqual(RO.stallDecision({ silentMs: 10 * MIN }).warn, true);
+    assert.strictEqual(RO.stallDecision({ silentMs: 15 * MIN, warnedAtMin: 10 }).warn, false);
+    assert.strictEqual(RO.stallDecision({ silentMs: 20 * MIN, warnedAtMin: 10 }).warn, true);
+    // Решение о пропуске — за main: чужой id, обязательный, оживший шаг — отказ.
+    const base = { running: true, id: 'cursor', requestedId: 'cursor', optional: true, silentMs: 9 * MIN };
+    assert.deepStrictEqual(RO.canSkipNow(base), { ok: true, reason: '' });
+    assert.strictEqual(RO.canSkipNow(Object.assign({}, base, { requestedId: 'vscode' })).reason, 'not-running');
+    assert.strictEqual(RO.canSkipNow(Object.assign({}, base, { optional: false })).reason, 'required');
+    assert.strictEqual(RO.canSkipNow(Object.assign({}, base, { silentMs: 30000 })).reason, 'alive',
+      'шаг ожил после показа кнопки — не убиваем');
+    assert.strictEqual(RO.canSkipNow(Object.assign({}, base, { running: false })).reason, 'not-running');
+  });
+
+  ok('main.js: «Пропустить шаг» решает MAIN (canSkipNow), убивает дерево ОДНОГО шага и не пишет маркер установки', () => {
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('skip-step'"));
+    const body = h.slice(0, h.indexOf('\n});') + 4);
+    assert(body.length > 100, 'обработчик skip-step есть');
+    assertOrder(body, 'runOutcome.canSkipNow(', 'killProcessTree(st.child)', 'сначала проверка, потом kill');
+    // optional — из вшитого components.json (COMPONENT_META), не из renderer.
+    assert(/const stall = \{ optional: !!\(meta && meta\.optional === true\)/.test(m), 'признак optional берётся из meta');
+    // Убийство дерева — общая функция с killChildren, а не копия.
+    assert(/function killProcessTree\(c\)/.test(m), 'есть killProcessTree');
+    const kc = m.slice(m.indexOf('function killChildren()'), m.indexOf('function killChildren()') + 200);
+    assert(/killProcessTree\(c\)/.test(kc), 'killChildren переиспользует killProcessTree');
+    const close = m.slice(m.indexOf("child.on('close'"));
+    // Честный исход скрипта (0, свой пропуск 120, частичный успех 121) сильнее кнопки.
+    assertOrder(close, 'stall.skipRequested && !okRun && !runOutcome.isSkipExit(code) && !runOutcome.isPartialExit(code)',
+      'receipts.shouldRecordInstall(', 'пропуск по кнопке разбирается до маркеров установки');
+    assert(/userSkipped: true/.test(close), 'renderer узнаёт, что шаг пропустили кнопкой');
+    // Сторож шлёт предложение только через решение stallDecision, «ожил» — из потока вывода.
+    assert(/runOutcome\.stallDecision\(/.test(m) && /sendChannel\('step-stall', \{ id, state: 'stalled', mins \}\)/.test(m));
+    assert(/if \(stall\.offered\) \{ stall\.offered = false; sendChannel\('step-stall', \{ id, state: 'alive' \}\); \}/.test(m));
+  });
+
+  ok('main.js: провал докачки с не-сетевой причиной (EPERM, 403) идёт с hintKind, и renderer не пишет «Сеть оборвалась»', () => {
+    const m = codeOnlyJs(MAIN());
+    const i = m.indexOf('const integrity = /sha-?256|checksums');
+    const blk = m.slice(i, i + 1600);
+    assert(/failureExplain\.explainScriptFailure\(\[errMsg\]\)/.test(blk), 'причина докачки — из словаря');
+    assert(/hintKind: notNet \? why\.kind : ''/.test(blk), 'вид причины уходит в renderer');
+    const src = APPJS();
+    const sb = {};
+    vm.runInNewContext([
+      'const INTEGRITY_ERR_RE = /SHA-?256|checksums\\.json|не совпал|подмен/i;',
+      cutBlock(src, 'function isIntegrityFail'), cutBlock(src, 'function isNetFail'),
+      'this.isNetFail = isNetFail;'].join('\n'), sb);
+    assert.strictEqual(sb.isNetFail({ ok: false, stage: 'fetch', error: 'ETIMEDOUT' }), true, 'настоящая сеть — сеть');
+    assert.strictEqual(sb.isNetFail({ ok: false, stage: 'fetch', error: 'timed out', hintKind: 'network' }), true);
+    assert.strictEqual(sb.isNetFail({ ok: false, stage: 'fetch', error: 'EPERM rename', hintKind: 'file-locked' }), false,
+      'антивирус держит файл — не «Сеть оборвалась»');
+    assert.strictEqual(sb.isNetFail({ ok: false, stage: 'fetch', error: 'HTTP 403', hintKind: 'access-denied-403' }), false,
+      'сервер отказал — не «Сеть оборвалась»');
+  });
+
+  ok('причины: 403 — «сервер отказал», а не «нет сети»; «No package found» — «нет в Store твоего региона»', () => {
+    const k = (lines) => { const r = FE.explainScriptFailure(lines); return r ? r.kind : null; };
+    assert.strictEqual(k(['Invoke-WebRequest : Удаленный сервер возвратил ошибку: (403) Запрещено.']), 'access-denied-403');
+    assert.strictEqual(k(['The remote server returned an error: (403) Forbidden.']), 'access-denied-403');
+    assert.strictEqual(k(['все зеркала не сработали: HTTP 403; HTTP 403']), 'access-denied-403');
+    assert.strictEqual(k(['API Error: 403 Request not allowed']), 'access-denied-403');
+    assert.strictEqual(k(['No package found matching input criteria.']), 'store-region');
+    // Отрицательные контроли: сеть остаётся сетью, «403 МБ» и «4030» — не код ответа,
+    // занятый файл — по-прежнему занятый файл.
+    assert.strictEqual(k(['curl: (6) Could not resolve host: registry.npmjs.org']), 'network');
+    assert.strictEqual(k(['Скачано 403 МБ из 1000']), null);
+    assert.strictEqual(k(['status: 4030 items']), null);
+    assert.strictEqual(k(["EPERM: operation not permitted, rename 'a' -> 'b'"]), 'file-locked');
+    assert(/не обрыв сети/.test(FE.explainScriptFailure(['(403) Forbidden']).short));
+    assert(/региона/.test(FE.explainScriptFailure(['No package found matching input criteria']).short));
+  });
+
+  ok('chatgpt-desktop.ps1: winget с потолком времени — дерево гасится taskkill /T, шаг честно пропускается; «No package found» → «нет в Store вашего региона»', () => {
+    const s = codeOnly(DT_CHATGPT_PS1());
+    const m = /\$WINGET_TIMEOUT_SEC = (\d+)/.exec(s);
+    assert(m, 'потолок времени объявлен');
+    assert(Number(m[1]) >= 300 && Number(m[1]) <= 1800, 'потолок разумный (5–30 мин): ' + m[1]);
+    assert(/ReadLineAsync\(\)/.test(s) && /ReadToEndAsync\(\)/.test(s), 'вывод читается по ходу, stderr дренируется');
+    assert(/Join-Path \$env:SystemRoot 'System32\\taskkill\.exe'/.test(s) && /\/T \/F/.test(s), 'taskkill по абсолютному пути, всё дерево');
+    assertOrder(s, '(Get-Date) -gt $deadline', 'taskkill', 'kill — только по дедлайну');
+    assert(/No package found matching input criteria/.test(s) && /-1978335212/.test(s), 'распознаётся «пакет не найден»');
+    assert(/недоступен в Microsoft Store вашего региона/.test(s), 'причина названа');
+    assert(!/нужна авторизация в Microsoft Store/.test(s), 'прежняя неверная причина убрана');
+    assert(!/&\s*\$winget\b/.test(s), 'winget больше нигде не зовётся без потолка');
+  });
+
+  ok('claude-desktop.ps1: 403/451 при скачивании — «сервер отказал», а не «нет сети?»', () => {
+    const s = codeOnly(DT_CLAUDE_PS1());
+    assert(!/\(нет сети\?\)/.test(s), 'прежняя подпись «нет сети?» убрана');
+    assert(/\[int\]\$_\.Exception\.Response\.StatusCode/.test(s), 'код ответа читается из исключения');
+    assert(/\$httpCode -eq 403 -or \$httpCode -eq 451/.test(s));
+    assert(/это не обрыв сети/.test(s));
+    assert(/нет соединения с сервером/.test(s), 'настоящий обрыв назван отдельно');
+  });
+
+  // ---- итог прогона ---------------------------------------------------------
+  ok('components.json: optional ровно у дополнений — основной путь (git, node, VS Code, Claude Code, панель, конфиг) обязателен', () => {
+    const optional = Object.keys(compById).filter((id) => compById[id].optional === true).sort();
+    // «extension» (панель в Cursor и шрифт) стал необязательным по решению оркестратора 09.10: панель
+    // Claude в VS Code ставит компонент «vscode», и провал панели в Cursor (A13) должен быть жёлтым,
+    // а не красным. Основной путь — git, node, vscode, claude, конфиг.
+    assert.deepStrictEqual(optional,
+      ['bridge', 'chatgpt-desktop', 'claude-desktop', 'cursor', 'extension', 'handy', 'mascot', 'nomad', 'uv'],
+      'список необязательных изменился: ' + optional.join(', '));
+    ['git', 'node', 'vscode', 'claude', 'config', 'pydeps', 'course', 'verify'].forEach((id) =>
+      assert.notStrictEqual(compById[id].optional, true, id + ' — основной путь, не может быть необязательным'));
+    // Ни один обязательный не зависит от необязательного: иначе провал «можно не ставить»
+    // каскадом пропустил бы обязательное, а ok=True соврал бы.
+    Object.values(compById).forEach((c) => (c.requires || []).forEach((r) => {
+      if (c.optional !== true) assert.notStrictEqual(compById[r].optional, true, c.id + ' требует необязательный ' + r);
+    }));
+  });
+
+  ok('итог прогона: необязательный провал и код 121 не делают ok=False; обязательный провал — делает и назван первым', () => {
+    const rep = RS.installReport({
+      failed: [], softFailed: ['cursor'], partial: ['vscode'], gracefulSkipped: ['claude-desktop'],
+      byId: compById,
+      errors: [{ id: 'cursor', stage: 'fail', error: 'код 1 · Cursor.exe не найден' }],
+      partialWhy: { vscode: 'панель Codex не установилась' },
+      checks: [{ status: 'ok', label: 'Git' }],
+    });
+    assert.strictEqual(rep.ok, true, 'необязательное и частичное не роняют ok');
+    assert.deepStrictEqual(rep.failed, [], 'в failed нет ни Cursor, ни VS Code');
+    assert(rep.skipped.includes('cursor') && rep.skipped.includes('claude-desktop'), 'не встало, но не провал: ' + rep.skipped);
+    const ce = rep.errors.find((e) => e.id === 'cursor');
+    assert(ce && /^\(необязательный\)/.test(ce.error), 'причина Cursor сохранена и помечена: ' + JSON.stringify(ce));
+    const pe = rep.errors.find((e) => e.id === 'vscode');
+    assert(pe && pe.stage === 'partial' && /Codex/.test(pe.error), 'частичный успех едет с объяснением: ' + JSON.stringify(pe));
+    // Путаница на входе: необязательный в failed всё равно не роняет ok.
+    assert.strictEqual(RS.installReport({ failed: ['handy'], byId: compById }).ok, true);
+    // Отрицательный контроль: обязательный провал — ok=False и назван первым.
+    const bad = RS.installReport({ failed: ['node'], softFailed: ['cursor'], byId: compById,
+      errors: [{ id: 'cursor', stage: 'fail', error: 'x' }, { id: 'node', stage: 'net', error: 'y' }] });
+    assert.strictEqual(bad.ok, false);
+    assert.deepStrictEqual(bad.failed, ['node']);
+    assert.strictEqual(bad.errors[0].id, 'node', 'причина обязательного — первой (приёмник берёт десять)');
+    // Пропуск из-за упавшей зависимости у НЕОБЯЗАТЕЛЬНОГО не роняет ok сам по себе.
+    assert.strictEqual(RS.installReport({ depSkipped: ['bridge'], byId: compById }).ok, true);
+    // Обязательный компонент, пропущенный из-за упавшей зависимости, ok по-прежнему роняет. Раньше здесь был
+    // «extension»; он стал необязательным (09.10), поэтому проверяем на «config» — основной путь.
+    assert.strictEqual(RS.installReport({ depSkipped: ['config'], byId: compById }).ok, false);
+    assert.strictEqual(RS.installReport({ depSkipped: ['extension'], byId: compById }).ok, true,
+      'панель в Cursor необязательна: её пропуск из-за зависимости ok не роняет');
+  });
+
+  ok('итог прогона: ok=False ВСЕГДА с названным компонентом — красная проверка без упавших шагов называет его', () => {
+    const rep = RS.installReport({ failed: [], byId: compById,
+      checks: [{ status: 'ok', label: 'Git' }, { status: 'fail', label: 'Расширение' },
+        { status: 'skip', label: 'Claude CLI (установлен, запуск не проверен)' }] });
+    assert.strictEqual(rep.ok, false, 'красная проверка — это провал');
+    assert.deepStrictEqual(rep.failed, ['extension'], 'названа панель, а не пустой список');
+    assert(rep.errors.some((e) => e.id === 'extension' && e.stage === 'verify' && /Расширение/.test(e.error)),
+      'причина — «проверка после установки»: ' + JSON.stringify(rep.errors));
+    assert.deepStrictEqual(RS.installReport({ checks: [{ ok: false, label: 'Python-пакеты' }], byId: compById }).failed, ['pydeps']);
+    assert.deepStrictEqual(RS.installReport({ checks: [{ status: 'fail', label: 'Новая проверка' }], byId: compById }).failed,
+      ['verify'], 'незнакомый ярлык — на шаг verify, но не пусто');
+    assert.strictEqual(RS.installReport({ checks: [{ status: 'skip', label: 'Git' }], byId: compById }).ok, true, 'skip — не провал');
+    // Ярлыки, которые реально печатают оба verify-скрипта, все сопоставлены компонентам.
+    [['windows', 'verify.ps1'], ['macos', 'verify.sh']].forEach(([dir, f]) => {
+      // Комментарии вырезаем: в шапке скрипта стоит образец «CHECK ok <ярлык>».
+      const src = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', dir, f), 'utf8'));
+      const labels = new Set();
+      const re = /CHECK (?:ok|fail) ([^"\r\n;]+?)"/g;
+      let mm;
+      while ((mm = re.exec(src)) !== null) labels.add(mm[1].trim());
+      assert(labels.size >= 6, f + ': нашлось слишком мало ярлыков (' + labels.size + ') — разбор теста сломан');
+      labels.forEach((l) => assert(RS.CHECK_LABEL_TO_ID[l], f + ': ярлык «' + l + '» не сопоставлен компоненту'));
+    });
+  });
+
+  ok('итог прогона: красная строка «Запуск claude в PowerShell» (verify.ps1) — это claude; в отчёте и на экране сказано, что делать', () => {
+    const label = 'Запуск claude в PowerShell';
+    // Ярлык verify.ps1 печатает только при доказанной беде: в cmd claude отвечает, а в
+    // PowerShell (терминал VS Code по умолчанию) — нет. Он обязан попасть на компонент
+    // «claude», а не в общую корзину «verify»: иначе отчёт и экран назвали бы безымянную
+    // «проверку», а скрипт-проверка перестала бы проходить сверку ярлыков выше.
+    assert.strictEqual(RS.CHECK_LABEL_TO_ID[label], 'claude', 'ярлык сопоставлен компоненту');
+    assert.deepStrictEqual(RS.failedCheckIds([{ status: 'fail', label }]), ['claude']);
+    assert.deepStrictEqual(RS.failedCheckIds([{ status: 'ok', label }]), [], 'зелёная строка — не провал');
+    assert.deepStrictEqual(RS.failedCheckIds([{ status: 'skip', label }]), [], 'skip — не провал');
+    // «Claude CLI» (через cmd) зелёный, PowerShell красный: ни один шаг не упал, а ok=False.
+    const rep = RS.installReport({ failed: [], byId: compById,
+      checks: [{ status: 'ok', label: 'Git' }, { status: 'ok', label: 'Claude CLI' }, { status: 'fail', label }] });
+    assert.strictEqual(rep.ok, false, 'красная проверка — это провал');
+    assert.deepStrictEqual(rep.failed, ['claude'], 'назван claude, а не пустой список и не verify');
+    assert.deepStrictEqual(rep.hardFailed, [], 'шаги встали: экран скажет «проверка нашла проблемы», а не «не установилось»');
+    const err = rep.errors.find((e) => e.id === 'claude');
+    assert(err && err.stage === 'verify' && err.error.indexOf(label) !== -1, JSON.stringify(rep.errors));
+    assert(/claude\.cmd/.test(err.error) && /Command Prompt/.test(err.error), 'в отчёте — обход: ' + err.error);
+    assert(err.error.length <= 250, 'причина с запасом влезает в 300 символов приёмника: ' + err.error.length);
+    // Пояснение есть только у этого ярлыка; у остальных (и у чужих имён из прототипа) его нет.
+    const why = RS.checkFailWhy(label);
+    assert(why && why.hint && why.short, 'пояснение к красной строке есть');
+    ['Git', 'Node', 'Claude CLI', 'Claude CLI (установлен, запуск не проверен)', 'Конфиг', 'Расширение', 'toString', '__proto__']
+      .forEach((l) => assert.strictEqual(RS.checkFailWhy(l), null, 'у «' + l + '» пояснения нет'));
+    // Совета «разреши скрипты командой» нет: claude.ps1 сам пробует выставить политику, а
+    // красная строка значит «нельзя или не помогло» — повтор той же команды гонял бы по кругу.
+    assert(!/Set-ExecutionPolicy/.test(why.hint + why.short), 'совет про Set-ExecutionPolicy вернулся');
+    // Экран: красная строка с пояснением под ярлыком. Ярлык и пояснение экранируются —
+    // оба приходят не из нашего литерала в вёрстке, а из вывода скрипта и словаря.
+    const H = loadRenderer({});
+    try {
+      H.ctx.HMRunStatus = RS;
+      const red = H.run("checkLiHtml('fail', 'Запуск claude в PowerShell')");
+      assert(/^<li class="fail has-why">/.test(red) && red.indexOf('✕') !== -1, red);
+      assert(/<span class="ns-check-why">[^<]*claude\.cmd[^<]*Command Prompt[^<]*<\/span>/.test(red), 'пояснение под ярлыком: ' + red);
+      const green = H.run("checkLiHtml('ok', 'Запуск claude в PowerShell')");
+      assert(/^<li class="ok">/.test(green) && green.indexOf('ns-check-why') === -1, 'зелёной пояснение не нужно: ' + green);
+      const plain = H.run("checkLiHtml('fail', 'Git')");
+      assert(/^<li class="fail">/.test(plain) && plain.indexOf('ns-check-why') === -1, 'у понятного ярлыка пояснения нет: ' + plain);
+      const evil = H.run("checkLiHtml('fail', '<img src=x onerror=alert(1)>')");
+      assert(evil.indexOf('<img') === -1 && evil.indexOf('&lt;img') !== -1, 'ярлык экранируется: ' + evil);
+      // Помощника нет (старый кэш, сбой загрузки) — финишный экран всё равно рисуется.
+      H.ctx.HMRunStatus = undefined;
+      const bare = H.run("checkLiHtml('fail', 'Запуск claude в PowerShell')");
+      assert(/^<li class="fail">/.test(bare) && bare.indexOf('Запуск claude в PowerShell') !== -1, 'без пояснения, но строка есть: ' + bare);
+    } finally { H.dispose(); }
+    // Вёрстка пояснения лежит в стилях (иначе подсказка слиплась бы с ярлыком в узкой колонке).
+    const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'styles.css'), 'utf8');
+    assert(/\.ns-check-list li\.has-why\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/.test(css) && /\.ns-check-why\s*\{[^}]*display:\s*block/.test(css),
+      'стили has-why / ns-check-why на месте');
+  });
+
+  ok('телеметрия (app.js): финиш шлёт итог installReport — ok, failed, skipped, errors одним источником', () => {
+    const a = codeOnlyJs(APPJS());
+    const fin = cutBlock(a, 'function finishInstall');
+    assert(/window\.HMRunStatus\.installReport\(/.test(fin), 'итог считает run-status.js');
+    assert(/const okAll = report\.ok/.test(fin), 'экран и отчёт берут ok из одного места');
+    assert(/sendInstallTelemetry\(report\)/.test(fin));
+    const tel = cutBlock(a, 'function sendInstallTelemetry');
+    assert(/ok: !!r\.ok/.test(tel) && /failed: \(r\.failed/.test(tel) && /skipped: \(r\.skipped/.test(tel) && /errors: \(r\.errors/.test(tel));
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+    assertOrder(html, '<script src="run-status.js">', '<script src="app.js">', 'run-status.js подключается ДО app.js');
+  });
+
+  // ---- живой прогон renderer: жёлтое, частичное, пропуск кнопкой --------------
+  const buildRun = (doc, mk) => {
+    const add = (parent, tag, id, cls) => {
+      const el = mk(tag);
+      if (id) el.id = id;
+      if (cls) { el.className = cls; cls.split(' ').forEach((c) => el.classList.add(c)); }
+      parent.appendChild(el);
+      return el;
+    };
+    const vp = add(doc.body, 'section', 'view-progress');
+    add(vp, 'ul', 'step-list');
+    add(vp, 'div', 'progress-summary');
+    add(vp, 'div', 'progress-title');
+    add(vp, 'div', 'progress-sub');
+    add(vp, 'button', 'btn-finish');
+    add(vp, 'img', 'mascot-progress', 'mascot');
+    const tips = add(vp, 'div', 'tips');
+    add(tips, 'div', 'tips-text');
+    add(doc.body, 'section', 'view-select');
+  };
+  const runScenario = async (results) => {
+    const sent = [];
+    let logCb = null;
+    const H = loadRenderer({ build: buildRun, installer: {
+      onLog: (cb) => { logCb = cb; return () => { logCb = null; }; },
+      onRemoteProgress: () => () => {},
+      sendTelemetry: (p) => { sent.push(p); return Promise.resolve({ ok: true }); },
+      runComponent: async (id) => {
+        if (id === 'verify' && logCb) (results.__checks || []).forEach((l) => logCb({ line: l }));
+        return Object.assign({ id }, results[id] || { ok: true, code: 0 });
+      },
+    } });
+    H.ctx.HMRunStatus = RS;
+    H.ctx.__byId = JSON.parse(JSON.stringify(compById));
+    H.run('STATE.byId = __byId; STATE.checks = []; STATE.telemetryConsent = true; STATE.installStartedAt = Date.now();' +
+      'renderNextSteps = function () { globalThis.__ns = Array.prototype.slice.call(arguments); };' +
+      // Стенд не разбирает innerHTML в узлы, поэтому подпись шага ловим на входе в setStepLabel.
+      'globalThis.__labels = {}; var __origSetStepLabel = setStepLabel;' +
+      'setStepLabel = function (id, text) { __labels[id] = text; return __origSetStepLabel(id, text); };');
+    const ids = Object.keys(results).filter((k) => k !== '__checks');
+    H.ctx.__ids = ids;
+    H.run('buildSteps(__ids)');
+    try {
+      const res = await H.run('runComponents(__ids, { HM_SELECTED: __ids.join(",") })');
+      H.ctx.__res = res;
+      H.run('finishInstall(__res)');
+      const cls = {};
+      const lbl = {};
+      ids.forEach((id) => {
+        const li = H.document.querySelector('.step[data-id="' + id + '"]');
+        cls[id] = li ? li.className : null;
+        lbl[id] = H.ctx.__labels[id] || '';
+      });
+      return { res, cls, lbl, sent, ns: H.ctx.__ns, title: H.document.getElementById('progress-title').textContent,
+        sub: H.document.getElementById('progress-sub').textContent };
+    } finally { H.dispose(); }
+  };
+
+  trackAsync(okAsync('прогон (app.js): необязательный провал — жёлтый, код 121 — «частично», пропуск кнопкой — серый; финиш «Готово!» и ok=True', async () => {
+    const r = await runScenario({
+      git: { ok: true, code: 0 },
+      cursor: { ok: false, code: 1, error: 'код 1 · Cursor.exe не найден', phase: 'Ставлю Cursor' },
+      // Ровно та форма, которую main.js отдаёт на код 121 (install-receipts: isPartialExit/partialReason).
+      vscode: { ok: true, code: 121, skipped: false, partial: true, partialReason: 'панель Codex не установилась' },
+      handy: { ok: true, code: 1, skipped: true, userSkipped: true, skipReason: 'пропущен по кнопке «Пропустить шаг»' },
+      verify: { ok: true, code: 0 },
+      __checks: ['CHECK ok Git', 'CHECK ok Расширение'],
+    });
+    assert.strictEqual(r.cls.git, 'step done');
+    assert.strictEqual(r.cls.cursor, 'step warn', 'необязательный провал — жёлтый, не красный');
+    assert.strictEqual(r.cls.vscode, 'step partial', 'код 121 — «частично»');
+    assert.strictEqual(r.cls.handy, 'step skipped', 'пропуск кнопкой — как осознанный пропуск');
+    // Массивы из vm-контекста сравниваем через JSON: у них чужой прототип Array.
+    assert.strictEqual(JSON.stringify(r.res.failed), '[]', 'обязательных провалов нет');
+    assert.strictEqual(JSON.stringify(r.res.softFailed), '["cursor"]');
+    assert.strictEqual(JSON.stringify(r.res.partial), '["vscode"]');
+    assert.strictEqual(r.title, 'Готово!', 'финиш не рапортует провал из-за необязательного: ' + r.title);
+    assert(/необязательн/.test(r.sub), 'подзаголовок честно говорит про оговорки: ' + r.sub);
+    assert.strictEqual(r.sent.length, 1, 'один отчёт');
+    const t = r.sent[0];
+    assert.strictEqual(t.ok, true, 'ok=True при необязательном провале и частичном успехе');
+    assert.strictEqual(JSON.stringify(t.failed), '[]');
+    assert(t.skipped.includes('cursor') && t.skipped.includes('handy'), 'не встало, но не провал: ' + t.skipped);
+    assert(t.errors.some((e) => e.id === 'vscode' && e.stage === 'partial'), 'частичный успех — в причинах');
+    assert(Array.isArray(r.ns) && r.ns[6] && r.ns[6].includes('cursor') && r.ns[7].includes('vscode'),
+      'финишный экран получает необязательное и частичное');
+    assert(/работает, но: панель Codex не установилась/.test(r.lbl.vscode), 'подпись шага — причина от main: ' + r.lbl.vscode);
+    // main не нашёл строку «ЧАСТИЧНО:» (пустой partialReason) — шаг всё равно жёлтый
+    // и подписан общей фразой, а не обрывком «работает, но: ».
+    const r2 = await runScenario({
+      vscode: { ok: true, code: 121, skipped: false, partial: true, partialReason: '' },
+      verify: { ok: true, code: 0 },
+    });
+    assert.strictEqual(r2.cls.vscode, 'step partial');
+    assert(/работает, но: необязательн/.test(r2.lbl.vscode), 'пустая причина — общая фраза: ' + r2.lbl.vscode);
+    assert.strictEqual(r2.sent[0].ok, true);
+    assert(r2.sent[0].errors.some((e) => e.id === 'vscode' && /^ЧАСТИЧНО: необязательн/.test(e.error)), 'и в отчёте тоже');
+  }));
+
+  trackAsync(okAsync('прогон (app.js): не подготовилась защищённая папка загрузки (stage env) — без «нужны права администратора», с тем, что делать', async () => {
+    // Установщик и так запущен от администратора; папку задерживают антивирус или
+    // занятый диск. Старая подпись «Нужны права администратора» отправляла человека
+    // перезапускать то, что уже под админом.
+    const r = await runScenario({
+      node: { ok: false, code: -1, stage: 'env',
+        error: 'не удалось подготовить защищённый каталог для загрузки (таймаут примитива (20 с))' },
+      verify: { ok: true, code: 0 },
+    });
+    assert.strictEqual(r.cls.node, 'step error-net', 'среда, а не поломка — оранжевый шаг с «Повторить»');
+    assert(!/прав/i.test(r.lbl.node), 'про права ни слова: ' + r.lbl.node);
+    assert(/защищённая папка/.test(r.lbl.node) && /антивирус/.test(r.lbl.node), 'что случилось: ' + r.lbl.node);
+    assert(/«Повторить»/.test(r.lbl.node) && /«Скопировать отчёт для поддержки»/.test(r.lbl.node),
+      'что делать — повтор, а если повторится — отчёт: ' + r.lbl.node);
+    // Зависимые шаги называют ту же причину, а не «не хватило прав администратора».
+    const sb = {};
+    vm.runInNewContext(cutBlock(APPJS(), 'const DEP_WHY_TEXT =') + ';\nthis.T = DEP_WHY_TEXT;', sb);
+    assert(!/прав/i.test(sb.T.env) && /защищённая папка/.test(sb.T.env), 'причина у зависимых: ' + sb.T.env);
+  }));
+
+  trackAsync(okAsync('прогон (app.js): ОБЯЗАТЕЛЬНЫЙ провал и красная проверка — ok=False с названным компонентом (отрицательный контроль)', async () => {
+    const r = await runScenario({
+      node: { ok: false, code: 1, error: 'код 1 · msiexec', phase: 'Ставлю Node' },
+      verify: { ok: true, code: 0 },
+      __checks: ['CHECK fail Node'],
+    });
+    assert(/^step error/.test(r.cls.node), 'обязательный провал остаётся красным: ' + r.cls.node);
+    assert.notStrictEqual(r.title, 'Готово!');
+    assert.strictEqual(r.sent[0].ok, false);
+    assert(r.sent[0].failed.includes('node'), 'упавший компонент назван: ' + r.sent[0].failed);
+    const r2 = await runScenario({ git: { ok: true, code: 0 }, verify: { ok: true, code: 0 }, __checks: ['CHECK fail Конфиг'] });
+    assert.strictEqual(r2.sent[0].ok, false, 'проверка нашла проблему — ok=False');
+    assert.strictEqual(JSON.stringify(r2.sent[0].failed), '["config"]', 'ok=False без упавших шагов всё равно называет компонент');
+  }));
+
+  trackAsync(okAsync('прогон (app.js): красная «Запуск claude в PowerShell» при зелёном шаге claude — ok=False с названным claude и обходом в отчёте, заголовок без «не установилось»', async () => {
+    // Ровно то, что печатает verify.ps1 при вердикте claude-ps = blocked|broken: через cmd
+    // claude отвечает («Claude CLI» зелёный), через PowerShell — нет.
+    const r = await runScenario({
+      claude: { ok: true, code: 0 },
+      verify: { ok: true, code: 0 },
+      __checks: ['CHECK ok Claude CLI', 'CHECK fail Запуск claude в PowerShell'],
+    });
+    assert.strictEqual(r.cls.claude, 'step done', 'сам шаг встал: Claude Code установлен');
+    assert.strictEqual(r.sent[0].ok, false, 'проверка нашла проблему — ok=False');
+    assert.strictEqual(JSON.stringify(r.sent[0].failed), '["claude"]', 'назван claude, а не пустой список');
+    const e = r.sent[0].errors.find((x) => x.id === 'claude');
+    assert(e && e.stage === 'verify' && /Запуск claude в PowerShell/.test(e.error) && /claude\.cmd/.test(e.error),
+      'в отчёте — что красное и чем обойти: ' + JSON.stringify(r.sent[0].errors));
+    assert.strictEqual(r.title, 'Установка завершена, но проверка нашла проблемы',
+      'шаги встали, поэтому «Готово!» нельзя, а «часть не установилась» — неправда: ' + r.title);
+    assert.notStrictEqual(r.title, 'Готово!');
+  }));
+
+  trackAsync(okAsync('прогон (app.js): длинная причина «ЧАСТИЧНО» — в подписи шага и в отчёте остаётся НАЧАЛО текста, обрыв виден многоточием, пределы целы', async () => {
+    // A1 печатает недостающее ПЕРВЫМ и укладывается в 240 символов; main режет причину до
+    // 300, экран — до 240, подпись шага — до 59. Все три обрезки идут с конца: если бы
+    // какая-то брала хвост, человек увидел бы «…подробности подробности» вместо сути.
+    const head = 'панель Claude Code не встала';
+    const long = (head + ' — ' + 'подробности '.repeat(60)).slice(0, 300);   // как отдаёт main
+    const r = await runScenario({
+      vscode: { ok: true, code: 121, skipped: false, partial: true, partialReason: long },
+      verify: { ok: true, code: 0 },
+    });
+    assert.strictEqual(r.cls.vscode, 'step partial');
+    const prefix = compById.vscode.name + ' — работает, но: ';
+    assert.strictEqual(r.lbl.vscode.indexOf(prefix + head), 0, 'подпись шага начинается с сути: ' + r.lbl.vscode);
+    assert(/…$/.test(r.lbl.vscode), 'обрыв подписи виден: ' + r.lbl.vscode);
+    assert(r.lbl.vscode.length <= prefix.length + 60, 'подпись не длиннее 59 символов причины и «…»: ' + r.lbl.vscode.length);
+    const pe = r.sent[0].errors.find((x) => x.id === 'vscode' && x.stage === 'partial');
+    assert(pe && pe.error.indexOf('ЧАСТИЧНО: ' + head) === 0, 'в отчёте тоже начало: ' + (pe && pe.error));
+    assert(/…$/.test(pe.error) && pe.error.length <= 'ЧАСТИЧНО: '.length + 240, 'в отчёте не больше 240 + префикс, обрыв виден: ' + pe.error.length);
+    assert.strictEqual(r.sent[0].ok, true, 'частичный успех по-прежнему не роняет ok');
+    // Короткая причина (норма после правки A1) доезжает целиком, без многоточия.
+    const r2 = await runScenario({
+      vscode: { ok: true, code: 121, skipped: false, partial: true, partialReason: head + ' (нет сети)' },
+      verify: { ok: true, code: 0 },
+    });
+    assert.strictEqual(r2.lbl.vscode, prefix + head + ' (нет сети)', 'короткое — без изменений: ' + r2.lbl.vscode);
+    assert(r2.sent[0].errors.some((x) => x.stage === 'partial' && x.error === 'ЧАСТИЧНО: ' + head + ' (нет сети)'));
+  }));
+
+  ok('сторож (app.js): «Пропустить шаг» появляется по сигналу main, зовёт skipStep с id шага и исчезает, когда шаг ожил', () => {
+    const calls = [];
+    const H = loadRenderer({ build: buildRun, installer: {
+      skipStep: (id) => { calls.push(id); return new Promise(() => {}); },
+    } });
+    try {
+      H.ctx.__byId = JSON.parse(JSON.stringify(compById));
+      H.run('STATE.byId = __byId; buildSteps(["cursor", "git"]);');
+      const li = H.document.querySelector('.step[data-id="cursor"]');
+      assert(li, 'шаг cursor отрисован');
+      H.run('onStepStall({ id: "cursor", state: "stalled", mins: 8 })');
+      const btn = li.querySelector('.step-skip');
+      assert(btn && btn.textContent === 'Пропустить шаг', 'кнопка появилась у молчащего шага');
+      H.run('onStepStall({ id: "cursor", state: "stalled", mins: 9 })');
+      assert.strictEqual(li.querySelectorAll('.step-skip').length, 1, 'повторный сигнал не плодит кнопки');
+      btn.click();
+      assert.deepStrictEqual(calls, ['cursor'], 'просьба ушла в main с id шага');
+      assert(btn.disabled, 'кнопка блокируется до ответа');
+      H.run('onStepStall({ id: "cursor", state: "alive" })');
+      assert.strictEqual(li.querySelector('.step-skip'), null, 'шаг ожил — кнопка убрана');
+      // Сигнал по чужому шагу кнопку у этого не рисует.
+      H.run('onStepStall({ id: "git", state: "stalled", mins: 8 })');
+      assert.strictEqual(li.querySelector('.step-skip'), null);
+    } finally { H.dispose(); }
+    const a = APPJS();
+    assert(/window\.installer\.onStepStall\(onStepStall\)/.test(a), 'сигнал main подключён в init');
+    assert(/removeStepSkip\(id\);/.test(cutBlock(a, 'async function runComponents')), 'по завершении шага кнопка снимается');
+    const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+    assert(/skipStep: \(id\) => ipcRenderer\.invoke\('skip-step', \{ id \}\)/.test(pre));
+    assert(/ipcRenderer\.on\('step-stall', handler\)/.test(pre));
+  });
+
+  // ---- отчёт для поддержки ---------------------------------------------------
+  ok('отчёт для поддержки: шаг, ошибка, ОС, издание, версия, uid и 60 строк журнала — без путей профиля и секретов', () => {
+    const scrub = (s) => UIDT.scrubText(s, { home: 'C:\\Users\\Мария Соколова', user: 'masha', host: 'STENDBOX-K7QW1Z' });
+    const lines = [];
+    for (let i = 0; i < 100; i++) lines.push('[2026-10-06T00:00:00Z] [vscode] строка ' + i);
+    lines.push('[t] [config] C:\\Users\\Мария Соколова\\.claude\\settings.json не прочитан');
+    lines.push('[t] [x] ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnopqrstuv');
+    lines.push('[t] [x] Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123');
+    lines.push('[t] [x] прокси https://ivan:pa55word@proxy.corp:3128 и почта masha@yandex.ru');
+    lines.push('[t] [x] ключ кабинета nmd_0123456789abcdef и OPENAI sk-proj-AbCdEfGhIjKlMnOpQrStUvWx на STENDBOX-K7QW1Z');
+    const text = SR.buildSupportReport({
+      meta: { version: '0.1.0', edition: 'lite', platform: 'win32', osRelease: '10.0.26200', arch: 'x64', uid: '272540053', outcome: 'не встало: VS Code' },
+      steps: [{ id: 'vscode', name: 'VS Code — редактор', stage: 'fail', error: 'код 1 · этап: Ставлю расширение' }],
+      logTail: lines, net: 'связь есть — Claude Code сможет подключиться', scrub,
+    });
+    assert(/Установщик: 0\.1\.0 · издание: лёгкое/.test(text), 'версия и издание');
+    assert(/Система: Windows 10\.0\.26200 \(x64\)/.test(text), 'ОС');
+    assert(/uid: 272540053/.test(text), 'uid');
+    assert(/шаг «VS Code — редактор» \(vscode, fail\): код 1 · этап: Ставлю расширение/.test(text), 'шаг и ошибка');
+    assert(/Связь с Anthropic из консоли: связь есть/.test(text), 'итог проверки связи');
+    assert(/--- последние 60 строк журнала установки ---/.test(text), 'ровно 60 строк журнала');
+    assert(!/строка 44\b/.test(text) && /строка 45\b/.test(text) && /строка 99\b/.test(text), 'берутся ПОСЛЕДНИЕ строки');
+    ['Мария', 'Соколова', 'sk-ant-api03', 'abcdefghijklmnopqrstuvwxyz0123', 'pa55word', 'masha@yandex.ru',
+      'nmd_0123456789abcdef', 'sk-proj-AbCd', 'STENDBOX-K7QW1Z'].forEach((bad) =>
+      assert(!text.includes(bad), 'утекло в отчёт: ' + bad));
+    assert(/<secret>/.test(text) && /~\\\.claude\\settings\.json/.test(text), 'секреты заменены, путь сохранил смысл');
+    // «~\.claude\settings.json» — путь, а не «домен\учётка»: раньше чистка ПД резала его
+    // в «~\.<account>», и в отчёте пропадало, какой именно файл не прочитался.
+    const so = { home: 'C:\\Users\\x', user: 'x' };
+    assert.strictEqual(UIDT.scrubText('~\\.claude\\settings.json не прочитан', so), '~\\.claude\\settings.json не прочитан');
+    assert.strictEqual(UIDT.scrubText('ACE CORP.LOCAL\\petrov', so), 'ACE <account>', 'домен по-прежнему вычищается');
+    assert.strictEqual(UIDT.scrubText('ACE CORP\\petrov.ivan', so), 'ACE <account>');
+    const t2 = SR.buildSupportReport({ meta: { platform: 'darwin', edition: 'offline' }, steps: [], logTail: [] });
+    assert(/uid: нет/.test(t2) && /ничего/.test(t2) && /macOS/.test(t2), 'без uid и без провалов — честно сказано');
+    // Поля от renderer недоверенные: id чистится, длина режется.
+    const t3 = SR.buildSupportReport({ meta: {}, steps: [{ id: '../x;rm', name: 'x'.repeat(500), error: 'y'.repeat(2000) }], logTail: [] });
+    assert(/\(---x-rm\)/.test(t3) && !/x{81}/.test(t3) && !/y{401}/.test(t3), 'id и длины санитизированы');
+  });
+
+  ok('отчёт для поддержки: хвост журнала читается с КОНЦА файла, обрезанная первая строка выброшена, нет файла — без исключения', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-sr-'));
+    try {
+      const f = path.join(dir, 'install.log');
+      const big = [];
+      for (let i = 0; i < 20000; i++) big.push('строка номер ' + i + ' ' + 'x'.repeat(40));
+      fs.writeFileSync(f, big.join('\n') + '\n');
+      const r = SR.readLogTail(f, 60, 64 * 1024);
+      assert(r.ok && r.lines.length === 60, 'шестьдесят строк: ' + r.lines.length);
+      assert(r.lines[59].startsWith('строка номер 19999 '), 'последняя строка — последняя в файле');
+      assert(r.lines[0].startsWith('строка номер 19940 '), 'первая из шестидесяти — 19940-я');
+      fs.writeFileSync(f, 'Z'.repeat(2000) + '\ntail1\ntail2\n');
+      assert.deepStrictEqual(SR.readLogTail(f, 60, 1024).lines, ['tail1', 'tail2'], 'обрубок первой строки не показан');
+      fs.writeFileSync(f, 'a\r\nb\n\nc');
+      assert.deepStrictEqual(SR.readLogTail(f, 60).lines, ['a', 'b', 'c'], 'маленький файл целиком, пустые строки убраны');
+      const miss = SR.readLogTail(path.join(dir, 'нет.log'));
+      assert(miss.ok === false && miss.lines.length === 0, 'нет файла — пустой хвост и ok:false');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  trackAsync(okAsync('кнопка «Скопировать отчёт для поддержки»: в main уходят шаги из итога прогона, текст показывается человеку', async () => {
+    const payloads = [];
+    const H = loadRenderer({ build: (doc, mk) => { const st = mk('div'); st.id = 'ns-report-status'; doc.body.appendChild(st); },
+      installer: { supportReport: async (p) => { payloads.push(p); return { ok: true, text: 'Отчёт Hamidun Setup <тест>' }; } } });
+    try {
+      H.ctx.__byId = JSON.parse(JSON.stringify(compById));
+      H.run('STATE.byId = __byId; STATE.lastReport = { ok: false, failed: ["vscode"], skipped: ["cursor"], ' +
+        'errors: [{ id: "vscode", stage: "fail", error: "код 1" }, { id: "cursor", stage: "fail", error: "(необязательный) код 1" }] };');
+      await H.run('copySupportReport()');
+      assert.strictEqual(payloads.length, 1);
+      assert(/не встало: VS Code/.test(payloads[0].outcome), 'итог словами: ' + payloads[0].outcome);
+      assert.strictEqual(JSON.stringify(payloads[0].steps.map((s) => s.id)), '["vscode","cursor"]', 'шаги — из итога прогона');
+      assert(/VS Code/.test(payloads[0].steps[0].name), 'с человеческим именем');
+      assert(/скопирован/.test(H.document.getElementById('ns-report-status').textContent), 'человеку сказано, что дальше');
+      const modal = H.document.getElementById('report-preview');
+      assert(modal && /&lt;тест&gt;/.test(modal.innerHTML), 'текст отчёта показан и экранирован');
+    } finally { H.dispose(); }
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('support-report'"), m.indexOf("ipcMain.handle('support-report'") + 1400);
+    assert(/supportReport\.readLogTail\(LOG_PATH/.test(h), 'журнал читает MAIN по своему пути, не по пути от renderer');
+    assert(/scrub: \(s\) => scrubText\(s\)/.test(h) && /uid: INSTALL_UID/.test(h) && /clipboard\.writeText\(text\)/.test(h));
+  }));
+
+  // ---- связь с Anthropic -------------------------------------------------------
+  ok('связь с Anthropic: любой HTTP-ответ кроме 403/451 — «связь есть»; TLS, таймаут, сброс, DNS, прокси — различаются', () => {
+    const C = NC.classifyProbe;
+    [200, 401, 404, 405, 429, 500, 503].forEach((s) => assert.strictEqual(C({ status: s }), 'reachable', 'HTTP ' + s));
+    assert.strictEqual(C({ status: 403 }), 'geo');
+    assert.strictEqual(C({ status: 451 }), 'geo');
+    ['SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID',
+      'EPROTO', 'DEPTH_ZERO_SELF_SIGNED_CERT'].forEach((c) => assert.strictEqual(C({ code: c }), 'tls', c));
+    assert.strictEqual(C({ timedOut: true, code: 'ETIMEDOUT' }), 'timeout');
+    assert.strictEqual(C({ code: 'ENOTFOUND' }), 'dns');
+    assert.strictEqual(C({ code: 'EAI_AGAIN' }), 'dns');
+    assert.strictEqual(C({ code: 'ECONNRESET' }), 'reset');
+    assert.strictEqual(C({ code: 'ECONNREFUSED' }), 'reset');
+    assert.strictEqual(C({ code: 'ENETUNREACH' }), 'offline');
+    assert.strictEqual(C({ proxyDown: true, code: 'ECONNREFUSED' }), 'proxy-down', 'молчит ПРОКСИ ≠ молчит Anthropic');
+    assert.strictEqual(C({ proxyRefused: true, code: 'EPROXY' }), 'proxy-refused');
+    assert.strictEqual(C({}), 'unknown');
+    assert.strictEqual(C(null), 'unknown');
+    ['reachable', 'geo', 'tls', 'timeout', 'dns', 'reset', 'offline', 'proxy-down', 'proxy-refused', 'unknown']
+      .forEach((k) => assert(NC.describeKind(k).length > 10, 'нет человеческой фразы для ' + k));
+    assert.strictEqual(NC.parseStatusLine('HTTP/1.1 404 Not Found\r\n'), 404);
+    assert.strictEqual(NC.parseStatusLine('HTTP/2 200 \r\n'), 200);
+    assert.strictEqual(NC.parseStatusLine('HTTP/1.1 40'), null, 'строка ещё не пришла целиком');
+    assert(Number.isNaN(NC.parseStatusLine('SSH-2.0-OpenSSH\r\n')), 'не HTTP — не «связь есть»');
+  });
+
+  ok('системный прокси Windows: локальный http-прокси узнаётся во всех форматах ProxyServer; SOCKS, выключенный и чужой — не предлагаются', () => {
+    const P = NC.parseWinProxy;
+    const a = P('1', '127.0.0.1:10809');
+    assert(a.enabled && a.local && a.url === 'http://127.0.0.1:10809' && a.port === 10809, JSON.stringify(a));
+    const b = P('0x1', 'http=127.0.0.1:10809;https=127.0.0.1:10808;socks=127.0.0.1:10800');
+    assert.strictEqual(b.url, 'http://127.0.0.1:10808', 'по протоколам — берём https=');
+    assert.strictEqual(P('1', 'http=localhost:7890;ftp=x:1').url, 'http://localhost:7890');
+    assert.strictEqual(P('1', 'http://127.0.0.1:2080').url, 'http://127.0.0.1:2080');
+    const v6 = P('1', '[::1]:8080');
+    assert(v6.local && v6.url === 'http://[::1]:8080' && v6.host === '::1', JSON.stringify(v6));
+    assert.deepStrictEqual(P('1', 'socks=127.0.0.1:10808'), { enabled: true, socksOnly: true, reason: 'socks' },
+      'только SOCKS — Claude Code через HTTPS_PROXY его не возьмёт');
+    assert.strictEqual(P('1', 'socks5://127.0.0.1:1080').socksOnly, true);
+    assert.strictEqual(P('0', '127.0.0.1:10809').enabled, false, 'прокси выключен — не трогаем');
+    assert.strictEqual(P('', '').enabled, false);
+    const corp = P('1', 'proxy.corp.local:3128');
+    assert(corp.enabled && corp.local === false, 'корпоративный (не локальный) прокси не считается VPN-клиентом');
+    assert.strictEqual(P('1', 'мусор').reason, 'unparsed');
+    assert.strictEqual(P('1', '127.0.0.1:99999').reason, 'unparsed', 'порт вне диапазона');
+  });
+
+  ok('прокси в ~/.claude/settings.json: пишутся ТОЛЬКО ключи env прокси, остальное цело; битый JSON не трогаем', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-px-'));
+    try {
+      const dir = path.join(home, '.claude');
+      fs.mkdirSync(dir);
+      const f = path.join(dir, 'settings.json');
+      const orig = { model: 'opus', language: 'ru', permissions: { allow: ['Bash(*)'] },
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node x.js' }] }] },
+        env: { PYTHONUTF8: '1', MCP_TIMEOUT: '120000', NO_PROXY: 'corp.local' } };
+      fs.writeFileSync(f, '\uFEFF' + JSON.stringify(orig, null, 2));
+      const r = NC.writeProxyEnv('http://127.0.0.1:10809', { home });
+      assert(r.ok, JSON.stringify(r));
+      const got = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const noEnv = (o) => { const c = JSON.parse(JSON.stringify(o)); delete c.env; return c; };
+      assert.deepStrictEqual(noEnv(got), noEnv(orig), 'вне env ничего не изменилось');
+      assert.strictEqual(got.env.PYTHONUTF8, '1');
+      assert.strictEqual(got.env.MCP_TIMEOUT, '120000');
+      assert.strictEqual(got.env.HTTPS_PROXY, 'http://127.0.0.1:10809');
+      assert.strictEqual(got.env.HTTP_PROXY, 'http://127.0.0.1:10809');
+      assert.strictEqual(got.env.NO_PROXY, 'corp.local,localhost,127.0.0.1,::1', 'чужой NO_PROXY дополнен, не затёрт');
+      assert.deepStrictEqual(Object.keys(got.env).filter((k) => !(k in orig.env)).sort(), ['HTTPS_PROXY', 'HTTP_PROXY'],
+        'добавлены ровно ключи прокси');
+      assert(r.backup && fs.readFileSync(r.backup, 'utf8').includes('"PYTHONUTF8"'), 'рядом копия прежнего файла');
+      assert(NC.writeProxyEnv('http://127.0.0.1:10809', { home }).ok, 'повторная запись');
+      assert.strictEqual(JSON.parse(fs.readFileSync(f, 'utf8')).env.NO_PROXY, 'corp.local,localhost,127.0.0.1,::1',
+        'повтор не плодит дубли в NO_PROXY');
+      assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => /\.tmp$/.test(n)), [], 'временных файлов не осталось');
+      // Битый JSON — отказ, файл не тронут (иначе затёрли бы все настройки человека).
+      fs.writeFileSync(f, '{ "model": "opus", ');
+      const r3 = NC.writeProxyEnv('http://127.0.0.1:10809', { home });
+      assert.strictEqual(r3.ok, false);
+      assert.strictEqual(r3.reason, 'invalid-json');
+      assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ "model": "opus", ', 'битый файл не тронут');
+      fs.writeFileSync(f, JSON.stringify({ env: ['x'] }));
+      assert.strictEqual(NC.writeProxyEnv('http://127.0.0.1:1', { home }).reason, 'env-not-object');
+      assert.strictEqual(NC.mergeProxyEnv({}, 'socks5://127.0.0.1:1').reason, 'bad-url');
+      assert.strictEqual(NC.mergeProxyEnv({}, 'http://127.0.0.1:1/path').ok, false);
+      assert.strictEqual(NC.mergeProxyEnv([], 'http://127.0.0.1:1').reason, 'not-object');
+      // Файла нет — создаётся с одним блоком env.
+      fs.rmSync(f);
+      const r4 = NC.writeProxyEnv('http://127.0.0.1:7890', { home });
+      assert(r4.ok && r4.backup === '', JSON.stringify(r4));
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(f, 'utf8')),
+        { env: { HTTPS_PROXY: 'http://127.0.0.1:7890', HTTP_PROXY: 'http://127.0.0.1:7890', NO_PROXY: 'localhost,127.0.0.1,::1' } });
+      assert.strictEqual(NC.readProxyEnv(home).httpsProxy, 'http://127.0.0.1:7890', 'прописанный прокси виден проверке связи');
+      // Ссылку не трогаем (если ОС даёт создать ссылку без прав администратора).
+      let linked = false;
+      try {
+        fs.rmSync(f);
+        fs.writeFileSync(path.join(dir, 'real.json'), '{}');
+        fs.symlinkSync(path.join(dir, 'real.json'), f, 'file');
+        linked = true;
+      } catch (e) { /* нет права на ссылки — эта часть проверки здесь не выполняется */ }
+      if (linked) {
+        assert.strictEqual(NC.writeProxyEnv('http://127.0.0.1:1', { home }).reason, 'not-regular-file');
+        assert.strictEqual(fs.readFileSync(path.join(dir, 'real.json'), 'utf8'), '{}', 'цель ссылки не изменилась');
+      }
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  // Пробы связи ниже держатся на таймерах. Стартуют они ПОСЛЕ синхронной части файла:
+  // пока она идёт (минуты PowerShell-тестов, в том числе дописанных другими ветками ниже
+  // этого блока), цикл событий стоит, а по его возвращении первым срабатывает уже
+  // просроченный таймер, а не готовый ответ фейкового сокета — тест краснел бы от
+  // нагрузки, а не от кода. Таймауты там, где ответ должен прийти, — с запасом по той же причине.
+  const afterSyncPart = (fn) => new Promise((res) => setImmediate(res)).then(fn);
+  const NET_OK_TIMEOUT_MS = 30000;
+
+  // Фейковый TLS-сокет: проба идёт по сценарию без сети.
+  const fakeTls = (script) => (opts) => {
+    const s = new EventEmitter();
+    s.opts = opts;
+    s.setEncoding = () => {};
+    s.write = () => { if (script.onWrite) setImmediate(() => script.onWrite(s)); };
+    s.destroy = () => { s.destroyed = true; try { if (opts.socket) opts.socket.destroy(); } catch (e) { /* ignore */ } };
+    setImmediate(() => script.onConnect(s));
+    return s;
+  };
+
+  trackAsync(afterSyncPart(() => okAsync('проба связи (без сети): 404 — «связь есть», 403 — «гео», сброс и молчание различаются; SNI и проверка сертификата на месте', async () => {
+    const reply = (text) => fakeTls({ onConnect: (s) => s.emit('secureConnect'), onWrite: (s) => s.emit('data', text) });
+    const r404 = await NC.probeDirect({ timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: reply('HTTP/1.1 404 Not Found\r\ncontent-type: x\r\n\r\n') });
+    assert.strictEqual(NC.classifyProbe(r404), 'reachable', JSON.stringify(r404));
+    const r403 = await NC.probeDirect({ timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: reply('HTTP/1.1 403 Forbidden\r\n') });
+    assert.strictEqual(NC.classifyProbe(r403), 'geo', JSON.stringify(r403));
+    const rReset = await NC.probeDirect({ timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: fakeTls({ onConnect: (s) => {
+      const e = new Error('socket hang up'); e.code = 'ECONNRESET'; s.emit('error', e);
+    } }) });
+    assert.strictEqual(NC.classifyProbe(rReset), 'reset', JSON.stringify(rReset));
+    const rTls = await NC.probeDirect({ timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: fakeTls({ onConnect: (s) => {
+      const e = new Error('self-signed certificate in certificate chain'); e.code = 'SELF_SIGNED_CERT_IN_CHAIN'; s.emit('error', e);
+    } }) });
+    assert.strictEqual(NC.classifyProbe(rTls), 'tls', 'перехват TLS назван своим именем');
+    const t0 = Date.now();
+    const rSilent = await NC.probeDirect({ timeoutMs: 600, tlsConnect: fakeTls({ onConnect: () => {} }) });
+    assert.strictEqual(NC.classifyProbe(rSilent), 'timeout', JSON.stringify(rSilent));
+    assert(Date.now() - t0 < NET_OK_TIMEOUT_MS, 'таймаут соблюдён, а не вечное ожидание');
+    let seen = null;
+    await NC.probeDirect({ timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: fakeTls({ onConnect: (s) => { seen = s.opts; s.emit('secureConnect'); },
+      onWrite: (s) => s.emit('data', 'HTTP/1.1 200 OK\r\n') }) });
+    assert.strictEqual(seen.host, 'api.anthropic.com');
+    assert.strictEqual(seen.port, 443);
+    assert.strictEqual(seen.servername, 'api.anthropic.com', 'SNI — api.anthropic.com');
+    assert.notStrictEqual(seen.rejectUnauthorized, false, 'сертификат проверяется (перехват не выдаётся за связь)');
+  })));
+
+  trackAsync(afterSyncPart(() => okAsync('проба через прокси: CONNECT к живому прокси → TLS поверх туннеля; отказ прокси и мёртвый порт — разные причины', async () => {
+    let mode = 'ok';
+    let connectPath = '';
+    const serverSockets = [];
+    const srv = http.createServer((q, r) => { r.statusCode = 400; r.end(); });
+    srv.on('connect', (req, sock) => {
+      serverSockets.push(sock);
+      connectPath = req.url;
+      if (mode === 'ok') sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      else sock.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    });
+    await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+    const port = srv.address().port;
+    const overTunnel = fakeTls({ onConnect: (s) => {
+      assert(s.opts.socket, 'TLS идёт поверх туннеля CONNECT');
+      assert.strictEqual(s.opts.servername, 'api.anthropic.com');
+      s.emit('secureConnect');
+    }, onWrite: (s) => s.emit('data', 'HTTP/1.1 404 Not Found\r\n') });
+    try {
+      const r1 = await NC.probeViaProxy({ host: '127.0.0.1', port }, { timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: overTunnel });
+      assert.strictEqual(NC.classifyProbe(r1), 'reachable', JSON.stringify(r1));
+      assert.strictEqual(connectPath, 'api.anthropic.com:443', 'туннель — к api.anthropic.com:443');
+      mode = 'refuse';
+      const r2 = await NC.probeViaProxy({ host: '127.0.0.1', port }, { timeoutMs: NET_OK_TIMEOUT_MS, tlsConnect: overTunnel });
+      assert.strictEqual(NC.classifyProbe(r2), 'proxy-refused', JSON.stringify(r2));
+    } finally {
+      serverSockets.forEach((s) => { try { s.destroy(); } catch (e) { /* ignore */ } });
+      await new Promise((res) => srv.close(res));
+    }
+    const tmp = http.createServer();
+    await new Promise((res) => tmp.listen(0, '127.0.0.1', res));
+    const dead = tmp.address().port;
+    await new Promise((res) => tmp.close(res));
+    const r3 = await NC.probeViaProxy({ host: '127.0.0.1', port: dead }, { timeoutMs: NET_OK_TIMEOUT_MS });
+    assert.strictEqual(NC.classifyProbe(r3), 'proxy-down', 'VPN-клиент выключен — «прокси не отвечает»: ' + JSON.stringify(r3));
+  })));
+
+  ok('финиш (app.js): связь есть — зелёным; системный прокси VPN работает — кнопка; иначе шаги TUN; тексты экранируются', () => {
+    const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'ns-net'; doc.body.appendChild(n); } });
+    const box = () => H.document.getElementById('ns-net');
+    const reset = () => { if (!box()) { const n = H.mk('div'); n.id = 'ns-net'; H.document.body.appendChild(n); } };
+    try {
+      H.run("renderNetCheck({ kind: 'reachable' })");
+      assert(box().classList.contains('ok') && /Связь с серверами Claude из консоли есть/.test(box().textContent));
+      reset();
+      H.run("renderNetCheck({ kind: 'geo', detail: 'Anthropic отказал по адресу (ответ 403)', " +
+        "proxy: { enabled: true, local: true, url: 'http://127.0.0.1:10809', works: true, kind: 'reachable' } })");
+      assert(box().classList.contains('warn'));
+      assert(/id="ns-proxy"/.test(box().innerHTML) && /127\.0\.0\.1:10809/.test(box().innerHTML) && /системный прокси/.test(box().innerHTML),
+        'локальный прокси работает — предлагаем прописать');
+      reset();
+      H.run("renderNetCheck({ kind: 'timeout', detail: 'сервер не ответил', proxy: { enabled: false } })");
+      assert(/TUN/.test(box().innerHTML) && !/id="ns-proxy"/.test(box().innerHTML), 'прокси нет — шаги TUN, без кнопки');
+      assert(/Для самой установки VPN не нужен/.test(box().innerHTML));
+      reset();
+      H.run("renderNetCheck({ kind: 'geo', detail: 'x', configured: 'http://127.0.0.1:1', configuredKind: 'reachable' })");
+      assert(box().classList.contains('ok'), 'прокси уже прописан и работает — всё хорошо');
+      reset();
+      H.run("renderNetCheck({ kind: 'geo', detail: '<img src=x onerror=alert(1)>', proxy: { local: true, works: true, url: 'http://127.0.0.1:1<b>' } })");
+      assert(!/<img src=x/.test(box().innerHTML) && !/:1<b>/.test(box().innerHTML), 'данные из main экранируются: ' + box().innerHTML);
+      assert(/&lt;img src=x/.test(box().innerHTML), 'и при этом показаны, а не потеряны');
+      reset();
+      H.run("renderNetCheck({ kind: 'skipped' })");
+      assert.strictEqual(box(), null, 'пробный прогон без сети — блока нет');
+    } finally { H.dispose(); }
+  });
+
+  trackAsync(okAsync('финиш (app.js): прокси пишется ТОЛЬКО после согласия; адрес main берёт сам, renderer его не передаёт', async () => {
+    const calls = [];
+    const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'ns-net'; doc.body.appendChild(n); },
+      installer: { applyProxy: async (...args) => { calls.push(args); return { ok: true, url: 'http://127.0.0.1:10809', path: 'C:\\x\\settings.json', backup: 'C:\\x\\settings.json.hamidun-bak-1' }; } } });
+    try {
+      H.ctx.confirm = () => false;
+      await H.run("applyProxyClick('http://127.0.0.1:10809')");
+      assert.strictEqual(calls.length, 0, 'без согласия ничего не пишется');
+      let asked = '';
+      H.ctx.confirm = (t) => { asked = t; return true; };
+      await H.run("applyProxyClick('http://127.0.0.1:10809')");
+      assert.strictEqual(calls.length, 1);
+      assert.deepStrictEqual(calls[0], [], 'renderer НЕ передаёт адрес — main перечитывает его сам');
+      assert(/ВКЛЮЧЁННОМ VPN-клиенте/.test(asked) && /копия/.test(asked), 'в согласии сказано про риск и копию');
+      assert(/прописан/.test(H.document.getElementById('ns-net').textContent));
+    } finally { H.dispose(); }
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('apply-proxy'"), m.indexOf("ipcMain.handle('apply-proxy'") + 1400);
+    assertOrder(h, 'readWinSystemProxy()', 'netCheck.writeProxyEnv(', 'адрес — из реестра, прочитанного в main');
+    assertOrder(h, 'netCheck.probeViaProxy(', 'netCheck.writeProxyEnv(', 'пишем только проверенный прокси');
+    assert(/if \(!px\.local/.test(h), 'только локальный прокси');
+    assert(/ipcMain\.handle\('apply-proxy', async \(\) =>/.test(m), 'обработчик не принимает аргументов от renderer');
+  }));
+
+  // ---- финишный экран: скрепка, сводка пака, недоступное в сборке ---------------
+  ok('сводка пака: число скиллов и агентов из config-summary.json разными формами; мусор — «не знаем»', () => {
+    assert.deepStrictEqual(PS.parsePackSummary({ skills: 263, agents: 54 }), { skills: 263, agents: 54 });
+    assert.deepStrictEqual(PS.parsePackSummary({ skillCount: '12', agents_count: 3 }), { skills: 12, agents: 3 });
+    assert.deepStrictEqual(PS.parsePackSummary({ counts: { skills: 7, agents: 2 } }), { skills: 7, agents: 2 });
+    assert.deepStrictEqual(PS.parsePackSummary({ skills: ['a', 'b'], agents: { count: 4 } }), { skills: 2, agents: 4 });
+    assert.deepStrictEqual(PS.parsePackSummary({ skills: -1, agents: 'много' }), { skills: null, agents: null });
+    assert.deepStrictEqual(PS.parsePackSummary(null), { skills: null, agents: null });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-ps-'));
+    try {
+      assert.strictEqual(PS.readPackSummary({ home }).ok, false, 'нет файла — молчим');
+      fs.mkdirSync(path.join(home, '.hamidun-setup'));
+      fs.writeFileSync(path.join(home, '.hamidun-setup', 'config-summary.json'), '\uFEFF{"skills": 263, "agents": 54}');
+      let r = PS.readPackSummary({ home });
+      assert(r.ok && r.skills === 263 && r.agents === 54 && r.catalog === '', JSON.stringify(r));
+      fs.mkdirSync(path.join(home, '.claude'));
+      fs.writeFileSync(path.join(home, '.claude', 'CATALOG.md'), '# каталог');
+      r = PS.readPackSummary({ home });
+      assert.strictEqual(r.catalog, path.join(home, '.claude', 'CATALOG.md'), 'каталог найден');
+      fs.writeFileSync(path.join(home, '.hamidun-setup', 'config-summary.json'), '{битый');
+      assert.strictEqual(PS.readPackSummary({ home }).ok, false, 'битый файл — молчим, не падаем');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+  });
+
+  trackAsync(okAsync('финиш (app.js): «Установлено N скиллов, M агентов» и кнопка каталога — только если конфиг стоит', async () => {
+    const build = (doc, mk) => { const n = mk('div'); n.id = 'ns-pack'; n.className = 'ns-note ns-pack hidden'; n.classList.add('hidden'); doc.body.appendChild(n); };
+    const H = loadRenderer({ build, installer: { packSummary: async () => ({ ok: true, skills: 263, agents: 54, catalog: 'C:\\x\\CATALOG.md' }) } });
+    try {
+      await H.run('renderPackSummary()');
+      assert(H.document.getElementById('ns-pack').classList.contains('hidden'), 'конфига нет — молчим');
+      H.run("STATE.installedEver = new Set(['config'])");
+      await H.run('renderPackSummary()');
+      const el = H.document.getElementById('ns-pack');
+      assert(!el.classList.contains('hidden'));
+      assert(/263 скилла и 54 агента/.test(el.innerHTML), el.innerHTML);
+      assert(/CATALOG\.md/.test(el.innerHTML) && /id="ns-catalog"/.test(el.innerHTML));
+      const pl = (n) => H.run('ruPlural(' + n + ", 'скилл', 'скилла', 'скиллов')");
+      assert.deepStrictEqual([1, 2, 5, 11, 21, 112, 263].map(pl), ['скилл', 'скилла', 'скиллов', 'скиллов', 'скилл', 'скиллов', 'скилла']);
+    } finally { H.dispose(); }
+    const m = codeOnlyJs(MAIN());
+    const rc = m.slice(m.indexOf("ipcMain.handle('reveal-catalog'"), m.indexOf("ipcMain.handle('reveal-catalog'") + 400);
+    assert(/shell\.showItemInFolder\(target\)/.test(rc) && !/openPath/.test(rc),
+      'каталог показывается в папке, а не открывается .md из процесса администратора');
+  }));
+
+  ok('финиш (app.js): строка про скрепку — что это, запущена один раз и как запустить снова; без слов про автозапуск; только если скрепка стоит', () => {
+    const H = loadRenderer({});
+    try {
+      H.run("STATE.platform = 'win32'");
+      const win = H.run('mascotNoteText()');
+      assert(/помощник Claude/.test(win) && /один раз/.test(win) && /Пуск → «Claude Mascot»/.test(win), win);
+      assert(/%LOCALAPPDATA%\\Programs\\ClaudeMascot\\claude-mascot\.exe/.test(win), 'путь к exe назван: ' + win);
+      H.run("STATE.platform = 'darwin'");
+      const mac = H.run('mascotNoteText()');
+      assert(/⌘\+Пробел → «Claude Mascot»/.test(mac) && /Программы/.test(mac) && !/claude-mascot\.exe/.test(mac), mac);
+      // mascot.sh кладёт .app в ~/Applications — это «Программы» ВНУТРИ домашней папки, а не
+      // общие «Программы» из боковой панели Finder; «она в папке Программы» отправляло не туда.
+      assert(/домашняя папка → «Программы»/.test(mac), 'macOS: путь через домашнюю папку: ' + mac);
+      // Решение владельца 06.10: скрепка больше не ставится в автозагрузку — строка не
+      // обещает ни автозапуска, ни способов его отключить.
+      [win, mac].forEach((t) => assert(!/автозагруз|автозапуск|Автозагрузка|Объекты входа|вместе с Windows|при входе/i.test(t),
+        'строка говорит об автозапуске: ' + t));
+    } finally { H.dispose(); }
+    const a = APPJS();
+    const ns = cutBlock(a, 'function renderNextSteps');
+    assert(/const mascotHtml = mascotInstalled \?/.test(ns), 'строка про скрепку — только когда она стоит');
+    assert(/STATE\.installedEver\.has\('mascot'\)/.test(ns));
+    // Путь в строке — тот же, куда скрепку кладёт mascot.ps1.
+    const mps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'mascot.ps1'), 'utf8');
+    assert(/Programs\\ClaudeMascot/.test(mps) && /claude-mascot\.exe/.test(mps), 'mascot.ps1 ставит скрепку туда, куда указывает строка');
+  });
+
+  ok('экран компонентов: у каждого видимого — одна строка «зачем · платно ли · можно ли снять», и она экранируется', () => {
+    Object.values(compById).filter((c) => !c.hidden).forEach((c) => {
+      assert(typeof c.brief === 'string' && c.brief.length >= 20 && c.brief.length <= 160, c.id + ': brief ' + JSON.stringify(c.brief));
+      assert(!/[<>]/.test(c.brief), c.id + ': без разметки');
+    });
+    assert(/Claude Pro/.test(compById.claude.brief) && /\$20/.test(compById.claude.brief), 'про подписку сказано у Claude Code');
+    assert(/закрытая бета/i.test(compById.nomad.brief), 'Nomad назван бетой для приглашённых');
+    assert(/\$\{c\.brief \? `<div class="card-brief">\$\{escapeHtml\(c\.brief\)\}<\/div>` : ''\}/.test(APPJS()),
+      'карточка рисует brief через escapeHtml');
+  });
+
+  ok('приветствие: «Что понадобится» ДО установки — Pro от $20, VPN на весь компьютер для входа (не для установки), 15–40 минут', () => {
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+    const w = html.slice(html.indexOf('id="view-welcome"'), html.indexOf('id="view-select"'));
+    const i = w.indexOf('id="wc-need"');
+    assert(i !== -1, 'блок есть на ПЕРВОМ экране');
+    const need = w.slice(i, w.indexOf('</div>', w.indexOf('</ul>', i)));
+    assert(/Claude Pro — от \$20/.test(need), 'подписка и цена');
+    assert(/VPN на весь компьютер/.test(need) && /TUN/.test(need) && /Для самой установки VPN не нужен/.test(need), 'VPN');
+    assert(/15–40 минут/.test(need), 'сколько займёт');
+    assert(!/около часа|За час|примерно час/.test(w), 'старое обещание «около часа» убрано');
+  });
+
+  ok('памятка «Что дальше»: как работать в Claude Code — где писать, claude -c, Esc и Ctrl+C, 1/2/3, /login, сохранить в файл', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'assets', 'START-HERE.html'), 'utf8');
+    const i = m.indexOf('id="how-to-work"');
+    assert(i !== -1, 'раздел есть');
+    const sec = m.slice(i, m.indexOf('Шпаргалка', i));
+    ['claude -c', 'claude -r', 'Esc', 'Ctrl', '/login', 'Login expired', 'PowerShell', 'Copilot', 'в файл']
+      .forEach((t) => assert(sec.includes(t), 'нет в разделе: ' + t));
+    assert(/<b>1<\/b>[\s\S]*<b>2<\/b>[\s\S]*<b>3<\/b>/.test(sec), 'разрешения 1/2/3 расшифрованы');
+    // Подкоманд, которых у Claude Code НЕТ (claude --help 2.1.283), памятка не советует.
+    assert(!/claude --plan|claude login\b/.test(m), 'несуществующие команды');
+    // AI-мост без адреса сервера не работает ни у кого — путём из России он не предлагается.
+    assert(!/включи <b>AI-мост<\/b>/.test(m), 'памятка не зовёт в неработающий мост');
+    assert(/режим <b>TUN<\/b>/.test(m), 'путь из России — VPN в режиме TUN');
+  });
+
+  ok('main.js: окно закрыли посреди установки — уходит отчёт «прервано на шаге X», выход ждёт его не дольше 2,5 с', () => {
+    const m = codeOnlyJs(MAIN());
+    const wac = m.slice(m.indexOf("app.on('window-all-closed'"), m.indexOf("app.on('before-quit'"));
+    assertOrder(wac, 'sendAbortReportIfNeeded()', 'killChildren()', 'отчёт собирается ДО убийства шага (иначе шаг уже неизвестен)');
+    assert(/waitTelemetryThen\(\(\) => app\.quit\(\)\)/.test(wac));
+    const i = m.indexOf('function sendAbortReportIfNeeded');
+    const body = m.slice(i, m.indexOf('\nfunction waitTelemetryThen', i));
+    assert(/_runReport\.started/.test(body) && /_runReport\.finished/.test(body), 'только начатый и не закрытый финишем прогон');
+    assert(/stage: 'aborted'/.test(body) && /uid: INSTALL_UID \|\| null/.test(body));
+    assert(/cfg\.telemetry && cfg\.telemetry\.url/.test(body), 'адрес — только из вшитого config.json');
+    const h = m.slice(m.indexOf("ipcMain.handle('send-telemetry'"), m.indexOf('function postTelemetry'));
+    assert(/if \(event === 'install_started'\)/.test(h) && /if \(event === 'installed'\) _runReport\.finished = true/.test(h));
+    const w = m.slice(m.indexOf('function waitTelemetryThen'), m.indexOf('function waitTelemetryThen') + 300);
+    assert(/Date\.now\(\) \+ 2500/.test(w), 'ожидание ограничено');
+  });
+
+  // ======================================================================================
+  // Четвёртый коммит C: режим «Проверить и починить», помощь (C09), находки ревью C-02…C-12,
+  // пробелы покрытия (A22/A05/D06/A28/D-reg/D09/A14/B11), числа в памятке и повтор записи
+  // ключа Nomad. Каждый тест здесь ПАДАЕТ на коде до этого коммита.
+  // ======================================================================================
+  const FLK = require(path.join(ROOT, 'src', 'renderer', 'finish-link.js'));
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const INDEX_HTML = () => fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+  const MEMO = () => fs.readFileSync(path.join(ROOT, 'assets', 'START-HERE.html'), 'utf8');
+
+  // Стенд финиша: экран прогресса + блоки, которые трогают startInstall/finishInstall/renderRepairFinish.
+  const buildRepair = (doc, mk) => {
+    buildRun(doc, mk);
+    const add = (id, tag, cls) => {
+      const el = mk(tag || 'div'); el.id = id;
+      if (cls) { el.className = cls; cls.split(' ').forEach((c) => el.classList.add(c)); }
+      doc.body.appendChild(el);
+      return el;
+    };
+    add('next-steps', 'section', 'next-steps hidden');
+    add('btn-repair', 'button', 'btn-sm hidden');
+    add('btn-install', 'button', 'btn btn-primary');
+    add('summary', 'div');
+    add('progress-bot-banner', 'div', 'progress-bot hidden');
+  };
+  const mkRepairHarness = (verifyLines, opts) => {
+    const o = opts || {};
+    const calls = [];
+    const sent = [];
+    let logCb = null;
+    const H = loadRenderer({ build: buildRepair, installer: {
+      onLog: (cb) => { logCb = cb; return () => { logCb = null; }; },
+      onRemoteProgress: () => () => {},
+      sendTelemetry: (p) => { sent.push(p); return Promise.resolve({ ok: true }); },
+      runComponent: async (id, env) => {
+        calls.push({ id, env: Object.assign({}, env) });
+        if (id === 'verify' && logCb) verifyLines.forEach((l) => logCb({ line: l }));
+        return Object.assign({ id }, o.result || { ok: true, code: 0 });
+      },
+    } });
+    H.ctx.HMRunStatus = RS;
+    H.ctx.HMFinishLink = FLK;
+    H.ctx.HMDeps = HMDeps;
+    H.ctx.__byId = clone(compById);
+    H.ctx.__cfg = o.config || {};
+    H.run('STATE.byId = __byId; STATE.platform = "win32"; STATE.detectDone = true; STATE.netProbeDone = true; STATE.vendorBlocked = false;' +
+      'STATE.packsData = { core: [], packs: [] }; STATE.selectedPacks = {}; STATE.selectedSkills = {}; STATE.config = __cfg;' +
+      'Object.keys(STATE.byId).forEach(function (id) { STATE.selected[id] = (id === "verify"); });');
+    return { H, calls, sent };
+  };
+  // renderNextSteps в стенде падает на первой же кнопке (innerHTML не разбирается в узлы), но вёрстка к
+  // этому моменту уже записана — её и читаем.
+  const renderNsHtml = (H, args) => {
+    try { H.run('renderNextSteps(' + args + ')'); } catch (e) { /* ожидаемо: см. выше */ }
+    return H.document.getElementById('next-steps').innerHTML;
+  };
+  const buildNs = (doc, mk) => { const n = mk('section'); n.id = 'next-steps'; doc.body.appendChild(n); };
+  const mkNsHarness = (cfg) => {
+    const H = loadRenderer({ build: buildNs });
+    H.ctx.HMRunStatus = RS;
+    H.ctx.HMFinishLink = FLK;
+    H.ctx.__byId = clone(compById);
+    H.ctx.__cfg = cfg || { links: { bot: 'https://t.me/testbot' }, finish: {} };
+    H.run('STATE.byId = __byId; STATE.platform = "win32"; STATE.config = __cfg;');
+    return H;
+  };
+
+  // ---- 1. Режим ремонта -------------------------------------------------------------------
+  trackAsync(okAsync('ремонт (app.js): «Проверить и починить» запускает ТОЛЬКО verify (HM_SELECTED=verify); финиш рассказывает, что сделано, а не «Готово!»; телеметрия помечена mode=repair', async () => {
+    const lines = [
+      'claude уже стоит (C:\\x\\claude.cmd) — проверяю для него PATH и политику PowerShell.',
+      'Настройки Claude Code: убрал 2 устаревших правила <b>x</b>.',
+      'Финальная проверка установки...', 'CHECK skip Git', 'CHECK skip Node',
+    ];
+    const { H, calls, sent } = mkRepairHarness(lines);
+    try {
+      await H.run('startInstall({ repair: true })');
+      assert.deepStrictEqual(calls.map((c) => c.id), ['verify'], 'в прогоне ТОЛЬКО verify');
+      assert.strictEqual(calls[0].env.HM_SELECTED, 'verify',
+        'для verify «выбран» значит «этот прогон поставил сам»: здесь не ставится ничего, и его починки профиля обязаны включиться');
+      assert.strictEqual(H.run('STATE.repairMode'), true);
+      const title = H.document.getElementById('progress-title').textContent;
+      assert(/Проверка и починка завершены/.test(title) && !/Готово!/.test(title), 'заголовок: ' + title);
+      const html = H.document.getElementById('next-steps').innerHTML;
+      assert(/Что сделала проверка/.test(html), 'экран говорит, что сделано: ' + html);
+      assert(/Настройки Claude Code: убрал 2 устаревших правила &lt;b&gt;x&lt;\/b&gt;/.test(html), 'строки verify — на экране и экранированы');
+      assert(!/Финальная проверка установки/.test(html), 'служебная шапка verify не показывается');
+      assert(!/Что дальше — три простых шага/.test(html) && !/Открой VS Code/.test(html), 'праздника «всё установлено» нет');
+      assert(!/>Git</.test(html) && !/>Node</.test(html), 'строки «не выбрано» (skip) — это все проверки подряд, их не показываем');
+      assert.strictEqual(sent.length, 2, 'старт и финиш');
+      assert.strictEqual(sent[0].event, 'install_started');
+      assert.strictEqual(sent[0].mode, 'repair', 'бот отличает ремонт от установки с самого старта');
+      assert.strictEqual(JSON.stringify(sent[0].selected), '["verify"]');
+      assert.strictEqual(sent[1].event, 'installed');
+      assert.strictEqual(sent[1].mode, 'repair');
+      assert.strictEqual(sent[1].ok, true);
+      // Отрицательный контроль: обычная установка сбрасывает режим и шлёт mode=install.
+      H.run('renderNextSteps = function () {}; STATE.selected.git = true;');
+      await H.run('startInstall()');
+      assert.strictEqual(H.run('STATE.repairMode'), false, 'обычная установка выключает режим ремонта');
+      assert.strictEqual(sent[sent.length - 1].mode, 'install');
+      assert.deepStrictEqual(calls.slice(1).map((c) => c.id), ['git', 'verify'], 'в обычной установке — выбранное и verify последним');
+      assert.notStrictEqual(calls[calls.length - 1].env.HM_SELECTED, 'verify', 'HM_SELECTED=verify — только у ремонта');
+    } finally { H.dispose(); }
+  }));
+
+  trackAsync(okAsync('ремонт (app.js): красная проверка после ремонта — «нашла проблемы», ok=False с названным компонентом, строка с подсказкой, бот получает failed_<id>', async () => {
+    const { H, sent } = mkRepairHarness(['CHECK fail Запуск claude в PowerShell', 'CHECK skip Git'],
+      { config: { links: { bot: 'https://t.me/testbot' }, finish: {} } });
+    try {
+      await H.run('startInstall({ repair: true })');
+      const title = H.document.getElementById('progress-title').textContent;
+      assert(/Проверка нашла проблемы/.test(title), 'заголовок: ' + title);
+      const html = H.document.getElementById('next-steps').innerHTML;
+      assert(/ns-check-why/.test(html) && /claude\.cmd/.test(html), 'красная строка с подсказкой, что делать');
+      assert(/class="ns-fail"/.test(html) && /Скопировать отчёт для поддержки/.test(html));
+      assert(/data-ext="https:\/\/t\.me\/testbot\?start=failed_claude_win"/.test(html), 'бот — с payload провала: ' + html);
+      assert.strictEqual(sent[1].ok, false);
+      assert.strictEqual(JSON.stringify(sent[1].failed), '["claude"]');
+      assert.strictEqual(sent[1].mode, 'repair');
+    } finally { H.dispose(); }
+  }));
+
+  ok('ремонт (app.js): кнопка «Проверить и починить» видна, только когда ставить нечего, детекция закончилась и нет блокировки', () => {
+    const { H } = mkRepairHarness([]);
+    try {
+      const state = (js) => {
+        H.run(js + '; refreshDerived();');
+        const b = H.document.getElementById('btn-repair');
+        return { hidden: b.classList.contains('hidden'), primary: b.classList.contains('primary'),
+          installDisabled: H.document.getElementById('btn-install').disabled, summary: H.document.getElementById('summary').textContent };
+      };
+      let s = state('STATE.selected = { git: false, verify: true }');
+      assert(!s.hidden && s.primary && s.installDisabled, 'всё уже стоит: «Установить» серая, ремонт — главное действие: ' + JSON.stringify(s));
+      assert(/Проверить и починить/.test(s.summary), 'в сводке сказано, что делать: ' + s.summary);
+      s = state('STATE.selected = { git: true, verify: true }');
+      assert(s.hidden && !s.installDisabled, 'есть что ставить — ремонт не нужен: verify и так идёт последним в каждом прогоне');
+      s = state('STATE.selected = { git: false, verify: true }; STATE.detectDone = false');
+      assert(s.hidden, 'пока детекция не закончилась, неизвестно, что уже стоит');
+      s = state('STATE.detectDone = true; STATE.vendorBlocked = true');
+      assert(s.hidden, 'при блокировке запуска (mac translocation) ремонта нет');
+    } finally { H.dispose(); }
+    const html = INDEX_HTML();
+    assert(/<button[^>]*id="btn-repair"[^>]*>/.test(html) && /id="btn-repair"[^>]*class="[^"]*\bhidden\b/.test(html),
+      'кнопка есть в разметке и скрыта по умолчанию');
+    assert(/repairBtn\.addEventListener\('click', \(\) => startInstall\(\{ repair: true \}\)\)/.test(APPJS()), 'обработчик зовёт startInstall({ repair: true })');
+    // main принимает mode только из закрытого списка.
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('send-telemetry'"), m.indexOf('function postTelemetry'));
+    assert(/mode: p\.mode === 'repair' \? 'repair' : 'install'/.test(h), 'mode — закрытый список, как event');
+  });
+
+  // ---- 2. C09: кнопка бота, плашка помощи, подсказки -------------------------------------------
+  ok('финиш (app.js): кнопка бота строится из ИТОГА прогона — красная только проверка после установки даёт failed_<id>, а не installed', () => {
+    const H = mkNsHarness();
+    try {
+      // verify вышел с кодом 0, шаги встали (failed = []), но проверка красная: итог прогона называет claude.
+      H.run('STATE.lastReport = { ok: false, failed: ["claude"], skipped: [], errors: [] }');
+      const red = renderNsHtml(H, '[], [], [], true, [], [], [], []');
+      assert(/data-ext="https:\/\/t\.me\/testbot\?start=failed_claude_win"/.test(red) && !/start=installed_win/.test(red),
+        'бот должен узнать о провале: ' + (red.match(/data-ext="[^"]*start=[^"]*"/) || [''])[0]);
+      // Отрицательные контроли: итога нет — как раньше; упавший шаг по-прежнему даёт failed_<id>.
+      H.run('STATE.lastReport = null');
+      assert(/start=installed_win/.test(renderNsHtml(H, '[], [], [], false, [], [], [], []')));
+      assert(/start=failed_node_win/.test(renderNsHtml(H, '["node"], [], [], false, [], [], [], []')));
+    } finally { H.dispose(); }
+    assert(/botStartPayload\(botFailedIds\(failed\)/.test(APPJS()), 'payload строится через botFailedIds');
+  });
+
+  ok('плашка «Не едет?»: во время установки есть «Скопировать отчёт», бот открывается с тем же payload, что и на финише; про скриншот ни слова', () => {
+    const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'progress-bot-banner'; n.classList.add('hidden'); doc.body.appendChild(n); } });
+    try {
+      H.ctx.HMFinishLink = FLK;
+      H.run('STATE.platform = "win32"; STATE.config = { links: { bot: "https://t.me/testbot" } }; renderProgressBotBanner();');
+      const el = H.document.getElementById('progress-bot-banner');
+      assert(/id="pb-report"/.test(el.innerHTML) && /Скопировать отчёт/.test(el.innerHTML), 'кнопка отчёта в плашке: ' + el.innerHTML);
+      assert(!/скриншот/i.test(el.innerHTML), 'про скриншот больше не просим: до бота он доходит не всегда');
+      assert(!el.classList.contains('hidden'));
+      // Идёт прогон, ничего не упало — голая ссылка («installed_*» посреди установки было бы враньём).
+      H.run('STATE.runActive = true; STATE.badEver = new Map();');
+      assert.strictEqual(H.run('botUrlForState()'), 'https://t.me/testbot');
+      // Упал git (корневая причина); cursor необязательный, node пропущен из-за зависимости — ни тот, ни другой не payload.
+      H.run("STATE.badEver = new Map([['git', 'fail'], ['cursor', 'optional'], ['node', 'dep']])");
+      assert.strictEqual(H.run('botUrlForState()'), 'https://t.me/testbot?start=failed_git_win');
+      // Финиш: берём итог прогона, как кнопка финиша.
+      H.run("STATE.runActive = false; STATE.lastReport = { ok: false, failed: ['claude'] }");
+      assert.strictEqual(H.run('botUrlForState()'), 'https://t.me/testbot?start=failed_claude_win');
+      H.run("STATE.lastReport = { ok: true, failed: [] }");
+      assert.strictEqual(H.run('botUrlForState()'), 'https://t.me/testbot', 'всё хорошо — голая ссылка: плашка не поздравляет');
+    } finally { H.dispose(); }
+  });
+
+  trackAsync(okAsync('отчёт для поддержки посреди установки: называет текущий шаг, не врёт «всё установлено», берёт живую карту причин вместо итога прошлого прогона', async () => {
+    const payloads = [];
+    const H = loadRenderer({ build: (doc, mk) => { const st = mk('div'); st.id = 'pb-report-status'; doc.body.appendChild(st); },
+      installer: { supportReport: async (p) => { payloads.push(p); return { ok: true, text: 'Отчёт' }; } } });
+    try {
+      H.ctx.__byId = clone(compById);
+      H.run('STATE.byId = __byId; STATE.runActive = true; STATE.currentStepId = "vscode"; ' +
+        'STATE.lastReport = { ok: false, failed: ["old"], errors: [{ id: "old", stage: "fail", error: "прошлый прогон" }] }; ' +
+        'STATE.errorDigest = new Map([["git", { id: "git", stage: "net", error: "обрыв" }]]);');
+      await H.run('copySupportReport()');
+      assert(/установка идёт, сейчас шаг «VS Code/.test(payloads[0].outcome), payloads[0].outcome);
+      assert.strictEqual(payloads[0].running, true);
+      assert.strictEqual(JSON.stringify(payloads[0].steps.map((s) => s.id)), '["git"]', 'живая карта причин, а не итог прошлого прогона');
+      assert(/скопирован/.test(H.document.getElementById('pb-report-status').textContent), 'статус виден и в плашке, а не только на финише');
+    } finally { H.dispose(); }
+    const t = SR.buildSupportReport({ meta: { platform: 'win32', edition: 'lite', running: true }, steps: [], logTail: [] });
+    assert(/пока ничего — установка ещё идёт/.test(t) && !/все выбранные компоненты установлены/.test(t), t);
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('support-report'"), m.indexOf("ipcMain.handle('support-report'") + 1800);
+    assert(/running: p\.running === true/.test(h), 'main передаёт признак «идёт прогон»');
+    assert(/process\.getSystemVersion/.test(h), 'на macOS в отчёте — настоящая версия системы, а не ядро Darwin');
+  }));
+
+  ok('подсказки: нигде не просят «прислать файл журнала» — только «Скопировать отчёт для поддержки» (файл — запасной путь при сбое самого копирования)', () => {
+    const a = codeOnlyJs(APPJS());
+    const bad = a.split('\n').filter((l) => /пришли (боту )?(файл|лог|журнал)|пришли этот файл|файл журнала|журнал установки в бота/i.test(l));
+    assert.strictEqual(bad.length, 1, 'просьба прислать файл осталась не только в запасном пути: ' + bad.join(' | '));
+    assert(/Скопировать не получилось/.test(bad[0]) || /Открой лог кнопкой/.test(bad[0]), 'единственное место — когда копирование не удалось: ' + bad[0]);
+    // Шесть подсказок финиша, которые раньше просили прислать файл журнала, теперь ведут на отчёт.
+    [
+      'Повтор не поможет: нажми «Скопировать отчёт» и вставь текст в чат с ботом.',
+      "sub = 'Нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ботом — поможем разобраться.'",
+      'установка остановлена. Нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ботом.',
+      'Повтор не поможет — нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ${botH}',
+      'Если повтор не помогает — нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ${botH}',
+      'Не удалось открыть лог. Нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом',
+    ].forEach((h) => assert(a.indexOf(h) !== -1, 'нет подсказки: ' + h));
+  });
+
+  // ---- 3. Находки ревью C-02 … C-12 ------------------------------------------------------------
+  ok('финиш (app.js): красная плашка — только при жёстком провале; не встало лишь необязательное или частичное — жёлтый блок с «Повторить» и без ссылки на спрятанную кнопку (C-02)', () => {
+    const H = mkNsHarness();
+    try {
+      const count = (html, re) => (html.match(re) || []).length;
+      const soft = renderNsHtml(H, '[], [], [], false, [], [], ["cursor"], []');
+      assert(!/class="ns-fail"/.test(soft), 'красного блока нет: ' + soft.slice(0, 200));
+      assert(/<div class="ns-warn">[^]*?id="ns-retry"[^]*?<\/div>/.test(soft), 'кнопка «Повторить» — в жёлтом блоке');
+      assert.strictEqual(count(soft, /id="ns-retry"/g), 1);
+      assert(!/«Показать лог для поддержки» ниже/.test(soft), 'нет ссылки на кнопку из «Ещё инструменты»');
+      const partial = renderNsHtml(H, '[], [], [], false, [], [], [], ["vscode"]');
+      assert(!/class="ns-fail"/.test(partial) && /class="ns-warn"/.test(partial) && count(partial, /id="ns-retry"/g) === 1, 'то же для «частично»');
+      const both = renderNsHtml(H, '[], [], [], false, [], [], ["cursor"], ["vscode"]');
+      assert.strictEqual(count(both, /id="ns-retry"/g), 1, 'при необязательном и частичном вместе кнопка одна');
+      const hard = renderNsHtml(H, '["node"], [], [], false, [], [], [], []');
+      assert(/<div class="ns-fail">[^]*?id="ns-retry"[^]*?Скопировать отчёт для поддержки/.test(hard), 'жёсткий провал — красный блок с «Повторить» и отчётом');
+      assert.strictEqual(count(hard, /id="ns-retry"/g), 1);
+      const dep = renderNsHtml(H, '[], ["extension"], [], false, [], [], [], []');
+      assert(/class="ns-fail"/.test(dep), 'пропуск из-за зависимости — по-прежнему красный блок');
+    } finally { H.dispose(); }
+  });
+
+  ok('«VPN для установки не нужен» — с оговоркой про необязательные Claude Desktop, ChatGPT и Cursor: на приветствии, в шагах TUN и в памятке (C-03)', () => {
+    const html = INDEX_HTML();
+    const w = html.slice(html.indexOf('id="wc-need"'), html.indexOf('</ul>', html.indexOf('id="wc-need"')));
+    assert(/Для самой установки VPN не нужен/.test(w) && /кроме необязательных Claude Desktop, ChatGPT и Cursor/.test(w), 'приветствие');
+    const H = loadRenderer({});
+    try {
+      const tun = H.run('tunStepsHtml()');
+      assert(/Для самой установки VPN не нужен/.test(tun) && /Claude Desktop, ChatGPT и Cursor/.test(tun), 'шаги TUN: ' + tun);
+    } finally { H.dispose(); }
+    assert(/Для самой установки VPN не нужен — кроме необязательных Claude Desktop, ChatGPT и Cursor/.test(MEMO()), 'памятка');
+    // Оговорка нужна не зря: сам скрипт Claude Desktop на 403 просит VPN.
+    const cd = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude-desktop.ps1'), 'utf8');
+    assert(/VPN/.test(cd), 'claude-desktop.ps1 действительно говорит про VPN при отказе');
+  });
+
+  ok('скрепка: строка на финише — только если её поставил ЭТОТ прогон; как запустить, как убрать («Удалить») и честно про притормаживание, пока она не запущена (C-04)', () => {
+    const H = mkNsHarness();
+    try {
+      ['win32', 'darwin'].forEach((plat) => {
+        H.run('STATE.platform = ' + JSON.stringify(plat));
+        const t = H.run('mascotNoteText()');
+        assert(/Удалить/.test(t) && /Скрепка Claude \(маскот\)/.test(t), plat + ': как убрать — карточка «Удалить»: ' + t);
+        assert(/притормаживать/.test(t) && /запусти её или удали/.test(t), plat + ': честно про хуки без запущенной скрепки');
+        assert(!/автозагруз|автозапуск|Автозагрузка|Объекты входа|вместе с Windows|при входе/i.test(t), plat + ': про автозапуск ни слова');
+      });
+      H.run('STATE.platform = "win32"');
+      H.run('STATE.detected = { mascot: { installed: true } }; STATE.installedEver = new Set();');
+      assert(!/ns-mascot/.test(renderNsHtml(H, '[], [], [], false, [], [], [], []')), 'найденная на диске скрепка — не наша установка, строки нет');
+      H.run('STATE.installedEver = new Set(["mascot"])');
+      assert(/ns-mascot/.test(renderNsHtml(H, '[], [], [], false, [], [], [], []')), 'поставил этот прогон — строка есть');
+    } finally { H.dispose(); }
+  });
+
+  ok('связь с Anthropic: совет — по ВИДУ сбоя (нет сети, перехват сертификата, сбой проверки, 403 через VPN-прокси, нечитаемый прокси), а не «нужен VPN» на всё (C-05, C-09)', () => {
+    const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'ns-net'; doc.body.appendChild(n); } });
+    const show = (res) => { H.run('renderNetCheck(' + JSON.stringify(res) + ')'); return H.document.getElementById('ns-net').innerHTML; };
+    try {
+      const off = show({ kind: 'offline', detail: 'нет выхода в интернет' });
+      assert(/Wi-Fi/.test(off) && !/TUN/.test(off) && !/нужен VPN/.test(off), 'нет сети — проверь подключение, не TUN: ' + off);
+      const tls = show({ kind: 'tls', detail: 'перехватывают' });
+      assert(/антивирус/.test(tls) && /NODE_EXTRA_CA_CERTS/.test(tls) && !/режим <b>TUN/.test(tls) && !/нужен VPN/.test(tls), 'перехват — антивирус/сертификат: ' + tls);
+      const unk = show({ kind: 'unknown', detail: 'не удалось проверить' });
+      assert(/проверить не удалось/.test(unk) && !/пока не достучится/.test(unk), 'сбой самой проверки не выдаётся за «не достучится»: ' + unk);
+      const geoProxy = show({ kind: 'geo', detail: '403', proxy: { enabled: true, local: true, url: 'http://127.0.0.1:10809', kind: 'geo', works: false } });
+      assert(/выходной адрес VPN/.test(geoProxy) && !/id="ns-proxy"/.test(geoProxy) && !/<ol/.test(geoProxy), 'VPN-прокси отвечает 403 — дело в стране выхода: ' + geoProxy);
+      const generic = show({ kind: 'timeout', detail: 'не ответил', proxy: { enabled: false } });
+      assert(/TUN/.test(generic) && /нужен VPN на весь компьютер/.test(generic), 'таймаут — как и раньше, VPN в режиме TUN');
+      // C-09: прокси уже прописан, но не разобран (логин:пароль@хост, socks) — не предлагаем заменить и не показываем значение.
+      const unread = show({ kind: 'geo', detail: '403', configured: '', configuredUnreadable: true,
+        proxy: { enabled: true, local: true, url: 'http://127.0.0.1:10809', works: true, kind: 'reachable' } });
+      assert(!/id="ns-proxy"/.test(unread), 'замену чужого прокси не предлагаем: ' + unread);
+      assert(/не получилось/.test(unread) && /settings\.json/.test(unread) && /TUN/.test(unread), 'объяснение и запасной путь');
+    } finally { H.dispose(); }
+  });
+
+  ok('нечитаемый прокси в настройках Claude Code (логин:пароль@хост, socks) НЕ заменяется молча: чистый разбор, main не предлагает системный прокси и не пишет поверх (C-09)', () => {
+    assert.deepStrictEqual(NC.classifyConfiguredProxy(''), { present: false, unreadable: false, parsed: null });
+    const ok1 = NC.classifyConfiguredProxy('http://127.0.0.1:10809');
+    assert(ok1.present && !ok1.unreadable && ok1.parsed.port === 10809);
+    ['http://user:pw@corp:3128', 'socks5://127.0.0.1:1080', 'мусор'].forEach((v) => {
+      const c = NC.classifyConfiguredProxy(v);
+      assert(c.present && c.unreadable && c.parsed === null, v);
+    });
+    assert.strictEqual(NC.mergeProxyEnv({}, 'http://user:pw@127.0.0.1:80').ok, false, 'адрес с паролем не пишем');
+    assert.strictEqual(NC.mergeProxyEnv({}, 'http://[::1]:80').ok, true, 'IPv6 без логина — можно');
+    const m = codeOnlyJs(MAIN());
+    const nc = m.slice(m.indexOf("ipcMain.handle('net-check'"), m.indexOf("ipcMain.handle('apply-proxy'"));
+    assert(/res\.configuredUnreadable = cfgProxy\.unreadable/.test(nc) && /res\.configured = cfgProxy\.unreadable \? ''/.test(nc),
+      'нечитаемое значение на экран не уходит');
+    assert(/!res\.configuredKind && !res\.configuredUnreadable && IS_WIN/.test(nc), 'системный прокси при нечитаемом настроенном не предлагается');
+    const ap = m.slice(m.indexOf("ipcMain.handle('apply-proxy'"), m.indexOf("ipcMain.handle('apply-proxy'") + 1800);
+    assertOrder(ap, "reason: 'existing-proxy'", 'netCheck.writeProxyEnv(', 'устаревшей кнопкой чужой прокси не заменить');
+  });
+
+  trackAsync(okAsync('прогон (app.js): EPERM при публикации распаковки (file-locked) получает автоматический второй заход, как в базе; 403 и нехватка места — нет (C-06)', async () => {
+    const attempt = async (first) => {
+      const calls = [];
+      const H = loadRenderer({ build: buildRun, installer: {
+        onLog: (cb) => () => {},
+        onRemoteProgress: () => () => {},
+        runComponent: async (id) => { calls.push(id); return calls.length === 1 ? Object.assign({ id }, first) : { id, ok: true, code: 0 }; },
+      } });
+      try {
+        H.ctx.HMRunStatus = RS;
+        H.ctx.__byId = clone(compById);
+        H.run('STATE.byId = __byId; STATE.checks = []; STATE.errorDigest = new Map(); STATE.fileLockRetryMs = 0;');
+        H.ctx.__ids = ['node'];
+        H.run('buildSteps(__ids)');
+        const res = await H.run('runComponents(__ids, {})');
+        return { calls: calls.length, failed: JSON.stringify(res.failed) };
+      } finally { H.dispose(); }
+    };
+    const locked = await attempt({ ok: false, code: 1, stage: 'fetch', hintKind: 'file-locked', error: 'EPERM: rename' });
+    assert.strictEqual(locked.calls, 2, 'антивирус держит файл — второй заход сам');
+    assert.strictEqual(locked.failed, '[]', 'и со второго раза встало');
+    const net = await attempt({ ok: false, code: 1, stage: 'fetch', error: 'ETIMEDOUT' });
+    assert.strictEqual(net.calls, 2, 'сеть — как и раньше');
+    const geo = await attempt({ ok: false, code: 1, stage: 'fetch', hintKind: 'access-denied-403', error: 'HTTP 403' });
+    assert.strictEqual(geo.calls, 1, '403 — результат тот же, повтор не нужен');
+    const disk = await attempt({ ok: false, code: 1, stage: 'fetch', hintKind: 'disk-full', error: 'ENOSPC' });
+    assert.strictEqual(disk.calls, 1, 'нет места — повтор не поможет');
+    const integrity = await attempt({ ok: false, code: 1, stage: 'fetch', error: 'SHA-256 не совпал' });
+    assert.strictEqual(integrity.calls, 1, 'целостность — детерминированно');
+  }));
+
+  ok('отчёт для поддержки: секреты в JSON и с кавычками вычищаются, токен npm — тоже; обещание на экране не абсолютное (C-07)', () => {
+    const r = SR.redactSecrets;
+    assert(!/abc123def456/.test(r('{"api_key": "abc123def456"}')), 'JSON с кавычками у имени');
+    assert(!/abcdef0123456789/.test(r('{"token":"abcdef0123456789"}')), 'JSON без пробела');
+    assert(!/npm_abcdefghijklmnopqrstuvwxyz0123456789/.test(r('npm config set //registry.npmjs.org/:_authToken npm_abcdefghijklmnopqrstuvwxyz0123456789')), 'npm-токен через пробел');
+    assert.strictEqual(r('author: Иван'), 'author: Иван', 'безобидное «author» не режем');
+    assert(!/ключей в нём нет/.test(APPJS()), 'экран больше не обещает «ключей в нём нет»');
+    assert(/всё равно просмотри его перед отправкой/.test(APPJS()), 'вместо обещания — просьба просмотреть');
+  });
+
+  ok('отчёт для поддержки помещается в одно сообщение Telegram: ~3500 знаков, шапка и упавшие шаги целы, из журнала — ПОСЛЕДНИЕ строки (C-08)', () => {
+    const log = [];
+    for (let i = 0; i < 60; i++) log.push('[2026-10-09T10:00:00Z] [pydeps] ' + 'очень длинная строка журнала pip номер ' + i + ' ' + 'x'.repeat(110));
+    log.push('[t] [claude] ПОСЛЕДНЯЯ строка: код возврата 7');
+    const steps = [];
+    for (let i = 0; i < 10; i++) steps.push({ id: 'comp' + i, name: 'Компонент ' + i, stage: 'fail', error: 'e'.repeat(400) });
+    const t = SR.buildSupportReport({ meta: { version: '1', edition: 'lite', platform: 'win32', osRelease: '10.0.26300', arch: 'x64', outcome: 'не встало: компоненты' },
+      steps, logTail: log, net: 'связь есть' });
+    assert(t.length <= SR.REPORT_MAX_CHARS, 'длина ' + t.length + ' > ' + SR.REPORT_MAX_CHARS);
+    assert(/Отчёт Hamidun Setup для поддержки/.test(t) && /Итог: не встало/.test(t) && /Связь с Anthropic из консоли: связь есть/.test(t), 'шапка цела');
+    assert(/шаг «Компонент 0»/.test(t) && /шаг «Компонент 9»/.test(t), 'все упавшие шаги названы (описания ужаты)');
+    assert(/ПОСЛЕДНЯЯ строка: код возврата 7/.test(t), 'хвост журнала — самые свежие строки');
+    assert(/из 60: старые не поместились в одно сообщение/.test(t), 'человеку сказано, что часть журнала не вошла');
+    const short = SR.buildSupportReport({ meta: {}, steps: [], logTail: ['a', 'b'] });
+    assert(/--- последние 2 строк журнала установки ---/.test(short) && !/не поместились/.test(short), 'короткий журнал — без пометки');
+  });
+
+  ok('«Пропустить шаг»: вышедшему процессу не отправляется taskkill по мёртвому PID; пайпы рвутся, чтобы шаг закончился сам (C-10)', () => {
+    assert.strictEqual(RO.childExited({ exitCode: 0 }), true);
+    assert.strictEqual(RO.childExited({ exitCode: null, signalCode: 'SIGKILL' }), true);
+    assert.strictEqual(RO.childExited({ exitCode: null, signalCode: null }), false, 'живой процесс');
+    assert.strictEqual(RO.childExited({ pid: 1 }), false, 'без полей считаем живым');
+    assert.strictEqual(RO.childExited(null), false);
+    const base = { running: true, id: 'cursor', requestedId: 'cursor', optional: true, silentMs: 9 * 60000 };
+    assert.deepStrictEqual(RO.canSkipNow(base), { ok: true, reason: '' });
+    assert.strictEqual(RO.canSkipNow(Object.assign({}, base, { exited: true })).reason, 'not-running',
+      'процесс уже вышел — убивать нечего; а если PID отдан чужому, taskkill убил бы постороннее дерево');
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('skip-step'"));
+    const body = h.slice(0, h.indexOf('\n});') + 4);
+    assert(/exited: !!\(st && runOutcome\.childExited\(st\.child\)\)/.test(body), 'main передаёт признак «вышел»');
+    assertOrder(body, 'st.child.stdout.destroy()', 'killProcessTree(st.child)', 'пайпы рвём в отказе, до возможного убийства');
+    const kp = m.slice(m.indexOf('function killProcessTree(c)'), m.indexOf('function killProcessTree(c)') + 400);
+    assert(/runOutcome\.childExited\(c\)\) return;/.test(kp), 'killProcessTree сам не трогает вышедший процесс');
+  });
+
+  ok('предложение «Пропустить шаг» говорит, что молчание может быть здоровой медленной загрузкой; убитый установщик — «удали и поставь заново» (C-11, C-12)', () => {
+    const m = codeOnlyJs(MAIN());
+    const o = m.slice(m.indexOf("const o = '[внимание] шаг «'"), m.indexOf("const o = '[внимание] шаг «'") + 900);
+    assert(/Молчание не всегда значит зависание/.test(o) && /медленном интернете/.test(o) && /лучше подождать/.test(o), 'строка в журнале: ' + o.slice(0, 300));
+    const a = APPJS();
+    const b = a.slice(a.indexOf('function addStepSkip'), a.indexOf('function removeStepSkip'));
+    assert(/медленном интернете/.test(b) && /лучше подождать/.test(b), 'подсказка кнопки');
+    assert(/удали её и поставь заново/.test(m.slice(m.indexOf('stall.skipRequested && !okRun'), m.indexOf('stall.skipRequested && !okRun') + 1400)),
+      'после остановки установщика недоустановленная программа может остаться — об этом сказано');
+  });
+
+  // ---- 4. Пробелы покрытия ---------------------------------------------------------------------
+  ok('памятка: «Первый запуск Claude Code: что увидишь» — английские экраны, вопрос о доверии папке («Yes, proceed»), «Consumer Terms» и FAQ (A22, A05)', () => {
+    const m = MEMO();
+    const i = m.indexOf('id="first-run"');
+    assert(i !== -1, 'блок есть');
+    const sec = m.slice(i, m.indexOf('Первый результат', i));
+    ['Choose the text style', 'Select login method', 'Claude account with subscription', 'Authorize', 'Security notes',
+      'terminal setup', 'Do you trust the files in this folder', 'Yes, proceed', 'No, exit', 'Consumer Terms', 'claude.ai']
+      .forEach((t) => assert(sec.includes(t), 'нет в блоке: ' + t));
+    assert(/закрой Claude Code полностью/.test(sec), 'после принятия условий — перезапуск');
+    assert(/<summary>[^<]*английском[^<]*</.test(m) && /<summary>[^<]*Consumer Terms/.test(m), 'FAQ: английские экраны и ошибка 400');
+    assert(/href="#first-run"/.test(m), 'в шагах открытия есть ссылка на блок');
+  });
+
+  trackAsync(okAsync('памятка и сводка пака: скиллы работают только в Claude Code (панель ✳ или терминал), а не в приложении Claude, на claude.ai и в телефоне (D06)', async () => {
+    const m = MEMO();
+    assert(/Скиллов и агентов нет в приложении Claude, на claude\.ai и в телефоне/.test(m), 'FAQ в памятке');
+    assert(/работают только в <b>Claude Code<\/b>/.test(m));
+    const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'ns-pack'; n.classList.add('hidden'); doc.body.appendChild(n); },
+      installer: { packSummary: async () => ({ ok: true, skills: 21, agents: 3, catalog: 'C:\\x\\CATALOG.md' }) } });
+    try {
+      H.run("STATE.installedEver = new Set(['config'])");
+      await H.run('renderPackSummary()');
+      const el = H.document.getElementById('ns-pack');
+      assert(/21 скилл/.test(el.innerHTML) && /3 агента/.test(el.innerHTML));
+      assert(/Работают они в Claude Code/.test(el.innerHTML) && /на claude\.ai и в телефоне их нет/.test(el.innerHTML), 'где работают: ' + el.innerHTML);
+    } finally { H.dispose(); }
+  }));
+
+  ok('предполётная строка: куда всё ставится и что свои проекты можно хранить где угодно — и в спокойной строке, и в предупреждении о месте (A28)', () => {
+    const H = loadRenderer({ build: (doc, mk) => {
+      const vs = mk('section'); vs.id = 'view-select';
+      const hero = mk('div'); hero.className = 'hero'; hero.classList.add('hero');
+      vs.appendChild(hero); doc.body.appendChild(vs);
+    } });
+    try {
+      H.run("STATE.platform = 'win32'; STATE.edition = 'offline'; STATE.homeRoot = 'C:\\\\';" +
+        "STATE.byId = { big: { id: 'big', name: 'Big', sizeBytes: { win32: 1073741824 } } }; STATE.selected = { big: true };");
+      H.run('STATE.freeGB = 120; renderPreflight();');
+      const line = H.document.getElementById('disk-line').textContent;
+      assert(/Всё ставится в твой профиль на этом диске/.test(line) && /свои проекты можно хранить где угодно/.test(line), line);
+      H.run('STATE.freeGB = 1; renderPreflight();');
+      const warn = H.document.getElementById('preflight-warn').innerHTML;
+      assert(/Всё ставится в твой профиль на этом диске/.test(warn) && /≈3 ГБ/.test(warn), warn);
+    } finally { H.dispose(); }
+    assert(/<div><b>Куда всё ставится\.<\/b>[^<]*<b>C:<\/b>[\s\S]*?<b>свои проекты можно хранить где угодно<\/b>/.test(MEMO()), 'и в памятке');
+  });
+
+  ok('приветствие и памятка: регистрация требует зарубежную карту и номер телефона, из России бывают отказы и блокировки — без обещаний (D-reg)', () => {
+    const html = INDEX_HTML();
+    const w = html.slice(html.indexOf('id="wc-need"'), html.indexOf('</ul>', html.indexOf('id="wc-need"')));
+    assert(/Зарубежная карта и номер телефона/.test(w) && /отказы при регистрации и блокировки аккаунтов/.test(w), 'строка на первом экране');
+    assert(/не можем обещать/.test(w) && /памятке/.test(w), 'тон ровный: без обещаний, подробности — в памятке');
+    assert(!/гарант/i.test(w), 'слова «гарантия» нет');
+    const m = MEMO();
+    assert(/<b>Регистрация\.<\/b>[^<]*номер телефона[^<]*код подтверждения/.test(m) && /Обещать, что получится, мы не можем/.test(m), 'абзац в памятке');
+  });
+
+  ok('памятка и config.json: домены для раздельного туннеля сверены с официальной документацией Claude Code (claude.com, platform.claude.com, …) (D09)', () => {
+    const m = MEMO();
+    const i = m.indexOf('Домены для раздельного туннеля');
+    assert(i !== -1, 'блок есть');
+    const sec = m.slice(i, i + 2200);
+    ['claude.ai', 'claude.com', 'platform.claude.com', 'anthropic.com', 'api.anthropic.com', 'claudeusercontent.com',
+      'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'Network access requirements'].forEach((d) => assert(sec.includes(d), 'нет в блоке: ' + d));
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    ['claude.ai', 'claude.com', 'platform.claude.com', 'anthropic.com', 'claudeusercontent.com', 'openai.com', 'chatgpt.com']
+      .forEach((d) => assert(cfg.bridge.pacDomains.includes(d), 'в bridge.pacDomains нет ' + d));
+  });
+
+  ok('окно «Запусти установщик из окна DMG»: сначала кнопка «Исправить автоматически», и только потом «закрой это окно» — порядок не противоречит сам себе (A14)', () => {
+    const a = APPJS();
+    const modal = a.slice(a.indexOf('function renderVendorBlock'), a.indexOf("bindMacSelfHeal('mac-selfheal', 'mac-selfheal-status')"));
+    assertOrder(modal, 'id="mac-selfheal"', 'закрой это окно установщика', 'кнопка (в этом же окне) раньше, чем просьба закрыть окно');
+    assert(/закрывать это окно не нужно/.test(modal), 'про кнопку прямо сказано, что окно закрывать не надо');
+    assert(!/<li>Закрой это окно установщика/.test(modal), 'первым пунктом «закрой окно» больше не стоит');
+  });
+
+  trackAsync(okAsync('прогон (app.js): провал панели в Cursor (extension) — жёлтый шаг, ok не падает; сам extension теперь необязательный (A13)', async () => {
+    assert.strictEqual(compById.extension.optional, true, 'components.json: extension необязательный');
+    assert(RS.isOptional(compById.extension));
+    assert.strictEqual(RS.installReport({ softFailed: ['extension'], byId: compById }).ok, true);
+    const r = await runScenario({
+      vscode: { ok: true, code: 0 },
+      extension: { ok: false, code: 1, error: 'код 1 · панель Claude в Cursor не подтвердилась', phase: 'Ставлю расширение' },
+      verify: { ok: true, code: 0 },
+    });
+    assert.strictEqual(r.cls.extension, 'step warn', 'жёлтый, не красный: ' + r.cls.extension);
+    assert.strictEqual(r.sent[0].ok, true, 'провал необязательной панели ok не роняет');
+    assert(r.sent[0].skipped.includes('extension'), 'едет в skipped, а не в failed');
+    assert.strictEqual(JSON.stringify(r.sent[0].failed), '[]');
+  }));
+
+  ok('«Конфиг» и наборы скиллов: подсказка «Claude Code уже стоит? Отметь только «Конфиг»» и честное «Снять все» без обещания минимума (B11)', () => {
+    assert(/Отметь только «Конфиг»/.test(compById.config.brief) && /не перезапишет/.test(compById.config.brief), 'карточка: ' + compById.config.brief);
+    assert(compById.config.brief.length >= 20 && compById.config.brief.length <= 160, 'brief укладывается в 160 знаков');
+    // Слова подсказки сверяем с поведением config.ps1, а не только друг с другом.
+    const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'config.ps1'), 'utf8');
+    assert(/robocopy \$srcClaude \$claudeHome \/E \/XC \/XN \/XO/.test(ps), 'config.ps1: в режиме «доложить» копируются только отсутствующие файлы');
+    assert(/Резервная копия ~\/\.claude/.test(ps) && /\.backup\./.test(ps), 'config.ps1: перед раскладкой — копия .claude рядом');
+    const m = MEMO();
+    assert(/У меня уже стоит Claude Code — что отметить, чтобы ничего не сломать\?/.test(m) && /Отметь только «Конфиг»/.test(m)
+      && /только те файлы, которых у тебя нет/.test(m) && /заведомо сломанные записи/.test(m), 'FAQ в памятке');
+    const html = INDEX_HTML();
+    const note = html.slice(html.indexOf('class="packs-note"'), html.indexOf('</div>', html.indexOf('class="packs-note"')));
+    assert(/«чистого минимума» не будет/.test(note) && /не попали ни в один|нет ни в одном наборе/.test(note), 'подсказка на экране наборов');
+    const n = Number((/останутся (\d+) базовых скилла/.exec(note) || [])[1]);
+    assert.strictEqual(n, packs.core.length, 'число базовых скиллов в подсказке (' + n + ') = длине packs.core (' + packs.core.length + ')');
+    assert(/Скилл, не попавший НИ в один пак, тоже ставится всегда/.test(packs._comment), 'packs.json по-прежнему так и работает — подсказка не врёт');
+  });
+
+  // ---- 4a. Числа в памятке из config-summary.json; спека бота ------------------------------------
+  ok('памятка: «N навыков, M команд и K помощников» берутся из config-summary.json в момент выдачи; нет файла — цифр нет вовсе (extra b)', () => {
+    const m = MEMO();
+    assert(!/284 навыка|155 команд|66 помощников/.test(m), 'зашитых цифр нет');
+    assert(/<!--PACK-COUNTS--><!--\/PACK-COUNTS-->Ниже собраны самые ходовые\./.test(m), 'пара маркеров и целое предложение');
+    const filled = PS.fillStartHere(m, { skills: 284, commands: 155, agents: 66 });
+    assert(/<!--PACK-COUNTS-->В твоей сборке сейчас — 284 навыка, 155 команд и 66 помощников\. <!--\/PACK-COUNTS-->Ниже собраны/.test(filled), 'с цифрами');
+    assert.strictEqual(PS.fillStartHere(m, null), m, 'без сводки памятка не меняется — и без цифр');
+    assert.strictEqual(PS.fillStartHere(m, { skills: 'мусор', agents: -5 }), m, 'мусор в файле — как будто файла нет');
+    const once = PS.fillStartHere(m, { skills: 21, commands: 12, agents: 1 });
+    assert(/21 навык, 12 команд и 1 помощник\./.test(once), 'падежи: ' + (/сейчас — [^<]*/.exec(once) || [''])[0]);
+    assert.strictEqual((PS.fillStartHere(once, { skills: 2 }).match(/PACK-COUNTS-->/g) || []).length, 2, 'повторная подстановка заменяет, а не дублирует');
+    assert(/В твоей сборке сейчас — 2 навыка\. /.test(PS.fillStartHere(once, { skills: 2 })));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-sh-'));
+    try {
+      assert.strictEqual(PS.readSummaryJson({ home }), null, 'нет файла — null');
+      fs.mkdirSync(path.join(home, '.hamidun-setup'));
+      fs.writeFileSync(path.join(home, '.hamidun-setup', 'config-summary.json'), '\uFEFF{"skills":5,"agents":2,"commands":7}');
+      assert.deepStrictEqual(PS.parsePackCounts(PS.readSummaryJson({ home })), { skills: 5, agents: 2, commands: 7 });
+      assert.deepStrictEqual(PS.parsePackSummary({ skills: 263, agents: 54 }), { skills: 263, agents: 54 }, 'форма parsePackSummary не изменилась');
+    } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    const mj = codeOnlyJs(MAIN());
+    assert(/function startHereHtml\(src\)/.test(mj) && /packSummary\.fillStartHere\(raw, packSummary\.readSummaryJson/.test(mj), 'main подставляет числа');
+    const sv = mj.slice(mj.indexOf("ipcMain.handle('save-start-here'"), mj.indexOf("ipcMain.handle('read-start-here'"));
+    assert(/startHereHtml\(src\)/.test(sv) && /fs\.copyFileSync\(src, dest\)/.test(sv), 'на рабочий стол — с числами, а не удалось — как есть');
+    const rd = mj.slice(mj.indexOf("ipcMain.handle('read-start-here'"), mj.indexOf("ipcMain.handle('read-start-here'") + 900);
+    assert(/startHereHtml\(src\)/.test(rd), 'и встроенный просмотр тоже');
+  });
+
+  ok('docs/bridge-bot-spec.md: payload — как его шлёт установщик (installed_<os>, failed_<id>_<os>), мост скрыт без enroll-адреса, exe подписан Certum, тело телеметрии с mode', () => {
+    const d = fs.readFileSync(path.join(ROOT, 'docs', 'bridge-bot-spec.md'), 'utf8');
+    assert(/installed_win/.test(d) && /failed_<id>_win/.test(d) && /Токена `inst_<token>` в установщике НЕТ/.test(d), 'payload');
+    assert(!/открывает `t\.me\/Bot\?start=inst_<token>`/.test(d), 'старый payload inst_<token> как действующий удалён');
+    assert(/СКРЫТ, пока в `config\.json` пуст[\s>]+`bridge\.enrollEndpoint`/.test(d) && /ЗАДЕЛ на будущее/.test(d), 'мост — задел, компонент скрыт');
+    assert(/подписан кодовым сертификатом Certum с 05\.10\.2026/.test(d) && !/exe пока НЕ подписан/.test(d), 'подпись');
+    assert(/"mode": "install" \| "repair"/.test(d) && /errors\[0\]\.stage="aborted"/.test(d), 'тело телеметрии');
+    // Сверка с кодом: каждое поле тела из документа реально отправляет main.
+    const m = codeOnlyJs(MAIN());
+    const h = m.slice(m.indexOf("ipcMain.handle('send-telemetry'"), m.indexOf('function postTelemetry'));
+    ['event', 'platform', 'uid', 'edition', 'mode', 'ok', 'failed', 'skipped', 'selected', 'errors', 'duration_sec'].forEach((f) =>
+      assert(new RegExp('\\b' + f + '\\b').test(h), 'main не шлёт поле ' + f));
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    assert(/mode/.test(cfg.telemetry._comment) && /repair/.test(cfg.telemetry._comment), 'config.json описывает mode');
+  });
+
+  // ---- 6. Ключ Nomad: повтор переименования ----------------------------------------------------
+  ok('ключ Nomad: rename поверх config.yaml повторяется на EPERM/EBUSY/EACCES (антивирус держит файл) и не повторяется на прочих ошибках (writeNomadKey)', () => {
+    const NK = require(path.join(ROOT, 'src', 'nomad-key.js'));
+    const fail = (code) => Object.assign(new Error(code + ': busy'), { code });
+    const pauses = [];
+    // renameWithRetry напрямую.
+    let n = 0;
+    NK.renameWithRetry('a', 'b', { rename: () => { n++; if (n < 3) throw fail('EPERM'); }, sleep: (ms) => pauses.push(ms) });
+    assert.strictEqual(n, 3, 'два отказа, третья попытка прошла');
+    assert.deepStrictEqual(pauses, [30, 120], 'пауза растёт');
+    n = 0;
+    assert.throws(() => NK.renameWithRetry('a', 'b', { rename: () => { n++; throw fail('EBUSY'); }, sleep: () => {} }), /EBUSY/);
+    assert.strictEqual(n, 6, 'шесть попыток и честная ошибка');
+    n = 0;
+    assert.throws(() => NK.renameWithRetry('a', 'b', { rename: () => { n++; throw fail('ENOENT'); }, sleep: () => {} }), /ENOENT/);
+    assert.strictEqual(n, 1, 'не те коды — сразу, без пауз');
+    // writeNomadKey целиком, на временном файле: отказы подменённого rename не теряют ключ и не оставляют .tmp.
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nomad-rt-'));
+    const F = path.join(base, 'hermes', 'config.yaml');
+    fs.mkdirSync(path.dirname(F), { recursive: true });
+    try {
+      fs.writeFileSync(F, 'agent:\n  name: "x"\n', 'utf8');
+      let calls = 0;
+      const flaky = (from, to) => { calls++; if (calls <= 2) throw fail('EPERM'); fs.renameSync(from, to); };
+      const res = NK.writeNomadKey('nmd_live_aaaaaaaaaaaaaaaa', { config: {}, file: F, newline: '\n', rename: flaky, sleep: () => {} });
+      assert.strictEqual(res.ok, true, 'после двух EPERM запись прошла: ' + JSON.stringify(res));
+      assert.strictEqual(calls, 3);
+      assert(fs.readFileSync(F, 'utf8').includes('api_key: "nmd_live_aaaaaaaaaaaaaaaa"') && fs.readFileSync(F, 'utf8').includes('name: "x"'), 'ключ записан, соседние настройки целы');
+      const always = NK.writeNomadKey('nmd_live_bbbbbbbbbbbbbbbb', { config: {}, file: F, newline: '\n', rename: () => { throw fail('EPERM'); }, sleep: () => {} });
+      assert.strictEqual(always.ok, false);
+      assert(/EPERM/.test(always.message), 'причина названа');
+      assert(fs.readFileSync(F, 'utf8').includes('nmd_live_aaaaaaaaaaaaaaaa') && !fs.readFileSync(F, 'utf8').includes('nmd_live_bbbbbbbbbbbbbbbb'), 'прежний файл цел');
+      assert.deepStrictEqual(fs.readdirSync(path.dirname(F)).filter((f) => /\.tmp$/.test(f)), [], 'временный файл убран');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+}());

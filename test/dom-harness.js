@@ -15,7 +15,8 @@
  * DOM здесь ровно такой, какой трогает renderer: id, классы, дерево, обработчики
  * событий и `offsetWidth` (renderer читает его ради reflow перед анимацией).
  * Селекторы поддерживаются те, что реально встречаются: `#id`, `.class`,
- * перечисление через запятую и потомок `#id .class`.
+ * перечисление через запятую, потомок `#id .class` и атрибут в хвосте
+ * `.step[data-id="git"]` (так renderer находит шаг прогона).
  */
 const fs = require('fs');
 const path = require('path');
@@ -135,8 +136,20 @@ function createDocument() {
   };
 
   doc._matches = (el, sel) => {
-    const s = String(sel).trim();
+    let s = String(sel).trim();
     if (!s) return false;
+    // Атрибут в хвосте: «.step[data-id="git"]» — так renderer ищет шаг прогона.
+    // data-* читается из dataset (как в браузере: data-id → dataset.id).
+    const am = /^(.*?)\[([\w-]+)(?:="([^"]*)")?\]$/.exec(s);
+    if (am) {
+      const name = am[2];
+      const val = name.startsWith('data-')
+        ? el.dataset[name.slice(5).replace(/-([a-z])/g, (m, c) => c.toUpperCase())]
+        : el.getAttribute(name);
+      if (am[3] === undefined ? (val === undefined || val === null) : String(val) !== am[3]) return false;
+      s = am[1];
+      if (!s) return true;
+    }
     if (s.startsWith('#')) return el.id === s.slice(1);
     if (s.startsWith('.')) {
       return s.slice(1).split('.').every((c) => el.classList.contains(c) ||
@@ -146,7 +159,7 @@ function createDocument() {
   };
 
   // Поддержаны формы, которые реально встречаются в renderer:
-  //   «#id», «.class», «a, b» и потомок «#id .class».
+  //   «#id», «.class», «a, b», потомок «#id .class» и «.class[data-x="y"]».
   doc._find = (sel, root) => {
     const out = [];
     for (const part of String(sel).split(',')) {
