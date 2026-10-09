@@ -4,7 +4,7 @@
 
 - **Раздел:** Установка компонентов
 - **Код:** `src/uninstall-targets.js`, `src/uninstall-exec.js`, `src/install-receipts.js`, `src/main.js:3163-3283`, `src/main.js:3037-3161`, `src/main.js:3014-3029`, `src/main.js:2896-2971`, `src/main.js:2662-2696`, `src/main.js:1330-1365`, `src/main.js:368-375`, `src/renderer/app.js:38-43`, `src/renderer/app.js:506-575`, `src/preload.js:12`, `src/install-manifest.js:160-167`
-- **Тесты:** «targets: course (win32) — контент курса из известных мест; ярлык из вшитого config; НИ одной цели в ~/.claude», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «targets: mascot (darwin) БЕЗ vendor → НЕТ appbundle-цели (fail-closed); с vendor → точный путь + пин TeamID», «targets: неизвестный/не-removable id → null (деинсталляция отклоняется fail-closed)», «guard: сам ~/.claude, всё внутри него, дом, предок дома, ~/CLAUDE.md, ~/.hamidun-setup → отказ», «PRESERVE: деинсталляция курса — sandbox/state.json/identity.json/settings.local.json ЦЕЛЫ, контент курса удалён, ~/.claude цел», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «crafted-квитанция с artifacts на ~/.claude НЕ влияет на план: artifacts игнорируются целиком», «uninstall: REMOVABLE (app.js) гейтится квитанцией-маркером; все REMOVABLE имеют зашитую карту целей», «main.js: uninstall гейтится hasReceipt (маркер); receipted в detect-state; маркер пишется при успехе установки», «main.js (source): деактивация маркера ДО удаления, restore при провале, stillThere → ok:false, финальная очистка проверяется», «receipts: deactivate (атомарно, ДО удаления) → hasReceipt=false; restore → true; finalize с ПРОВЕРКОЙ результата», «прерванное удаление: маркер возвращается на старте, живой не затирается», «P0-4 (source): uninstall-component — platform-гейт ДО плана (win32-компонент на darwin → отказ)», «main.js (source) + app.js: Nomad-uninstall отбит ранним гейтом (UNINSTALL_DISABLED) и НЕ предлагается в UI», «P1-7 main.js: учёт чистится ТОЛЬКО после пост-детекции отсутствия; оставшийся компонент → ok:false», «цель hookurl заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё», «restoreHookUrl (реальная ФС): порт снят, чужие ключи целы, повтор идемпотентен»
+- **Тесты:** «targets: course (win32) — контент курса из известных мест; ярлык из вшитого config; НИ одной цели в ~/.claude», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «targets: mascot (darwin) БЕЗ vendor → НЕТ appbundle-цели (fail-closed); с vendor → точный путь + пин TeamID», «targets: mascot — win32 убирает ярлык из меню Пуск и автозапуск прошлых версий; darwin — LaunchAgent прошлых версий», «targets: неизвестный/не-removable id → null (деинсталляция отклоняется fail-closed)», «guard: сам ~/.claude, всё внутри него, дом, предок дома, ~/CLAUDE.md, ~/.hamidun-setup → отказ», «PRESERVE: деинсталляция курса — sandbox/state.json/identity.json/settings.local.json ЦЕЛЫ, контент курса удалён, ~/.claude цел», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «crafted-квитанция с artifacts на ~/.claude НЕ влияет на план: artifacts игнорируются целиком», «uninstall: REMOVABLE (app.js) гейтится квитанцией-маркером; все REMOVABLE имеют зашитую карту целей», «main.js: uninstall гейтится hasReceipt (маркер); receipted в detect-state; маркер пишется при успехе установки», «main.js (source): деактивация маркера ДО удаления, restore при провале, stillThere → ok:false, финальная очистка проверяется», «receipts: deactivate (атомарно, ДО удаления) → hasReceipt=false; restore → true; finalize с ПРОВЕРКОЙ результата», «прерванное удаление: маркер возвращается на старте, живой не затирается», «P0-4 (source): uninstall-component — platform-гейт ДО плана (win32-компонент на darwin → отказ)», «main.js (source) + app.js: Nomad-uninstall отбит ранним гейтом (UNINSTALL_DISABLED) и НЕ предлагается в UI», «P1-7 main.js: учёт чистится ТОЛЬКО после пост-детекции отсутствия; оставшийся компонент → ok:false», «цель hookentries заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё», «isMascotHookUrl: только адрес скрепки — чужие хуки на том же порту, другой порт, мусор и не-URL не наши», «removeMascotHooks (реальная ФС): записи скрепки сняты, чужие хуки (в том числе хук-команда, похожая на скрепочную) и ключи целы, повтор идемпотентен», «removeMascotHooks: вид файла сохраняется (отступ, CRLF, завершающий перевод строки); опустевшее событие и hooks убираются, пустой массив до нас остаётся», «removeMascotHooks: плейсхолдер VSCODE_PORT в конфиг не возвращается — это не URL (A25/B01); прежняя подстановка ловится подлогом», «removeMascotHooks: подлоги отбиты — чужой путь, symlink/junction, битый JSON, нечисловой порт; dry-run не пишет; файл изменился под руками — отказ», «main.js: hookentries подключён и к описанию, и к исполнению (иначе цель молча ничья)», «verifyPostconditions: hookentries — остались записи скрепки или нечитаемый конфиг с нашим адресом — проблема; чужие хуки и отсутствие файла — нет», «runValueIsOurs и verifyPostconditions: запись Run снимается и считается снятой только если она наша; чужая с тем же именем остаётся законно», «removeFileBestEffort: ярлык за junction — kept, а не failed; обычный удаляется; оставшийся ярлык пост-проверку не краснит», «main.js: bestEffort-файл и ограничитель onlyIfValueIs подключены к исполнению (ограничитель — ДО удаления значения)»
 
 ## Что обещает человеку
 
@@ -72,11 +72,18 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
   `bridge_agent.py`, `emptydir`, и две `profileline`-цели с ТОЧНОЙ строкой
   `BRIDGE_RC_LINE` для `~/.zshrc` и `~/.bash_profile`. В обоих случаях
   `config.json` уходит в `preserve`.
-- `mascot` — сперва платформонезависимая цель `hookurl` на `~/.claude/settings.json`
-  (замена `127.0.0.1:45832/hook` обратно на `127.0.0.1:VSCODE_PORT/hook`). Дальше
+- `mascot` — сперва платформонезависимая цель `hookentries` на `~/.claude/settings.json`:
+  она убирает записи хуков скрепки (адрес `http://127.0.0.1:45832/hook`, с меткой
+  `?src=claude-mascot` и без), а всё прочее в файле оставляет. Раньше цель подставляла вместо
+  адреса `127.0.0.1:VSCODE_PORT/hook` — это не URL (`new URL` бросает `ERR_INVALID_URL`), и
+  Claude Code показывал Settings Error (строки A25 и B01 разбора диалогов). Дальше
   Windows: `killproc claude-mascot.exe`, `dirtree` каталога приложения,
-  `.claude-mascot/.installed`, `emptydir`, `reg`-значение `ClaudeMascot`. macOS:
-  `launchagent com.hamidun.claude-mascot` + plist, и `appbundle` в `~/Applications` —
+  `.claude-mascot/.installed`, `emptydir`, `file` на ярлык меню «Пуск»
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Claude Mascot.lnk` с признаком `bestEffort`: отказ защиты при junction в `AppData\Roaming` даёт `kept`, а не провал (`removeFileBestEffort`) (с 06.10.2026
+  установка кладёт его вместо автозапуска — решение владельца, строка A26) и
+  `reg`-значение `ClaudeMascot` с признаком `onlyIfValueIs` (снимается, только если ведёт на наш exe — `runValueIsOurs`; чужое под тем же именем остаётся) — автозапуск, который прописывали прошлые версии. macOS:
+  `launchagent com.hamidun.claude-mascot` + plist (тоже наследие прошлых версий: новая
+  установка агента не ставит, а оставшийся снимает), и `appbundle` в `~/Applications` —
   ТОЛЬКО если `ctx.mascotMac` дал ИМЯ `.app` из vendor: гейт проверяет ровно
   `ctx.mascotMac.appName` и его расширение (`src/uninstall-targets.js:221`), bundleId
   в условии не участвует и берётся строкой ниже как `String(bundleId || '')`
@@ -102,7 +109,7 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
 прерывается, ничего не удаляется. Дальше каждая цель исполняется
 `executeUninstallTarget` (`src/main.js:3056-3161`), который раскладывает тип на
 исполнителя из `uninstall-exec` (`removeFile`, `removeEmptyDir`, `removeDirTree`,
-`removeProfileLine`, `restoreHookUrl`) либо на локальные `winRegDeleteValue` /
+`removeProfileLine`, `removeMascotHooks`, `removeFileBestEffort`) либо на локальные `winRegDeleteValue` /
 `winRemoveUserPathEntry` (`src/main.js:2900-2971`), а неизвестный тип отбивает
 fail-closed. Каждая строка результата уходит и в UI (`component-log`), и в
 `install.log`.
@@ -134,15 +141,15 @@ fail-closed. Каждая строка результата уходит и в U
    совпадение, и «внутри», и «предок существующего защищённого»
    (`src/uninstall-exec.js:139-158`). На POSIX дополнительно сверяются device+inode
    (`src/uninstall-exec.js:162-181`). Исключение ровно одно и оно ничего не удаляет:
-   цель `hookurl` на `~/.claude/settings.json` (`src/uninstall-targets.js:201-207`) —
+   цель `hookentries` на `~/.claude/settings.json` (`src/uninstall-targets.js:221-225`) —
    первая в плане маскота на обеих платформах. Через `checkTarget` она НЕ проходит:
-   `executeUninstallTarget` отправляет её напрямую в `restoreHookUrl`
+   `executeUninstallTarget` отправляет её напрямую в `removeMascotHooks`
    (`src/main.js:3077`), а тот заменяет guard собственным узким допуском — см.
    инвариант 4.
-4. Единственная операция, которой разрешено писать в `~/.claude`, — `restoreHookUrl`,
-   и она ничего не удаляет: допущен ровно один путь `~/.claude/settings.json`
-   (`src/uninstall-exec.js:528-531`), проверяется, что это не symlink и обычный файл,
-   JSON парсится ДО и ПОСЛЕ замены, запись атомарная.
+4. Единственная операция, которой разрешено писать в `~/.claude`, — `removeMascotHooks`,
+   и она не удаляет файлов, а убирает из одного файла записи хуков скрепки: допущен ровно один путь `~/.claude/settings.json`
+   (`src/uninstall-exec.js:671-690`), проверяется, что в цепочке нет symlink/junction и это обычный файл,
+   JSON парсится ДО и ПОСЛЕ правки, число записей сверяется, запись атомарная.
 5. Пути из `preserve` переживают удаление: они уходят в `guardOpts.extraProtected`
    (`src/main.js:3213`), и `removeDirTree` отказывает всей цели, если внутри неё лежит
    сохраняемый путь (`src/uninstall-exec.js:235-239`).
@@ -257,53 +264,43 @@ fail-closed. Каждая строка результата уходит и в U
   CFBundleIdentifier», `src/main.js:3124`) и роняет всю деинсталляцию
   (`src/main.js:3256-3264`). Бандла там нет (перетащен в `/Applications`, снесён
   руками) — цель отдаёт `absent`, счётчик `failed` не растёт, и общий отказ приходит не
-  отсюда, а от `hookurl` в пост-проверке (риск №1). Защита от удаления чужого `.app` в
+   отсюда, а от `hookentries` в пост-проверке (риск №1). Защита от удаления чужого `.app` в
   обеих ветках одинакова.
 - Не откатывает частичное удаление: при провале возвращается только маркер установки,
   уже удалённые файлы обратно не появляются.
 - Каталоги, где остались чужие или сохраняемые файлы, остаются на диске (`kept`) — это
   ожидаемое поведение, а не сбой.
-- Возврат hook-url — не удаление, а замена подстроки в `settings.json`: механика
-  подтверждена (`src/uninstall-targets.js:201-207` → `src/main.js:3077` →
-  `src/uninstall-exec.js:525-562`), чужие записи и правки пользователя в файле не
-  трогаются. Но подставляемая строка `127.0.0.1:VSCODE_PORT/hook` — НЕ «плейсхолдер
-  пака»: в `vendor/config-pack/` её нет ни в одном файле, включая сам
-  `vendor/config-pack/.claude/settings.json` (10 247 байт, ноль вхождений
-  `VSCODE_PORT`). Обоснование «приводим конфиг к тому виду, в котором его раздаёт пак»
-  (`src/uninstall-targets.js:195-198`) и та же посылка в установщике
-  (`scripts/windows/mascot.ps1:50`, `scripts/macos/mascot.sh:174`) вшитым паком
-  опровергаются; происхождение этого плейсхолдера по репозиторию не прослеживается.
-  Обратимость («следующая установка скрепки снова подставит порт») держится только
-  если хуки с `VSCODE_PORT` кто-то реально прописал: `mascot.ps1:71` меняет файл ТОЛЬКО
-  при `$rawSettings.Contains($HOOK_OLD)`.
+- Снятие хуков скрепки — не удаление файла, а правка одного файла: из `settings.json` убираются
+  только записи скрепки (механика: `src/uninstall-targets.js:221-225` → `src/main.js:3219` →
+  `src/uninstall-exec.js:671-731`), а чужие хуки (в том числе на том же порту, но по другому пути, и
+  хук-команды), пустые массивы, бывшие до нас, и остальные ключи остаются. Прежняя подстановка
+  `127.0.0.1:VSCODE_PORT/hook` убрана: это не URL, а «плейсхолдера пака» в `vendor/config-pack/` нет
+  ни в одном файле, включая сам `vendor/config-pack/.claude/settings.json` (ноль вхождений
+  `VSCODE_PORT`). Установка (`scripts/windows/mascot.ps1:57`, `scripts/macos/mascot.sh:188`)
+  по-прежнему подставляет порт в этот плейсхолдер, если пак его несёт; когда не несёт, она в этом
+  месте ничего не меняет.
 - Квитанция отвечает ровно на один вопрос — «ставил ли этот установщик компонент»; она
   не хранит версию артефактов на диске и не является инвентарём.
 
 ## Риски и открытые вопросы
 
-1. **Пост-проверка не знает типа `hookurl` — удаление маскота всегда рапортует
-   провал.** `verifyPostconditions` разбирает `file`, `dirtree`, `emptydir`, `reg`,
-   `pathentry`, `profileline`, `launchagent`, `appbundle`, `killproc`, а всё прочее
+1. **Пост-проверка знает тип `hookentries`, но любой НОВЫЙ тип цели без своей ветки снова уронит
+   удаление.** `verifyPostconditions` разбирает `file`, `dirtree`, `emptydir`, `reg`,
+   `pathentry`, `profileline`, `launchagent`, `appbundle`, `hookentries`, `killproc`, а всё прочее
    уходит в `default` → `problems.push('неизвестный тип цели в пост-проверке: …')`
-   (`src/uninstall-exec.js:667-668`). План маскота содержит `hookurl` первой целью
-   (`src/uninstall-targets.js:201-207`). Проверено запуском на этой машине:
-   `verifyPostconditions` для плана `mascot` (win32) возвращает
-   `{ ok: false, problems: ['неизвестный тип цели в пост-проверке: hookurl'] }`. В
-   `main.js` это даёт `stillThere = true` → `restoreReceipt` → ответ `ok:false`
-   (`src/main.js:3245-3264`). То есть при фактически успешном удалении человек видит
-   «Не удалось удалить», маркер возвращается, кнопка «Удалить» остаётся, а файлы уже
-   снесены; повтор пройдёт по `absent`-целям и упрётся в ту же пост-проверку. Учёт
-   (`finalizeRemoval`, `manifest.removeEntry`) при этом не выполняется никогда.
-2. **Нота маскота противоречит его же цели.** В том же `case 'mascot'` в план
-   добавляется цель, правящая `~/.claude/settings.json`
-   (`src/uninstall-targets.js:201-207`), и тут же — нота «Хуки в ~/.claude/settings.json
-   НЕ трогаю (там могут быть твои правки)» (`src/uninstall-targets.js:237`). Обе строки
-   печатаются человеку в одном логе удаления (`src/main.js:3216`, `3324`).
+   (`src/uninstall-exec.js:889-890`). Первая редакция пост-проверки не знала цели хуков скрепки, и
+   каждое удаление скрепки рапортовало провал при фактически успешном удалении (`stillThere = true`
+   → `restoreReceipt` → ответ `ok:false`, `src/main.js:3245-3264`); ветка `hookentries`
+   (`src/uninstall-exec.js:863-888`) это закрыла. Держится тестом «verifyPostconditions: hookentries — остались записи скрепки или нечитаемый конфиг с нашим адресом — проблема; чужие хуки и отсутствие файла — нет».
+2. **Нота маскота больше не противоречит его цели.** Цель `hookentries` убирает записи хуков
+   скрепки, и нота плана говорит ровно это (`src/uninstall-targets.js:267`): «Из ~/.claude/settings.json
+   убираю только записи хуков скрепки …; твои хуки и остальные настройки НЕ трогаю». Обе строки
+   печатаются человеку в одном логе удаления.
 3. **Тестами не покрыт сквозной путь удаления маскота.** Тестовый исполнитель
    `execFsPlan` (test/run-tests.js) прогоняет только `file`, `emptydir`, `dirtree`,
-   `profileline`; `hookurl`, `reg`, `pathentry`, `launchagent`, `appbundle` через него
+   `profileline`; `hookentries`, `reg`, `pathentry`, `launchagent`, `appbundle` через него
    не проходят, а `verifyPostconditions` в связке с планом маскота не вызывается ни в
-   одном тесте. Именно поэтому риск №1 живёт незамеченным: `restoreHookUrl` покрыт
+   одном тесте. Именно поэтому риск №1 жил незамеченным: `removeMascotHooks` покрыт
    изолированно, связка «план маскота → пост-проверка → вердикт» — нет.
 4. **Частичный провал оставляет расхождение диска и учёта.** Ветка
    `failed > 0 || stillThere` возвращает маркер, но не восстанавливает удалённое

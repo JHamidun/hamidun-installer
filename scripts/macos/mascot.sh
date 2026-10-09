@@ -3,9 +3,10 @@
 # Аналог scripts/windows/mascot.ps1. Ставит ПОДПИСАННУЮ+НОТАРИЗОВАННУЮ .app из vendor
 # в ~/Applications (без админа): проверяет SHA-256 + codesign + пин TeamID + spctl
 # (нотаризация), ставит через staging с атомарным swap, снимает карантин, аккуратно
-# правит хуки Claude Code, ставит автозапуск (LaunchAgent) и делает health-check :45832.
+# правит хуки Claude Code, запускает скрепку один раз и делает health-check :45832.
+# Автозапуска при входе НЕТ (решение владельца 06.10.2026): LaunchAgent прошлых версий снимается.
 set -uo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; source "$DIR/_lib.sh"; source "$DIR/_mascot.sh"   # общие функции скрепки (их же зовёт touchup-mascot.sh)
 DRY="${HM_DRY_RUN:-}"
 
 # Пин издателя: скрепка обязана быть подписана ИМЕННО нашим Developer ID (Apple Team ID).
@@ -76,7 +77,7 @@ DEST_DIR="$HOME/Applications"
 DEST="$DEST_DIR/$APP_NAME"
 
 if [ -n "$DRY" ]; then
-  echo "  [dry-run] WOULD: verify SHA-256(CFBundleExecutable-бинаря)+codesign+точный TeamID($MASCOT_TEAM_ID)+spctl (нотаризация), staging-копия .app (verify ДО свапа) -> $DEST со свапом через $DEST.old (rollback при провале) + re-verify результата, xattr -dr com.apple.quarantine, хуки (settings.json: 127.0.0.1:VSCODE_PORT/hook -> :45832/hook; python: tmp 0600 + fsync + ре-валидация с диска + байтовая анти-гонка перед os.replace + атомарный бэкап .hm-bak), LaunchAgent автозапуск, запуск + health-check http://127.0.0.1:45832/health (дедлайн 10 с, OK только при живом процессе)"
+  echo "  [dry-run] WOULD: verify SHA-256(CFBundleExecutable-бинаря)+codesign+точный TeamID($MASCOT_TEAM_ID)+spctl (нотаризация), staging-копия .app (verify ДО свапа) -> $DEST со свапом через $DEST.old (rollback при провале) + re-verify результата, xattr -dr com.apple.quarantine, хуки (settings.json: 127.0.0.1:VSCODE_PORT/hook -> :45832/hook; python: tmp 0600 + fsync + ре-валидация с диска + байтовая анти-гонка перед os.replace + атомарный бэкап .hm-bak), без автозапуска (LaunchAgent com.hamidun.claude-mascot от прошлых версий снять, если наш), запуск один раз (open) + health-check http://127.0.0.1:45832/health (дедлайн 10 с, OK только при живом процессе)"
   echo "[dry-run] Скрепка: ветка выбрана, без изменений."; exit 0
 fi
 
@@ -330,34 +331,31 @@ else
   echo "  Маркер .installed оставлен — правку хуков скрепка докрутит сама."
 fi
 
-# 4. Автозапуск при входе (LaunchAgent, ~/Library/LaunchAgents, без админа). RunAtLoad
-# также запускает скрепку прямо сейчас. KeepAlive НЕ ставим — если пользователь закрыл
-# скрепку, она не должна воскресать до следующего входа.
-LA_DIR="$HOME/Library/LaunchAgents"
-LA="$LA_DIR/com.hamidun.claude-mascot.plist"
-mkdir -p "$LA_DIR"
-EXECBIN="$DEST/Contents/MacOS/$APP_BIN"
-cat > "$LA" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.hamidun.claude-mascot</string>
-  <key>ProgramArguments</key>
-  <array><string>$EXECBIN</string></array>
-  <key>RunAtLoad</key><true/>
-</dict></plist>
-EOF
-launchctl unload "$LA" 2>/dev/null || true
+# 4. Автозапуска НЕТ — решение владельца 06.10.2026 (строка A26 разбора диалогов
+# поддержки): люди не понимали, что за скрепка появляется при входе и откуда она взялась.
+# Теперь скрепка стартует один раз сразу после установки, а дальше — только когда человек
+# сам откроет её из «Программ».
+#
+# Прошлые версии ставили LaunchAgent com.hamidun.claude-mascot с RunAtLoad. При повторной
+# установке снимаем его, но ТОЛЬКО свой: обычный файл по нашему точному пути И с нашей
+# меткой внутри. Чужой файл под этим именем не трогаем — и пишем об этом в журнал.
+# Правило и функция — в _mascot.sh, их же зовёт touchup-mascot.sh: сюда повторный запуск
+# установщика не доходит, пока скрепка отмечена «уже установлено».
+remove_old_mascot_autostart 'com.hamidun.claude-mascot' "$HOME/Library/LaunchAgents/com.hamidun.claude-mascot.plist"
+
+# Запуск сейчас — один раз (раньше его давал RunAtLoad при загрузке агента). Скрипт идёт
+# от имени пользователя, open запускает .app через LaunchServices — как двойной щелчок.
 LAUNCHED=0
-if launchctl load "$LA" 2>/dev/null; then
-  LAUNCHED=1   # RunAtLoad=true поднимет скрепку сейчас и при каждом входе
+if open "$DEST" 2>/dev/null; then
+  LAUNCHED=1
 else
-  echo "  ВНИМАНИЕ: автозапуск (LaunchAgent) не загрузился — пробую запустить напрямую."
-  open "$DEST" 2>/dev/null && LAUNCHED=1 || echo "  ВНИМАНИЕ: скрепка не запустилась — открой вручную: $DEST"
+  echo "  ВНИМАНИЕ: скрепка не запустилась — открой вручную: $DEST"
 fi
 
 # P0-4: квитанция владения — ТОЧНЫЙ путь бандла + его ИДЕНТИЧНОСТЬ (CFBundleIdentifier
-# + Team ID) + LaunchAgent + маркер. Деинсталлятор удалит .app ТОЛЬКО по этому пути
+# + Team ID) + маркер. LaunchAgent больше не ставим — и в квитанцию его не пишем (снять
+# агента прошлых версий деинсталлятор умеет и так: цель зашита в uninstall-targets.js).
+# Деинсталлятор удалит .app ТОЛЬКО по этому пути
 # и ТОЛЬКО при совпадении идентичности — НИКОГДА не по маске *[Cc]laude*.app.
 echo "HM-RECEIPT path $DEST"
 MASCOT_BUNDLE_ID=""
@@ -369,7 +367,6 @@ if [ -z "$MASCOT_BUNDLE_ID" ]; then
 fi
 [ -n "$MASCOT_BUNDLE_ID" ] && echo "HM-RECEIPT bundleid $MASCOT_BUNDLE_ID"
 echo "HM-RECEIPT teamid $MASCOT_TEAM_ID"
-echo "HM-RECEIPT launchagent com.hamidun.claude-mascot|$LA"
 echo "HM-RECEIPT path $HOME/.claude-mascot"
 
 # 5. Health-check (НЕ критичный): абсолютный дедлайн 10 с (а не 10 итераций по
@@ -387,11 +384,16 @@ fi
 # процесс, а молчащий health + мёртвый процесс = НЕ успех.
 PROC_ALIVE=0
 if pgrep -f "/Contents/MacOS/$APP_BIN" >/dev/null 2>&1; then PROC_ALIVE=1; fi
+# Автозапуска нет, поэтому в каждом исходе говорим, откуда открыть скрепку потом.
+# ~/Applications в Finder — папка «Программы» внутри домашней (не та, что в боковой панели).
+MASCOT_NAME="${APP_NAME%.app}"
+REOPEN="Программы → $MASCOT_NAME (в Finder: домашняя папка → «Программы»; или Cmd+Пробел и «$MASCOT_NAME»)"
 if [ "$HEALTHY" = "1" ] && [ "$PROC_ALIVE" = "1" ]; then
+  echo "  Сама при входе в систему скрепка не запускается — открыть её снова: $REOPEN."
   echo "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude."
 elif [ "$LAUNCHED" = "1" ] && [ "$PROC_ALIVE" = "1" ]; then
-  echo "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится — открой вручную: $DEST"
+  echo "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится — открой её: $REOPEN"
 else
-  echo "Скрепка установлена, но не подтвердила запуск — стартует при следующем входе (автозапуск). Вручную: $DEST"
+  echo "Скрепка установлена, но не подтвердила запуск — открой её вручную: $REOPEN. Путь: $DEST"
 fi
 exit 0

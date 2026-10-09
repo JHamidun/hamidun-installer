@@ -1,6 +1,6 @@
 ﻿# Скрепка Claude (маскот) — Windows: живой помощник поверх окон + кнопки разрешений
 $ErrorActionPreference = 'Continue'
-. (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_verify.ps1'); . (Join-Path $PSScriptRoot '_mascot.ps1')  # Confirm-HmArtifact (fail-closed SHA-256); общие функции скрепки (их же зовёт touchup-mascot.ps1)
 $DRY = [bool]$env:HM_DRY_RUN
 
 # Вшитый артефакт (Windows-only; кладёт tools/fetch-vendor.ps1 из локальной сборки claude-mascot)
@@ -11,7 +11,7 @@ $destDir = Join-Path $env:LOCALAPPDATA 'Programs\ClaudeMascot'
 $dest    = Join-Path $destDir 'claude-mascot.exe'
 
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: SHA-256 exe, копия -> $dest, хуки (settings.json: hook-url 127.0.0.1:VSCODE_PORT/hook -> :45832/hook, атомарно + бэкап .hm-bak), Run-автозапуск, запуск + health-check"
+    Write-Host "  [dry-run] WOULD: SHA-256 exe, копия -> $dest, хуки (settings.json: hook-url 127.0.0.1:VSCODE_PORT/hook -> :45832/hook, атомарно + бэкап .hm-bak), без автозапуска (запись HKCU Run ClaudeMascot от прошлых версий снять, если ведёт на наш exe), ярлык «Claude Mascot» в меню «Пуск», запуск один раз + health-check"
     Write-Host "[dry-run] Скрепка: ветка выбрана, без изменений."; exit 0
 }
 
@@ -97,17 +97,37 @@ if (-not $keepMarker) {
     Write-Host "  Маркер .installed оставлен — правку хуков скрепка докрутит сама."
 }
 
-# 5. Автозапуск при входе в Windows (HKCU, без админа) — не критичен, но о провале сообщаем честно
-$autoRunOk = $false
-try {
-    New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ClaudeMascot' -Value "`"$dest`"" -PropertyType String -Force -ErrorAction Stop | Out-Null
-    $autoRunOk = $true
-} catch { Write-Host "  ВНИМАНИЕ: автозапуск не прописался ($($_.Exception.Message)) — скрепку придётся запускать вручную: $dest" }
+# 5. Автозапуска НЕТ — решение владельца 06.10.2026 (строка A26 разбора диалогов
+# поддержки): люди не понимали, что за скрепка появляется при входе в Windows и откуда
+# она взялась. Теперь скрепка стартует один раз сразу после установки (ниже), а дальше —
+# только когда человек сам откроет её из меню «Пуск».
+#
+# Прошлые версии установщика прописывали HKCU\...\Run\ClaudeMascot всегда. При повторной
+# установке эту запись снимаем, но ТОЛЬКО свою: имя ClaudeMascot И значение ведёт ровно
+# на наш exe (правило и функции — в _mascot.ps1, их же зовёт touchup-mascot.ps1: сюда
+# повторный запуск установщика не доходит, пока скрепка отмечена «уже установлено»).
+# Чужое значение под тем же именем не трогаем — и пишем об этом в журнал.
+$null = Remove-HmMascotOldAutorun 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' $dest
 
-# P0-4: квитанция владения — ТОЧНЫЕ пути/реестр созданных артефактов (main соберёт в receipt).
+# 5б. Ярлык «Claude Mascot» в меню «Пуск» (только для этого пользователя): раз скрепка сама
+# не стартует, человеку нужно место, откуда её открыть. Ярлык — просто файл, он ничего не
+# запускает, и exe под админом здесь не исполняется. Но пишем мы его из-под админа в
+# каталог, который может менять любая программа этого пользователя — отсюда правила в
+# _mascot.ps1: папка берётся от профиля и сверяется с ответом оболочки (не из реестра
+# вслепую), без junction/symlink в пути, сохранение через временный файл и Move с
+# тремя попытками, повторная проверка непосредственно перед переносом. Не вышло — не
+# критично: скрепка запущена, путь к exe в журнале.
+$lnkPath = $null
+try {
+    $progsDir = Get-HmMascotProgramsDir
+    $lnkPath = New-HmMascotShortcut $progsDir $dest { $null = Get-HmMascotProgramsDir }
+    Write-Host "  Ярлык в меню «Пуск»: $lnkPath"
+} catch { Write-Host "  Ярлык в меню «Пуск» не создался (не критично): $($_.Exception.Message). Скрепку можно запускать файлом: $dest" }
+
+# P0-4: квитанция владения — ТОЧНЫЕ пути созданных артефактов (main соберёт в receipt).
 Write-Host "HM-RECEIPT path $destDir"
 Write-Host "HM-RECEIPT path $(Join-Path $env:USERPROFILE '.claude-mascot')"
-if ($autoRunOk) { Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|ClaudeMascot" }
+if ($lnkPath) { Write-Host "HM-RECEIPT path $lnkPath" }
 
 # Запуск сейчас
 # Запуск сейчас — ДЕ-ЭЛЕВАЦИЯ через explorer.exe (medium integrity): под elevated-токеном
@@ -129,7 +149,12 @@ if ($launched) {
         } catch { }
     }
 }
-if ($healthy) { Write-Host "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude." }
+# Автозапуска нет, поэтому в каждом исходе говорим, откуда открыть скрепку потом.
+$reopen = if ($lnkPath) { 'меню «Пуск» → Claude Mascot' } else { $dest }
+if ($healthy) {
+    Write-Host "  Сама при входе в Windows скрепка не запускается — открыть её снова: $reopen."
+    Write-Host "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude."
+}
 elseif (-not $wvOk) {
     # ДВА факта вместе, а не по отдельности: WebView2 в реестре нет И скрепка не
     # ответила на проверку. Это не «не успела» — окно рисовать нечем, Tauri без
@@ -151,7 +176,6 @@ elseif (-not $wvOk) {
     Write-Host "  Всё остальное установлено и работает: скрепка косметическая."
     exit 1
 }
-elseif ($launched) { Write-Host "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится на экране — запусти вручную: $dest" }
-elseif ($autoRunOk) { Write-Host "Скрепка установлена, но не подтвердила запуск — стартует при следующем входе в Windows (автозапуск). Вручную: $dest" }
-else { Write-Host "Скрепка установлена, но не запустилась и автозапуск не прописан — запусти вручную: $dest" }
+elseif ($launched) { Write-Host "OK: Скрепка установлена и запускается (не успела ответить на проверку — это не ошибка). Если не появится на экране — открой её: $reopen" }
+else { Write-Host "Скрепка установлена, но не запустилась — открой её вручную: $reopen" }
 exit 0
