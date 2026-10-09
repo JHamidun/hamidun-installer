@@ -374,6 +374,14 @@ function main() {
     // нужен shell:true (тогда 'npx' резолвится шеллом в npx.cmd). На macOS безвреден.
     execFileSync('npx', ['electron-builder'].concat(t.builderArgs), { cwd: ROOT, stdio: 'inherit', shell: true });
 
+    // 4a. Fuse-проводка упакованного Electron: RunAsNode, NODE_OPTIONS и --inspect выключены.
+    // Гасит их хук afterPack (tools/after-pack.js) до подписи; здесь — независимая сверка
+    // результата прямо по байтам готового бинаря (lite-exe — тот же подписанный requireAdministrator).
+    // Код выхода ≠ 0 роняет сборку, finally ниже вернёт дерево. На macOS смотрим .app из
+    // electron-builder: release/mac-universal.
+    execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-fuses.js')]
+      .concat(target === 'mac' ? [path.join(ROOT, 'release', 'mac-universal')] : []), { cwd: ROOT, stdio: 'inherit' });
+
     // 4b. Упакованный vendor-lite побайтно равен своему checksums.json. Подписанная сборка
     // переписала бы uv/uvx, и на машине человека Confirm-HmArtifact остановил бы их как
     // «подменённые» (хук подписи теперь обходит чужие файлы — это страховка от возврата).

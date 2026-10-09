@@ -18394,3 +18394,769 @@ ok('config.json в репозитории без сборочных маркер
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 }());
+
+// ===========================================================================
+// Electron fuses (находка F8 ревью безопасности): подписанный Certum exe с requireAdministrator
+// не должен исполнять чужой JS из NODE_OPTIONS / ELECTRON_RUN_AS_NODE / --inspect. Хук
+// tools/after-pack.js гасит три fuse ДО подписи, tools/verify-fuses.js — независимый гейт после
+// сборки. Тесты исполняют код, а не читают исходник: синтетические бинари с настоящей проводкой,
+// хук в дочернем процессе (пакет @electron/fuses — ESM), и главное — НАСТОЯЩИЙ Electron 44 с
+// внешним оракулом (маркер-файлы от дочерних процессов). Пакета или Electron нет — честный SKIP.
+// Секция только на синхронном ok(): так её можно гонять отдельно (run_section.js).
+// ===========================================================================
+(function () {
+  console.log('\n== Electron fuses: хук afterPack, гейт verify-fuses, настоящий рантайм ==');
+  const { spawnSync } = require('child_process');
+  const TOOLS = path.join(ROOT, 'tools');
+  const VF = () => require(path.join(TOOLS, 'verify-fuses.js'));
+  const HOOK = () => require(path.join(TOOLS, 'after-pack.js'));
+  const SENT = Buffer.from('dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX', 'latin1');
+  const CHUNK = 8 * 1024 * 1024;
+  // Проводка настоящего Electron 44.5.1 (прочитана из dist/electron.exe) и она же после правки:
+  // изменены ровно индексы 0 (RunAsNode), 2 (NODE_OPTIONS), 3 (--inspect).
+  const STOCK = [0x31, 0x30, 0x31, 0x31, 0x30, 0x30, 0x30, 0x31, 0x31];
+  const HARD = [0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31, 0x31];
+  const PE_JUNK = 2 + 6000; // смещение sentinel в синтетическом exe ниже
+
+  const tmps = [];
+  let releaseTouched = false; // тест приманки мог создать release/ в репозитории: пустую папку убираем, непустую не трогаем
+  process.on('exit', () => {
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+    if (releaseTouched) { try { fs.rmdirSync(path.join(ROOT, 'release')); } catch (e) { /* не пуста или нет — не наша */ } }
+  });
+  function tmp(prefix) { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix || 'hm-fuses-')); tmps.push(d); return d; }
+  function put(dir, rel, buf) { const p = path.join(dir, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, buf); return p; }
+
+  // Детерминированный «мусор» вместо случайного: тест воспроизводим, а sentinel в нём не встречается.
+  function junk(n, seed) {
+    let x = (seed >>> 0) || 1;
+    const b = Buffer.alloc(n);
+    for (let i = 0; i < n; i++) { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; b[i] = x & 255; }
+    return b;
+  }
+  const wire = (states, version) => Buffer.concat([SENT, Buffer.from([version === undefined ? 1 : version, states.length]), Buffer.from(states)]);
+  const pe = (states) => Buffer.concat([Buffer.from('MZ'), junk(6000, 11), wire(states), junk(4000, 12)]);
+  const mach = (states) => Buffer.concat([Buffer.from([0xCF, 0xFA, 0xED, 0xFE]), junk(5000, 21), wire(states), junk(3000, 22)]);
+  const fat = (a, b) => Buffer.concat([Buffer.from([0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2]), junk(2000, 31), wire(a), junk(2500, 32), wire(b), junk(1500, 33)]);
+  const FW = ['Contents', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework'];
+  const diffAt = (a, b) => { const out = []; for (let i = 0; i < Math.max(a.length, b.length); i++) if (a[i] !== b[i]) out.push(i); return out; };
+  const errs = (r) => r.lines.filter((l) => l.err).map((l) => l.text).join('\n');
+  // Код JS без комментариев: закомментированный вызов гейта не должен проходить за настоящий
+  // (codeOnly выше режет только `#`-строки, а у JS комментарии `//` и блоки `/* */`).
+  const jsOnly = (text) => String(text).replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+
+  // --- дочерний процесс: хук асинхронный и тянет ESM-пакет, поэтому гоняем его отдельно ---------
+  const DRIVER = [
+    "'use strict';",
+    "const path = require('path');",
+    "const TOOLS = process.argv[2], mode = process.argv[3], arg = JSON.parse(process.argv[4] || '{}');",
+    "const hook = require(path.join(TOOLS, 'after-pack.js'));",
+    "const vf = require(path.join(TOOLS, 'verify-fuses.js'));",
+    "const out = (o) => console.log('\\nRESULT ' + JSON.stringify(o));",
+    "(async () => {",
+    "  if (mode === 'afterPack') {",
+    "    const ctx = { electronPlatformName: arg.platform, appOutDir: arg.appOutDir, packager: { appInfo: { productFilename: arg.product || 'Hamidun Setup' } } };",
+    "    const saw = [];",
+    "    const deps = arg.realAdhoc ? undefined : { adhoc: async () => {",
+    "      saw.push(hook.binariesFor(ctx).map((t) => vf.scanFile(t.file).wires.map((w) => vf.judgeWire(w).ok)));",
+    "    } };",
+    "    await hook.default(ctx, deps);",
+    "    out({ ok: true, adhocSaw: saw });",
+    "  } else if (mode === 'flipFile') {",
+    "    const lib = await hook.assertReady();",
+    "    await hook.flipFile(lib, arg.file, arg.kind);",
+    "    out({ ok: true });",
+    "  } else if (mode === 'flipFileStub') {", // «пакет»-заглушка: отказ хука обязан случиться ДО обращения к нему
+    "    const stub = { FuseVersion: { V1: '1' }, FuseV1Options: { RunAsNode: 0, EnableNodeOptionsEnvironmentVariable: 2, EnableNodeCliInspectArguments: 3 },",
+    "      flipFuses: async () => { throw new Error('STUB-CALLED: хук дошёл до записи'); } };",
+    "    try { await hook.flipFile(stub, arg.file, arg.kind); out({ ok: true }); } catch (e) { out({ ok: false, error: e.message }); }",
+    "  } else if (mode === 'binariesFor') {",
+    "    const ctx = { electronPlatformName: arg.platform, appOutDir: arg.appOutDir, packager: { appInfo: { productFilename: 'Hamidun Setup' } } };",
+    "    try { out({ ok: true, files: hook.binariesFor(ctx).map((t) => t.file) }); } catch (e) { out({ ok: false, error: e.message }); }",
+    "  } else if (mode === 'loadMissing') {",
+    "    try { await hook.loadFusesLib('@electron/no-such-package-for-test'); out({ ok: true }); } catch (e) { out({ ok: false, error: e.message }); }",
+    "  } else if (mode === 'lib') {",
+    "    const lib = await hook.loadFusesLib();",
+    "    out({ ok: true, version: lib.FuseVersion.V1, options: lib.FuseV1Options });",
+    "  } else if (mode === 'retry') {", // «пакет», который первые failTimes раз отвечает кодом ошибки, потом честно правит
+    "    const real = await hook.loadFusesLib();",
+    "    let calls = 0;",
+    "    const fake = { FuseVersion: real.FuseVersion, FuseV1Options: real.FuseV1Options, flipFuses: async (file, cfg) => {",
+    "      calls++;",
+    "      if (calls <= arg.failTimes) { const e = new Error(arg.code + ': занят'); e.code = arg.code; throw e; }",
+    "      return real.flipFuses(file, cfg);",
+    "    } };",
+    "    try { await hook.flipFile(fake, arg.file, 'exe'); out({ ok: true, calls }); }",
+    "    catch (e) { out({ ok: false, calls, error: e.message, code: e.code }); }",
+    "  } else if (mode === 'setFuses') {", // только для тестов: выставить ОТДЕЛЬНЫЕ fuse (изоляция «какой fuse что закрывает»)
+    "    const lib = await hook.loadFusesLib();",
+    "    const cfg = { version: lib.FuseVersion.V1 };",
+    "    if ('runAsNode' in arg) cfg[lib.FuseV1Options.RunAsNode] = arg.runAsNode;",
+    "    if ('nodeOptions' in arg) cfg[lib.FuseV1Options.EnableNodeOptionsEnvironmentVariable] = arg.nodeOptions;",
+    "    if ('inspect' in arg) cfg[lib.FuseV1Options.EnableNodeCliInspectArguments] = arg.inspect;",
+    "    out({ ok: true, wires: await lib.flipFuses(arg.file, cfg) });",
+    "  }",
+    "})().catch((e) => { out({ ok: false, error: String(e && e.message) }); process.exitCode = 1; });",
+  ].join('\n');
+  let driverFile = null;
+  function driver(mode, arg, env) {
+    if (!driverFile) { driverFile = path.join(tmp('hm-fuses-drv-'), 'driver.js'); fs.writeFileSync(driverFile, DRIVER); }
+    const r = spawnSync(process.execPath, [driverFile, TOOLS, mode, JSON.stringify(arg || {})], {
+      encoding: 'utf8', timeout: 300000, env: Object.assign({}, process.env, env || {}),
+    });
+    const m = /\nRESULT (.*)\s*$/.exec('\n' + String(r.stdout || '').trim());
+    let result = null;
+    try { result = m ? JSON.parse(m[1]) : null; } catch (e) { /* result stays null */ }
+    return { status: r.status, stdout: String(r.stdout || ''), stderr: String(r.stderr || ''), result };
+  }
+  let libProbe = null;
+  function needLib() {
+    // Нет самого хука или он не грузится — это ПРОВАЛ теста, а не пропуск: иначе на старом дереве (без
+    // tools/after-pack.js) все тесты хука честно показали бы ⏭ и выглядели бы «не нужными».
+    HOOK();
+    if (!libProbe) libProbe = driver('lib');
+    const r = libProbe.result;
+    if (r && r.ok) return;
+    // Пропуск — только когда хук исправен, а не нашёлся именно пакет (его сообщение — «не загружается пакет …»).
+    if (r && /не загружается пакет/.test(String(r.error))) {
+      SKIP('нет пакета @electron/fuses (npm ci в корне проекта или путь к нему в NODE_PATH) — правку проверить нечем: ' + String(r.error).slice(0, 100));
+    }
+    throw new Error('драйвер хука не ответил, а пакет тут ни при чём: ' + libProbe.stdout + libProbe.stderr);
+  }
+  const hookRun = (platform, appOutDir, extra) => driver('afterPack', Object.assign({ platform, appOutDir }, extra || {}));
+
+  // ================= Гейт verify-fuses: независимый читатель, без пакета =================
+
+  ok('fuses: гейт verify-fuses — заводская проводка Electron (три fuse включены) даёт код 1, выключенная — 0', () => {
+    const vf = VF();
+    const d = tmp();
+    put(d, 'Hamidun Setup.exe', pe(STOCK));
+    const bad = vf.checkDir(d);
+    assert.strictEqual(bad.code, 1, 'заводская проводка обязана валить сборку');
+    for (const n of ['RunAsNode', 'EnableNodeOptionsEnvironmentVariable', 'EnableNodeCliInspectArguments']) {
+      assert(errs(bad).includes(n + ' ВКЛЮЧЁН'), 'гейт назвал ' + n + ': ' + errs(bad));
+    }
+    assert(!/EnableCookieEncryption|GrantFileProtocolExtraPrivileges|OnlyLoadAppFromAsar/.test(errs(bad)), 'чужие fuse гейт не трогает');
+    put(d, 'Hamidun Setup.exe', pe(HARD));
+    const good = vf.checkDir(d);
+    assert.strictEqual(good.code, 0, errs(good));
+    assert.strictEqual(good.wires, 1);
+    // Отрицательный контроль по каждому из трёх: стоит включить любой — гейт краснеет.
+    for (const idx of [0, 2, 3]) {
+      const s = HARD.slice(); s[idx] = 0x31;
+      put(d, 'Hamidun Setup.exe', pe(s));
+      assert.strictEqual(vf.checkDir(d).code, 1, 'fuse #' + idx + ' включён — гейт обязан упасть');
+    }
+    // Не наша забота в этой волне: ASAR-fuse включены — гейт зелёный (мы их не требуем и не запрещаем).
+    const asar = HARD.slice(); asar[4] = 0x31; asar[5] = 0x31;
+    put(d, 'Hamidun Setup.exe', pe(asar));
+    assert.strictEqual(vf.checkDir(d).code, 0, 'ASAR-fuse не входят в этот гейт');
+  });
+
+  ok('fuses: гейт не зеленеет без доказательства — removed, чужая версия, обрезанная и короткая проводка дают код 1', () => {
+    const vf = VF();
+    const d = tmp();
+    const cases = [
+      ['состояние removed у NODE_OPTIONS', pe(HARD.map((b, i) => (i === 2 ? 0x72 : b))), /removed/],
+      ['неизвестный байт состояния', pe(HARD.map((b, i) => (i === 0 ? 0x7a : b))), /неизвестное состояние 0x7a/],
+      ['версия проводки 2', Buffer.concat([Buffer.from('MZ'), junk(900, 5), wire(HARD, 2), junk(300, 6)]), /неизвестная версия проводки: 2/],
+      ['проводка обрезана концом файла', Buffer.concat([Buffer.from('MZ'), junk(900, 5), SENT, Buffer.from([1, 9, 0x30, 0x30])]), /обрезана/],
+      ['проводка короче нужного индекса', Buffer.concat([Buffer.from('MZ'), junk(900, 5), wire([0x30, 0x30, 0x30]), junk(300, 6)]), /нет индекса 3/],
+      ['sentinel в самом конце файла', Buffer.concat([Buffer.from('MZ'), junk(900, 5), SENT]), /обрезана|неизвестная версия/],
+    ];
+    for (const [why, buf, re] of cases) {
+      put(d, 'Hamidun Setup.exe', buf);
+      const r = vf.checkDir(d);
+      assert.strictEqual(r.code, 1, why + ': выключенность не доказана — код должен быть 1, а не зелёный: ' + r.code + ' ' + errs(r));
+      assert(re.test(errs(r)), why + ': причина названа словами (' + re + '): ' + errs(r));
+    }
+  });
+
+  ok('fuses: гейт не зеленеет вхолостую — нет папки, пустая папка, exe без sentinel, файл вместо папки дают код 2', () => {
+    const vf = VF();
+    const base = tmp();
+    assert.strictEqual(vf.checkDir(path.join(base, 'нет-такой')).code, 2, 'нет папки');
+    const empty = path.join(base, 'empty'); fs.mkdirSync(empty);
+    assert.strictEqual(vf.checkDir(empty).code, 2, 'пустая папка');
+    const nosent = path.join(base, 'nosent'); fs.mkdirSync(nosent);
+    put(nosent, 'Hamidun Setup.exe', Buffer.concat([Buffer.from('MZ'), junk(5000, 3)]));
+    const r = vf.checkDir(nosent);
+    assert.strictEqual(r.code, 2, 'exe без sentinel — проверять нечего, а не «чисто»');
+    assert(/нет fuse-проводки/.test(errs(r)), errs(r));
+    const only = path.join(base, 'only-text'); fs.mkdirSync(only);
+    put(only, 'readme.txt', pe(STOCK));
+    assert.strictEqual(vf.checkDir(only).code, 2, 'проводка в не-exe в корне не считается бинарём Electron');
+    const file = put(base, 'file.exe', pe(HARD));
+    assert.strictEqual(vf.checkDir(file).code, 2, 'файл вместо папки');
+  });
+
+  ok('fuses: гейт на macOS — Electron Framework внутри .app, у universal две проводки и зелёный только при обеих выключенных', () => {
+    const vf = VF();
+    const d = tmp();
+    const app = path.join(d, 'mac-universal', 'Hamidun Setup.app');
+    put(path.join(d, 'mac-universal'), path.join('Hamidun Setup.app', ...FW), fat(HARD, HARD));
+    const ok2 = vf.checkDir(path.join(d, 'mac-universal'));
+    assert.strictEqual(ok2.code, 0, errs(ok2));
+    assert.strictEqual(ok2.wires, 2, 'обе проводки universal-слайсов проверены');
+    // один слайс не погашен (хук не отработал для arm64) — красный, и виден именно он
+    put(path.join(d, 'mac-universal'), path.join('Hamidun Setup.app', ...FW), fat(HARD, STOCK));
+    const half = vf.checkDir(path.join(d, 'mac-universal'));
+    assert.strictEqual(half.code, 1, 'вторая проводка заводская — гейт обязан упасть');
+    assert(/RunAsNode ВКЛЮЧЁН/.test(errs(half)));
+    // сам .app как аргумент тоже годится
+    put(path.join(d, 'mac-universal'), path.join('Hamidun Setup.app', ...FW), mach(HARD));
+    assert.strictEqual(vf.checkDir(app).code, 0, '.app как аргумент');
+    // .app без Electron Framework — проверять нечего (2), а не «чисто»
+    const bare = path.join(d, 'bare'); fs.mkdirSync(path.join(bare, 'Hamidun Setup.app', 'Contents', 'MacOS'), { recursive: true });
+    put(bare, path.join('Hamidun Setup.app', 'Contents', 'MacOS', 'Hamidun Setup'), mach(STOCK));
+    assert.strictEqual(vf.checkDir(bare).code, 2, 'основной исполняемый файл не заменяет Electron Framework');
+  });
+
+  ok('fuses: sentinel на стыке 8 МиБ-кусков находится ровно один раз, на любом смещении у границы', () => {
+    const vf = VF();
+    const d = tmp();
+    const big = junk(CHUNK + 4096, 77);
+    const w = wire(HARD);
+    for (const off of [CHUNK - 40, CHUNK - 32, CHUNK - 31, CHUNK - 16, CHUNK - 1, CHUNK, CHUNK + 1]) {
+      const buf = Buffer.from(big);
+      w.copy(buf, off);
+      const f = put(d, 'edge.exe', buf);
+      const scan = vf.scanFile(f);
+      assert.strictEqual(scan.wires.length, 1, 'смещение ' + off + ': ровно одна проводка, а найдено ' + scan.wires.length);
+      assert.strictEqual(scan.wires[0].offset, off, 'смещение ' + off);
+      assert(vf.judgeWire(scan.wires[0]).ok, 'смещение ' + off + ': состояния прочитаны целиком');
+    }
+  });
+
+  ok('fuses: CLI verify-fuses — коды выхода настоящего процесса 0, 1 и 2', () => {
+    const d = tmp();
+    const run = (dir) => spawnSync(process.execPath, [path.join(TOOLS, 'verify-fuses.js'), dir], { encoding: 'utf8', timeout: 120000 });
+    put(d, path.join('a', 'Hamidun Setup.exe'), pe(HARD));
+    put(d, path.join('b', 'Hamidun Setup.exe'), pe(STOCK));
+    fs.mkdirSync(path.join(d, 'c'));
+    const good = run(path.join(d, 'a'));
+    assert.strictEqual(good.status, 0, good.stdout + good.stderr);
+    assert(/OK: проверено проводок 1/.test(good.stdout), good.stdout);
+    const bad = run(path.join(d, 'b'));
+    assert.strictEqual(bad.status, 1, bad.stdout + bad.stderr);
+    assert(/ПРОВАЛ/.test(bad.stderr) && /сборка НЕГОДНА/.test(bad.stderr), bad.stderr);
+    const none = run(path.join(d, 'c'));
+    assert.strictEqual(none.status, 2, none.stdout + none.stderr);
+    // без аргумента смотрит release/win-unpacked: в чистом чекауте его нет -> 2, а не молчаливый успех
+    if (!fs.existsSync(path.join(ROOT, 'release', 'win-unpacked'))) {
+      const def = spawnSync(process.execPath, [path.join(TOOLS, 'verify-fuses.js')], { encoding: 'utf8', timeout: 120000, cwd: d });
+      assert.strictEqual(def.status, 2, 'по умолчанию — release/win-unpacked: ' + def.stdout + def.stderr);
+    }
+  });
+
+  ok('fuses: индексы гейта сверены с FuseV1Options пакета @electron/fuses, расхождение ловится', () => {
+    const vf = VF();
+    const hook = HOOK();
+    // Отрицательные контроли не требуют пакета: подменяем «пакет» словарём.
+    const good = { FuseVersion: { V1: '1' }, FuseV1Options: { RunAsNode: 0, EnableNodeOptionsEnvironmentVariable: 2, EnableNodeCliInspectArguments: 3 } };
+    hook.assertLibMatches(good);
+    assert.throws(() => hook.assertLibMatches({ FuseVersion: { V1: '1' }, FuseV1Options: { RunAsNode: 0, EnableNodeOptionsEnvironmentVariable: 3, EnableNodeCliInspectArguments: 2 } }),
+      /порядок fuse разошёлся/, 'перепутанные индексы: гейт смотрел бы не в тот байт');
+    assert.throws(() => hook.assertLibMatches({ FuseVersion: { V1: '2' }, FuseV1Options: good.FuseV1Options }), /версия проводки/);
+    assert.throws(() => hook.assertLibMatches({ FuseVersion: { V1: '1' }, FuseV1Options: {} }), /порядок fuse разошёлся/);
+    assert.deepStrictEqual(vf.GUARDED.map((g) => [g.name, g.index]),
+      [['RunAsNode', 0], ['EnableNodeOptionsEnvironmentVariable', 2], ['EnableNodeCliInspectArguments', 3]]);
+    // Настоящий пакет: те же индексы и порядок (в нём ещё WasmTrapHandlers=8 — Electron 44 несёт 9 флагов).
+    needLib();
+    const o = libProbe.result.options;
+    for (const g of vf.GUARDED) assert.strictEqual(o[g.name], g.index, 'FuseV1Options.' + g.name);
+    assert.strictEqual(libProbe.result.version, String(vf.WIRE_VERSION));
+  });
+
+  // ================= Хук afterPack: синтетические бинари (нужен пакет @electron/fuses) =================
+
+  ok('fuses: хук Windows — гасит ровно три fuse, остальные байты файла те же, повтор ничего не меняет', () => {
+    needLib();
+    const vf = VF();
+    const d = tmp();
+    const exe = put(d, 'Hamidun Setup.exe', pe(STOCK));
+    const before = fs.readFileSync(exe);
+    const r = hookRun('win32', d);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert(r.result && r.result.ok, JSON.stringify(r.result));
+    const after = fs.readFileSync(exe);
+    assert.strictEqual(after.length, before.length, 'размер прежний');
+    assert.deepStrictEqual(diffAt(before, after), [PE_JUNK + 34, PE_JUNK + 36, PE_JUNK + 37],
+      'изменились ровно три байта: RunAsNode, NODE_OPTIONS, --inspect');
+    assert.strictEqual(Buffer.compare(after, pe(HARD)), 0, 'результат == заводская проводка с тремя погашенными');
+    assert.strictEqual(vf.checkDir(d).code, 0, 'независимый гейт согласен');
+    assert(/выключены в 1 проводке/.test(r.stdout), 'в логе сборки видно, что сделано: ' + r.stdout);
+    // повтор: файл не меняется ни на байт, хук говорит «правка не нужна»
+    const again = hookRun('win32', d);
+    assert.strictEqual(again.status, 0, again.stdout + again.stderr);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(exe), after), 0, 'идемпотентно');
+    assert(/уже выключены — правка не нужна/.test(again.stdout), again.stdout);
+    // ASAR-fuse и cookie-fuse, включённые заранее, хук не трогает
+    const s = STOCK.slice(); s[1] = 0x31; s[4] = 0x31; s[5] = 0x31;
+    put(d, 'Hamidun Setup.exe', pe(s));
+    assert.strictEqual(hookRun('win32', d).status, 0);
+    const kept = vf.scanFile(exe).wires[0].states;
+    assert.deepStrictEqual([kept[1], kept[4], kept[5]], [0x31, 0x31, 0x31], 'чужие fuse остались как были');
+  });
+
+  ok('fuses: хук macOS — Electron Framework внутри .app, thin и universal (две проводки) гасятся целиком', () => {
+    needLib();
+    const vf = VF();
+    for (const [name, buf, nWires] of [['thin', mach(STOCK), 1], ['universal', fat(STOCK, STOCK), 2]]) {
+      for (const platform of ['darwin', 'mas']) {
+        const d = tmp();
+        const f = put(d, path.join('Hamidun Setup.app', ...FW), buf);
+        // Основной исполняемый файл не должен меняться вовсе (проводка у него не живёт).
+        const mainExe = put(d, path.join('Hamidun Setup.app', 'Contents', 'MacOS', 'Hamidun Setup'), junk(777, 9));
+        const mainBefore = fs.readFileSync(mainExe);
+        const before = fs.readFileSync(f);
+        const r = hookRun(platform, d);
+        assert.strictEqual(r.status, 0, name + '/' + platform + ': ' + r.stdout + r.stderr);
+        const after = fs.readFileSync(f);
+        const want = nWires === 1 ? 3 : 6;
+        assert.strictEqual(diffAt(before, after).length, want, name + ': изменено ровно ' + want + ' байт (по три на проводку)');
+        const scan = vf.scanFile(f);
+        assert.strictEqual(scan.wires.length, nWires, name + ': проводок ' + nWires);
+        for (const w of scan.wires) assert.deepStrictEqual(Array.from(w.states), HARD, name + ': состояния == погашенные');
+        assert.strictEqual(Buffer.compare(fs.readFileSync(mainExe), mainBefore), 0, 'основной исполняемый файл не тронут');
+        assert.strictEqual(vf.checkDir(d).code, 0, name + ': независимый гейт согласен');
+      }
+    }
+  });
+
+  ok('fuses: хук отказывает ДО записи — нет sentinel, чужая версия, обрезанная и короткая проводка, лишние sentinel, разные проводки, жёсткая ссылка', () => {
+    // Пакета не нужно: вместо него заглушка, которая падает при любом обращении, — отказ обязан наступить раньше.
+    const cases = [
+      ['нет sentinel', 'exe', Buffer.concat([Buffer.from('MZ'), junk(4000, 3)]), /не найден sentinel/],
+      ['версия проводки 2', 'exe', Buffer.concat([Buffer.from('MZ'), junk(900, 5), wire(STOCK, 2), junk(300, 6)]), /неизвестная версия проводки 2/],
+      ['проводка обрезана', 'exe', Buffer.concat([Buffer.from('MZ'), junk(900, 5), SENT, Buffer.from([1, 9, 0x31, 0x30])]), /слишком короткая/],
+      ['проводка короче индекса 3', 'exe', Buffer.concat([Buffer.from('MZ'), junk(900, 5), wire([0x31, 0x30, 0x31]), junk(300, 6)]), /слишком короткая/],
+      ['два sentinel в exe (одинаковые проводки)', 'exe', Buffer.concat([Buffer.from('MZ'), junk(900, 5), wire(STOCK), junk(300, 6), wire(STOCK), junk(100, 7)]), /встречается 2 раз/],
+      ['три sentinel в Electron Framework', 'framework', Buffer.concat([junk(900, 5), wire(STOCK), junk(300, 6), wire(STOCK), junk(300, 7), wire(STOCK)]), /встречается 3 раз/],
+      ['два sentinel с разным содержимым', 'framework', fat(STOCK, HARD), /РАЗНЫМ содержимым/],
+      ['два sentinel с разным числом флагов', 'framework', fat(STOCK, STOCK.slice(0, 8)), /РАЗНЫМ содержимым/],
+    ];
+    for (const [why, kind, buf, re] of cases) {
+      const d = tmp();
+      const f = put(d, kind === 'exe' ? 'x.exe' : 'Electron Framework', buf);
+      const r = driver('flipFileStub', { file: f, kind });
+      assert(r.result && r.result.ok === false, why + ': хук обязан бросить, а ответил ' + JSON.stringify(r.result) + ' ' + r.stderr);
+      assert(!/STUB-CALLED/.test(r.result.error), why + ': хук дошёл до записи, а должен был отказать раньше');
+      assert(re.test(r.result.error), why + ': причина названа (' + re + '): ' + r.result.error);
+      assert.strictEqual(Buffer.compare(fs.readFileSync(f), buf), 0, why + ': файл не тронут ни на байт');
+    }
+    // Жёсткая ссылка на общий файл: правка на месте испортила бы кэш Electron.
+    const d = tmp();
+    const f = put(d, 'Hamidun Setup.exe', pe(STOCK));
+    const other = path.join(d, 'shared-cache.exe');
+    try { fs.linkSync(f, other); } catch (e) { SKIP('жёсткие ссылки недоступны на этом томе: ' + e.code); }
+    const r = driver('flipFileStub', { file: f, kind: 'exe' });
+    assert(r.result && r.result.ok === false, 'жёсткая ссылка: хук обязан бросить');
+    assert(/жёсткие ссылки/.test(r.result.error), r.result.error);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), pe(STOCK)), 0, 'файл не тронут');
+    assert.strictEqual(Buffer.compare(fs.readFileSync(other), pe(STOCK)), 0, 'общий кэш не испорчен');
+  });
+
+  ok('fuses: fuse гасятся ДО ad-hoc подписи mac-adhoc-sign, который остаётся последним шагом хука', () => {
+    needLib();
+    // Рантайм: к моменту вызова ad-hoc подписи проводка уже погашена (подпись после правки, не до).
+    const d = tmp();
+    put(d, path.join('Hamidun Setup.app', ...FW), mach(STOCK));
+    const r = hookRun('darwin', d);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.deepStrictEqual(r.result.adhocSaw, [[[true]]], 'ad-hoc подпись вызвана ровно раз и увидела погашенную проводку');
+    // Настоящий делегат: с CSC_LINK он пропускает ad-hoc (подпишет electron-builder) — запуск codesign
+    // на любом хосте исключён; важен порядок строк лога: сначала fuse, потом делегат.
+    const d2 = tmp();
+    put(d2, path.join('Hamidun Setup.app', ...FW), mach(STOCK));
+    const real2 = driver('afterPack', { platform: 'darwin', appOutDir: d2, realAdhoc: true }, { CSC_LINK: 'dummy-not-a-cert' });
+    assert.strictEqual(real2.status, 0, real2.stdout + real2.stderr);
+    assertOrder(real2.stdout, '[fuses] darwin', '[adhoc-sign] CSC_LINK задан', 'сначала fuse, потом делегат ad-hoc');
+    assert.strictEqual(VF().checkDir(d2).code, 0, 'с настоящим делегатом fuse тоже погашены');
+    // целиком через хук неподдерживаемая платформа тоже бросает, а не пропускает правку молча
+    const lin = hookRun('linux', tmp());
+    assert.notStrictEqual(lin.status, 0, 'linux через весь хук: бросок, а не молчаливый пропуск');
+    // Статика: порядок в коде хука и отрицательный контроль сторожа порядка.
+    const src = jsOnly(fs.readFileSync(path.join(TOOLS, 'after-pack.js'), 'utf8'));
+    assertOrder(src, 'await flipFuses(context);', 'await d.adhoc(context);', 'fuse раньше ad-hoc подписи');
+    const swapped = src.replace('await flipFuses(context);', '').replace('await d.adhoc(context);', 'await d.adhoc(context);\n  await flipFuses(context);');
+    assert.throws(() => assertOrder(swapped, 'await flipFuses(context);', 'await d.adhoc(context);'), 'контроль: правка после ad-hoc ловится');
+    // mac-adhoc-sign цел: тот же экспорт, на не-darwin ничего не делает
+    const adhoc = require(path.join(TOOLS, 'mac-adhoc-sign.js'));
+    assert.strictEqual(typeof adhoc.default, 'function');
+  });
+
+  ok('fuses: хук бросает на неподдерживаемой платформе, без бинаря и без пакета @electron/fuses', () => {
+    // Пакета не требуется: все три отказа случаются до обращения к нему (заглушка падает при любом обращении).
+    const d = tmp();
+    const lin = driver('binariesFor', { platform: 'linux', appOutDir: d });
+    assert(lin.result && lin.result.ok === false && /не поддержана/.test(lin.result.error), 'linux: нельзя молча выпустить бинарь с заводскими fuse: ' + JSON.stringify(lin.result));
+    const noExe = driver('flipFileStub', { file: path.join(d, 'Hamidun Setup.exe'), kind: 'exe' });
+    assert(noExe.result && noExe.result.ok === false && /нет бинаря Electron/.test(noExe.result.error), JSON.stringify(noExe.result));
+    const noFw = tmp();
+    fs.mkdirSync(path.join(noFw, 'Hamidun Setup.app', 'Contents', 'MacOS'), { recursive: true });
+    const mac = driver('binariesFor', { platform: 'darwin', appOutDir: noFw });
+    assert(mac.result && mac.result.ok === false && /нет Electron Framework/.test(mac.result.error), JSON.stringify(mac.result));
+    const win = driver('binariesFor', { platform: 'win32', appOutDir: d });
+    assert(win.result && win.result.ok && /Hamidun Setup\.exe$/.test(win.result.files[0]), 'контроль: на Windows цель — <productFilename>.exe: ' + JSON.stringify(win.result));
+    // пакета нет: понятное сообщение с лекарством, а не голый MODULE_NOT_FOUND
+    const miss = driver('loadMissing');
+    assert(miss.result && miss.result.ok === false, JSON.stringify(miss.result));
+    assert(/npm ci/.test(miss.result.error) && /сборка остановлена/.test(miss.result.error), miss.result.error);
+  });
+
+  ok('fuses: хук повторяет правку при EBUSY и EPERM (антивирус держит свежий файл), но не при прочих ошибках', () => {
+    needLib();
+    const vf = VF();
+    const d = tmp();
+    const f = put(d, 'Hamidun Setup.exe', pe(STOCK));
+    const flaky = driver('retry', { file: f, code: 'EBUSY', failTimes: 2 });
+    assert(flaky.result && flaky.result.ok, 'две занятости подряд переживаются: ' + JSON.stringify(flaky.result) + flaky.stderr);
+    assert.strictEqual(flaky.result.calls, 3, 'третья попытка прошла');
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), pe(HARD)), 0, 'после повторов файл погашен ровно как обычно');
+    assert(/EBUSY[^\n]*повтор 1 из 2/.test(flaky.stdout) && /повтор 2 из 2/.test(flaky.stdout), 'повторы видны в логе сборки: ' + flaky.stdout);
+    const g = put(d, 'other.exe', pe(STOCK));
+    const stuck = driver('retry', { file: g, code: 'EPERM', failTimes: 99 });
+    assert(stuck.result && stuck.result.ok === false && stuck.result.code === 'EPERM', 'вечная занятость — бросок, а не тихий пропуск: ' + JSON.stringify(stuck.result));
+    assert.strictEqual(stuck.result.calls, 3, 'ровно три попытки, потом отказ');
+    assert.strictEqual(Buffer.compare(fs.readFileSync(g), pe(STOCK)), 0, 'файл при отказе не тронут');
+    assert.strictEqual(vf.checkDir(path.dirname(g)).code, 1, 'и гейт его по-прежнему не пропускает');
+    const other = driver('retry', { file: g, code: 'ENOENT', failTimes: 99 });
+    assert(other.result && other.result.ok === false && other.result.calls === 1, 'прочие ошибки — сразу наружу, без повторов: ' + JSON.stringify(other.result));
+  });
+
+  ok('fuses: проверка хука ПОСЛЕ правки ловит чужой fuse, сдвиг размера, непогашенную тройку и смену числа проводок', () => {
+    const vf = VF();
+    const hook = HOOK();
+    const d = tmp();
+    const scanOf = (buf) => vf.scanFile(put(d, 'x.bin', buf));
+    const before = scanOf(pe(STOCK));
+    const good = scanOf(pe(HARD));
+    hook.postcheck(before, good, 'x'); // честный результат проходит
+    const cookie = HARD.slice(); cookie[1] = 0x31;
+    assert.throws(() => hook.postcheck(before, scanOf(pe(cookie)), 'x'), /fuse #1 изменился/, 'задет чужой fuse (cookie)');
+    const asar = HARD.slice(); asar[4] = 0x31;
+    assert.throws(() => hook.postcheck(before, scanOf(pe(asar)), 'x'), /fuse #4 изменился/, 'задет чужой fuse (ASAR)');
+    const left = HARD.slice(); left[3] = 0x31;
+    assert.throws(() => hook.postcheck(before, scanOf(pe(left)), 'x'), /после правки fuse всё ещё не выключены/, 'одна из трёх осталась включённой');
+    assert.throws(() => hook.postcheck(before, scanOf(Buffer.concat([pe(HARD), Buffer.from([1])])), 'x'), /размер файла изменился/, 'размер файла');
+    assert.throws(() => hook.postcheck(before, Object.assign({}, good, { wires: good.wires.concat(good.wires) }), 'x'), /число проводок изменилось/, 'число проводок');
+    assert.throws(() => hook.postcheck(before, Object.assign({}, good, { wires: [Object.assign({}, good.wires[0], { offset: good.wires[0].offset + 1 })] }), 'x'),
+      /заголовок проводки #0 изменился/, 'сместилась сама проводка');
+    // до правки: те же отказы, что у настоящего хука, но без записи и без пакета
+    assert.throws(() => hook.precheck(scanOf(Buffer.concat([Buffer.from('MZ'), junk(500, 4)])), 'exe', 'x'), /не найден sentinel/);
+    assert.throws(() => hook.precheck(scanOf(fat(STOCK, HARD)), 'framework', 'x'), /РАЗНЫМ содержимым/);
+    hook.precheck(scanOf(fat(STOCK, STOCK)), 'framework', 'x'); // universal с одинаковыми проводками допустим
+    assert.throws(() => hook.precheck(scanOf(fat(STOCK, STOCK)), 'exe', 'x'), /встречается 2 раз/, 'в exe вторая проводка недопустима');
+  });
+
+  // ================= Подключение к сборке =================
+
+  ok('fuses: package.json — build.afterPack ведёт на tools/after-pack.js, пакет закреплён точно, lock чистый', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
+    const flips = (p) => !!(p.build && p.build.afterPack === 'tools/after-pack.js' && fs.existsSync(path.join(ROOT, p.build.afterPack)));
+    assert(flips(pkg), 'build.afterPack обязан вести на tools/after-pack.js (единый вход: fuse, потом ad-hoc)');
+    assert(!flips({ build: { afterPack: 'tools/mac-adhoc-sign.js' } }), 'контроль: прежний вход (только ad-hoc) гейтом не принимается');
+    assert.strictEqual(typeof HOOK().default, 'function', 'хук экспортирует функцию (exports.default)');
+    assert.strictEqual(typeof require(path.join(TOOLS, 'mac-adhoc-sign.js')).default, 'function', 'прежний ad-hoc хук на месте');
+    const v = pkg.devDependencies['@electron/fuses'];
+    assert(/^\d+\.\d+\.\d+$/.test(v), '@electron/fuses закреплён ТОЧНО, а не диапазоном: ' + v);
+    const ent = lock.packages['node_modules/@electron/fuses'];
+    assert(ent, 'пакет есть в lock');
+    assert.strictEqual(ent.version, v, 'lock совпадает с package.json');
+    assert.strictEqual(lock.packages[''].devDependencies['@electron/fuses'], v, 'lock: спецификатор корня');
+    assert(/^https:\/\/registry\.npmjs\.org\//.test(ent.resolved), 'пакет из реестра npmjs: ' + ent.resolved);
+    assert(/^sha512-/.test(ent.integrity), 'есть integrity');
+    assert(!ent.hasInstallScript, 'install-скриптов нет');
+    assert(!ent.dependencies && !ent.peerDependencies && !ent.optionalDependencies, 'зависимостей нет — в lock ровно одна новая строка');
+    assert.strictEqual(ent.dev, true, 'только для сборки, в приложение не попадает');
+    assert(!(pkg.dependencies || {})['@electron/fuses'], 'не runtime-зависимость');
+  });
+
+  ok('fuses: гейт подключён после electron-builder — dist, dist:win, dist:mac, build-lite (обе платформы) и build-mac.yml', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    // Цепочку читаем по звеньям `&&`: гейт — отдельное звено, а не слово внутри чужой команды, и без
+    // `||` / `;`, которые проглотили бы его падение.
+    const chain = (name) => String(pkg.scripts[name]).split('&&').map((x) => x.trim());
+    for (const k of ['dist', 'dist:win']) {
+      assert(!/\|\||;/.test(pkg.scripts[k]), k + ': ни `||`, ни `;` — упавший гейт не должен проглатываться');
+      const c = chain(k);
+      const i = c.indexOf('node tools/verify-fuses.js');
+      assert(i > 0, k + ': вызов гейта пропал или обёрнут во что-то ещё');
+      assert(/^electron-builder( --win)?$/.test(c[i - 1]), k + ': гейт идёт СРАЗУ после electron-builder: ' + c[i - 1]);
+      assert.strictEqual(c[i + 1], 'node tools/verify-packed-vendor.js', k + ': гейт fuse стоит ДО проверки vendor');
+    }
+    const cm = chain('dist:mac');
+    assert(!/\|\||;/.test(pkg.scripts['dist:mac']), 'dist:mac: упавший гейт не проглатывается');
+    assert.strictEqual(cm[cm.length - 1], 'node tools/verify-fuses.js release/mac-universal', 'dist:mac: гейт последний и смотрит .app');
+    assert.strictEqual(cm[cm.length - 2], 'electron-builder --mac', 'dist:mac: гейт сразу после сборки');
+    // build-lite: настоящий вызов (execFileSync бросает при коде ≠ 0), а не слово в закомментированной или мёртвой строке.
+    const lite = jsOnly(fs.readFileSync(path.join(ROOT, 'tools', 'build-lite.js'), 'utf8'));
+    const gateCall = /execFileSync\(process\.execPath, \[path\.join\(ROOT, 'tools', 'verify-fuses\.js'\)\]\s*\.concat\(target === 'mac' \? \[path\.join\(ROOT, 'release', 'mac-universal'\)\] : \[\]\), \{ cwd: ROOT, stdio: 'inherit' \}\);/;
+    assert(gateCall.test(lite), 'build-lite: гейт вызывается execFileSync с stdio inherit (код ≠ 0 роняет сборку); на macOS — release/mac-universal, на Windows — папка по умолчанию');
+    const at = lite.search(gateCall);
+    assert(at > lite.indexOf("['electron-builder'].concat(t.builderArgs)") && lite.indexOf("['electron-builder'].concat(t.builderArgs)") !== -1, 'build-lite: гейт после electron-builder');
+    assert(at < lite.indexOf("'verify-packed-vendor.js'") && lite.indexOf("'verify-packed-vendor.js'") !== -1, 'build-lite: гейт fuse до проверки vendor');
+    const yml = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'build-mac.yml'), 'utf8');
+    assert(/- name: Gate[^\r\n]*\r?\n\s+run: node tools\/verify-fuses\.js release\/mac-universal\r?\n/.test(yml), 'build-mac.yml: шаг гейта с обычным run');
+    const step = yml.slice(yml.indexOf('- name: Gate'), yml.indexOf('- name: Assemble final dmg'));
+    assert(!/continue-on-error|\|\| true|\bif:/.test(step), 'build-mac.yml: шаг гейта не глотает падение и не пропускается условием');
+    assertOrder(yml, 'npx electron-builder --mac --universal', '- name: Gate', 'build-mac.yml: гейт после сборки .app');
+    assertOrder(yml, '- name: Gate', '- name: Assemble final dmg', 'build-mac.yml: гейт до сборки dmg');
+    // контроль сторожа порядка: гейт, унесённый до сборки, ловится
+    assert.throws(() => assertOrder('node tools/verify-fuses.js && electron-builder', 'electron-builder', 'node tools/verify-fuses.js'));
+  });
+
+  ok('fuses: beforePack проверяет наличие пакета ДО упаковки, а e2e-gui не трогает fuse вне временной копии', () => {
+    const bp = jsOnly(fs.readFileSync(path.join(TOOLS, 'before-pack.js'), 'utf8'));
+    assertOrder(bp, 'runPreflight', "await require('./after-pack.js').assertReady();", 'before-pack: проверка пакета идёт после предполётных гейтов');
+    assertOrder(bp, "throw new Error('[preflight]", "await require('./after-pack.js').assertReady();", 'before-pack: отказ предполёта не маскируется проверкой пакета');
+    const e2e = jsOnly(fs.readFileSync(path.join(ROOT, 'test', 'e2e-gui.js'), 'utf8'));
+    assert(/electron\.launch\(await withInspectFuse\(ctx, launchOpts\)\)/.test(e2e), 'launchApp идёт через withInspectFuse');
+    assert(/if \(ctx\.source\) return launchOpts;/.test(e2e), 'source mode (заводской electron) не трогаем');
+    assert(/startsWith\(tmp\.toLowerCase\(\)\)/.test(e2e) && /отказ править fuse вне временного каталога/.test(e2e), 'вне временного каталога — отказ');
+    assert(/EnableNodeCliInspectArguments\]: true/.test(e2e) && !/RunAsNode\]: true|EnableNodeOptionsEnvironmentVariable\]: true/.test(e2e),
+      'включается ТОЛЬКО --inspect: RunAsNode и NODE_OPTIONS остаются выключенными в копии');
+  });
+
+  // ================= Настоящий Electron 44: внешний оракул =================
+  //
+  // Оракул — дочерние процессы настоящего Electron и маркер-файлы, которые пишет «чужой» скрипт; код
+  // хука и гейта в этом доказательстве не участвует. Какой вектор настоящий — выяснено запуском, а не
+  // чтением: УПАКОВАННЫЙ Electron (имя exe не electron.exe) сам режет одиночный NODE_OPTIONS
+  // («Most NODE_OPTIONs are not supported in packaged apps»). Рабочая цепочка для нашего
+  // «Hamidun Setup.exe» — ELECTRON_RUN_AS_NODE=1 вместе с NODE_OPTIONS=--require в окружении (HKCU\Environment):
+  // exe запускается как Node, NODE_OPTIONS действует целиком, приложение не стартует вовсе, а чужой
+  // скрипт отработал под токеном администратора. Поэтому проверяются все векторы, а каждый fuse —
+  // ещё и по отдельности: так опечатка в индексе (не тот байт проводки) краснит тест, а не прячется.
+
+  // Каталог dist настоящего Electron (тот же, что кладёт в сборку electron-builder): через
+  // require.resolve (учитывает NODE_PATH), затем явные пути. Нет — честный SKIP.
+  function findElectronDist() {
+    const pkgDirs = [];
+    try { pkgDirs.push(path.dirname(require.resolve('electron/package.json'))); } catch (e) { /* нет в резолвере */ }
+    for (const p of String(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)) pkgDirs.push(path.join(p, 'electron'));
+    pkgDirs.push(path.join(ROOT, 'node_modules', 'electron'));
+    for (const c of pkgDirs) {
+      try {
+        const rel = fs.readFileSync(path.join(c, 'path.txt'), 'utf8').trim();
+        const exe = path.join(c, 'dist', rel);
+        if (rel && fs.existsSync(exe)) return { dist: path.join(c, 'dist'), rel, exe };
+      } catch (e) { /* следующий */ }
+    }
+    return null;
+  }
+
+  let REAL; // undefined — ещё не готовили; null — недоступно; объект — копия dist во временной папке
+  function realCopy() {
+    if (REAL === null) SKIP('нет настоящего Electron для рантайм-проверки');
+    if (REAL) return REAL;
+    if (process.platform !== 'win32') { REAL = null; SKIP('рантайм-проверка exe — только Windows'); }
+    needLib();
+    const src = findElectronDist();
+    if (!src) { REAL = null; SKIP('нет бинарника Electron (npx install-electron --no или NODE_PATH с electron) — рантайм не проверить'); }
+    const base = tmp('hm-fuses-real-');
+    const dist = path.join(base, 'dist');
+    fs.cpSync(src.dist, dist, { recursive: true }); // ~370 МБ: ~2 с на SSD; exe меняем ТОЛЬКО в копии
+    const exe = path.join(dist, 'Hamidun Setup.exe');
+    fs.renameSync(path.join(dist, src.rel), exe);
+    // Раскладка как у настоящей сборки: resources/app есть, поэтому `exe скрипт.js` не запускает скрипт
+    // как приложение, а ELECTRON_RUN_AS_NODE — единственный способ выполнить чужой JS через аргумент.
+    const appDir = path.join(dist, 'resources', 'app');
+    put(appDir, 'package.json', JSON.stringify({ name: 'fuse-probe', version: '1.0.0', main: 'main.js' }));
+    put(appDir, 'main.js', [
+      "const { app } = require('electron');",
+      "if (process.env.HM_UD) app.setPath('userData', process.env.HM_UD);", // профиль человека не трогаем
+      "require('fs').writeFileSync(process.env.HM_MARK_APP || 'NUL', 'app-main electron=' + process.versions.electron + ' argv=' + JSON.stringify(process.argv.slice(1)));",
+      "if (process.env.HM_STAY) { setTimeout(() => app.quit(), 120000); } else { app.quit(); }",
+    ].join('\n'));
+    const evil = put(base, 'evil.js', "require('fs').writeFileSync(process.env.HM_MARK_EVIL, 'EVIL RAN type=' + (process.type || 'node'));");
+    REAL = { base, dist, exe, cur: exe, evil, srcExe: src.exe, appDir };
+    return REAL;
+  }
+
+  const fwdSlash = (p) => p.split('\\').join('/');
+  // Один запуск Electron и разбор следов. Маркер-файлы безвредны и лежат во временной папке.
+  function probe(real, label, extraEnv, args) {
+    const mApp = path.join(real.base, 'm-app-' + label + '.txt');
+    const mEvil = path.join(real.base, 'm-evil-' + label + '.txt');
+    for (const f of [mApp, mEvil]) fs.rmSync(f, { force: true });
+    const env = Object.assign({}, process.env);
+    delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
+    Object.assign(env, { HM_MARK_APP: mApp, HM_MARK_EVIL: mEvil, HM_UD: path.join(real.base, 'ud-' + label) }, extraEnv);
+    const t0 = Date.now();
+    const r = spawnSync(real.cur, args || [], { env, encoding: 'utf8', input: '', timeout: 180000, windowsHide: true });
+    return {
+      label, ms: Date.now() - t0, status: r.status, error: r.error && r.error.message,
+      evil: fs.existsSync(mEvil) ? fs.readFileSync(mEvil, 'utf8') : null,
+      app: fs.existsSync(mApp) ? fs.readFileSync(mApp, 'utf8') : null,
+      inspector: /Debugger listening on ws:\/\//.test(r.stderr || ''),
+      stderr: String(r.stderr || '').slice(0, 300),
+    };
+  }
+  // То же, но под именем electron.exe: «неупакованный» режим, где NODE_OPTIONS Electron не режет сам.
+  function asUnpackaged(real, fn) {
+    const alt = path.join(real.dist, 'electron.exe');
+    fs.renameSync(real.exe, alt);
+    real.cur = alt;
+    try { return fn(); } finally { fs.renameSync(alt, real.exe); real.cur = real.exe; }
+  }
+  const VEC = {
+    control: (real) => probe(real, 'control', {}, []),
+    // двойной клик с окружением из HKCU\Environment: аргументов нет вовсе
+    nodeModeOpts: (real) => probe(real, 'rn-opts', { ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: '--require "' + fwdSlash(real.evil) + '"' }, []),
+    nodeModeScript: (real) => probe(real, 'rn-script', { ELECTRON_RUN_AS_NODE: '1' }, [real.evil]),
+    optsUnpackaged: (real) => asUnpackaged(real, () => probe(real, 'opts-unpackaged', { NODE_OPTIONS: '--require "' + fwdSlash(real.evil) + '"' }, [])),
+    inspect: (real) => probe(real, 'inspect', {}, ['--inspect=0']),
+  };
+  const ALL_VECTORS = ['control', 'nodeModeOpts', 'nodeModeScript', 'optsUnpackaged', 'inspect'];
+  function runVectors(real, names) { const o = {}; for (const n of names) o[n] = VEC[n](real); return o; }
+  function setFuses(real, flags) {
+    const r = driver('setFuses', Object.assign({ file: real.exe }, flags));
+    assert(r.result && r.result.ok, 'setFuses: ' + r.stdout + r.stderr);
+  }
+  const ranEvil = (p, type) => !!p.evil && (!type || p.evil.includes('type=' + type));
+  function positions(fileA, fileB) {
+    const fa = fs.openSync(fileA, 'r'); const fb = fs.openSync(fileB, 'r');
+    try {
+      const sa = fs.fstatSync(fa).size; const sb = fs.fstatSync(fb).size;
+      if (sa !== sb) return { sizeA: sa, sizeB: sb, diffs: null };
+      const CH = 4 * 1024 * 1024; const A = Buffer.allocUnsafe(CH); const B = Buffer.allocUnsafe(CH); const diffs = [];
+      const readFull = (fd, buf, n, pos) => { let got = 0; while (got < n) { const k = fs.readSync(fd, buf, got, n - got, pos + got); if (!k) break; got += k; } return got; };
+      for (let pos = 0; pos < sa; pos += CH) {
+        const n = Math.min(CH, sa - pos);
+        readFull(fa, A, n, pos); readFull(fb, B, n, pos);
+        if (A.compare(B, 0, n, 0, n) !== 0) for (let i = 0; i < n; i++) if (A[i] !== B[i]) diffs.push(pos + i);
+        if (diffs.length > 50) break;
+      }
+      return { sizeA: sa, sizeB: sb, diffs };
+    } finally { fs.closeSync(fa); fs.closeSync(fb); }
+  }
+  const gateExit = (dir) => spawnSync(process.execPath, [path.join(TOOLS, 'verify-fuses.js'), dir], { encoding: 'utf8', timeout: 120000 });
+
+  ok('fuses: настоящий Electron 44 — до правки NODE_OPTIONS, ELECTRON_RUN_AS_NODE и --inspect действуют, после неё нет, приложение стартует', () => {
+    const real = realCopy();
+    const vf = VF();
+    const srcStat = fs.statSync(real.srcExe);
+
+    // --- ДО: эталон обязан быть заводским, иначе сравнивать не с чем (зелёного без красного не бывает) ---
+    const stockWire = vf.scanFile(real.exe).wires;
+    assert.strictEqual(stockWire.length, 1, 'в настоящем Electron ровно одна проводка');
+    assert(vf.GUARDED.every((g) => stockWire[0].states[g.index] === vf.STATE.ENABLED),
+      'эталонный Electron уже закалён — не с чем сравнивать, переустанови пакет electron: ' + Buffer.from(stockWire[0].states).toString('latin1'));
+    const gateBefore = gateExit(real.dist);
+    assert.strictEqual(gateBefore.status, 1, 'гейт на заводской копии обязан упасть: ' + gateBefore.stdout + gateBefore.stderr);
+    const S = runVectors(real, ALL_VECTORS);
+    assert(S.control.app && !S.control.evil && !S.control.inspector, 'контроль: приложение стартует само, чужого кода и отладчика нет: ' + JSON.stringify(S.control));
+    assert(ranEvil(S.nodeModeOpts, 'node') && !S.nodeModeOpts.app,
+      'ДО: ELECTRON_RUN_AS_NODE=1 + NODE_OPTIONS=--require в окружении, БЕЗ аргументов (двойной клик) — чужой скрипт исполнен, приложение не стартовало: ' + JSON.stringify(S.nodeModeOpts));
+    assert(ranEvil(S.nodeModeScript, 'node'), 'ДО: ELECTRON_RUN_AS_NODE=1 исполняет скрипт-аргумент: ' + JSON.stringify(S.nodeModeScript));
+    assert(ranEvil(S.optsUnpackaged, 'browser'), 'ДО: NODE_OPTIONS=--require исполняется внутри main-процесса Electron (имя electron.exe): ' + JSON.stringify(S.optsUnpackaged));
+    assert(S.inspect.inspector, 'ДО: --inspect открывает отладчик: ' + JSON.stringify(S.inspect));
+
+    // --- ПО ОДНОМУ: каждый fuse закрывает свой вектор и только его (индекс не перепутан) ---
+    setFuses(real, { runAsNode: false });
+    const I1 = runVectors(real, ['nodeModeOpts', 'nodeModeScript', 'optsUnpackaged']);
+    assert(!I1.nodeModeOpts.evil && I1.nodeModeOpts.app, 'RunAsNode выключен: цепочка двойного клика мертва, приложение стартует: ' + JSON.stringify(I1.nodeModeOpts));
+    assert(!I1.nodeModeScript.evil && I1.nodeModeScript.app, 'RunAsNode выключен: скрипт-аргумент не исполняется: ' + JSON.stringify(I1.nodeModeScript));
+    assert(ranEvil(I1.optsUnpackaged, 'browser'), 'RunAsNode не касается NODE_OPTIONS в режиме Electron — вектор жив, пока жив второй fuse: ' + JSON.stringify(I1.optsUnpackaged));
+    assert.strictEqual(gateExit(real.dist).status, 1, 'два fuse ещё включены — гейт краснеет');
+    setFuses(real, { runAsNode: true, nodeOptions: false });
+    const I2 = runVectors(real, ['nodeModeOpts', 'nodeModeScript', 'optsUnpackaged']);
+    assert(!I2.nodeModeOpts.evil, 'NODE_OPTIONS выключен: в Node-режиме он тоже игнорируется: ' + JSON.stringify(I2.nodeModeOpts));
+    assert(ranEvil(I2.nodeModeScript, 'node'), 'скрипт-аргумент жив, пока жив RunAsNode: ' + JSON.stringify(I2.nodeModeScript));
+    assert(!I2.optsUnpackaged.evil && I2.optsUnpackaged.app, 'NODE_OPTIONS выключен: в режиме Electron тоже не исполняется: ' + JSON.stringify(I2.optsUnpackaged));
+    setFuses(real, { nodeOptions: true, inspect: false });
+    const I3 = runVectors(real, ['inspect']);
+    assert(!I3.inspect.inspector && I3.inspect.app, '--inspect выключен: отладчик не открывается, приложение стартует: ' + JSON.stringify(I3.inspect));
+
+    // --- правка настоящим хуком (win32-контекст, ad-hoc подпись — заглушка): всё выключено ---
+    setFuses(real, { runAsNode: true, nodeOptions: true, inspect: true });
+    assert.strictEqual(gateExit(real.dist).status, 1, 'после возврата заводских значений гейт снова красный');
+    const r = hookRun('win32', real.dist);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert(r.result && r.result.ok, JSON.stringify(r.result));
+
+    // --- ПОСЛЕ ---
+    const H = runVectors(real, ALL_VECTORS);
+    for (const k of ALL_VECTORS) {
+      assert(H[k].app, 'ПОСЛЕ правки приложение стартует нормально (' + k + '): ' + JSON.stringify(H[k]));
+      assert.strictEqual(H[k].status, 0, 'код выхода 0 (' + k + '): ' + JSON.stringify(H[k]));
+      assert.strictEqual(H[k].evil, null, 'ПОСЛЕ правки чужой скрипт не исполняется (' + k + '): ' + JSON.stringify(H[k]));
+    }
+    assert.strictEqual(H.inspect.inspector, false, 'ПОСЛЕ правки --inspect не открывает отладчик: ' + JSON.stringify(H.inspect));
+    const argvSeen = JSON.parse(H.nodeModeScript.app.split(' argv=')[1]);
+    assert(argvSeen.some((a) => a.toLowerCase() === real.evil.toLowerCase()),
+      'вместо скрипта запущено приложение, а скрипт лишь аргумент argv: ' + H.nodeModeScript.app);
+    const gateAfter = gateExit(real.dist);
+    assert.strictEqual(gateAfter.status, 0, 'гейт на правленой копии зелёный: ' + gateAfter.stdout + gateAfter.stderr);
+
+    // --- побайтно: изменено ровно три байта проводки, эталон из node_modules цел ---
+    const d = positions(real.srcExe, real.exe);
+    const off = stockWire[0].offset + 32 + 2;
+    assert.deepStrictEqual(d.diffs, [off, off + 2, off + 3], 'у настоящего exe изменены ровно RunAsNode, NODE_OPTIONS и --inspect');
+    assert.strictEqual(fs.statSync(real.srcExe).mtimeMs, srcStat.mtimeMs, 'эталонный Electron в node_modules не тронут (mtime)');
+    assert.strictEqual(vf.scanFile(real.srcExe).wires[0].states[0], vf.STATE.ENABLED, 'и в нём по-прежнему заводская проводка');
+  });
+
+  ok('fuses: e2e-gui withInspectFuse включает ТОЛЬКО --inspect в копии, Playwright подключается, вне временной папки отказ', () => {
+    const real = realCopy();
+    try { require.resolve('playwright-core'); } catch (e) { SKIP('нет playwright-core в резолвере (NODE_PATH) — e2e-обвязку не проверить'); }
+    const vf = VF();
+    // Копия погашена предыдущим тестом; если его пропустили или он упал — гасим сами.
+    if (!vf.scanFile(real.exe).wires.every((w) => vf.judgeWire(w).ok)) assert.strictEqual(hookRun('win32', real.dist).status, 0);
+    // Приманка вне временной папки: withInspectFuse обязан отказать и не тронуть файл. Кладём её в
+    // release/ репозитория (папка под .gitignore); если сам репозиторий лежит во временной папке —
+    // проверку отказа пропускаем, остальное идёт как обычно.
+    const tmpRoot = path.resolve(os.tmpdir()).toLowerCase() + path.sep;
+    const decoyBytes = pe(HARD);
+    let decoyDir = '';
+    if (!path.resolve(ROOT).toLowerCase().startsWith(tmpRoot)) {
+      decoyDir = path.join(ROOT, 'release', '_fuses-test-decoy');
+      releaseTouched = true;
+      put(decoyDir, 'Hamidun Setup.exe', decoyBytes);
+      tmps.push(decoyDir);
+    }
+    // e2e-gui подключаем как модуль (argv[2] = selftest отключает предохранитель «только в CI»).
+    const script = put(tmp('hm-fuses-e2e-'), 'e2e-probe.js', [
+      "process.argv[2] = 'selftest';",
+      "const path = require('path');",
+      "const m = require(process.env.HM_E2E_GUI);",
+      "const { _electron } = require('playwright-core');",
+      "(async () => {",
+      "  const res = {};",
+      "  if (process.env.HM_DECOY_DIR) {",
+      "    try { await m.withInspectFuse({ source: false }, { executablePath: path.join(process.env.HM_DECOY_DIR, 'Hamidun Setup.exe') }); res.decoyOk = true; }",
+      "    catch (e) { res.decoyErr = e.message; }",
+      "  }",
+      "  const exe = process.env.HM_PROBE_EXE;",
+      "  await m.withInspectFuse({ source: false }, { executablePath: exe });",
+      "  const env = Object.assign({}, process.env, { HM_STAY: '1' });",
+      "  delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;",
+      "  const app = await _electron.launch({ executablePath: exe, args: ['--user-data-dir=' + process.env.HM_UD], env, timeout: 120000 });",
+      "  res.version = await app.evaluate(() => process.versions.electron);",
+      "  await app.close();",
+      "  console.log('RESULT ' + JSON.stringify(res));",
+      "})().catch((e) => { console.log('RESULT ' + JSON.stringify({ fatal: String(e && e.message).slice(0, 300) })); process.exitCode = 1; });",
+    ].join('\n'));
+    const env = Object.assign({}, process.env, {
+      HM_E2E_GUI: path.join(ROOT, 'test', 'e2e-gui.js'), HM_PROBE_EXE: real.exe, HM_DECOY_DIR: decoyDir,
+      HM_MARK_APP: path.join(real.base, 'm-app-pw.txt'), HM_UD: path.join(real.base, 'ud-pw'),
+    });
+    delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 300000, env });
+    const m = /RESULT (.*)\s*$/.exec(String(r.stdout || '').trim());
+    assert(m, 'драйвер не ответил: ' + r.stdout + r.stderr);
+    const res = JSON.parse(m[1]);
+    assert(!res.fatal, 'Playwright подключается к копии с включённым --inspect: ' + res.fatal);
+    assert(/^\d+\.\d+\.\d+/.test(String(res.version)), 'main-процесс отвечает через инспектор: ' + res.version);
+    if (decoyDir) {
+      assert(res.decoyErr && /вне временного каталога/.test(res.decoyErr), 'вне временной папки — отказ: ' + JSON.stringify(res));
+      assert.strictEqual(Buffer.compare(fs.readFileSync(path.join(decoyDir, 'Hamidun Setup.exe')), decoyBytes), 0, 'файл вне временной папки не тронут');
+    }
+    const w = vf.scanFile(real.exe).wires[0].states;
+    assert.deepStrictEqual([w[0], w[2], w[3]], [vf.STATE.DISABLED, vf.STATE.DISABLED, vf.STATE.ENABLED],
+      'в копии включён ТОЛЬКО --inspect, RunAsNode и NODE_OPTIONS остались выключенными');
+  });
+})();

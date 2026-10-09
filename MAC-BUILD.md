@@ -34,6 +34,13 @@ npm run dist:mac          # -> release/Hamidun-Setup-Mac.dmg
 Без секретов Apple в окружении сборка выйдет с ad-hoc подписью (`tools/mac-adhoc-sign.js`) —
 раздавать такой артефакт нельзя, он только для локальной проверки.
 
+Хук `afterPack` — `tools/after-pack.js`: сначала он гасит fuse `RunAsNode`,
+`EnableNodeOptionsEnvironmentVariable` и `EnableNodeCliInspectArguments` в `Electron Framework`
+внутри `.app` (до любой подписи, на каждом слайсе и на склеенном universal-пакете), потом передаёт
+управление `tools/mac-adhoc-sign.js`. Результат сверяет `node tools/verify-fuses.js
+release/mac-universal` — он стоит в `dist:mac`, в `tools/build-lite.js` и отдельным шагом в
+`.github/workflows/build-mac.yml`.
+
 ## Полное офлайн-издание: четыре шага, последний пропускать нельзя
 
 Порядок ровно такой, как в `build-mac.yml`. Ошибка ровно одна и всегда одна и та же:
