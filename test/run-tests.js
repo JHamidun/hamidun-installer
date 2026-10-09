@@ -10835,3 +10835,106 @@ ok('config.json в репозитории без сборочных маркер
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 })();
+
+// ===========================================================================
+// Исправления «на каждый запуск»: диспетчер touch-up'ов (scripts/windows/_touchups.ps1,
+// scripts/macos/_touchups.sh). Проверка покрытия диалогов с Никой показала, что
+// исправления внутри скриптов компонентов не доходят до людей, у которых компонент уже
+// стоит (карточка снята с галочки). Touch-up — отдельный скрипт, который зовёт verify.
+// Тесты запускают НАСТОЯЩИЙ диспетчер на временном каталоге с touch-up'ами: обычным
+// (кириллица + exit 5), зависшим и упавшим с исключением.
+// ===========================================================================
+(function () {
+  console.log('\n== Исправления на каждый запуск: диспетчер touch-up\'ов ==');
+  const { spawnSync } = require('child_process');
+  const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-touchups-'));
+  const psLib = path.join(ROOT, 'scripts', 'windows', '_touchups.ps1');
+  const q = (s) => String(s).replace(/'/g, "''");
+  const runPs = (cmd, env) => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+    { encoding: 'utf8', timeout: 120000, env: env || process.env });
+
+  ok('_touchups.ps1: PS 5.1 — порядок, кириллица, чужие имена игнорируются, код выхода ребёнка не краснит прогон', () => {
+    if (process.platform !== 'win32') SKIP('нужен Windows PowerShell 5.1');
+    const dir = tmpRoot();
+    try {
+      const w = (n, body) => fs.writeFileSync(path.join(dir, n), '\uFEFF' + body, 'utf8');
+      w('touchup-b.ps1', "Write-Host 'ОБНОВЛЕНО: второй'\nexit 0\n");
+      w('touchup-a.ps1', "Write-Host 'ОБНОВЛЕНО: первый — привет'\nexit 5\n");          // код выхода не учитывается
+      w('touchup-bad_name.ps1', "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");                  // подчёркивание: чужое имя
+      w('other.ps1', "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");
+      w("touchup-q'uote.ps1", "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");                   // апостроф: тоже чужое имя
+      const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
+        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -TimeoutSec 20; Write-Host 'КОНЕЦ'");
+      const lines = (r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      assert.deepStrictEqual(lines, ['ОБНОВЛЕНО: первый — привет', 'ОБНОВЛЕНО: второй', 'КОНЕЦ'],
+        'порядок по имени, кириллица без мусора, чужие имена не запускаются; вывод: ' + r.stdout + r.stderr);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  ok('_touchups.ps1: зависший touch-up прерывается по таймауту, упавший даёт одну строку, остальные идут дальше', () => {
+    if (process.platform !== 'win32') SKIP('нужен Windows PowerShell 5.1');
+    const dir = tmpRoot();
+    try {
+      const w = (n, body) => fs.writeFileSync(path.join(dir, n), '\uFEFF' + body, 'utf8');
+      w('touchup-a-hang.ps1', "Start-Sleep -Seconds 60\nWrite-Host 'ОБНОВЛЕНО: не успел'\n");
+      w('touchup-b-throw.ps1', "throw 'сломался на ровном месте'\n");
+      w('touchup-c-ok.ps1', "Write-Host 'ОБНОВЛЕНО: дошёл'\n");
+      const t0 = Date.now();
+      const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
+        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -TimeoutSec 30; Write-Host 'КОНЕЦ'");
+      const sec = (Date.now() - t0) / 1000;
+      const out = r.stdout || '';
+      assert(/\[touchup-a-hang\] прервано/.test(out), 'таймаут обязан быть назван: ' + out);
+      assert(!/не успел/.test(out), 'прерванный touch-up не должен договорить');
+      assert(/\[touchup-b-throw\] ошибка: .*сломался/.test(out), 'исключение — одной строкой: ' + out);
+      assert(/ОБНОВЛЕНО: дошёл/.test(out) && /КОНЕЦ/.test(out), 'остальные не пострадали: ' + out);
+      assert(sec < 90, 'зависший touch-up должен прерываться по таймауту (30 с), а не ждать свои 60 с, заняло ' + sec + ' с');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  ok('_touchups.ps1: типографский апостроф в пути каталога не ломает запуск', () => {
+    if (process.platform !== 'win32') SKIP('нужен Windows PowerShell 5.1');
+    const base = tmpRoot();
+    const dir = path.join(base, 'O\u2019Brien');
+    try {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'touchup-x.ps1'), "\uFEFFWrite-Host 'ОБНОВЛЕНО: апостроф'\n", 'utf8');
+      const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
+        "'; Invoke-HmTouchups -Dir ([string]$env:HM_T_DIR) -TimeoutSec 20",
+      Object.assign({}, process.env, { HM_T_DIR: dir }));
+      assert(/ОБНОВЛЕНО: апостроф/.test(r.stdout || ''), 'путь с ’ сломал запуск: ' + r.stdout + r.stderr);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
+  ok('_touchups.ps1: библиотека — без exit, с BOM; отсутствующий каталог не бросает', () => {
+    const b = fs.readFileSync(psLib);
+    assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'кириллица в комментариях и строках — нужен UTF-8 BOM');
+    assert(!/^\s*exit\b/m.test(codeOnly(b.toString('utf8'))), 'библиотека не должна завершать процесс');
+    if (process.platform !== 'win32') return;
+    const r = runPs(". '" + q(psLib) + "'; Invoke-HmTouchups -Dir 'C:\\нет-такого-каталога-hm'; Write-Host 'ЖИВ'");
+    assert(/ЖИВ/.test(r.stdout || ''), 'отсутствующий каталог не должен ронять verify: ' + r.stdout + r.stderr);
+  });
+
+  ok('_touchups.sh: bash — порядок, таймаут, чужие имена, ошибка в одном не мешает остальным', () => {
+    const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (probe.error || probe.status !== 0) SKIP('нет bash');
+    const dir = tmpRoot();
+    try {
+      const w = (n, body) => fs.writeFileSync(path.join(dir, n), body, 'utf8');
+      w('touchup-b.sh', "echo 'ОБНОВЛЕНО: второй'\nexit 0\n");
+      w('touchup-a.sh', "echo 'ОБНОВЛЕНО: первый'\nexit 7\n");
+      w('touchup-hang.sh', "sleep 30\necho 'ОБНОВЛЕНО: не успел'\n");
+      w('touchup-bad_name.sh', "echo 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");
+      w('other.sh', "echo 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");
+      const lib = path.join(ROOT, 'scripts', 'macos', '_touchups.sh').replace(/\\/g, '/');
+      const d = dir.replace(/\\/g, '/');
+      const t0 = Date.now();
+      const r = spawnSync('bash', ['-c', '. "$1"; hm_run_touchups "$2" 3; echo КОНЕЦ', 'x', lib, d], { encoding: 'utf8', timeout: 60000 });
+      const sec = (Date.now() - t0) / 1000;
+      const lines = (r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      assert.deepStrictEqual(lines, ['ОБНОВЛЕНО: первый', 'ОБНОВЛЕНО: второй', '[touchup-hang] прервано: не уложился в 3 с', 'КОНЕЦ'],
+        'порядок по имени (a, b, hang); вывод: ' + r.stdout + r.stderr);
+      assert(sec < 25, 'зависший touch-up держал диспетчер ' + sec + ' с');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+})();
