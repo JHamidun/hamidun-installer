@@ -8418,6 +8418,337 @@ ok('config.json в репозитории без сборочных маркер
     const finallyPos = h.indexOf('_installBusy = false');
     assert(awaitPos > 0 && finallyPos > awaitPos, 'finally стоит ПОСЛЕ await-промиса');
   });
+
+  // Electron 35 сменил умолчание на Windows: WM_QUERYENDSESSION отвечается «да», и
+  // перезагрузка/выход из сессии больше не ждут окно установщика (на 32 оно держало их
+  // само). Идущий шаг — msiexec/PowerShell — убивало бы вместе с сессией на полпути.
+  // Окно обязано вернуть запрет через 'query-session-end', но ТОЛЬКО пока держится замок
+  // _installBusy: вечный запрет в простое — это установщик, который не даёт выключить ПК.
+  // Гоняем НАСТОЯЩЕЕ тело createWindow() с поддельным BrowserWindow, а не ищем строку.
+  ok('query-session-end: на Windows выключение держится ровно пока идёт шаг (_installBusy)', () => {
+    const s = MAIN();
+    const start = s.indexOf('function createWindow()');
+    assert(start > 0, 'нашли createWindow');
+    const body = s.slice(start, s.indexOf('\n}\n', start) + 3);   // верхнеуровневая функция кончается `\n}\n`
+    const decl = s.match(/^let _installBusy = false;[^\n]*$/m);
+    assert(decl, 'объявление замка _installBusy на месте (его переименование ломает обработчик)');
+
+    const run = (src, isWin) => {
+      const wins = [];
+      class FakeWindow {
+        constructor(opts) { this.opts = opts; this.handlers = {}; wins.push(this); }
+        loadFile() {}
+        once(ev, fn) { (this.handlers[ev] = this.handlers[ev] || []).push(fn); }
+        on(ev, fn) { (this.handlers[ev] = this.handlers[ev] || []).push(fn); }
+        flashFrame() {}
+      }
+      const api = new Function('BrowserWindow', 'IS_WIN', 'IS_MAC', 'path', '__dirname', 'bringToFront',
+        'let mainWindow = null; let _frontedForInstall = false;\n' + decl[0] + '\n' + src +
+        '\n; return { createWindow, setBusy: (v) => { _installBusy = v; } };'
+      )(FakeWindow, isWin, !isWin, path, path.join(ROOT, 'src'), () => {});
+      api.createWindow();
+      const w = wins[0];
+      // Возвращает, сколько раз обработчик запретил сессии закончиться при данном замке.
+      const fire = (busy) => {
+        api.setBusy(busy);
+        let prevented = 0;
+        for (const fn of (w.handlers['query-session-end'] || [])) fn({ preventDefault() { prevented++; } });
+        return prevented;
+      };
+      return { w, fire };
+    };
+
+    const win = run(body, true);
+    assert.strictEqual((win.w.handlers['query-session-end'] || []).length, 1, 'на Windows ровно один обработчик');
+    assert.strictEqual(win.fire(false), 0, 'в простое окно выключению НЕ мешает');
+    assert.strictEqual(win.fire(true), 1, 'пока идёт шаг — запрет (иначе перезагрузка убьёт msiexec на полпути)');
+    assert.strictEqual(win.fire(false), 0, 'замок снят → снова не мешает (замок читается в момент события, не при регистрации)');
+
+    // Событие есть только на Windows: на Mac его не вешаем.
+    assert.strictEqual(run(body, false).w.handlers['query-session-end'], undefined, 'на Mac обработчика нет');
+
+    // Обработчик вешается на окно ВНУТРИ createWindow, после его создания.
+    assertOrder(codeOf(body), 'mainWindow = new BrowserWindow(', "'query-session-end'",
+      'обработчик query-session-end стоит после создания окна');
+
+    // Негативный контроль: без строки с обработчиком тот же стенд обязан показать «запрета нет».
+    const mutated = body.replace(/^[ \t]*if \(IS_WIN\) mainWindow\.on\('query-session-end'.*$/m, '');
+    assert(mutated !== body, 'контроль: строку с обработчиком удалось вырезать');
+    assert.strictEqual(run(mutated, true).fire(true), 0, 'контроль: без обработчика стенд видит отсутствие запрета');
+  });
+})();
+
+// ===========================================================================
+// Electron 40+ на Windows: fs.rmSync падает с EPERM на read-only файлах (рантайм собран с
+// libc++, который атрибут не снимает). Юнит-тесты идут под системным Node 22, где rmSync
+// на таких файлах работает, — поэтому сам баг ими НЕ виден, и стерегут здесь две вещи:
+// логику обхода (src/fs-compat.js) на подставной ФС и его работу под НАСТОЯЩИМ рантаймом.
+// ===========================================================================
+(function fsCompatReadOnlyRm() {
+  console.log('== Electron 40+: rmSync и read-only файлы (src/fs-compat.js) ==');
+  const compatPath = path.join(ROOT, 'src', 'fs-compat.js');
+
+  // ФС в памяти: узлы по полному пути. ro → у файла нет бита записи (как read-only на Windows).
+  // lnk → симлинк/junction: внутрь ходить НЕЛЬЗЯ (под админом chmodSync идёт по ссылке).
+  const makeWorld = () => {
+    const R = path.join(path.sep, 'w', 'tree');
+    const n = (p, o) => Object.assign({ p, kids: [] }, o);
+    const nodes = {};
+    const add = (parent, name, o) => {
+      const p = path.join(parent.p, name);
+      nodes[p] = n(p, o);
+      parent.kids.push(p);
+      return nodes[p];
+    };
+    nodes[R] = n(R, { dir: true });
+    add(nodes[R], 'a.txt', { ro: true });
+    add(nodes[R], 'b.txt', {});
+    const sub = add(nodes[R], 'sub', { dir: true });
+    add(sub, 'c.bin', { ro: true });
+    const lnk = add(nodes[R], 'lnk', { link: true, ro: true });
+    add(lnk, 'evil.txt', { ro: true });          // за ссылкой: трогать нельзя
+    const chmods = [];
+    const fsx = {
+      lstatSync(p) {
+        const x = nodes[p];
+        if (!x) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+        return { mode: x.ro ? 0o444 : 0o666, isDirectory: () => !!x.dir, isSymbolicLink: () => !!x.link };
+      },
+      readdirSync(p) { return nodes[p].kids.map((k) => path.basename(k)); },
+      chmodSync(p, mode) { chmods.push(p); nodes[p].ro = !(mode & 0o200); },
+    };
+    const hasRo = (p) => { const x = nodes[p]; if (x.link) return false; return !!(x.ro && !x.dir) || x.kids.some(hasRo); };
+    const calls = { orig: 0 };
+    // «Сломанный» rmSync: падает EPERM, пока в дереве (мимо ссылок) есть read-only файл.
+    const orig = function (p) {
+      calls.orig++;
+      if (hasRo(p)) { const e = new Error('EPERM, Permission denied: ' + p); e.code = 'EPERM'; throw e; }
+      nodes[p].gone = true;
+    };
+    return { R, nodes, fsx, chmods, orig, calls };
+  };
+
+  ok('fs-compat: EPERM на read-only → атрибут снимается у дерева, rmSync повторяется ровно раз', () => {
+    const fc = require(compatPath);
+    const w = makeWorld();
+    assert.throws(() => w.orig(w.R), (e) => e.code === 'EPERM', 'контроль: стенд воспроизводит баг без обёртки');
+    w.calls.orig = 0;
+    const seen = [];
+    const rm = fc.wrapRmSync(w.orig, { fs: w.fsx, onRetry: (p, n) => seen.push([p, n]) });
+    rm(w.R, { recursive: true, force: true });
+    assert.strictEqual(w.nodes[w.R].gone, true, 'дерево удалено');
+    assert.strictEqual(w.calls.orig, 2, 'исходный rmSync: первая попытка + ровно один повтор');
+    assert.deepStrictEqual(w.chmods.slice().sort(),
+      [path.join(w.R, 'a.txt'), path.join(w.R, 'sub', 'c.bin')].sort(),
+      'снят атрибут только у read-only файлов дерева');
+    assert(!w.chmods.some((p) => /lnk/.test(p)), 'за симлинком/junction ничего не трогаем (chmod идёт по ссылке, а мы под админом)');
+    assert.deepStrictEqual(seen, [[w.R, 2]], 'обход оставил след для журнала: путь и число объектов');
+  });
+
+  ok('fs-compat: чужие ошибки проходят как есть, повторов и chmod без причины нет', () => {
+    const fc = require(compatPath);
+    // не EPERM — отдаём как есть, дерево не трогаем
+    let w = makeWorld();
+    const busy = Object.assign(new Error('busy'), { code: 'EBUSY' });
+    let calls = 0;
+    let rm = fc.wrapRmSync(() => { calls++; throw busy; }, { fs: w.fsx });
+    assert.throws(() => rm(w.R), (e) => e === busy, 'EBUSY отдаётся той же ошибкой');
+    assert.strictEqual(calls, 1, 'EBUSY не повторяется');
+    assert.strictEqual(w.chmods.length, 0, 'без EPERM атрибуты не трогаем');
+
+    // EPERM, но read-only нет (ACL, чужой владелец) — исходная ошибка, без повторов
+    w = makeWorld();
+    w.nodes[path.join(w.R, 'a.txt')].ro = false; w.nodes[path.join(w.R, 'sub', 'c.bin')].ro = false;
+    const acl = Object.assign(new Error('EPERM acl'), { code: 'EPERM' });
+    calls = 0;
+    const seen = [];
+    rm = fc.wrapRmSync(() => { calls++; throw acl; }, { fs: w.fsx, onRetry: () => seen.push(1) });
+    assert.throws(() => rm(w.R), (e) => e === acl, 'EPERM не про атрибут — та же ошибка');
+    assert.strictEqual(calls, 1, 'снимать было нечего → повтора нет');
+    assert.strictEqual(seen.length, 0, 'и в журнал «обход сработал» не пишем');
+
+    // после снятия атрибута снова отказ (файл занят) — второй отказ уходит наверх, цикла нет
+    w = makeWorld();
+    calls = 0;
+    const locked = Object.assign(new Error('EPERM locked'), { code: 'EPERM' });
+    rm = fc.wrapRmSync(() => { calls++; throw locked; }, { fs: w.fsx });
+    assert.throws(() => rm(w.R), (e) => e === locked, 'второй отказ отдан наружу');
+    assert.strictEqual(calls, 2, 'ровно два вызова: попытка и один повтор');
+
+    // путь не строкой (Buffer/URL) — обёртка его не разбирает и не трогает дерево
+    w = makeWorld();
+    calls = 0;
+    const eperm = Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    rm = fc.wrapRmSync(() => { calls++; throw eperm; }, { fs: w.fsx });
+    assert.throws(() => rm(Buffer.from(w.R)), (e) => e === eperm);
+    assert.strictEqual(calls, 1);
+    assert.strictEqual(w.chmods.length, 0);
+  });
+
+  ok('fs-compat: install() включается только на Windows и только один раз', () => {
+    const cp = require('child_process');
+    const script = [
+      "const fs = require('fs');",
+      "const orig = fs.rmSync;",
+      "const fc = require(process.env.HM_COMPAT);",
+      "const first = fc.install(() => {});",
+      "const afterFirst = fs.rmSync;",
+      "const second = fc.install(() => {});",
+      "process.stdout.write(JSON.stringify({ first, second, replaced: afterFirst !== orig,",
+      "  marked: !!afterFirst.__hmReadOnlyRetry, stable: fs.rmSync === afterFirst }));",
+    ].join('\n');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-fsi-'));
+    let o;
+    try {
+      const file = path.join(tmp, 'child.js');
+      fs.writeFileSync(file, script);
+      const env = Object.assign({}, process.env, { HM_COMPAT: compatPath });
+      delete env.ELECTRON_RUN_AS_NODE;
+      const r = cp.spawnSync(process.execPath, [file], { env, encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r.status, 0, 'дочерний Node отработал: ' + r.stderr);
+      o = JSON.parse(r.stdout);
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
+    if (process.platform === 'win32') {
+      assert(o.first && o.second, 'на Windows install() включает обход и повторно возвращает true');
+      assert(o.replaced && o.marked, 'rmSync заменён обёрткой с меткой');
+      assert(o.stable, 'второй install() не оборачивает повторно');
+    } else {
+      assert.strictEqual(o.first, false, 'вне Windows install() ничего не делает');
+      assert.strictEqual(o.replaced, false, 'вне Windows rmSync не подменяется');
+    }
+  });
+
+  // Главное: настоящий рантайм. Под ним дерево с read-only файлами раньше НЕ удалялось —
+  // ни голым rmSync, ни установочным rmStagingTree (возвращал false и оставлял в
+  // %ProgramData% Admins-only каталог, который пользователь стереть не может).
+  ok('fs-compat: под настоящим Electron-рантаймом rmSync и rmStagingTree сносят дерево с read-only файлами', () => {
+    if (process.platform !== 'win32') SKIP('read-only-атрибут и баг libc++ — только Windows');
+    const cp = require('child_process');
+    const rel = (() => { try { return fs.readFileSync(path.join(ROOT, 'node_modules', 'electron', 'path.txt'), 'utf8').trim(); } catch (e) { return ''; } })();
+    const exe = rel ? path.join(ROOT, 'node_modules', 'electron', 'dist', rel) : '';
+    if (!exe || !fs.existsSync(exe)) SKIP('нет бинарника Electron (npx install-electron --no) — рантайм не проверить');
+
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-fsc-'));
+    const scriptFile = path.join(base, 'child.js');
+    fs.writeFileSync(scriptFile, [
+      "const fs = require('fs'), path = require('path'), cp = require('child_process');",
+      "const compat = require(process.env.HM_COMPAT);",
+      "const sp = require(process.env.HM_STAGING);",
+      "let logged = 0;",
+      "compat.install(() => { logged++; });",
+      "const base = process.env.HM_BASE;",
+      "function mk(root) {",
+      "  fs.mkdirSync(path.join(root, 'a', 'b'), { recursive: true });",
+      "  for (const f of ['x.txt', path.join('a', 'y.bin'), path.join('a', 'b', 'z.dll')]) {",
+      "    const p = path.join(root, f); fs.writeFileSync(p, 'x'); cp.execFileSync('attrib', ['+R', p]);",
+      "  }",
+      "}",
+      "const t1 = path.join(base, 'tree'); mk(t1);",
+      "let treeErr = null; try { fs.rmSync(t1, { recursive: true, force: true }); } catch (e) { treeErr = e.code || String(e); }",
+      "const stg = path.join(base, 'HmDeElev-0123456789abcdef0123456789abcdef'); mk(path.join(stg, 'w'));",
+      "const staging = sp.rmStagingTree(path.join(stg, 'w'));",
+      "const f1 = path.join(base, 'single.json'); fs.writeFileSync(f1, '{}'); cp.execFileSync('attrib', ['+R', f1]);",
+      "let fileErr = null; try { fs.rmSync(f1, { force: true }); } catch (e) { fileErr = e.code || String(e); }",
+      "process.stdout.write(JSON.stringify({ runtime: process.versions.electron ? 'electron ' + process.versions.electron : 'node',",
+      "  treeRemoved: !fs.existsSync(t1), treeErr, staging, stagingGone: !fs.existsSync(stg),",
+      "  fileRemoved: !fs.existsSync(f1), fileErr, logged }));",
+    ].join('\n'));
+    let out;
+    try {
+      const r = cp.spawnSync(exe, [scriptFile], {
+        env: Object.assign({}, process.env, {
+          ELECTRON_RUN_AS_NODE: '1', HM_COMPAT: compatPath,
+          HM_STAGING: path.join(ROOT, 'src', 'staging-paths.js'), HM_BASE: base,
+        }),
+        encoding: 'utf8', timeout: 90000,
+      });
+      assert.strictEqual(r.status, 0, 'Electron-как-Node отработал (код ' + r.status + '): ' + (r.stderr || r.error));
+      out = JSON.parse(r.stdout);
+    } finally {
+      try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* системный Node снимает read-only сам */ }
+    }
+    assert.strictEqual(out.treeErr, null, 'rmSync дерева с read-only не бросает (' + out.runtime + '): ' + out.treeErr);
+    assert(out.treeRemoved, 'дерево с read-only файлами удалено (' + out.runtime + ')');
+    assert(out.staging === true && out.stagingGone, 'rmStagingTree снёс staging с read-only файлами (' + out.runtime + ')');
+    assert.strictEqual(out.fileErr, null, 'rmSync одного read-only файла не бросает: ' + out.fileErr);
+    assert(out.fileRemoved, 'одиночный read-only файл удалён');
+  });
+
+  // Обход должен быть включён ДО любого rmSync: после logToFile (ему нужен журнал) и до
+  // уборки, которую запускает app.whenReady (pruneStaleSecureDirs).
+  ok('main.js включает fs-compat после logToFile и до первой уборки', () => {
+    const s = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8')
+      .split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
+    assert(/require\('\.\/fs-compat'\)\.install\(\(line\) => logToFile\('fs-compat', line\)\)/.test(s),
+      'обход включается с записью в install.log');
+    assertOrder(s, 'function logToFile(id, line)', "require('./fs-compat').install(", 'журнал объявлен до включения обхода');
+    assertOrder(s, "require('./fs-compat').install(", 'app.whenReady()', 'обход включён до старта приложения');
+    assertOrder(s, "require('./fs-compat').install(", 'function pruneStaleSecureDirs()', 'обход включён до уборки staging');
+    // негативный контроль: сдвинутый после whenReady вызов обязан поймать сторож порядка
+    const moved = s.replace("require('./fs-compat').install((line) => logToFile('fs-compat', line));", '')
+      + "\nrequire('./fs-compat').install((line) => logToFile('fs-compat', line));\n";
+    assert.throws(() => assertOrder(moved, "require('./fs-compat').install(", 'app.whenReady()'),
+      'контроль: вызов после whenReady ловится');
+  });
+})();
+
+// ===========================================================================
+// Electron 44: версии закреплены ТОЧНО (каретка молча подтянула бы другой рантайм и другую
+// Chromium), lock не расходится с package.json, пол macOS задан явно и назван людям, а CI
+// после каждого `npm ci` докачивает бинарник (с Electron 42 он не качается в postinstall).
+// ===========================================================================
+(function electronRuntimePins() {
+  console.log('== Electron 44: пины версий, lock, пол macOS, бинарник в CI ==');
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
+  const gte = (a, b) => {
+    const x = String(a).split('.').map(Number); const y = String(b).split('.').map(Number);
+    for (let i = 0; i < 3; i++) { if (x[i] !== y[i]) return x[i] > y[i]; }
+    return true;
+  };
+
+  ok('electron: точный пин (без ^/~), не ниже 44.5.0, lock совпадает с package.json', () => {
+    const v = pkg.devDependencies.electron;
+    assert(/^\d+\.\d+\.\d+$/.test(v), 'electron закреплён ТОЧНО, а не диапазоном: ' + v);
+    assert(gte(v, '44.5.0'), 'electron не ниже 44.5.0 (исправления 44.4.4–44.5.0: ready-to-show, confirm()): ' + v);
+    assert.strictEqual(lock.packages['node_modules/electron'].version, v, 'package-lock.json: установленная версия electron');
+    assert.strictEqual(lock.packages[''].devDependencies.electron, v, 'package-lock.json: спецификатор electron');
+  });
+
+  ok('electron-builder: точный пин 25.1.8 (смена сборщика — отдельным шагом), lock совпадает', () => {
+    const v = pkg.devDependencies['electron-builder'];
+    assert.strictEqual(v, '25.1.8', 'electron-builder закреплён точно на проверенной версии');
+    assert.strictEqual(lock.packages['node_modules/electron-builder'].version, v, 'lock: electron-builder');
+    assert.strictEqual(lock.packages['node_modules/app-builder-lib'].version, v, 'lock: app-builder-lib той же версии');
+    assert.strictEqual(lock.packages[''].devDependencies['electron-builder'], v, 'lock: спецификатор electron-builder');
+  });
+
+  ok('пол macOS: minimumSystemVersion = 13.0 (Electron 44) и он назван людям', () => {
+    // Ниже 13.0 нельзя: приложение запустилось бы и упало. Выше — уже решение продукта.
+    assert.strictEqual(pkg.build.mac.minimumSystemVersion, '13.0', 'build.mac.minimumSystemVersion');
+    const txtPath = path.join(ROOT, 'assets', 'mac', 'ПРОЧТИ ЕСЛИ ПИШЕТ ПОВРЕЖДЕНО.txt');
+    const first = fs.readFileSync(txtPath, 'utf8').split('\n')[0];
+    assert(/^Нужна macOS 13 Ventura или новее \(лучше 13\.5\+\)/.test(first), 'первая строка файла в dmg: ' + first);
+    for (const rel of [['README.md'], ['MAC-BUILD.md'], ['docs', 'bridge-bot-spec.md']]) {
+      // доки переносят строки по ширине — фразу ищем после схлопывания пробелов и переводов строк
+      const flat = fs.readFileSync(path.join(ROOT, ...rel), 'utf8').replace(/\s+/g, ' ');
+      assert(/Нужна macOS 13 Ventura или новее \(лучше 13\.5\+\)/.test(flat), rel.join('/') + ': назван пол macOS');
+    }
+  });
+
+  ok('e2e-win.yml: после КАЖДОГО `npm ci` стоит `npx install-electron --no`', () => {
+    const lines = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'e2e-win.yml'), 'utf8').split(/\r?\n/);
+    const runs = lines.map((l, i) => [l.trim(), i]).filter(([l]) => /^run:/.test(l));
+    const ci = runs.filter(([l]) => /^run: npm ci\b/.test(l));
+    assert(ci.length >= 4, 'нашли все шаги npm ci: ' + ci.length);
+    for (const [, i] of ci) {
+      const next = runs.find(([, j]) => j > i);
+      assert(next && next[0] === 'run: npx install-electron --no',
+        'после npm ci (строка ' + (i + 1) + ') нет докачки бинарника Electron: ' + (next && next[0]));
+    }
+  });
 })();
 
 // ===========================================================================

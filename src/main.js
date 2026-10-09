@@ -194,6 +194,10 @@ function logToFile(id, line) {
   }
 }
 
+// Electron 40+ на Windows: fs.rmSync падает с EPERM на read-only файлах — снос staging,
+// карантина удаления и finalDir встал бы колом. Обход и обоснование — в src/fs-compat.js.
+require('./fs-compat').install((line) => logToFile('fs-compat', line));
+
 let mainWindow = null;
 
 // Track live installer child processes so we can kill orphans if the window
@@ -294,6 +298,11 @@ function createWindow() {
     _frontedForInstall = false;
     try { mainWindow.flashFrame(false); } catch (_) {}
   });
+  // Electron 35+ отвечает на WM_QUERYENDSESSION «да» по умолчанию (в 32 окно само держало
+  // перезагрузку/выход). Идущий шаг (msiexec/PowerShell) убило бы вместе с сессией на
+  // полпути, оставив полуустановленный компонент. Возвращаем старый запрет ТОЛЬКО пока
+  // держится замок _installBusy; в простое окно выключению не мешает.
+  if (IS_WIN) mainWindow.on('query-session-end', (e) => { if (_installBusy) e.preventDefault(); });
 }
 // M1: подняли ли окно на передний план в текущем «эпизоде» ухода фокуса — чтобы
 // не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
