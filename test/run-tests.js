@@ -20845,7 +20845,7 @@ ok('config.json в репозитории без сборочных маркер
     "    if ('inspect' in arg) cfg[lib.FuseV1Options.EnableNodeCliInspectArguments] = arg.inspect;",
     // Сразу после пробного запуска Electron свежий 245-МБ exe держит антивирус: открытие на запись даёт EBUSY/EPERM/EACCES
     // (так упали 2 из 9 прогонов). У боевого хука тот же повтор, но на ~1,5 с; тестовому помощнику нужен запас побольше:
-    // Defender сканирует изменённый exe до 17 с. Прочие ошибки — сразу наружу.
+    // пять повторов, ≈16,5 с суммарно (сколько Defender держит файл на самом деле — не измерено). Прочие ошибки — сразу наружу.
     "    let wires;",
     "    for (let i = 0; ; i++) {",
     "      try { wires = await lib.flipFuses(arg.file, cfg); break; } catch (e) {",
@@ -22298,11 +22298,18 @@ ok('config.json в репозитории без сборочных маркер
       assert.deepStrictEqual(trip.log, [], 'все четыре отказа случились ДО диска: ни одного обращения к ФС');
       // негативный контроль: без этих двух защит обход сразу лезет на диск — сторожок это видит (на настоящей ФС
       // это был бы снос корня диска / текущего каталога)
+      // проба сторожка на БЕЗВРЕДНОМ пути: контроли ниже вызывают модуль без защиты, и единственный барьер между ним и
+      // настоящим диском — подмена opts.fs. Если её когда-нибудь переименуют или потеряют, контроль ушёл бы сносить корень
+      // диска и текущий каталог. Поэтому сперва, на несуществующем пути, убеждаемся, что сторожок слышен: при
+      // потерянной подмене обход упрётся в ENOENT, force его проглотит, и тест покраснеет, ничего не тронув
+      const probeInjection = (mod, label) => assert.throws(() => mod.removeTreeNoFollow(path.join(missing, 'проба'), { force: true, fs: tripFs() }), (e) => e.code === 'EHM_TRIPWIRE', 'проба сторожка (' + label + '): обход идёт через подменённую ФС, а не мимо неё');
       const noRootGuard = loadMutated([['if (parentOfRoot === rootPath) throw', 'if (false) throw']]);
+      probeInjection(noRootGuard, 'без защиты корня');
       const t1 = tripFs();
       assert.throws(() => noRootGuard.removeTreeNoFollow(path.parse(process.cwd()).root, { force: true, fs: t1 }), (e) => e.code === 'EHM_TRIPWIRE', 'контроль: без защиты корня ФС обход идёт к диску');
       assert(t1.log.length > 0, 'контроль: сторожок записал обращение (корень ФС)');
       const noEmptyGuard = loadMutated([['if (!s || ', 'if (']]);
+      probeInjection(noEmptyGuard, 'без защиты пустой строки');
       const t2 = tripFs();
       assert.throws(() => noEmptyGuard.removeTreeNoFollow('', { force: true, fs: t2 }), (e) => e.code === 'EHM_TRIPWIRE', 'контроль: без защиты пустой строки обход идёт к диску (текущий каталог)');
       assert(t2.log.length > 0, 'контроль: сторожок записал обращение (пустая строка)');
@@ -22937,9 +22944,9 @@ ok('config.json в репозитории без сборочных маркер
         finally { fs.readdirSync = origReaddir; }
         assert(swapped && swapDone, mode + ': подмена каталога по ходу сноса состоялась');
         assert.strictEqual(r.status, 'failed', mode + ': ' + JSON.stringify(r));
-        assert(/не удалось удалить дерево: ERR_HM_TREE_CHANGED — каталог подменён во время сноса \(ссылка, junction или другой каталог\), ничего не тронуто: /.test(r.message),
+        assert(/не удалось удалить дерево: ERR_HM_TREE_CHANGED — каталог подменён во время сноса \(ссылка, junction или другой каталог\), удаление остановлено, за подменённым путём ничего не тронуто: /.test(r.message),
           mode + ': причина названа по-русски, а не одним кодом: ' + r.message);
-        if (mode === 'plain') assert(/\(дерево возвращено на место\)$/.test(r.message), mode + ': и сказано, что дерево возвращено: ' + r.message);
+        if (mode === 'plain') assert(/\(оставшееся дерево возвращено на место\)$/.test(r.message), mode + ': и сказано, что оставшееся дерево возвращено: ' + r.message);
         assert(victimAlive(victim) && fs.existsSync(path.join(victim, 'x.txt')), mode + ': ЦЕЛЬ ЗА ССЫЛКОЙ ЦЕЛА (включая одноимённый файл)');
         assert(fs.existsSync(target), mode + ': дерево возвращено на прежний путь');
         assert.deepStrictEqual(fs.readdirSync(path.dirname(target)).filter((n) => n.indexOf('.hm-quar.') === 0), [], mode + ': карантин не остался');

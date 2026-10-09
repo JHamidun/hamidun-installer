@@ -320,7 +320,7 @@ function removeDirTree(p, opts, dry) {
     if (fs.existsSync(quarantine)) {
       const back = restore();
       return res('failed', 'не удалось удалить дерево: ' + treeFailWhy(e) +
-        (back ? ' (дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
+        (back ? ' (оставшееся дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
     }
   }
   if (fs.existsSync(quarantine)) {
@@ -346,7 +346,7 @@ function treeFailWhy(e) {
   const msg = String((e && e.message) || '');
   if (code === 'ERR_HM_TREE_CHANGED') return code + ' — ' + msg.replace(/^ERR_HM_TREE_CHANGED:\s*/, '');
   if (code === 'ENOTEMPTY') {
-    const note = /\[([^\]]*не трогаю[^\]]*)\]/.exec(msg);   // подпись removeLink: «это перенаправление/ссылка, но внутри есть содержимое»
+    const note = /\[(это перенаправление[\s\S]*)\]$/.exec(msg);   // подпись removeLink стоит в конце сообщения; в самом пути бывают [ и ]
     if (note) return code + ' — ' + note[1];
   }
   return String(code);
