@@ -56,6 +56,9 @@ jobs:
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
+
       - name: Проверка прав (E2E требует элевации для staging докачки)
         shell: pwsh
         run: |
@@ -208,6 +211,9 @@ jobs:
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
 
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
+
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         shell: pwsh
         run: |
@@ -252,6 +258,9 @@ jobs:
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Подготовка офлайн-издания (vendor/config-pack из публичного репо)
         run: |
@@ -325,6 +334,9 @@ jobs:
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         run: |

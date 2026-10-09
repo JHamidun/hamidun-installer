@@ -30,8 +30,8 @@
     "test": "node test/run-tests.js"
   },
   "devDependencies": {
-    "electron": "^32.0.0",
-    "electron-builder": "^25.0.0",
+    "electron": "44.5.1",
+    "electron-builder": "25.1.8",
     "playwright-core": "^1.61.1"
   },
   "_buildNotes": {
@@ -155,6 +155,7 @@
       "category": "public.app-category.developer-tools",
       "artifactName": "Hamidun-Setup-Mac.${ext}",
       "hardenedRuntime": true,
+      "minimumSystemVersion": "13.0",
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
