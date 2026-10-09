@@ -245,6 +245,19 @@ function assertRegistryMatchesChecksums(platform) {
     console.log('            но НЕ против устаревшей публикации. Для «config» возраст проверен штампом выше.');
   }
 
+  // Обязательные члены архивов (release-check.js REQUIRED_GATED): vscode обязан нести vsix
+  // панели Claude. Запись, опубликованная до этого правила, проходит все сверки выше — и
+  // молча возвращает lite к установке панели только из Marketplace. Ловим до сборки.
+  const missReq = require('./release-check.js').missingRequiredGated(reg, platform);
+  if (missReq.length) {
+    const ids = [...new Set(missReq.map((m) => m.remoteId))];
+    throw new Error(
+      `опубликованные архивы не несут обязательные файлы: ${missReq.map((m) => m.remoteId + '/' + m.member).join(', ')} ` +
+      `(архив стал составным после публикации). Перепубликуй: python tools/publish-vendor.py --platform ${platform} --only ${ids.join(',')} — ` +
+      `и только потом собирай lite.`
+    );
+  }
+
   // Ни одной записи своей платформы = lite-сборка, которой НЕЧЕГО качать: все тяжёлые
   // компоненты у пользователя уйдут в «нет сборки для платформы». Ловим до сборки.
   if (!entries) {

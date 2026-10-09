@@ -136,7 +136,15 @@ win32`, при ненулевом коде публикация останавл
 **Кто это потом читает.** `remote-components.json` — вход для `src/remote-fetch.js`
 (`pickEntry`, `isFetchableUrl`) на машине пользователя и для
 `tools/build-lite.js:159-239`, где `gatedFiles` из записи сверяются с вшитым
-`checksums.json` до сборки лёгкого издания. Сейчас в реестре 23 записи, у каждой
+`checksums.json` до сборки лёгкого издания. Архив `vscode` (win32) с 06.10 — составной
+(`staged`): `apps/vscode-setup.exe` + `apps/claude-code.vsix` + `apps/vscode-language-pack-ru.vsix`
+(русский интерфейс; подобран под минор вшитого VS Code), все части обязательны,
+`chatgpt.vsix` в него не кладётся. Причина — в лёгком издании vsix панели Claude ехал
+только в архиве `extension`, а тот ставит панель лишь в Cursor и качается лишь при
+выбранном Cursor. Запись, опубликованную до 06.10 (один установщик), `release-check.js`
+(`REQUIRED_GATED`, `missingRequiredGated`) объявляет NO-GO, а `build-lite.js` не собирает
+лёгкое издание до перепубликации: `python tools/publish-vendor.py --platform win32 --only vscode`.
+Сейчас в реестре 23 записи, у каждой
 два зеркала (regru + yandex) и заполненный `installRelPath`.
 
 ## Инварианты
@@ -257,6 +265,7 @@ win32`, при ненулевом коде публикация останавл
 
 ## Риски и открытые вопросы
 
+- **`claude-code.vsix` (около 117 МБ) едет в ДВУХ архивах: `vscode` и `extension`.** Решение владельца (09.10), принято осознанно: архив `vscode` ставит панель в VS Code, архив `extension` — в Cursor, а у Cursor свой источник расширений (Open VSX), так что общий файл на двоих не сделать, не связав два независимых компонента. Цена: лёгкое издание, где выбраны оба редактора, скачивает файл дважды. Если это станет проблемой, правится составом `COMPONENTS` в `tools/publish-vendor.py`, а не скриптами.
 - **Тестов на сами инструменты нет.** В `test/run-tests.js` не встречаются ни
   `publish-dist`, ни `publish-vendor`, ни `push-component`; в `_features.json` у
   фичи `tested: "unknown"`. Процитированные тесты проверяют СЛЕДСТВИЕ — схему

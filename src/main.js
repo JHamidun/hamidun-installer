@@ -15,6 +15,7 @@ const uninstallTargets = require('./uninstall-targets'); // зашитый per-c
 const uninstallExec = require('./uninstall-exec');       // guard (fail-closed) + исполнители удаления в JS
 const { rmStagingTree } = require('./staging-paths'); // снос staging — только по имени HmDeElev-<hex>
 const nomadKey = require('./nomad-key');             // запись ключа Nomad в config.yaml
+const deelevRoute = require('./deelev-route');       // «Last Result» задачи → можно ли запасной путь
 const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
 
 const IS_WIN = process.platform === 'win32';
@@ -1212,7 +1213,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // garbage. Force the console output encoding to UTF-8 *before* running the
     // script, then invoke it via the call operator so its own `exit N` becomes
     // this process's exit code. Escape single quotes in the path ('  -> '').
-    const psScript = script.replace(/'/g, "''");
+    // psQuoteBody удваивает не только ASCII ', но и типографские кавычки U+2018/2019/201A/201B:
+    // PowerShell считает их ограничителями, и «O’Brien» в пути ломал бы запуск КАЖДОГО скрипта.
+    const psScript = deelevRoute.psQuoteBody(script);
     // Trailing exit propagates the script's real code (bare `exit $LASTEXITCODE`
     // would return 0 when the script fails to load — $LASTEXITCODE is $null then).
     const inline =
@@ -1339,6 +1342,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
       // (receipts.EXIT_SKIP) — НЕ ошибка, но и НЕ установка: маркер НЕ пишем.
       const skipped = receipts.isSkipExit(code);
+      // Код 121 (receipts.EXIT_PARTIAL) — «частичный успех»: компонент работает, но
+      // необязательной части нет (vscode: редактор стоит, панель Claude или Codex не встала).
+      // Для потока это успех: зависимые идут дальше, маркер установки пишется. Renderer
+      // получает res.partial === true и res.partialReason — текст строки «ЧАСТИЧНО: …» из
+      // вывода скрипта — и рисует шаг ЖЁЛТЫМ (не зелёным «готово», не красной ошибкой).
+      const partial = receipts.isPartialExit(code);
       // Записываем версию в справочный манифест ~/.hamidun-setup/installed.json ТОЛЬКО
       // при реальном успехе (код 0) и НЕ в dry-run. Скрытый verify не пишем. Skip-код
       // и любой ненулевой код маркер НЕ пишут (иначе фантомная кнопка «Удалить» → снос
@@ -1392,6 +1401,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // Объяснение печатаем в лог/UI сразу (человек читает его на месте, а не ищет
       // причину в простыне из cargo/pip) и отдаём renderer'у в res.hint — он ставит
       // короткую подпись на шаге и кладёт вид причины в отчёт боту.
+      if (partial) {
+        // Кэш докачки НЕ чистим: «Повторить» для недоставленной части переиспользует уже
+        // скачанный архив (уборка всё равно гарантирована на выходе, cleanupAllSecureDirs).
+        const partialWhy = receipts.partialReason(outTail);
+        logLine(`=== компонент «${id}» установлен частично (код ${code})${partialWhy ? ': ' + partialWhy : ''} ===`);
+        resolve({ id, ok: true, code, skipped: false, partial: true, partialReason: partialWhy });
+        return;
+      }
       if (!okRun && !skipped) {
         const why = failureExplain.explainScriptFailure(outTail);
         // ВЫЖИМКА строится ВСЕГДА, опознана причина или нет. До 20.08.2026 её не
@@ -1654,7 +1671,7 @@ ipcMain.handle('launch-cursor', () => {
       try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
       try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
       const cexe = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe');
-      if (fs.existsSync(cexe)) { return winLaunchDeElevated(cexe, startDir); }
+      if (fs.existsSync(cexe)) { return winLaunchDeElevated(cexe, startDir, deelevRoute.editorOpenFiles(startDir, 'PROMPTS.md')); }
     } else if (IS_MAC) {
       spawn('/usr/bin/open', ['-a', 'Cursor'], { detached: true, stdio: 'ignore' }).unref();
       return true;
@@ -1712,9 +1729,9 @@ async function winMakeSecureDir() {
     // Инлайн: дот-сорсим bundled-примитив и зовём АТОМАРНЫЙ конструктор secure-dir.
     // Пути — ЛИТЕРАЛАМИ (single-quoted, ''-экранирование); ни одного аргумента из
     // renderer/сети. Установщик elevated -> каталог {SYSTEM,Admins}, без user-ACE.
-    const deLit = String(deelev).replace(/'/g, "''");
-    const pdLit = String(pd).replace(/'/g, "''");
-    const icLit = String(icacls).replace(/'/g, "''");
+    const deLit = deelevRoute.psQuoteBody(deelev);
+    const pdLit = deelevRoute.psQuoteBody(pd);
+    const icLit = deelevRoute.psQuoteBody(icacls);
     // PSModulePath ПРИБИВАЕМ литералом к System32\WindowsPowerShell\v1.0\Modules.
     // Две причины, обе кусаются:
     //  1) если установщик запущен из окружения PowerShell 7 (терминал pwsh, CI-раннер),
@@ -1726,7 +1743,7 @@ async function winMakeSecureDir() {
     //  2) PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) и является
     //     штатным вектором module-hijack в elevated-процессе.
     const s32 = path.dirname(path.dirname(path.dirname(ps)));   // ...\System32 из валидированного powershell.exe
-    const psmLit = path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules').replace(/'/g, "''");
+    const psmLit = deelevRoute.psQuoteBody(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'));
     const inline =
       // Кодировку консоли задаём ПЕРВОЙ командой. powershell 5.1 пишет stdout и stderr
       // в кодовой странице консоли (CP866 на русской Windows), а Node читает трубу как
@@ -1803,6 +1820,58 @@ async function winMakeSecureDir() {
   } catch (e) { return null; }
 }
 
+// Запасной путь запуска редактора: тот же exe с ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же
+// пользователь — проверяется по самому токену ДО запуска) через вшитый _deelev.ps1
+// (Invoke-HmAsShellUser, CreateProcessWithTokenW). Нужен там, где одноразовая задача
+// планировщика отказывает целиком: у людей «Открыть VS Code» и «Открыть курс» открывали
+// только папку в Проводнике. НЕ «explorer.exe <exe>»: если оболочки в этот момент нет, наш
+// elevated explorer исполнил бы запуск сам, под админом, по ассоциациям из HKCU.
+// Promise<{ gate, code, reason }>: gate 'medium' и code 0 — редактор запущен.
+function winShellTokenLaunch(exe, folderArg, extraArgs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let ps = null; let deelev = null;
+    try { ps = remoteFetch.winPowershellPath(); deelev = winDeElevScript(); } catch (e) { /* ниже */ }
+    if (!ps || !deelev || !fs.existsSync(ps) || !fs.existsSync(deelev)) {
+      return done({ gate: 'unavailable', code: -1, reason: 'нет powershell или _deelev.ps1' });
+    }
+    // Литералы — single-quoted с удвоением ВСЕХ пяти знаков-ограничителей (ASCII ' и U+2018/2019/
+    // 201A/201B, deelevRoute.psLit), ни одного значения из renderer.
+    // PSModulePath прибит литералом (тот же довод, что в winMakeSecureDir).
+    const lit = deelevRoute.psLit;
+    const s32 = path.dirname(path.dirname(path.dirname(ps)));
+    const inline =
+      '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+      '$env:PSModulePath=' + lit(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')) + ';' +
+      '. ' + lit(deelev) + ';' +
+      '$r=Invoke-HmAsShellUser -Exe ' + lit(exe) + ' -Arguments @(' + [folderArg].concat(extraArgs || []).map(lit).join(',') +
+      ") -NoWait -Label 'launch-editor';" +
+      "[Console]::Out.Write('HMSHELL::'+$r.Gate+'::'+$r.Code+'::'+([string]$r.Reason -replace '::',': ')+'::END')";
+    let so = '';
+    let child;
+    try {
+      // env доверенный (detectSpawnEnv): COR_*/PSModulePath из HKCU\Environment в elevated
+      // powershell.exe не пускаем — тот же класс подсадки, что закрыт в winMakeSecureDir.
+      child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
+    } catch (e) { return done({ gate: 'unavailable', code: -1, reason: String((e && e.message) || e) }); }
+    const kill = setTimeout(() => {
+      try { child.kill(); } catch (e) { /* */ }
+      done({ gate: 'unknown', code: -1, reason: 'запасной путь не ответил за 30 с' });
+    }, 30000);
+    child.stdout.on('data', (d) => { so += String(d); });
+    child.stderr.on('data', () => { /* причина приезжает в маркере stdout */ });
+    child.on('error', (e) => { clearTimeout(kill); done({ gate: 'unavailable', code: -1, reason: String((e && e.message) || e) }); });
+    child.on('close', () => {
+      clearTimeout(kill);
+      const m = /HMSHELL::([a-z-]+)::(-?\d+)::([\s\S]*?)::END/.exec(so);
+      if (!m) return done({ gate: 'unavailable', code: -1, reason: 'нет ответа от _deelev.ps1' });
+      done({ gate: m[1], code: Number(m[2]), reason: m[3] });
+    });
+  });
+}
+
 // P0-D (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
 // Прямой spawn user-writable Code.exe/Cursor.exe (%LOCALAPPDATA%\…) исполнил бы ПОД АДМИНОМ
 // (high integrity) то, что medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить
@@ -1816,13 +1885,18 @@ async function winMakeSecureDir() {
 //              pre-creation/tamper XML невозможны. Обёртка ПЕРВЫМИ строками ставит чистые
 //              env-ЛИТЕРАЛЫ (ни одного cmdlet до gate), сверяет integrity абсолютным
 //              System32\whoami и стартует редактор ЛИШЬ при medium (иначе exit 210).
-//   fallback — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
-//              shell). Editor-exe в fallback НЕ исполняем (P0-D#4).
+//   запасной — если ДОКАЗАНО, что задача ничего не запустила (сбой до /Run, 210, HRESULT
+//              планировщика — deelevRoute.shellFallbackAllowed), тот же exe с проверенным
+//              medium-токеном оболочки Explorer (winShellTokenLaunch).
+//   последний — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
+//              shell). Editor-exe через explorer НЕ исполняем (P0-D#4).
 // P0-D#5/P1-1: true возвращаем ТОЛЬКО когда задача подтвердила gate И старт — по «Last Result»
-// (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил.
-// Иначе (210 refused / 211 start-fail / нет подтверждения / любой сбой) -> folder-only fallback.
-// Возвращает Promise<boolean> (опрос неблокирующий — UI не морозим).
-async function winLaunchDeElevated(exe, folderArg) {
+// (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил,
+// либо запасной путь создал процесс с проверенным medium-токеном. Иначе (211 start-fail / нет
+// подтверждения / любой сбой) -> folder-only fallback. Каждый исход — строка в install.log.
+// Возвращает Promise<boolean|'explorer'> (опрос неблокирующий — UI не морозим).
+// extraArgs — файлы, которые редактор откроет вкладками в той же папке (code <папка> <файл>).
+async function winLaunchDeElevated(exe, folderArg, extraArgs) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
   // Возвращаем 'explorer', а НЕ true: открылась папка, редактор не запускался.
@@ -1845,7 +1919,25 @@ async function winLaunchDeElevated(exe, folderArg) {
     } catch (e) { /* ignore */ }
     return false;
   };
-  const done = (v) => Promise.resolve(v);
+  // Итог запуска — одной строкой в install.log: путь, Gate и «Last Result» (hex), причина.
+  // Раньше отказ кнопки не оставлял следа нигде, и «открылась только папка» не объяснить.
+  const note = (msg) => { try { logToFile('launch', 'Открыть редактор: ' + msg); } catch (e) { /* журнал не роняет запуск */ } };
+  // Задача доказанно НИЧЕГО не запустила -> токен оболочки; не вышло или не доказано -> папка.
+  const viaShellOrFolder = async (stage, lr) => {
+    const v = deelevRoute.taskVerdict(lr);
+    const taskText = stage === 'done'
+      ? 'задача — Gate=' + v.gate + (v.hex ? ', Last Result=' + v.hex : '')
+      : 'задача не отработала (этап ' + stage + ')';
+    if (!deelevRoute.shellFallbackAllowed(stage, lr)) {
+      note(taskText + '; запасной путь не запускаю (первый запуск отработал или мог ещё идти) — открываю папку');
+      return folderFallback();
+    }
+    const sh = await winShellTokenLaunch(exe, folderArg, extraArgs);
+    note(taskText + '; запасной путь (токен оболочки Explorer) — Gate=' + sh.gate + ', код ' + sh.code +
+      (sh.reason ? ': ' + sh.reason : ''));
+    if (sh.gate === 'medium' && sh.code === 0) return true;
+    return folderFallback();
+  };
 
   let ps = null, schtasks = null, whoami = null;
   try {
@@ -1853,12 +1945,12 @@ async function winLaunchDeElevated(exe, folderArg) {
     schtasks = remoteFetch.sysBin('schtasks.exe');
     whoami = remoteFetch.sysBin('whoami.exe');
   } catch (e) { /* fail-closed ниже */ }
-  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return done(folderFallback()); }
+  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return viaShellOrFolder('prereq', null); }
 
   const s32 = path.join(sysRoot, 'System32');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
   const dir = await winMakeSecureDir();
-  if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
+  if (!dir) { return viaShellOrFolder('staging', null); }   // не заперли staging -> задача не создана
   const xmlFile = path.join(dir, 'task.xml');
   function runSchtasks(args) {
     // env доверенный: schtasks — тот же класс привилегированного вызова, что и
@@ -1874,17 +1966,21 @@ async function winLaunchDeElevated(exe, folderArg) {
   // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без
   // единого cmdlet/Join-Path до них). Integrity-self-check абсолютным System32\whoami.
   // Start-Process редактора ТОЛЬКО при medium: exit 0 старт / 211 бросок / 210 не-medium.
-  // Путь папки — в ОДНОМ аргументе с вложенными кавычками (P1-2: %USERPROFILE% с пробелом не рвётся).
-  const s32Lit = s32.replace(/'/g, "''");
-  const srLit = sysRoot.replace(/'/g, "''");
-  const whoLit = whoami.replace(/'/g, "''");
-  const exeLit = String(exe).replace(/'/g, "''");
-  const folderLit = String(folderArg).replace(/'/g, "''");
+  // Каждый путь — ОДНИМ аргументом с вложенными кавычками (P1-2: %USERPROFILE% с пробелом не рвётся).
+  const s32Lit = deelevRoute.psQuoteBody(s32);
+  const srLit = deelevRoute.psQuoteBody(sysRoot);
+  const whoLit = deelevRoute.psQuoteBody(whoami);
+  const exeLit = deelevRoute.psQuoteBody(exe);
+  // Папка и файлы — ОТДЕЛЬНЫМИ аргументами, каждый в своих кавычках (P1-2: пробел в
+  // %USERPROFILE% не рвёт путь); невыразимый путь к файлу не ломает запуск — откроется папка.
+  const argList = deelevRoute.psArgList([folderArg].concat(extraArgs || [])) || deelevRoute.psArgList([folderArg]);
+  // Папку не выразить аргументом (кавычка, перевод строки) — редактор не запускаем, только папка.
+  if (!argList) { rmStagingTree(dir); note('путь папки не выразить аргументом — открываю папку'); return folderFallback(); }
   const wrapperBody =
     "$env:PSModulePath='" + s32Lit + "\\WindowsPowerShell\\v1.0\\Modules'\n" +
     "$env:Path='" + s32Lit + ";" + srLit + ";" + s32Lit + "\\WindowsPowerShell\\v1.0'\n" +
     "if(@(& '" + whoLit + "' /groups 2>$null) -match 'S-1-16-8192'){\n" +
-    "try{ Start-Process -FilePath '" + exeLit + "' -ArgumentList '\"" + folderLit + "\"'; exit 0 }catch{ exit 211 }\n" +
+    "try{ Start-Process -FilePath '" + exeLit + "' -ArgumentList " + argList + "; exit 0 }catch{ exit 211 }\n" +
     "} else { exit 210 }\n";
   const b64 = Buffer.from(wrapperBody, 'utf16le').toString('base64');
   const wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + b64;
@@ -1925,11 +2021,11 @@ async function winLaunchDeElevated(exe, folderArg) {
 
   try {
     fs.writeFileSync(xmlFile, '\uFEFF' + taskXml, 'ucs2');   // UTF-16LE + BOM (schtasks /XML)
-  } catch (e) { cleanup(); return done(folderFallback()); }
+  } catch (e) { cleanup(); return viaShellOrFolder('create', null); }
 
-  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return done(folderFallback()); }
+  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return viaShellOrFolder('create', null); }
   try { fs.unlinkSync(xmlFile); } catch (e) { /* определение задачи уже в БД планировщика */ }
-  if (!runSchtasks(['/Run', '/TN', tag])) { cleanup(); return done(folderFallback()); }
+  if (!runSchtasks(['/Run', '/TN', tag])) { cleanup(); return viaShellOrFolder('run', null); }
 
   // Неблокирующий опрос «Last Result» (Start-Process быстр -> обычно ~1-2с; крайний срок 30с).
   return new Promise((resolve) => {
@@ -1938,9 +2034,16 @@ async function winLaunchDeElevated(exe, folderArg) {
       const lr = readLastResult();
       if (lr !== null && lr !== '267009' && lr !== '267011') {
         cleanup();
-        return resolve(lr === '0' ? true : folderFallback());   // 0 = gate прошёл И старт; иначе папка
+        // 0 = gate прошёл И старт. Иначе — запасной путь, ЕСЛИ задача доказанно ничего не
+        // запустила (210 / HRESULT планировщика); 211 и прочее — папка.
+        if (lr === '0') { note('задача — Gate=medium, Last Result=0x00000000: редактор запущен'); return resolve(true); }
+        return viaShellOrFolder('done', lr).then(resolve, () => resolve(folderFallback()));
       }
-      if (Date.now() > deadline) { cleanup(); return resolve(folderFallback()); }
+      if (Date.now() > deadline) {
+        cleanup();
+        note('задача не отчиталась за 30 с — второй запуск не делаю, открываю папку');
+        return resolve(folderFallback());
+      }
       setTimeout(poll, 400);
     };
     setTimeout(poll, 400);
@@ -1954,7 +2057,7 @@ async function winLaunchDeElevated(exe, folderArg) {
 // Open a folder in VS Code (de-elevated on Windows; `open -a` on macOS). Shared
 // by the default finish button (HamidunStart sandbox) and the explicit course
 // launcher below.
-function launchVsCodeOn(dir, { create = true } = {}) {
+function launchVsCodeOn(dir, { create = true, openFile = '' } = {}) {
   try {
     if (create) {
       // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
@@ -1963,12 +2066,10 @@ function launchVsCodeOn(dir, { create = true } = {}) {
     }
     try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
     if (IS_WIN) {
-      const codeExe = firstExisting([
-        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
-        path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
-      ]);
+      // Те же поиски, что у детектора и у vscode.ps1: стандартные места + установка в свою папку.
+      const codeExe = winVsCodeExe();
       // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
-      if (codeExe) { return winLaunchDeElevated(codeExe, dir); }
+      if (codeExe) { return winLaunchDeElevated(codeExe, dir, deelevRoute.editorOpenFiles(dir, openFile)); }
       // ЗАПАСНОЙ РЕДАКТОР — CURSOR. Установщик предлагает оба редактора на выбор, и
       // человек вправе снять VS Code, оставив Cursor. Раньше здесь искался ТОЛЬКО
       // Code.exe, и у такого человека кнопка «Открыть курс-симулятор» молча ничего не
@@ -1979,7 +2080,7 @@ function launchVsCodeOn(dir, { create = true } = {}) {
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe'),
         path.join(winPF(), 'cursor', 'Cursor.exe')
       ]);
-      if (cursorExe) { return winLaunchDeElevated(cursorExe, dir); }
+      if (cursorExe) { return winLaunchDeElevated(cursorExe, dir, deelevRoute.editorOpenFiles(dir, openFile)); }
       // Редактора нет вовсе — открываем папку в проводнике. Это не «как задумано», но
       // человек хотя бы видит файлы курса и понимает, куда идти, вместо пустого клика.
       try {
@@ -1997,13 +2098,16 @@ function launchVsCodeOn(dir, { create = true } = {}) {
       // (VS Code в нестандартном месте вроде ~/Downloads — pre-check по путям его бы
       // пропустил). Раньше fire-and-forget spawn всегда возвращал true. open отдаёт
       // управление быстро (хендофф в LaunchServices), main-поток блокируется кратко.
-      const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir],
+      // Папка И PROMPTS.md (если он есть) одним вызовом: кнопка ✳ панели Claude в заголовке
+      // редактора видна только при открытом файле.
+      const files = deelevRoute.editorOpenFiles(dir, openFile);
+      const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir].concat(files),
         { stdio: 'ignore', timeout: 15000 });
       if (r.status === 0) return true;
       // Тот же запасной путь, что и на Windows: человек мог выбрать Cursor вместо
       // VS Code — тогда открываем в нём, а если редактора нет вовсе, показываем папку
       // в Finder. Пустой клик — худший из возможных исходов.
-      const rc = spawnSync('/usr/bin/open', ['-a', 'Cursor', dir],
+      const rc = spawnSync('/usr/bin/open', ['-a', 'Cursor', dir].concat(files),
         { stdio: 'ignore', timeout: 15000 });
       if (rc.status === 0) return true;
       const rf = spawnSync('/usr/bin/open', [dir], { stdio: 'ignore', timeout: 10000 });
@@ -2013,7 +2117,9 @@ function launchVsCodeOn(dir, { create = true } = {}) {
   return false;
 }
 
-ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart')));
+// Вместе с папкой открываем PROMPTS.md (если он есть): кнопка ✳ панели Claude в заголовке
+// редактора появляется только при открытом файле, а без неё новичок панель не находит.
+ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart'), { openFile: 'PROMPTS.md' }));
 
 // Приём ключа Nomad ПОСЛЕ установки.
 //
@@ -2247,12 +2353,18 @@ ipcMain.handle('open-claude-terminal', async () => {
       // shoulder это был бы профиль АДМИНА). where claude — авторитетная проверка в
       // контексте запуска: нет claude → сообщение + pause (окно НЕ схлопывается за долю
       // секунды, как было бы с голым `claude`). nodejs в PATH — claude.cmd требует node.
+      // chcp 65001 — СРАЗУ после @echo off: файл пишется в UTF-8, а консоль по умолчанию
+      // в OEM-кодировке, и русский текст ниже выходил кракозябрами. До этой строки — только
+      // ASCII (cmd читает построчно в текущей кодировке). `call claude` обязателен: npm
+      // ставит claude.cmd, а переход в другой .cmd без call не возвращается — строка с
+      // pause после него не выполнялась, и окно с ошибкой Claude закрывалось мгновенно.
       const cmdBody = '@echo off\r\n' +
+        'chcp 65001 >nul\r\n' +
         'cd /d "%USERPROFILE%\\HamidunStart"\r\n' +
         'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"\r\n' +
         'title Claude Code\r\n' +
         'where claude >nul 2>nul || (echo Claude Code не найден. Запусти установщик заново и отметь компонент "Claude Code". & echo. & pause & exit /b 1)\r\n' +
-        'claude\r\n' +
+        'call claude\r\n' +
         'if errorlevel 1 pause\r\n';
       try { fs.writeFileSync(launcher, cmdBody, 'utf8'); } catch (e) { return false; }
       if (fs.existsSync(exp)) {
@@ -2279,10 +2391,14 @@ ipcMain.handle('open-claude-terminal', async () => {
         const done = (v) => { if (!settled) { settled = true; resolve(v); } };
         let child;
         try {
-          child = spawn('/usr/bin/osascript', [
-            '-e', 'tell application "Terminal" to activate',
-            '-e', 'tell application "Terminal" to do script "claude"'
-          ], { stdio: 'ignore' });
+          // Terminal — в ~/HamidunStart (как на Windows), а не в $HOME: Claude просит доверия к
+          // папке, и домашняя — худший выбор. Путь едет отдельным аргументом osascript (см.
+          // deelevRoute.claudeTerminalOsaArgs), так что пробелы и кавычки в нём безопасны.
+          const startDir = path.join(os.homedir(), 'HamidunStart');
+          try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
+          let inStart = false;
+          try { inStart = fs.statSync(startDir).isDirectory(); } catch (e) { inStart = false; }
+          child = spawn('/usr/bin/osascript', deelevRoute.claudeTerminalOsaArgs(inStart ? startDir : ''), { stdio: 'ignore' });
         } catch (e) { return done(false); }
         child.on('error', () => done(false));
         child.on('close', (code) => done(code === 0));
@@ -2478,6 +2594,19 @@ function firstExisting(paths) {
   return '';
 }
 
+// Code.exe редактора VS Code на Windows: два стандартных места, затем каталог рядом с `code.cmd` из
+// свежего PATH (установщик VS Code кладёт <каталог>in в PATH) — так находится установка в
+// НЕстандартную папку, как её находит vscode.ps1 по ключу Uninstall. Только существование файла:
+// под elevated-токеном здесь ничего не запускается. Code.exe именно рядом с CLI — одиночный
+// code.cmd (хвост неполного удаления; курсоровский шим) редактором не считается.
+function winVsCodeExe() {
+  const std = firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
+                             path.join(winPF(), 'Microsoft VS Code', 'Code.exe')]);
+  if (std) return std;
+  const cli = resolveExecutable(['code.cmd'], []);
+  return cli ? firstExisting([path.join(path.dirname(path.dirname(cli)), 'Code.exe')]) : '';
+}
+
 // Каталог расширения установлен в dir: есть ПОДКАТАЛОГ вида "<extId>-<версия>".
 // Точный префикс `${extId}-` + ЦИФРА версии (ordinal case-insensitive) + ОБЯЗАТЕЛЬНО
 // Dirent.isDirectory(): иначе `anthropic.claude-code-helper-1.0` даёт ложный PASS (он тоже
@@ -2569,19 +2698,19 @@ function detectComponents() {
       : firstExisting(['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')]);
     out.cursor = { installed: !!p, detectedVersion: '' };
   }
-  // vscode (полный бандл: приложение + ОБА расширения) — рекомендуемый редактор.
-  // P1: «установлен» (и авто-снятие галки) ТОЛЬКО когда есть И приложение, И оба
-  // расширения (Claude + Codex) ИМЕННО в VS Code. Иначе НЕ снимаем — vscode.ps1/sh
-  // единственный доставщик Codex, и он до-ставит недостающее даже при уже
-  // предустановленном VS Code (сценарий «VS Code есть, Codex нет» больше не молчит).
+  // vscode (рекомендуемый редактор): приложение + панель Claude Code.
+  // «Установлен» (и авто-снятие галки) ТОЛЬКО когда есть И приложение, И панель Claude ИМЕННО в
+  // VS Code (~/.vscode/extensions; чтение, ничего не пишется). Редактор БЕЗ панели — это и есть
+  // поломка, из-за которой шаг и затевался: такого человека шаг обязан предложить снова,
+  // vscode.ps1 при готовом редакторе ставит только недостающее расширение. Codex в условие
+  // НЕ входит: он необязателен (скрипт без него заканчивается кодом 121 «частично»), и требуй
+  // детектор его, шаг предлагался бы заново при каждом запуске тем, у кого Codex не встал.
   {
     const appPresent = IS_WIN
-      ? firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
-                       path.join(winPF(), 'Microsoft VS Code', 'Code.exe')])
+      ? winVsCodeExe()
       : firstExisting(['/Applications/Visual Studio Code.app', path.join(home, 'Applications', 'Visual Studio Code.app')]);
     const claudeExtId = (readJson('config.json', {}).claudeCodeExtensionId) || 'anthropic.claude-code';
-    const bothExts = vsCodeHasExt(home, claudeExtId) && vsCodeHasExt(home, 'openai.chatgpt');
-    out.vscode = { installed: !!appPresent && bothExts, detectedVersion: '' };
+    out.vscode = { installed: !!appPresent && vsCodeHasExt(home, claudeExtId), detectedVersion: '' };
   }
   // claude CLI
   {

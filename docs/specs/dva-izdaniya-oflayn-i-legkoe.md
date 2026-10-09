@@ -66,7 +66,10 @@
    `vendor-lite/checksums.json`, который уедет в артефакт; запись без поля `gatedFiles` —
    исключение; пустой `gatedFiles` — предупреждение со списком; дополнительно требует штамп
    `vendor/config-pack/.hamidun-config-pack.json` и, если задан `HM_CONFIG_REF`, совпадение
-   коммита; ноль записей для платформы — исключение;
+   коммита; ноль записей для платформы — исключение; и (с 06.10) обязательные члены
+   архивов из `REQUIRED_GATED` (`tools/release-check.js`): запись `vscode` (win32) обязана
+   нести `claude-code.vsix` и `vscode-language-pack-ru.vsix` — без них лёгкое издание снова ставило бы
+   панель Claude в VS Code только из Marketplace и оставалось бы с английским интерфейсом. Нет — исключение «перепубликуй: `publish-vendor.py --only vscode`»;
 6. `npx electron-builder` с аргументами платформы (для mac — `--universal`);
 7. size-assert: `findLiteArtifact()` ищет артефакт в `dist`, `release`, `dist/win-unpacked`,
    и при превышении потолка (`maxBytes`: 320 МиБ для win, 400 МиБ для mac) бросает исключение;

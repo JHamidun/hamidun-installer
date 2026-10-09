@@ -792,7 +792,8 @@ ok('main.js: IPC launch-vscode открывает папку ~/HamidunStart (н�
   const h = s.slice(fi, fi + 900);
   assert(/mkdirSync\(dir/.test(h), 'папка проекта создаётся, если её нет (реальный воркспейс)');
   // Папка открывается через де-элевированный лаунчер (P0), а не прямым spawn.
-  assert(/winLaunchDeElevated\(codeExe, dir\)/.test(h), 'папка передаётся редактору де-элевированным запуском (аналог code "<папка>")');
+  // Третий аргумент — файлы, открываемые вкладкой рядом с папкой (PROMPTS.md у HamidunStart).
+  assert(/winLaunchDeElevated\(codeExe, dir(?:, deelevRoute\.editorOpenFiles\(dir, openFile\))?\)/.test(h), 'папка передаётся редактору де-элевированным запуском (аналог code "<папка>")');
   assert(!/anthropic\.claude-code\/open|vscode:\/\//.test(h), 'НЕ агент-URI (панель-чат) — это IDE-открытие папки');
   assert(/ipcMain\.handle\('launch-cursor'/.test(s), 'launch-cursor сохранён (Cursor как опция)');
 });
@@ -1286,7 +1287,10 @@ ok('P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%
   assert(/S-1-16-8192/.test(h) && /whoami/i.test(h), 'integrity-gate (абс. whoami -> medium SID)');
   assert(/exit 210/.test(h) && /exit 211/.test(h), 'не-medium -> 210, бросок Start-Process -> 211');
   // P1-2 quoting: путь папки в ОДНОМ аргументе с вложенными кавычками.
-  assert(/-ArgumentList '\\"/.test(h), 'путь папки обёрнут во вложенные кавычки (пробел не рвётся)');
+  // Каждый путь — отдельный элемент в своих кавычках (deelevRoute.psArgList; его поведение
+  // с настоящим Start-Process проверяет тест «deelev-route.psArgList (прогон PS 5.1)…»).
+  assert(/-ArgumentList " \+ argList \+ "/.test(h) && /deelevRoute\.psArgList\(\[folderArg\]/.test(h),
+    'путь папки обёрнут во вложенные кавычки (пробел не рвётся)');
   // schtasks — АБСОЛЮТНЫЙ (sysBin), НЕ PS-модуль ScheduledTasks.
   assert(/remoteFetch\.sysBin\('schtasks\.exe'\)/.test(h), 'schtasks.exe — абсолютный из валидированного System32');
   assert(!/New-ScheduledTask/.test(h), 'НЕ используется PS-модуль ScheduledTasks (module-hijack исключён)');
@@ -1294,7 +1298,14 @@ ok('P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%
   // P1-1: аттестация по «Last Result» (не user-writable). 0 -> true; иначе folder-fallback.
   assert(/\/HRESULT/.test(h) && /\/FO', 'CSV'/.test(h), 'Last Result — CSV /HRESULT (не user-writable)');
   assert(/readLastResult\(\)/.test(h), 'опрос Last Result');
-  assert(/lr === '0' \? true : folderFallback\(\)/.test(h), 'success ТОЛЬКО при Last Result 0; иначе folder-fallback (P1-1)');
+  // success задачей — ТОЛЬКО при Last Result 0. Иначе — запасной путь (токен оболочки), но лишь
+  // когда deelevRoute.shellFallbackAllowed доказал, что задача ничего не запустила; дальше — папка.
+  assert(/if \(lr === '0'\) \{[^\n]*resolve\(true\)/.test(h), 'success задачей ТОЛЬКО при Last Result 0 (P1-1)');
+  assert(/viaShellOrFolder\('done', lr\)/.test(h), 'ненулевой итог — через решение «запасной путь или папка»');
+  assert(/if \(!deelevRoute\.shellFallbackAllowed\(stage, lr\)\) \{[\s\S]{0,200}?return folderFallback\(\)/.test(h),
+    'не доказано, что задача ничего не запустила -> только папка (второй запуск поверх живого не делаем)');
+  assert(/if \(sh\.gate === 'medium' && sh\.code === 0\) return true;\s*\n\s*return folderFallback\(\)/.test(h),
+    'запасной путь не подтвердил запуск -> папка, не «редактор открыт»');
   // fallback: АБСОЛЮТНЫЙ explorer.exe, ТОЛЬКО на папку (folderArg), не на exe.
   assert(/path\.join\(sysRoot, 'explorer\.exe'\)/.test(h), 'explorer.exe — абсолютный (из валидированного sysRoot)');
   assert(/spawn\(exp, \[String\(folderArg\)\]/.test(h), 'fallback открывает ТОЛЬКО папку (folderArg)');
@@ -1493,7 +1504,8 @@ ok('P0 install (vscode.ps1): install-extension де-элевированно + F
   assert(/function Get-VsCodeCli/.test(s), 'доверенный сигнал установки — отдельная функция');
   assert(/CurrentVersion\\Uninstall/.test(s), 'проверяем ключ Uninstall инсталлятора VS Code');
   assert(/HKCU:\\Software/.test(s) && /HKLM:\\Software/.test(s), 'и User Setup (HKCU), и System Setup (HKLM)');
-  assert(/Invoke-HmDeElevated \$cli @\('--install-extension'/.test(s), 'install-extension — де-элевированно');
+  // Через Invoke-HmDeElevatedSafe: та же задача планировщика + запасной путь с токеном оболочки.
+  assert(/Invoke-HmDeElevated(?:Safe)? \$cli @\('--install-extension'/.test(s), 'install-extension — де-элевированно');
   // аттестация — ПРЯМО по каталогам расширений, НЕ через editor CLI и НЕ через вывод бинаря.
   assert(!/--list-extensions/.test(s), 'НЕ запускает --list-extensions (никакого editor CLI для чтения)');
   assert(/Test-HmExtInstalled/.test(s), 'аттестация — прямой проверкой каталога расширений');
@@ -1509,7 +1521,7 @@ ok('P0-A (extension.ps1): Cursor install де-элевированно + FS-ат
   const s = EG_EXT();
   assert(/_deelev\.ps1/.test(s), 'дот-сорсит единый примитив де-элевации');
   assert(!/\$codeCli/.test(s), 'переменная $codeCli (установка в VS Code) удалена — дубль убран');
-  assert(/Invoke-HmDeElevated \$cli @\('--install-extension'/.test(s), 'Cursor install-extension — де-элевированно');
+  assert(/Invoke-HmDeElevated(?:Safe)? \$cli @\('--install-extension'/.test(s), 'Cursor install-extension — де-элевированно (через обёртку с запасным путём)');
   assert(!/--list-extensions/.test(s), 'НЕ запускает --list-extensions');
   assert(/Test-HmExtInstalled/.test(s) && /\.cursor\\extensions/.test(s), 'аттестация — каталог .cursor напрямую');
   assert(!/\$r\.Output/.test(s) && !/\$lst\.Output/.test(s), 'вывод бинаря НЕ используется как доверие');
@@ -1602,7 +1614,8 @@ ok('P1 (vscode.ps1): успех только при обоих расширен�
   const s = EG_PS1();
   assert(/if \(\$okClaude -and \$okCodex\) \{ exit 0 \}/.test(s), 'exit 0 требует ОБА расширения');
   assert(!/if \(\$okClaude\) \{ exit 0 \}/.test(s), 'старое поведение (успех по одному Claude) убрано');
-  assert(/\$missing/.test(s) && /anthropic\.claude-code/.test(s) && /openai\.chatgpt/.test(s), 'в ошибке называем отсутствующее расширение');
+  assert(/нет панели Claude Code/.test(s) && /нет Codex/.test(s) && /anthropic\.claude-code/.test(s) && /openai\.chatgpt/.test(s),
+    'в строке частичного успеха называем отсутствующее расширение (панель Claude / Codex)');
 });
 
 // vscode.sh: exit 0 по ОБЯЗАТЕЛЬНОМУ Claude; Codex опционален (сборка его не гейтит,
@@ -1616,16 +1629,18 @@ ok('vscode.sh: успех по обязательному Claude; отсутст
   assert(/Не установилось расширение Claude Code \(anthropic\.claude-code\)/.test(s), 'exit 1 называет именно обязательное расширение');
 });
 
-// P1 (main.js): «vscode» установлен ТОЛЬКО при приложении И ОБОИХ расширениях (иначе Codex доставляется).
-ok('P1 (main.js): detectComponents.vscode = приложение И оба расширения в VS Code (vsCodeHasExt)', () => {
+// main.js: «vscode» установлен ТОЛЬКО при приложении И панели Claude (Codex необязателен — иначе шаг предлагался бы заново при каждом запуске).
+ok('main.js: detectComponents.vscode = приложение И панель Claude в VS Code (vsCodeHasExt); Codex в условие не входит', () => {
   const s = EG_MAIN();
   assert(/function vsCodeHasExt\(/.test(s), 'хелпер точечной проверки расширения в VS Code');
   assert(/\.vscode', 'extensions'/.test(s) && /\.vscode-oss', 'extensions'/.test(s), 'смотрит папки VS Code (не Cursor)');
   const vi = s.indexOf('out.vscode = { installed:');
   assert(vi !== -1, 'детектор out.vscode есть');
-  const seg = s.slice(Math.max(0, vi - 700), vi + 120);
-  assert(/vsCodeHasExt\(home, claudeExtId\)/.test(seg) && /vsCodeHasExt\(home, 'openai\.chatgpt'\)/.test(seg), 'требует ОБА расширения');
-  assert(/!!appPresent && bothExts/.test(seg), 'installed = приложение И оба расширения');
+  const seg = s.slice(Math.max(0, vi - 1100), vi + 140);
+  assert(/vsCodeHasExt\(home, claudeExtId\)/.test(seg), 'требует панель Claude');
+  assert(!/openai\.chatgpt/.test(seg) && !/bothExts/.test(seg), 'Codex необязателен: в условие «установлен» не входит');
+  assert(/installed: !!appPresent && vsCodeHasExt\(home, claudeExtId\)/.test(seg), 'installed = приложение И панель Claude');
+  assert(/IS_WIN\s*\?\s*winVsCodeExe\(\)/.test(seg), 'на Windows приложение ищется той же функцией, что и кнопка запуска');
 });
 
 // P1 (app.js): exit-120 (res.skipped) -> компонент в skipped И в bad (dependents пропускаются, не краснеют);
@@ -8193,7 +8208,7 @@ ok('config.json в репозитории без сборочных маркер
     assert(/\$cfgOk = \$false/.test(upd), 'ps1: catch помечает конфиг несписанным');
     assert(/\$env:HM_BRIDGE_ENDPOINT -and \$cfgOk/.test(ps), 'ps1: «Сервер настроен» гейтится $cfgOk');
     // И-3 (Windows): selftest де-элевированно и ДО записи HKCU\Run; Run — внутри if ($agentOk).
-    assertOrder(ps, "Invoke-HmDeElevated $py @($agentPath, '--selftest')",
+    assertOrder(ps, "Invoke-HmDeElevatedSafe $py @($agentPath, '--selftest')",
       "New-ItemProperty -Path 'HKCU:", 'ps1: selftest идёт ДО записи Run');
     assert(/if \(\$agentOk\) \{\s*\r?\n\s*New-ItemProperty/.test(ps),
       'ps1: запись Run — только внутри гейта $agentOk');
@@ -8256,6 +8271,13 @@ ok('config.json в репозитории без сборочных маркер
         '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("DEELEV " + ($ArgList -join " "))',
         '  if ($ArgList -contains "--selftest") { return [pscustomobject]@{ Gate = "medium"; Code = [int]$env:HM_TEST_SELFTEST_EXIT } }',
         '  return [pscustomobject]@{ Gate = "medium"; Code = 0 }',
+        '}',
+        // bridge.ps1 зовёт обёртку с запасным путём; стаб отдаёт ту же форму итога.
+        'function Invoke-HmDeElevatedSafe {',
+        '  param($Exe, [string[]]$ArgList = @(), [string]$Label = "")',
+        '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("DEELEV " + ($ArgList -join " "))',
+        '  if ($ArgList -contains "--selftest") { return [pscustomobject]@{ Gate = "medium"; Code = [int]$env:HM_TEST_SELFTEST_EXIT; Finished = $true; ShellReason = "" } }',
+        '  return [pscustomobject]@{ Gate = "medium"; Code = 0; Finished = $true; ShellReason = "" }',
         '}'
       ].join('\r\n'), 'utf8')
     ]));
@@ -8903,9 +8925,10 @@ ok('config.json в репозитории без сборочных маркер
     const s = ps();
     assert(/\. \(Join-Path \$PSScriptRoot '_deelev\.ps1'\)/.test(s), 'подключён единый примитив де-элевации');
     const fn = cutPsFunction(s, 'function Grant-HmHandyMic');
-    assert(/Invoke-HmDeElevated \$regExe @\('query', \$consentKey, '\/v', 'Value'\)/.test(fn),
+    // Через Invoke-HmDeElevatedSafe: задача планировщика + запасной путь с токеном оболочки.
+    assert(/Invoke-HmDeElevated(?:Safe)? \$regExe @\('query', \$consentKey, '\/v', 'Value'\)/.test(fn),
       'ЧТЕНИЕ существующего решения — тоже де-элевированное (из-под админа оно смотрело бы в чужую ветку)');
-    assert(/Invoke-HmDeElevated \$regExe @\('add', \$consentKey, '\/v', 'Value', '\/t', 'REG_SZ', '\/d', 'Allow', '\/f'\)/.test(fn),
+    assert(/Invoke-HmDeElevated(?:Safe)? \$regExe @\('add', \$consentKey, '\/v', 'Value', '\/t', 'REG_SZ', '\/d', 'Allow', '\/f'\)/.test(fn),
       'ЗАПИСЬ идёт через тот же примитив');
     // Прямого запуска reg.exe под админом быть не должно ни в одном виде.
     assert(!/&\s*\$regExe/.test(fn) && !/Start-Process[^\n]*\$regExe/.test(fn),
@@ -10937,4 +10960,1390 @@ ok('config.json в репозитории без сборочных маркер
       assert(sec < 25, 'зависший touch-up держал диспетчер ' + sec + ' с');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
+})();
+
+// ===========================================================================
+// A1 (06.10.2026): де-элевация с ЗАПАСНЫМ путём, код 121 «частичный успех», vsix
+// панели Claude в lite-архиве VS Code.
+//
+// Из 283 диалогов: панель Claude в VS Code не встала у 24 человек, «vscode» — 52 отказа в
+// телеметрии. Корень, проверенный по присланному журналу: одноразовая задача планировщика
+// отказала ЦЕЛИКОМ («Last Result» 0x80070005 — действие задачи не стартовало), и вместе с
+// ней разом легли расширения, pip моста и разрешение микрофона Handy. А в лёгком издании
+// vsix панели вообще не доезжал до vscode.ps1 — панель шла только из Marketplace.
+// Здесь стережём: классификацию «Last Result» (PS и JS — один вердикт), правило «второй
+// путь и повтор — только при доказанной тишине первого», сам запасной путь (токен
+// оболочки, без explorer.exe/Add-Type), контракт 121 прогоном vscode.ps1 и то, что vsix
+// находится в ОБОИХ изданиях — по раскладке, которую реально собирает publish-vendor.py.
+// ===========================================================================
+(function deElevationFallbackA1() {
+  console.log('\n== A1: де-элевация с запасным путём, код 121, vsix панели в lite ==');
+  const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+  const RCPT = require(path.join(ROOT, 'src', 'install-receipts.js'));
+  const FE = require(path.join(ROOT, 'src', 'failure-explain.js'));
+  const DEELEV = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+  const VSCODE = path.join(ROOT, 'scripts', 'windows', 'vscode.ps1');
+  const deelevSrc = () => fs.readFileSync(DEELEV, 'utf8');
+  const rnd = () => Math.random().toString(36).slice(2, 10);
+  // Прогон куска PowerShell поверх НАСТОЯЩЕГО _deelev.ps1; ответ — строкой 'HMJSON:'.
+  const runDeelevPs = (body, extraEnv) => {
+    const f = path.join(os.tmpdir(), 'hm-a1-' + rnd() + '.ps1');
+    fs.writeFileSync(f, '﻿[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n. \'' +
+      DEELEV.replace(/'/g, "''") + '\'\r\n' + body + '\r\n', 'utf8');
+    try {
+      return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: 180000, env: Object.assign({}, process.env, extraEnv || {}) });
+    } finally { try { fs.rmSync(f, { force: true }); } catch (e) { /* */ } }
+  };
+  const hmJson = (r) => {
+    const line = String((r && r.stdout) || '').split(/\r?\n/).find((l) => l.startsWith('HMJSON:'));
+    assert(line, 'PowerShell не вернул HMJSON: ' + String((r && (r.stderr || r.stdout)) || '').slice(0, 400));
+    return JSON.parse(line.slice('HMJSON:'.length));
+  };
+
+  // --- Чистые решения (JS) ---
+  ok('deelev-route: Last Result 0x80070005 и SCHED_E_* — не стартовало; 210 — отказ гейта; 267014 — прервана; код программы — medium', () => {
+    const v = (lr) => DR.taskVerdict(lr);
+    assert.strictEqual(v('-2147024891').gate, 'not-started', 'боевой случай из журнала: действие задачи не стартовало');
+    assert.strictEqual(v('-2147024891').hex, '0x80070005', 'hex для журнала');
+    assert.strictEqual(v('2147942405').gate, 'not-started', 'то же число без знака');
+    assert.strictEqual(v('-2147216609').gate, 'not-started', 'SCHED_E_ALREADY_RUNNING 0x8004131F — планировщик не запустил');
+    assert.strictEqual(v('210').gate, 'refused', '210 — обёртка не увидела medium');
+    assert.strictEqual(v('267014').gate, 'terminated', '267014 — прервана по лимиту: могла оставить живой процесс');
+    assert.strictEqual(v('267009').gate, 'unknown', 'служебный статус — ничего не доказывает');
+    assert.strictEqual(v('0').gate, 'medium');
+    assert.strictEqual(v('1').code, 1, 'код программы доходит как есть');
+    assert.strictEqual(v('-1073741819').gate, 'medium', 'NTSTATUS падения — это код ПРОГРАММЫ (она запускалась)');
+    assert.strictEqual(v(null).gate, 'unknown');
+    assert.strictEqual(v('abc').gate, 'unknown');
+  });
+
+  ok('deelev-route: второй путь — ТОЛЬКО при доказанной тишине задачи (до /Run, 210, HRESULT); 0/211/служебные/таймаут — нет', () => {
+    ['prereq', 'staging', 'create', 'run'].forEach((s) =>
+      assert.strictEqual(DR.shellFallbackAllowed(s, null), true, 'задача не дошла до /Run (' + s + ') — ничего не запущено'));
+    assert.strictEqual(DR.shellFallbackAllowed('done', '-2147024891'), true, 'HRESULT планировщика');
+    assert.strictEqual(DR.shellFallbackAllowed('done', '210'), true, 'обёртка отказала до запуска программы');
+    // Негативный контроль: всё, где первый запуск отработал или МОГ ещё идти.
+    ['0', '1', '211', '267014', '267009', null, ''].forEach((lr) =>
+      assert.strictEqual(DR.shellFallbackAllowed('done', lr), false, 'Last Result ' + lr + ' — второй путь поверх нельзя'));
+    assert.strictEqual(DR.shellFallbackAllowed('running', null), false, 'сбой после /Run — задача могла стартовать');
+    assert.strictEqual(DR.shellFallbackAllowed('timeout', '-2147024891'), false, 'неизвестный этап — fail-safe');
+  });
+
+  ok('install-receipts: код 121 — частичный успех: маркер пишется, причина — из строки ЧАСТИЧНО, 120/1 не путаются', () => {
+    assert.strictEqual(RCPT.EXIT_PARTIAL, 121);
+    assert.strictEqual(RCPT.isPartialExit(121), true);
+    assert.strictEqual(RCPT.isPartialExit(120), false, '120 — пропуск, не частичный успех');
+    assert.strictEqual(RCPT.isPartialExit(1), false);
+    assert.strictEqual(RCPT.shouldRecordInstall(121, false, false), true, 'редактор стоит — квитанция нужна для «Удалить»');
+    assert.strictEqual(RCPT.shouldRecordInstall(121, true, false), false, 'dry-run — без следов');
+    assert.strictEqual(RCPT.shouldRecordInstall(120, false, false), false, 'skip по-прежнему без маркера');
+    const tail = 'Ставлю расширение...\n  ЧАСТИЧНО: старое\nOK: что-то\nЧАСТИЧНО: VS Code есть, панели нет — поставь вручную\n';
+    assert.strictEqual(RCPT.partialReason(tail), 'VS Code есть, панели нет — поставь вручную', 'берётся ПОСЛЕДНЯЯ строка, без префикса');
+    assert.strictEqual(RCPT.partialReason('нет такой строки'), '', 'нет строки — пустая причина');
+    // main.js передаёт хвост МАССИВОМ строк (кольцевой буфер outTail: push/shift по одной строке).
+    // Строим его тем же способом; строка ЧАСТИЧНО — не первая и не последняя.
+    const outTail = [];
+    ['Ставлю расширение Claude Code', 'OK: панель Claude Code в VS Code установлена.',
+      'ЧАСТИЧНО: нет Codex — Extensions → «Codex» → Install. Причина: нет сети.', 'Итог: редактор стоит'].forEach((l) => outTail.push(l));
+    assert.strictEqual(RCPT.partialReason(outTail), 'нет Codex — Extensions → «Codex» → Install. Причина: нет сети.',
+      'массив строк (как в main.js) — причина находится');
+    assert.strictEqual(RCPT.partialReason([]), '', 'пустой массив — пустая причина');
+    assert.strictEqual(RCPT.partialReason(null), '', 'null — пустая причина');
+    assert.strictEqual(RCPT.partialReason(['a', 'ЧАСТИЧНО: раз', 'b', '  ЧАСТИЧНО: два  ', 'c']), 'два', 'в массиве берётся ПОСЛЕДНЯЯ строка');
+    // Негативный контроль: прежняя реализация склеивала массив запятой и не находила ничего.
+    const oldImpl = (t) => { const l = String(t == null ? '' : t).split(/\r?\n/).map((x) => x.trim()).filter((x) => /^ЧАСТИЧНО:/.test(x));
+      return l.length ? l[l.length - 1].replace(/^ЧАСТИЧНО:\s*/, '').slice(0, 300) : ''; };
+    assert.strictEqual(oldImpl(outTail), '', 'контроль: старый разбор на массиве давал пустую причину — тест это ловит');
+  });
+
+  ok('main.js: код 121 → res.partial (ok, НЕ провал), причина из строки ЧАСТИЧНО; ветка стоит ДО разбора провала', () => {
+    const m = codeOnly(fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8'));
+    assert(/const partial = receipts\.isPartialExit\(code\);/.test(m), 'код 121 распознаётся через install-receipts');
+    assertOrder(m, 'if (partial) {', 'if (!okRun && !skipped) {', 'частичный успех обрабатывается ДО ветки провала');
+    const i = m.indexOf('if (partial) {');
+    const branch = m.slice(i, i + 700);
+    assert(/resolve\(\{ id, ok: true, code, skipped: false, partial: true, partialReason: partialWhy \}\)/.test(branch),
+      'renderer получает ok:true + partial:true + partialReason');
+    assert(/receipts\.partialReason\(outTail\)/.test(branch), 'причина — из вывода скрипта, не выдумана');
+    assert(!/cleanupSecureCache\(\)/.test(branch), 'кэш докачки при частичном успехе не чистится (повтор не качает заново)');
+  });
+
+  // --- Чистые решения (PowerShell, настоящий _deelev.ps1) ---
+  if (powershellAvailable()) {
+    ok('A1 (прогон PS 5.1): Get-HmTaskVerdict и deelev-route.taskVerdict дают ОДИН вердикт на одних числах', () => {
+      const vectors = ['', '0', '1', '5', '210', '211', '267014', '267009', '267011', '267045', '-2147024891', '2147942405',
+        '-2147023651', '-2147020576', '-2147216609', '-2147216602', '-1073741819', '9009', 'abc'];
+      const r = runDeelevPs("$out = @(); foreach ($lr in @(" + vectors.map((x) => "'" + x + "'").join(',') + ")) {" +
+        " $v = Get-HmTaskVerdict -LastResult $lr; $out += [pscustomobject]@{ lr = $lr; gate = $v.Gate; code = $v.Code; hex = $v.Hex } }\r\n" +
+        "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject $out -Compress))");
+      const rows = hmJson(r);
+      assert.strictEqual(rows.length, vectors.length, 'вердикт на каждое число');
+      rows.forEach((row) => {
+        const js = DR.taskVerdict(row.lr);
+        assert.strictEqual(row.gate, js.gate, 'Gate «' + row.lr + '»: PS=' + row.gate + ' JS=' + js.gate);
+        assert.strictEqual(row.code, js.code, 'Code «' + row.lr + '»');
+        assert.strictEqual(row.hex, js.hex, 'Hex «' + row.lr + '»');
+      });
+    });
+
+    ok('A1 (прогон PS 5.1): второй путь и повтор — только при доказанной тишине; итог и строка журнала', () => {
+      const body = [
+        "$t = { param($g, $h) [pscustomobject]@{ Gate = $g; Code = 0; Hex = $h; Kind = '' } }",
+        "$r = [ordered]@{}",
+        "$r.fb_create = Test-HmShellFallbackAllowed -TaskResult $null -Stage 'create'",
+        "$r.fb_running = Test-HmShellFallbackAllowed -TaskResult $null -Stage 'running'",
+        "$r.fb_notstarted = Test-HmShellFallbackAllowed -TaskResult (& $t 'not-started' '')",
+        "$r.fb_refused = Test-HmShellFallbackAllowed -TaskResult (& $t 'refused' '')",
+        "$r.fb_medium = Test-HmShellFallbackAllowed -TaskResult (& $t 'medium' '')",
+        "$r.fb_unknown = Test-HmShellFallbackAllowed -TaskResult (& $t 'unknown' '')",
+        "$r.fb_terminated = Test-HmShellFallbackAllowed -TaskResult (& $t 'terminated' '')",
+        "$r.retry_empty = Test-HmDeElevRetryAllowed -Attempts @()",
+        "$r.retry_done = Test-HmDeElevRetryAllowed -Attempts @([pscustomobject]@{Finished=$true},[pscustomobject]@{Finished=$true})",
+        "$r.retry_running = Test-HmDeElevRetryAllowed -Attempts @([pscustomobject]@{Finished=$true},[pscustomobject]@{Finished=$false})",
+        "$m1 = Merge-HmDeElevResult -Task (& $t 'not-started' '0x80070005') -Stage 'done' -Shell ([pscustomobject]@{Gate='medium';Code=0;Reason='';Logged=$true;LogNote=''}) -LogPath 'C:\\x\\deelev\\v.log'",
+        "$r.m1 = '' + $m1.Gate + '|' + $m1.Route + '|' + $m1.Finished",
+        "$r.s1 = Format-HmDeElevSummary -Label 'vscode-anthropic.claude-code' -Result $m1",
+        "$m1b = Merge-HmDeElevResult -Task (& $t 'not-started' '0x80070005') -Stage 'done' -Shell ([pscustomobject]@{Gate='medium';Code=0;Reason='';Logged=$false;LogNote='строка запуска с записью вывода (1100 знаков) длиннее предела 1024'}) -LogPath 'C:\\x\\deelev\\v.log'",
+        "$r.s1b = Format-HmDeElevSummary -Label 'bridge-pip' -Result $m1b",
+        "$r.refused_gate = Test-HmDeElevRefused -Attempts @([pscustomobject]@{Gate='refused';ShellGate=''})",
+        "$r.refused_shell = Test-HmDeElevRefused -Attempts @([pscustomobject]@{Gate='unavailable';ShellGate='refused'})",
+        "$r.refused_unavail = Test-HmDeElevRefused -Attempts @([pscustomobject]@{Gate='unavailable';ShellGate='unavailable'})",
+        "$r.refused_medium = Test-HmDeElevRefused -Attempts @([pscustomobject]@{Gate='medium';ShellGate=''},$null)",
+        "$r.refused_none = Test-HmDeElevRefused -Attempts @()",
+        "$m2 = Merge-HmDeElevResult -Task (& $t 'unknown' '') -Stage 'done' -Shell $null",
+        "$r.m2 = '' + $m2.Gate + '|' + $m2.Route + '|' + $m2.Finished",
+        "$r.s2 = Format-HmDeElevSummary -Label 'x' -Result $m2",
+        "$m3 = Merge-HmDeElevResult -Task $null -Stage 'create' -Shell ([pscustomobject]@{Gate='unavailable';Code=-1;Reason='нет службы'})",
+        "$r.m3 = '' + $m3.Gate + '|' + $m3.Route + '|' + $m3.Finished",
+        "$m4 = Merge-HmDeElevResult -Task (& $t 'refused' '0x000000D2') -Stage 'done' -Shell ([pscustomobject]@{Gate='refused';Code=-1;Reason='UAC'})",
+        "$r.m4 = '' + $m4.Gate + '|' + $m4.Route + '|' + $m4.Finished",
+        "$m5 = Merge-HmDeElevResult -Task $null -Stage 'running' -Shell $null",
+        "$r.m5 = '' + $m5.Gate + '|' + $m5.Route + '|' + $m5.Finished",
+        "$m6 = Merge-HmDeElevResult -Task (& $t 'not-started' '0x80070005') -Stage 'done' -Shell ([pscustomobject]@{Gate='unknown';Code=-1;Reason=''})",
+        "$r.m6 = '' + $m6.Gate + '|' + $m6.Route + '|' + $m6.Finished",
+        "$m7 = Merge-HmDeElevResult -Task ([pscustomobject]@{Gate='medium';Code=1;Hex='0x00000001';Kind='exit'}) -Stage 'done' -Shell $null",
+        "$r.m7 = '' + $m7.Gate + '|' + $m7.Route + '|' + $m7.Finished + '|' + $m7.Code",
+        "$r.acc_ok = Test-HmShellTokenAcceptable -UserSid 'S-1-5-21-1' -IntegritySid 'S-1-16-8192' -ExpectedUserSid 'S-1-5-21-1'",
+        "$r.acc_high = Test-HmShellTokenAcceptable -UserSid 'S-1-5-21-1' -IntegritySid 'S-1-16-12288' -ExpectedUserSid 'S-1-5-21-1'",
+        "$r.acc_other = Test-HmShellTokenAcceptable -UserSid 'S-1-5-21-2' -IntegritySid 'S-1-16-8192' -ExpectedUserSid 'S-1-5-21-1'",
+        "$r.acc_low = Test-HmShellTokenAcceptable -UserSid 'S-1-5-21-1' -IntegritySid 'S-1-16-4096' -ExpectedUserSid 'S-1-5-21-1'",
+        "Write-Output ('HMJSON:' + ([pscustomobject]$r | ConvertTo-Json -Compress))"
+      ].join('\r\n');
+      const o = hmJson(runDeelevPs(body));
+      assert.strictEqual(o.fb_create, true, 'задача не создалась — второй путь можно');
+      assert.strictEqual(o.fb_running, false, 'сбой ПОСЛЕ /Run — нельзя: первый мог стартовать');
+      assert.strictEqual(o.fb_notstarted, true);
+      assert.strictEqual(o.fb_refused, true);
+      assert.strictEqual(o.fb_medium, false, 'отработало — повторять вторым путём незачем');
+      assert.strictEqual(o.fb_unknown, false, 'итога нет — может ещё идти');
+      assert.strictEqual(o.fb_terminated, false, 'прервана лимитом — дети могли остаться');
+      assert.strictEqual(o.retry_empty, true);
+      assert.strictEqual(o.retry_done, true);
+      assert.strictEqual(o.retry_running, false, 'хоть один запуск может идти — повтора нет');
+      assert.strictEqual(o.m1, 'medium|shell-token|True', 'задача не стартовала, запасной путь отработал');
+      assert.strictEqual(o.m2, 'unknown|task|False', 'итога нет — не «закончено»');
+      assert.strictEqual(o.m3, 'unavailable|none|True', 'оба пути ничего не запустили — закончено, повторять можно');
+      assert.strictEqual(o.m4, 'refused|none|True');
+      assert.strictEqual(o.m5, 'unknown|task|False');
+      assert.strictEqual(o.m6, 'unknown|shell-token|False', 'запасной путь не дождался — не «закончено»');
+      assert.strictEqual(o.m7, 'medium|task|True|1', 'программа отработала с кодом 1 — это её итог');
+      // Строка журнала: Gate, Last Result в hex, какой путь, где вывод.
+      assert(/Gate=not-started, Last Result=0x80070005/.test(o.s1), 'журнал: Gate и hex: ' + o.s1);
+      assert(/запасной путь \(токен оболочки Explorer\) — Gate=medium, код 0/.test(o.s1), 'журнал: сработавший путь');
+      assert(/вывод программы: C:\\x\\deelev\\v\.log/.test(o.s1), 'журнал: где лежит вывод ребёнка');
+      assert(/вывод программы не записан: строка запуска с записью вывода \(1100 знаков\)/.test(o.s1b) && !/v\.log/.test(o.s1b),
+        'запасной путь запустил программу без журнала — файл не называем, причину называем: ' + o.s1b);
+      assert.strictEqual(o.refused_gate, true, 'отказ по политике (Gate refused) виден');
+      assert.strictEqual(o.refused_shell, true, 'и отказ запасного пути (ShellGate refused)');
+      assert.strictEqual(o.refused_unavail, false, '«недоступно» отказом по политике не считается — там повтор иногда помогает');
+      assert.strictEqual(o.refused_medium, false, 'запуск отработал — это не отказ');
+      assert.strictEqual(o.refused_none, false);
+      assert(/запасной путь не запускаю/.test(o.s2), 'журнал объясняет, почему второго пути не было');
+      assert.strictEqual(o.acc_ok, '', 'medium + своя учётная запись — можно');
+      assert(/UAC/.test(o.acc_high), 'high — отказ с объяснением про UAC: ' + o.acc_high);
+      assert(/другой учётной записи/.test(o.acc_other), 'чужая оболочка — отказ');
+      assert(/администратором \(Параметры → Учётные записи → Семья и другие пользователи\)/.test(o.acc_other) && !/запусти установщик из своей/.test(o.acc_other),
+        'совет выполним обычным пользователем (формулировка из main.js), а не «запусти из своей учётной записи»: ' + o.acc_other);
+      assert(o.acc_low, 'low — тоже отказ (нужен ровно medium)');
+    });
+
+    // --- M1: предел CreateProcessWithTokenW — 1024 знака в lpCommandLine -------------------------
+    // Реалистичные вызовы запасного пути (имена и аргументы — ровно те, что строят bridge.ps1,
+    // handy.ps1, vscode.ps1). План (Get-HmShellLaunchPlan) обязан уложить обе строки в предел
+    // при ЛЮБОМ имени пользователя, а прежняя строка — с каталогом журнала, ротацией, заголовком
+    // и двумя копиями программы — на тех же вызовах выходила за 1100.
+    ok('A1 (прогон PS 5.1): запасной путь — обе строки не длиннее 1024 знаков на реалистичных вызовах (pip с колёсами, Handy, самопроверка, vsix); прежняя строка выходила за предел', () => {
+      const body = [
+        "$cmd = \"$env:SystemRoot\\System32\\cmd.exe\"",
+        "$rows = @()",
+        "foreach ($u in @('a', 'Administrator-long-name', 'Анастасия-Владимировна')) {",
+        "  $prof = \"C:\\Users\\$u\"",
+        "  $py = \"$prof\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\"",
+        "  $wheels = \"$prof\\AppData\\Local\\Temp\\HmDeElev-0123456789abcdef0123456789abcdef\\vendor\\pywheels\"",
+        "  $reg = \"$env:SystemRoot\\System32\\reg.exe\"",
+        "  $key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone\\NonPackaged\\' + (\"$prof\\AppData\\Local\\Handy\\handy.exe\" -replace '\\\\', '#')",
+        "  $cases = @(",
+        "    @{ n = 'pip';      exe = $py;  a = @('-m','pip','install','--user','--no-index','--find-links',$wheels,'pystray','pillow'); l = 'bridge-pip' },",
+        "    @{ n = 'handy';    exe = $reg; a = @('add',$key,'/v','Value','/t','REG_SZ','/d','Allow','/f'); l = 'handy-mic-add' },",
+        "    @{ n = 'selftest'; exe = $py;  a = @(\"$prof\\AppData\\Local\\HamidunBridge\\bridge_agent.py\",'--selftest'); l = 'bridge-selftest' },",
+        "    @{ n = 'vsix';     exe = \"$prof\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd\"; a = @('--install-extension',\"$prof\\AppData\\Local\\Temp\\hm-vsix-0123456789abcdef0123456789abcdef.vsix\",'--force'); l = 'vscode-anthropic.claude-code' }",
+        "  )",
+        "  foreach ($c in $cases) {",
+        "    $log = \"$prof\\.hamidun-setup\\deelev\\\" + $c.l + '.log'",
+        "    $p = Get-HmShellLaunchPlan -CmdExe $cmd -Exe $c.exe -Arguments $c.a -LogPath $log -Label $c.l",
+        "    $rows += [pscustomobject]@{ user = $u; name = $c.n; mode = $p.Mode; main = $p.Main.Length; prep = $p.Prep.Length; err = $p.Error; note = $p.Note; exe = $c.exe; args = @($c.a); log = $log }",
+        "  }",
+        "}",
+        "$long = 'C:\\' + ('x' * 940) + '\\tool.exe'",
+        "$p1 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe $long -Arguments @('a') -LogPath 'C:\\Users\\a\\.hamidun-setup\\deelev\\t.log' -Label 't'",
+        "$huge = 'C:\\' + ('x' * 1100) + '\\tool.exe'",
+        "$p2 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe $huge -Arguments @('a') -LogPath 'C:\\Users\\a\\.hamidun-setup\\deelev\\t.log' -Label 't'",
+        "$p3 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe 'C:\\a%b\\x.exe' -Arguments @('a') -LogPath 'C:\\Users\\a\\.hamidun-setup\\deelev\\t.log' -Label 't'",
+        "$p4 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe 'C:\\a%b\\x.cmd' -Arguments @('a') -LogPath 'C:\\Users\\a\\.hamidun-setup\\deelev\\t.log' -Label 't'",
+        "$p5 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe 'C:\\x\\Code.exe' -Arguments @('C:\\dir') -NoLog",
+        "$p6 = Get-HmShellLaunchPlan -CmdExe $cmd -Exe 'C:\\x\\tool.cmd' -Arguments @('a b') -LogPath 'C:\\Users\\a\\.hamidun-setup\\deelev\\t.log' -Label 't'",
+        "function Sm($p) { [pscustomobject]@{ mode = $p.Mode; app = $p.App; main = $p.Main; len = $p.Main.Length; note = $p.Note; err = $p.Error } }",
+        "Write-Output ('HMJSON:' + ([pscustomobject]@{ rows = $rows; long = (Sm $p1); huge = (Sm $p2); pct = (Sm $p3); pctBatch = (Sm $p4); nolog = (Sm $p5); batch = (Sm $p6) } | ConvertTo-Json -Depth 5 -Compress))"
+      ].join('\r\n');
+      const o = hmJson(runDeelevPs(body));
+      const rows = Array.isArray(o.rows) ? o.rows : [o.rows];
+      assert.strictEqual(rows.length, 12, 'три имени пользователя x четыре вызова');
+      // ПРЕЖНЯЯ строка — копия формулы до исправления (контроль: предел действительно нарушался).
+      const oldLine = (r) => {
+        const q = (v) => '"' + String(v).replace(/(\\+)$/, '$1$1') + '"';
+        const target = [r.exe].concat(r.args).map(q).join(' ');
+        const dir = r.log.replace(/\\[^\\]*$/, '');
+        const inner = '(if not exist "' + dir + '\\" mkdir "' + dir + '") >nul 2>&1' +
+          ' & (if exist "' + r.log + '" for %I in ("' + r.log + '") do @if %~zI GTR 524288 del /f /q "' + r.log + '") >nul 2>&1' +
+          ' & (echo === %DATE% %TIME% route=shell-token label=' + r.name + ' ===) >>"' + r.log + '" 2>nul' +
+          ' & if exist "' + dir + '\\" (' + target + ' >>"' + r.log + '" 2>&1) else (' + target + ')';
+        return '"C:\\Windows\\System32\\cmd.exe" /d /e:on /v:off /s /c "' + inner + '"';
+      };
+      let oldOver = 0;
+      rows.forEach((r) => {
+        assert.strictEqual(r.err, '', r.name + '/' + r.user + ': запуск не отвергнут: ' + r.err);
+        assert.strictEqual(r.mode, 'logged', r.name + '/' + r.user + ': вывод пишется в журнал (' + r.note + ')');
+        assert(r.main <= 1024 && r.prep <= 1024, r.name + '/' + r.user + ': основная ' + r.main + ' и подготовка ' + r.prep + ' знаков — в пределе 1024');
+        if (oldLine(r).length > 1024) oldOver++;
+      });
+      assert(oldOver >= 4, 'контроль: прежняя строка не умещалась в 1024 на ' + oldOver + ' из 12 реалистичных вызовов — тест не пустой');
+      assert(rows.some((r) => r.name === 'pip' && oldLine(r).length > 1024), 'pip с офлайн-колёсами — именно тот вызов, что вылезал за предел');
+      assert(rows.some((r) => r.name === 'handy' && oldLine(r).length > 1024), 'Handy — тоже');
+      // Строка с журналом не умещается, а прямая умещается: программа запускается напрямую, без журнала.
+      assert.strictEqual(o.long.mode, 'direct', 'journal-строка > 1024, прямая < 1024 -> запуск напрямую: ' + JSON.stringify(o.long));
+      assert(o.long.len <= 1024 && /длиннее предела/.test(o.long.note), 'причина называется в примечании: ' + o.long.note);
+      assert(/^"C:\\x+\\tool\.exe" "a"$/.test(o.long.main) && /tool\.exe$/.test(o.long.app), 'прямая форма — сама программа, без cmd');
+      assert.strictEqual(o.huge.mode, '', 'и прямая длиннее предела — запуск отвергается, не обрезается: ' + JSON.stringify(o.huge));
+      assert(/длиннее предела/.test(o.huge.err), 'причина названа: ' + o.huge.err);
+      // «%» cmd раскрыл бы: журнал не пишем, но .exe запускается напрямую (там «%» — обычный знак); .cmd — нельзя.
+      assert.strictEqual(o.pct.mode, 'direct', '«%» в пути .exe -> запуск без журнала: ' + JSON.stringify(o.pct));
+      assert.strictEqual(o.pctBatch.mode, '', '«%» в пути .cmd: нужен cmd /c, а он раскроет знак — отказ');
+      // Запуск окна редактора: журнала нет по замыслу, примечания нет.
+      assert.strictEqual(o.nolog.mode, 'direct');
+      assert.strictEqual(o.nolog.note, '', 'журнал не предполагался — и объяснять нечего');
+      // .cmd CreateProcess сам не исполняет — через cmd /c.
+      assert(/cmd\.exe$/i.test(o.batch.app) && o.batch.mode === 'logged', '.cmd идёт через cmd /c (вывод пишется): ' + JSON.stringify(o.batch));
+    });
+
+    ok('A1 (прогон cmd.exe): подготовка журнала — каталог, ротация, заголовок, код выхода; недоступный журнал даёт код 1, основная строка — код и вывод программы', () => {
+      const base = path.join(os.tmpdir(), 'hm a1 ' + rnd() + ' (x86) & co');
+      fs.mkdirSync(base, { recursive: true });
+      try {
+        const bat = path.join(base, 'tgt.cmd');
+        fs.writeFileSync(bat, '@echo off\r\necho ARG1=[%~1]\r\necho ARG2=[%~2]\r\necho to-stderr 1>&2\r\nexit /b 7\r\n');
+        const log = path.join(base, 'logs', 't.log');
+        const blocked = path.join(base, 'blocked');
+        fs.writeFileSync(blocked, 'x');               // на месте каталога журнала лежит ФАЙЛ
+        const q = (v) => "'" + v.replace(/'/g, "''") + "'";
+        const body = [
+          "$cmd = \"$env:SystemRoot\\System32\\cmd.exe\"",
+          "function RunLine($line) { $psi = New-Object System.Diagnostics.ProcessStartInfo; $psi.FileName = $cmd",
+          "  $psi.Arguments = $line.Substring($line.IndexOf(' ') + 1); $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true",
+          "  $p = [System.Diagnostics.Process]::Start($psi); $p.WaitForExit(); return $p.ExitCode }",
+          "$log = " + q(log),
+          "$prep = New-HmShellLogPrepLine -CmdExe $cmd -LogPath $log -Label 'e2e'",
+          "$r = [ordered]@{}",
+          "$r.prep1 = RunLine $prep",
+          "$r.headerLines = @(Get-Content -LiteralPath $log).Count",
+          "[IO.File]::WriteAllBytes($log, (New-Object byte[] 600000))",
+          "$r.bigBefore = (Get-Item -LiteralPath $log).Length",
+          "$r.prep2 = RunLine $prep",
+          "$r.bigAfter = (Get-Item -LiteralPath $log).Length",
+          "$r.prep3 = RunLine $prep",
+          "$r.smallLines = @(Get-Content -LiteralPath $log).Count",
+          "$blockedPrep = New-HmShellLogPrepLine -CmdExe $cmd -LogPath " + q(path.join(blocked, 'x.log')) + " -Label 'e2e'",
+          "$r.prepBlocked = RunLine $blockedPrep",
+          "$plan = Get-HmShellLaunchPlan -CmdExe $cmd -Exe " + q(bat) + " -Arguments @('a b', 'x!y(1)') -LogPath $log -Label 'e2e'",
+          "$r.mode = $plan.Mode",
+          "$r.mainExit = RunLine $plan.Main",
+          "$r.directExit = RunLine $plan.DirectLine",
+          "$r.pct = New-HmShellCmdLine -CmdExe $cmd -Exe 'C:\\a%PATH%\\x.exe' -LogPath 'C:\\L\\t.log'",
+          "$r.quote = New-HmShellCmdLine -CmdExe $cmd -Exe 'C:\\x.exe' -Arguments @('bad\"q') -LogPath 'C:\\L\\t.log'",
+          "$r.direct = New-HmWinCommandLine -Exe 'C:\\x\\Code.exe' -Arguments @('C:\\dir with space\\')",
+          "Write-Output ('HMJSON:' + ([pscustomobject]$r | ConvertTo-Json -Compress))"
+        ].join('\r\n');
+        const o = hmJson(runDeelevPs(body));
+        assert.strictEqual(o.prep1, 0, 'подготовка на чистом месте: код 0');
+        assert.strictEqual(o.headerLines, 1, 'каталог создан, заголовок записан');
+        assert.strictEqual(o.bigBefore, 600000);
+        assert.strictEqual(o.prep2, 0);
+        assert(o.bigAfter < 200, 'журнал больше 512 КБ удалён и начат заново: ' + o.bigAfter + ' байт');
+        assert.strictEqual(o.prep3, 0);
+        assert.strictEqual(o.smallLines, 2, 'небольшой журнал дописывается, а не затирается');
+        assert.strictEqual(o.prepBlocked, 1, 'журнал открыть нельзя -> код 1 (запуск тогда идёт напрямую, без журнала)');
+        assert.strictEqual(o.mode, 'logged');
+        assert.strictEqual(o.mainExit, 7, 'код выхода программы проходит через cmd /c без потерь');
+        assert.strictEqual(o.directExit, 7, 'прямая форма для .cmd (cmd /c без журнала) — тот же код');
+        const text = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+        assert(/ARG1=\[a b\]/.test(text), 'аргумент с пробелом — один: ' + text);
+        assert(/ARG2=\[x!y\(1\)\]/.test(text), '«!» и скобки — буквами (/v:off): ' + text);
+        assert(/to-stderr/.test(text), 'stderr ребёнка тоже в журнале');
+        assert(/route=shell-token label=e2e/.test(text), 'заголовок с путём и меткой');
+        assert.strictEqual(o.pct, '', '«%» отвергается: cmd /c раскрыл бы его даже в кавычках');
+        assert.strictEqual(o.quote, '', 'кавычка внутри значения отвергается');
+        assert.strictEqual(o.direct, '"C:\\x\\Code.exe" "C:\\dir with space\\\\"', 'хвостовой «\\» удвоен — не экранирует кавычку');
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ } }
+    });
+
+    ok('A1 (прогон PS 5.1): токен оболочки Explorer читается (medium, та же учётная запись); запуск без SeImpersonate — честный отказ, а не обход', () => {
+      const label = 'a1-shelltest-' + rnd();
+      const body = [
+        "$i = Get-HmShellTokenInfo",
+        "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+        "$self = (& \"$env:SystemRoot\\System32\\whoami.exe\" /groups | Out-String)",
+        "$r = Invoke-HmAsShellUser -Exe \"$env:SystemRoot\\System32\\whoami.exe\" -Arguments @('/groups') -Label '" + label + "' -TimeoutSec 60",
+        "Write-Output ('HMJSON:' + ([pscustomobject]@{ reason = $i.Reason; il = $i.IntegritySid; user = $i.UserSid; me = $me;",
+        "  selfHigh = ($self -match 'S-1-16-12288'); gate = $r.Gate; code = $r.Code; why = $r.Reason; log = (Get-HmDeElevLogPath -Label '" + label + "') } | ConvertTo-Json -Compress))"
+      ].join('\r\n');
+      const o = hmJson(runDeelevPs(body));
+      try {
+        if (o.reason) SKIP('оболочки Explorer в этом сеансе нет (' + o.reason + ') — проверять нечего');
+        if (o.il !== 'S-1-16-8192') {
+          // UAC выключен / встроенный администратор: оболочка high — запасной путь ОБЯЗАН отказать.
+          assert.strictEqual(o.gate, 'refused', 'оболочка не medium -> отказ, не запуск: ' + o.why);
+          return;
+        }
+        assert.strictEqual(o.user, o.me, 'оболочка — та же учётная запись, что и тест');
+        if (o.selfHigh) {
+          // Под администратором (ручной прогон из elevated): реальный запуск с токеном оболочки.
+          assert.strictEqual(o.gate, 'medium', 'запуск с токеном оболочки: ' + o.why);
+          assert.strictEqual(o.code, 0, 'whoami завершился');
+          const text = fs.existsSync(o.log) ? fs.readFileSync(o.log, 'utf8') : '';
+          assert(/S-1-16-8192/.test(text) && !/S-1-16-12288/.test(text), 'ребёнок работал на MEDIUM: ' + text.slice(0, 200));
+        } else {
+          // Обычный (medium) прогон: CreateProcessWithTokenW требует SeImpersonate — его нет.
+          assert.strictEqual(o.gate, 'unavailable', 'без привилегии — «недоступно», а не запуск: ' + o.why);
+          assert(/1314/.test(o.why), 'причина названа (ERROR_PRIVILEGE_NOT_HELD): ' + o.why);
+        }
+      } finally { try { if (o.log) fs.rmSync(o.log, { force: true }); } catch (e) { /* */ } }
+    });
+  }
+
+  // --- Статические инварианты запасного пути ---
+  ok('_deelev.ps1: запасной путь — без Add-Type/csc и без explorer.exe; токен проверен ДО CreateProcessWithTokenW; родитель журнал ребёнка НЕ читает', () => {
+    const d = codeOnly(deelevSrc());
+    assert(!/\bAdd-Type\b/.test(d), 'нет Add-Type: csc.exe пишет и грузит сборку из %TEMP% (подмена DLL под админом)');
+    assert(/DefineDynamicAssembly\(/.test(d) && /AssemblyBuilderAccess\]::Run/.test(d), 'P/Invoke — сборкой в памяти');
+    assert(!/explorer\.exe/i.test(d), 'нет запуска через explorer.exe (без оболочки он исполнил бы запуск под админом)');
+    const i = d.indexOf('function Invoke-HmAsShellUser');
+    const fn = d.slice(i, d.indexOf('function Merge-HmDeElevResult'));
+    assertOrder(fn, 'Test-HmShellTokenAcceptable', 'DuplicateTokenEx', 'политика токена — до его копирования');
+    // CreateProcessWithTokenW вызывается ТОЛЬКО из Start-HmTokenProcess, а её зовёт только эта
+    // функция и только после проверки уровня копии токена (и для подготовки журнала, и для программы).
+    assertOrder(fn, '$dupIl = Get-HmTokenSid -Token $hDup -Class 25', 'Start-HmTokenProcess -Token', 'уровень проверен на ТОЙ копии, с которой запускаем');
+    assert(/if \(\$dupIl -ne 'S-1-16-8192'\)/.test(fn), 'копия не medium -> отказ');
+    assert.strictEqual((d.match(/\$N::CreateProcessWithTokenW\(/g) || []).length, 1, 'системный запуск с токеном — в одном месте');
+    assert.strictEqual((d.match(/Start-HmTokenProcess -Token/g) || []).length, 2, 'Start-HmTokenProcess зовут два места: подготовка журнала и программа');
+    assert(fn.split('Start-HmTokenProcess -Token').length === 3, 'оба вызова — внутри Invoke-HmAsShellUser, после проверки токена');
+    // Родитель НЕ читает и НЕ пишет файлы ребёнка (журнал — диагностика в user-writable каталоге).
+    const bi = d.indexOf('$body =');
+    const be = d.indexOf('"exit `$c`n"', bi);
+    assert(bi !== -1 && be > bi, 'тело обёртки найдено');
+    const outside = d.slice(0, bi) + d.slice(be);
+    assert(!/ReadAllText|ReadAllLines|ReadAllBytes|Get-Content|OpenRead|AppendAllText|Add-Content|Out-File/.test(outside),
+      'elevated-код не читает и не пишет журнал ребёнка');
+    const setContent = outside.match(/Set-Content[^\n]*/g) || [];
+    assert(setContent.every((l) => /\$xmlFile/.test(l)), 'Set-Content — только task.xml в защищённом каталоге: ' + setContent.join(' | '));
+    // Гейт обёртки — ПЕРВЫМ после чистки env: журнал и программа — только после medium.
+    const body = d.slice(bi, be);
+    assertOrder(body, "-match 'S-1-16-8192')){ exit 210 }", '`$l=', 'гейт integrity стоит ДО журнала');
+    assertOrder(body, "-match 'S-1-16-8192')){ exit 210 }", "& '$exeLit'", 'гейт integrity стоит ДО программы');
+  });
+
+  ok('сторож порядка запасного пути краснеет на мутанте без проверки токена (подлог)', () => {
+    const d = codeOnly(deelevSrc());
+    const i = d.indexOf('function Invoke-HmAsShellUser');
+    const fn = d.slice(i, d.indexOf('function Merge-HmDeElevResult'));
+    const mutant = fn.replace(/\$why = Test-HmShellTokenAcceptable[^\n]*\n/, '');
+    assert(mutant !== fn, 'мутация применилась');
+    assert.throws(() => assertOrder(mutant, 'Test-HmShellTokenAcceptable', 'DuplicateTokenEx'),
+      'проверка политики токена пропала — сторож обязан это поймать');
+  });
+
+  ok('vscode.ps1/bridge.ps1/handy.ps1: де-элевированные шаги идут через Invoke-HmDeElevatedSafe; итог — по диску/реестру', () => {
+    const vs = codeOnly(fs.readFileSync(VSCODE, 'utf8'));
+    assert(/Invoke-HmDeElevatedSafe \$cli @\('--install-extension', \$target, '--force'\) -Label "vscode-\$extId"/.test(vs),
+      'vscode: установка расширения — с запасным путём');
+    assert(/Test-HmDeElevRetryAllowed -Attempts \$a\.Results/.test(vs), 'vscode: повтор только при доказанной тишине');
+    assert(/Start-Sleep -Seconds \$script:ExtRetryDelaySec/.test(vs), 'vscode: пауза перед повтором');
+    assert(/\$script:ExtRetryDelaySec = 60/.test(vs), 'vscode: по умолчанию — минута');
+    const br = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'bridge.ps1'), 'utf8'));
+    ['bridge-pip', 'bridge-import', 'bridge-selftest'].forEach((l) =>
+      assert(new RegExp("Invoke-HmDeElevatedSafe \\$py [^\\n]*-Label '" + l + "'").test(br), 'мост: ' + l + ' — с запасным путём'));
+    assert(/\$trayOk = \(Test-HmBridgeTrayPackages \$py\)/.test(br), 'мост: трей подтверждается пакетами на диске');
+    const pips = br.match(/@\('-m', 'pip', 'install'[^)]*\)/g) || [];
+    assert(pips.length === 2 && pips.every((p) => /'--user'/.test(p)),
+      'мост: pip --user в ОБЕИХ ветках (Python «для всех» в Program Files не пишется на medium)');
+    assert(!/&\s*\$py\b/.test(br), 'мост: python пользователя под админом не запускается');
+    const hd = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'handy.ps1'), 'utf8'));
+    assert(/\$a\.Code -eq 0 -and \(\[string\]\(& \$readConsent\)\) -eq 'Allow'/.test(hd), 'Handy: успех — когда Allow читается из реестра');
+    assertOrder(hd, 'if ($q.Code -eq 0) {', 'if ($null -ne (& $readConsent)) {', 'Handy: ложное «не найдено» перепроверяется чтением');
+    assertOrder(hd, 'if ($null -ne (& $readConsent)) {', "@('add'", 'Handy: перепроверка — ДО записи');
+    assert(/OpenSubKey\(\$consentSub, \$false\)/.test(hd), 'Handy: реестр — только на чтение');
+  });
+
+  // --- vsix панели Claude в lite-архиве VS Code + страж публикации ---
+  ok('publish-vendor/release-check: архив vscode (win32) несёт apps/claude-code.vsix; запись без него — NO-GO и стоп build-lite', () => {
+    const rc = require(path.join(ROOT, 'tools', 'release-check.js'));
+    assert.deepStrictEqual(rc.REQUIRED_GATED.win32.vscode, ['vscode-setup.exe', 'claude-code.vsix', 'vscode-language-pack-ru.vsix']);
+    const reg = (gated) => ({ components: [{ remoteId: 'vscode', platform: 'win32', gatedFiles: gated }] });
+    assert.deepStrictEqual(rc.missingRequiredGated(reg({ 'vscode-setup.exe': 'a' }), 'win32'),
+      [{ remoteId: 'vscode', member: 'claude-code.vsix' }, { remoteId: 'vscode', member: 'vscode-language-pack-ru.vsix' }],
+      'старая запись (только установщик) поймана');
+    assert.deepStrictEqual(rc.missingRequiredGated(reg({ 'vscode-setup.exe': 'a', 'claude-code.vsix': 'b' }), 'win32'),
+      [{ remoteId: 'vscode', member: 'vscode-language-pack-ru.vsix' }], 'запись без языкового пакета поймана');
+    assert.deepStrictEqual(rc.missingRequiredGated(reg({ 'vscode-setup.exe': 'a', 'claude-code.vsix': 'b',
+      'vscode-language-pack-ru.vsix': 'c' }), 'win32'), [], 'перепубликованная запись проходит');
+    assert.deepStrictEqual(rc.missingRequiredGated(reg({}), 'darwin'), [], 'darwin этим правилом не затронут');
+    const bl = fs.readFileSync(path.join(ROOT, 'tools', 'build-lite.js'), 'utf8');
+    const ai = bl.indexOf('function assertRegistryMatchesChecksums');
+    assert(/missingRequiredGated\(reg, platform\)/.test(bl.slice(ai)), 'build-lite валит сборку до electron-builder');
+  });
+
+  const py = spawnSync('python', ['--version'], { encoding: 'utf8', timeout: 20000 });
+  const havePython = !py.error && py.status === 0;
+  // Раскладка lite-архива vscode — ровно та, что собирает publish-vendor.py (stage_composite).
+  const stageVscodeArchive = () => {
+    const fake = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1-vendor-'));
+    fs.mkdirSync(path.join(fake, 'apps'));
+    ['vscode-setup.exe', 'claude-code.vsix', 'chatgpt.vsix', 'vscode-language-pack-ru.vsix'].forEach((n, k) =>
+      fs.writeFileSync(path.join(fake, 'apps', n), Buffer.alloc(4096, 1 + k)));
+    const script = [
+      'import importlib.util, sys, pathlib',
+      'spec = importlib.util.spec_from_file_location("pv", sys.argv[1])',
+      'pv = importlib.util.module_from_spec(spec); spec.loader.exec_module(pv)',
+      'pv.VENDOR = pathlib.Path(sys.argv[2])',
+      'print("STAGE=" + str(pv.stage_composite(pv.COMPONENTS["vscode"])))'
+    ].join('\n');
+    const r = spawnSync('python', ['-c', script, path.join(ROOT, 'tools', 'publish-vendor.py'), fake],
+      { encoding: 'utf8', timeout: 60000 });
+    fs.rmSync(fake, { recursive: true, force: true });
+    const m = /STAGE=(.+)/.exec(r.stdout || '');
+    assert(m, 'publish-vendor.py не собрал staging: ' + (r.stderr || r.stdout));
+    return m[1].trim();
+  };
+  if (havePython) {
+    ok('publish-vendor.py (прогон): staging архива vscode = vscode-setup.exe + claude-code.vsix + русский языковой пакет, без chatgpt.vsix', () => {
+      const st = stageVscodeArchive();
+      try {
+        const list = fs.readdirSync(path.join(st, 'apps')).sort();
+        assert.deepStrictEqual(list, ['claude-code.vsix', 'vscode-language-pack-ru.vsix', 'vscode-setup.exe'],
+          'состав lite-архива vscode: ' + list.join(', '));
+      } finally { fs.rmSync(st, { recursive: true, force: true }); }
+    });
+  }
+
+  if (powershellAvailable()) {
+    // Песочница vscode.ps1: НАСТОЯЩИЙ скрипт + настоящий _deelev.ps1, поверх которого
+    // переопределены только запуск (Invoke-HmDeElevatedSafe — «ставит» расширение созданием
+    // каталога или отказывает, по env) и Start-Sleep (повтор без минуты ожидания). Решения —
+    // проверка каталогов, «можно ли повторять», контракт 121 — работают настоящие.
+    const STUB = [
+      '',
+      'function Start-Sleep { param($Seconds, $Milliseconds) }',
+      'function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)',
+      '  $id = ([string]$Label) -replace "^vscode-", ""',
+      '  $tgt = if ($Arguments.Count -ge 2) { [string]$Arguments[1] } else { "" }',
+      '  Add-Content -LiteralPath $env:HM_T_LOG -Value ("INSTALL " + $id + " " + $(if ($tgt -like "*.vsix") { "vsix" } else { "marketplace" }))',
+      '  $mode = if ($id -eq "anthropic.claude-code") { $env:HM_T_CLAUDE } elseif ($id -eq "ms-ceintl.vscode-language-pack-ru") { $(if ($env:HM_T_RU) { $env:HM_T_RU } else { "ok" }) } else { $env:HM_T_CODEX }',
+      '  if ($mode -eq "ok") {',
+      '    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE (".vscode\\extensions\\" + $id + "-9.9.9")) | Out-Null',
+      '    return [pscustomobject]@{ Gate = "medium"; Code = 0; Finished = $true; ShellReason = "" } }',
+      '  if ($mode -eq "unavailable") { return [pscustomobject]@{ Gate = "unavailable"; Code = -1; Finished = $true; ShellReason = "тестовая причина" } }',
+      '  if ($mode -eq "refused") { return [pscustomobject]@{ Gate = "refused"; Code = -1; Finished = $true; ShellGate = "refused"; ShellReason = "тестовый отказ политики" } }',
+      '  if ($mode -eq "running") { return [pscustomobject]@{ Gate = "unknown"; Code = -1; Finished = $false; ShellReason = "" } }',
+      '  return [pscustomobject]@{ Gate = "medium"; Code = 1; Finished = $true; ShellReason = "" }',
+      '}',
+      ''
+    ].join('\r\n');
+    // editor: 'default' (code.cmd + Code.exe в LOCALAPPDATA), 'cmd-only' (один code.cmd — остаток неполного
+    // удаления), 'none', 'custom' (редактор только в своей папке, на неё указывает ключ Uninstall).
+    // pre — расширения, уже лежащие в ~/.vscode/extensions; setupExe — вшитый «установщик VS Code»
+    // (копия whoami.exe: отрабатывает мгновенно, кодом 1, редактор не ставит).
+    // Раздел реестра с ключами Uninstall подменён (HM_VSCODE_UNINSTALL_ROOTS) — результат не зависит
+    // от того, стоит ли VS Code у того, кто гоняет тесты.
+    const runVscode = ({ claude, codex, ru, vendorDir, vsix, editor, pre, setupExe }) => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1-vs-'));
+      const sb = (p) => path.join(base, p);
+      ['scripts', 'vendor\\apps', 'temp', 'home', 'la\\Programs\\Microsoft VS Code\\bin'].forEach((d) => fs.mkdirSync(sb(d), { recursive: true }));
+      fs.copyFileSync(VSCODE, sb('scripts\\vscode.ps1'));
+      fs.writeFileSync(sb('scripts\\_verify.ps1'), '﻿function Confirm-HmArtifact { param($p) }\r\nfunction Test-HmArtifact { param($p) $true }\r\n');
+      fs.writeFileSync(sb('scripts\\_deelev.ps1'), fs.readFileSync(DEELEV, 'utf8') + STUB, 'utf8');
+      const kind = editor || 'default';
+      if (kind === 'default' || kind === 'cmd-only') fs.writeFileSync(sb('la\\Programs\\Microsoft VS Code\\bin\\code.cmd'), '@echo off\r\n');
+      if (kind === 'default') fs.writeFileSync(sb('la\\Programs\\Microsoft VS Code\\Code.exe'), 'MZ');
+      (pre || []).forEach((id) => fs.mkdirSync(sb('home\\.vscode\\extensions\\' + id + '-1.0.0'), { recursive: true }));
+      (vsix || []).forEach((n) => fs.writeFileSync(sb('vendor\\apps\\' + n), Buffer.alloc(4096, 5)));
+      if (setupExe) fs.copyFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe'), sb('vendor\\apps\\vscode-setup.exe'));
+      fs.writeFileSync(sb('calls.log'), '');
+      const rootName = 'HmTestA1-' + rnd();
+      let regTop = '';
+      let uninstallRoot = 'HKCU:\\Software\\' + rootName + '-none\\Uninstall';       // раздела нет -> «ключа Uninstall нет»
+      if (kind === 'custom') {
+        const custom = sb('custom\\VSCode');
+        fs.mkdirSync(path.join(custom, 'bin'), { recursive: true });
+        fs.writeFileSync(path.join(custom, 'bin', 'code.cmd'), '@echo off\r\n');
+        fs.writeFileSync(path.join(custom, 'Code.exe'), 'MZ');
+        regTop = 'HKCU\\Software\\' + rootName;
+        const key = regTop + '\\Uninstall\\{TEST-GUID}_is1';
+        spawnSync('reg.exe', ['add', key, '/v', 'DisplayName', '/t', 'REG_SZ', '/d', 'Microsoft Visual Studio Code (User)', '/f']);
+        spawnSync('reg.exe', ['add', key, '/v', 'InstallLocation', '/t', 'REG_SZ', '/d', custom, '/f']);
+        uninstallRoot = 'HKCU:\\Software\\' + rootName + '\\Uninstall';
+      }
+      const env = Object.assign({}, process.env, {
+        TEMP: sb('temp'), TMP: sb('temp'), LOCALAPPDATA: sb('la'), USERPROFILE: sb('home'),
+        HM_VENDOR: vendorDir || sb('vendor'), HM_T_LOG: sb('calls.log'), HM_T_CLAUDE: claude, HM_T_CODEX: codex,
+        HM_T_RU: ru || 'ok', HM_EXT_RETRY_DELAY_SEC: '0', HM_VSCODE_UNINSTALL_ROOTS: uninstallRoot
+      });
+      delete env.HM_DRY_RUN;
+      try {
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\vscode.ps1') + "'; exit $LASTEXITCODE"],
+          { encoding: 'utf8', timeout: 240000, env });
+        const out = String(r.stdout || '');
+        return { status: r.status, out, calls: fs.readFileSync(sb('calls.log'), 'utf8'),
+          partial: out.split(/\r?\n/).filter((l) => /^ЧАСТИЧНО:/.test(l)) };
+      } finally {
+        if (regTop) spawnSync('reg.exe', ['delete', regTop, '/f']);
+        try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ }
+      }
+    };
+    const count = (s, re) => (s.match(re) || []).length;
+
+    ok('vscode.ps1 (прогон PS 5.1): оба расширения встали — exit 0, строки ЧАСТИЧНО нет', () => {
+      const r = runVscode({ claude: 'ok', codex: 'ok' });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + r.out.slice(-600));
+      assert.strictEqual(r.partial.length, 0, 'без «ЧАСТИЧНО:»');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): Codex не встал — 121, ОДНА строка ЧАСТИЧНО, был ровно один автоповтор', () => {
+      const r = runVscode({ claude: 'ok', codex: 'fail' });
+      assert.strictEqual(r.status, 121, 'частичный успех, а не провал: ' + r.out.slice(-600));
+      assert.strictEqual(r.partial.length, 1, 'ровно одна строка «ЧАСТИЧНО:»: ' + JSON.stringify(r.partial));
+      assert(/Codex/.test(r.partial[0]) && /необязательный/.test(r.partial[0]), 'причина названа: ' + r.partial[0]);
+      assert.strictEqual(count(r.calls, /INSTALL openai\.chatgpt/g), 2, 'попытка + ОДИН повтор: ' + r.calls);
+      assert(/openai\.chatgpt: не встало с первой попытки, повторю один раз через 0 с/.test(r.out), 'повтор объявлен в журнале');
+      assert(!/(?:\.\.\.|…)\s*$/m.test(r.out.split(/\r?\n/).filter((l) => /повторю один раз/.test(l)).join('\n')),
+        'объявление повтора не кончается многоточием: разбор провала принял бы его за этап');
+      // Запуск дошёл до VS Code (Gate medium), расширения нет — тут и только тут уместно «нужен интернет».
+      assert(/нужен интернет/.test(r.partial[0]), 'запуск дошёл до редактора -> причина про магазин/интернет: ' + r.partial[0]);
+      assert(r.partial[0].length <= 240, 'строка не длиннее 240 знаков: ' + r.partial[0].length);
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): панель Claude не встала, редактор есть — 121 и ручной способ (code --install-extension)', () => {
+      const r = runVscode({ claude: 'fail', codex: 'ok' });
+      assert.strictEqual(r.status, 121, r.out.slice(-600));
+      assert.strictEqual(r.partial.length, 1);
+      assert(/^ЧАСТИЧНО: нет панели Claude Code — /.test(r.partial[0]), 'строка начинается с того, чего нет: ' + r.partial[0]);
+      assert(/code --install-extension anthropic\.claude-code/.test(r.partial[0]) && /Extensions/.test(r.partial[0]),
+        'названы оба ручных способа');
+      assert(r.partial[0].length <= 240, 'строка не длиннее 240 знаков: ' + r.partial[0].length);
+      assert(r.partial[0].indexOf('Причина:') > r.partial[0].indexOf('Install'), 'причина — в конце, после действия');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): де-элевация недоступна обоими путями — 121 с причиной; повтор был (ничего не запущено)', () => {
+      const r = runVscode({ claude: 'unavailable', codex: 'unavailable' });
+      assert.strictEqual(r.status, 121, r.out.slice(-600));
+      assert(/не удалось запустить установку от имени пользователя/.test(r.partial[0] || ''), 'причина названа коротко: ' + r.partial[0]);
+      assert(/тестовая причина/.test(r.out) && !/тестовая причина/.test(r.partial[0]), 'подробная причина — в журнале, а не в строке для экрана');
+      assert(r.partial[0].length <= 240, 'строка не длиннее 240 знаков: ' + r.partial[0].length);
+      assert.strictEqual(count(r.calls, /INSTALL anthropic\.claude-code/g), 2, 'ничего не запущено — повтор безопасен');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): первая установка ещё может идти — повтора НЕТ (негативный контроль гейта)', () => {
+      const r = runVscode({ claude: 'running', codex: 'ok' });
+      assert.strictEqual(r.status, 121, r.out.slice(-600));
+      assert.strictEqual(count(r.calls, /INSTALL anthropic\.claude-code/g), 1, 'второй запуск поверх возможно живого — запрещён');
+      assert(!/anthropic\.claude-code: не встало с первой попытки/.test(r.out), 'повтор не объявлялся');
+      assert(/установка пока не отчиталась/.test(r.out), 'человеку сказано, что установка могла ещё идти');
+      assert(/установка ещё шла, когда шаг завершился/.test(r.partial[0]), 'и в строке для экрана: ' + r.partial[0]);
+    });
+
+    // --- m5: отказ по политике не лечится повтором -------------------------------------------------
+    ok('vscode.ps1 (прогон PS 5.1): отказ по политике (refused) — РОВНО один запуск, без автоповтора; причина названа; недоступность повтор по-прежнему получает', () => {
+      const r = runVscode({ claude: 'refused', codex: 'ok' });
+      assert.strictEqual(r.status, 121, r.out.slice(-600));
+      assert.strictEqual(count(r.calls, /INSTALL anthropic\.claude-code/g), 1, 'отказ по политике -> один запуск (негативный контроль: при недоступности их два): ' + r.calls);
+      assert(!/anthropic\.claude-code: не встало с первой попытки/.test(r.out), 'повтор не объявлялся');
+      assert(/повтор ничего бы не изменил, не повторяю/.test(r.out), 'человеку сказано, почему повтора нет');
+      assert(/нет обычного уровня прав \(UAC выключен или вход под встроенным администратором\)/.test(r.partial[0]),
+        'причина в строке для экрана: ' + r.partial[0]);
+      const ctl = runVscode({ claude: 'unavailable', codex: 'ok' });
+      assert.strictEqual(count(ctl.calls, /INSTALL anthropic\.claude-code/g), 2, 'контроль: «недоступно» повтор получает');
+    });
+
+    // --- m9: Codex ---------------------------------------------------------------------------------
+    ok('vscode.ps1 (прогон PS 5.1): Codex не встал — причина его же попытки: про интернет сказано только если запуск дошёл до VS Code; недоступность названа недоступностью', () => {
+      const unavailable = runVscode({ claude: 'ok', codex: 'unavailable' });
+      assert.strictEqual(unavailable.status, 121, unavailable.out.slice(-600));
+      assert(/не удалось запустить установку от имени пользователя/.test(unavailable.partial[0]), unavailable.partial[0]);
+      assert(!/интернет/.test(unavailable.partial[0]), 'запуск не дошёл до VS Code — интернет ни при чём: ' + unavailable.partial[0]);
+      const ranAtMedium = runVscode({ claude: 'ok', codex: 'fail' });
+      assert(/нужен интернет/.test(ranAtMedium.partial[0]), 'запуск дошёл (Gate medium) — тогда и интернет: ' + ranAtMedium.partial[0]);
+      const refused = runVscode({ claude: 'ok', codex: 'refused' });
+      assert(/UAC выключен/.test(refused.partial[0]) && !/интернет/.test(refused.partial[0]), 'отказ по политике назван: ' + refused.partial[0]);
+    });
+
+    // --- m8: ЧАСТИЧНО — одна строка, до 240 знаков, чего нет и что сделать идут РАНЬШЕ причины -------
+    ok('vscode.ps1 (прогон PS 5.1): строка ЧАСТИЧНО во всех сочетаниях отказов — одна, не длиннее 240 знаков, сначала чего нет и что делать, потом причина', () => {
+      const combos = [['fail', 'fail'], ['unavailable', 'unavailable'], ['refused', 'refused'], ['running', 'ok'], ['ok', 'fail'], ['ok', 'unavailable'], ['fail', 'ok']];
+      combos.forEach(([claude, codex]) => {
+        const r = runVscode({ claude, codex });
+        assert.strictEqual(r.status, 121, claude + '/' + codex + ': ' + r.out.slice(-400));
+        assert.strictEqual(r.partial.length, 1, claude + '/' + codex + ': ровно одна строка: ' + JSON.stringify(r.partial));
+        const line = r.partial[0];
+        assert(line.length <= 240, claude + '/' + codex + ': ' + line.length + ' знаков: ' + line);
+        const miss = claude === 'ok' ? /^ЧАСТИЧНО: нет Codex \(необязательный\) — /.test(line) : /^ЧАСТИЧНО: нет панели Claude Code — /.test(line);
+        assert(miss, claude + '/' + codex + ': начинается с недостающего: ' + line);
+        assert(/Install/.test(line), claude + '/' + codex + ': названо ручное действие: ' + line);
+        assert(!/(?:\.\.\.|…)\s*$/.test(line), claude + '/' + codex + ': не кончается многоточием');
+      });
+    });
+
+    // --- m3/m7: что считается «редактор есть», и как выглядит красный выход ------------------------
+    ok('vscode.ps1 (прогон PS 5.1): один code.cmd без Code.exe — редактором не считается: с установщиком он запускается, а не молча доставляет расширения; без него шаг пропускается (120)', () => {
+      const skip = runVscode({ claude: 'ok', codex: 'ok', editor: 'cmd-only' });
+      assert.strictEqual(skip.status, 120, 'редактора нет и установщика нет -> пропуск, а не «VS Code установлен»: ' + skip.out.slice(-400));
+      assert(!/VS Code уже установлен/.test(skip.out), 'один code.cmd — не установленный редактор');
+      assert.strictEqual(skip.calls.trim(), '', 'расширения не ставились');
+      const r = runVscode({ claude: 'ok', codex: 'ok', editor: 'cmd-only', setupExe: true });
+      assert.strictEqual(r.status, 1, 'красный шаг: ' + r.out.slice(-600));
+      assert(/установщик VS Code завершился с кодом 1/.test(r.out), 'установщик редактора запускался: ' + r.out.slice(0, 400));
+      assert(/VS Code не установился — нажми «Повторить»; не поможет — поставь его с code\.visualstudio\.com/.test(r.out), 'строка про сам редактор: ' + r.out.slice(-400));
+      assert.strictEqual(r.calls.trim(), '', 'расширения не ставились: ставить некуда');
+      assert.strictEqual(r.partial.length, 0, 'это не частичный успех');
+      const why = FE.explainScriptFailure(r.out);
+      assert(!why || why.kind !== 'editor-extension', 'разбор провала не должен говорить «редактор встал, а панель — нет»: ' + JSON.stringify(why));
+      // Контроль: прежняя строка выхода 1 попадала в это правило и врала человеку.
+      const oldWhy = FE.explainScriptFailure('Не установились расширения: Claude Code (anthropic.claude-code) — и самого VS Code на диске нет, ставиться им некуда.');
+      assert(oldWhy && oldWhy.kind === 'editor-extension', 'контроль: старая строка опознавалась как «редактор встал»');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): установщик отработал, а Code.exe не появился — exit 1, даже если расширения уже на месте от прежней установки', () => {
+      const r = runVscode({ claude: 'ok', codex: 'ok', editor: 'none', setupExe: true, pre: ['anthropic.claude-code', 'openai.chatgpt'] });
+      assert.strictEqual(r.status, 1, 'красный шаг: ' + r.out.slice(-600));
+      assert(/установщик VS Code завершился с кодом 1/.test(r.out), 'код установщика назван');
+      assert(/VS Code не подтвердил установку \(Code\.exe не найден, код установщика 1\)/.test(r.out));
+      assert(/VS Code не установился — нажми «Повторить»/.test(r.out), 'итоговая строка про редактор');
+      assert.strictEqual(r.calls.trim(), '', 'расширения не трогались');
+      assert(!/расширени/i.test(r.out.split(/\r?\n/).filter(Boolean).slice(-2).join('\n')), 'в конце вывода слов про расширения нет');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): редактор в нестандартной папке (ключ Uninstall) находится по Code.exe рядом с CLI — доставляются только расширения, установщик не запускается', () => {
+      const r = runVscode({ claude: 'ok', codex: 'ok', editor: 'custom', setupExe: true });
+      assert.strictEqual(r.status, 0, r.out.slice(-600));
+      assert(/VS Code уже установлен — доставлю только расширения/.test(r.out), 'редактор найден: ' + r.out.slice(0, 300));
+      assert(!/Ставлю VS Code из встроенного установщика/.test(r.out) && !/установщик VS Code завершился/.test(r.out), 'установщик не запускался');
+      assert(/INSTALL anthropic\.claude-code/.test(r.calls), 'расширения ставятся через CLI из ключа Uninstall: ' + r.calls);
+    });
+
+    // --- m12: повторный запуск при готовом редакторе --------------------------------------------------
+    ok('vscode.ps1 (прогон PS 5.1): редактор есть, нет панели Claude — установщик редактора не запускается, ставится ТОЛЬКО недостающая панель (повторный запуск лечит поломку A01)', () => {
+      const r = runVscode({ claude: 'ok', codex: 'ok', setupExe: true, pre: ['openai.chatgpt'] });
+      assert.strictEqual(r.status, 0, r.out.slice(-600));
+      assert(/VS Code уже установлен — доставлю только расширения/.test(r.out), 'редактор найден, ставится только недостающее');
+      assert(!/Ставлю VS Code из встроенного установщика/.test(r.out) && !/установщик VS Code завершился/.test(r.out), 'установщик редактора не запускался');
+      assert.deepStrictEqual(r.calls.trim().split(/\r?\n/).filter((l) => /^INSTALL (anthropic|openai)/.test(l)), ['INSTALL anthropic.claude-code marketplace'],
+        'ставится одна недостающая панель, Codex уже на месте: ' + r.calls);
+      assert(/openai\.chatgpt: уже на месте/.test(r.out), 'Codex не переустанавливался');
+    });
+
+    ok('vscode.ps1 (прогон PS 5.1): вшитый claude-code.vsix находится в ПОЛНОМ издании (vendor)', () => {
+      const r = runVscode({ claude: 'ok', codex: 'ok',
+        vsix: ['vscode-setup.exe', 'claude-code.vsix', 'chatgpt.vsix', 'vscode-language-pack-ru.vsix'] });
+      assert.strictEqual(r.status, 0, r.out.slice(-600));
+      assert(/INSTALL anthropic\.claude-code vsix/.test(r.calls), 'панель — из вшитого vsix: ' + r.calls);
+      assert(/INSTALL openai\.chatgpt vsix/.test(r.calls), 'Codex — тоже из vsix (в полном vendor он есть)');
+      assert(/INSTALL ms-ceintl\.vscode-language-pack-ru vsix/.test(r.calls), 'русский пакет — из вшитого vsix');
+    });
+
+    if (havePython) {
+      ok('vscode.ps1 (прогон PS 5.1): вшитый claude-code.vsix находится в ЛЁГКОМ издании (staging архива vscode из publish-vendor.py)', () => {
+        const st = stageVscodeArchive();
+        try {
+          const r = runVscode({ claude: 'ok', codex: 'ok', vendorDir: st });
+          assert.strictEqual(r.status, 0, r.out.slice(-600));
+          assert(/INSTALL anthropic\.claude-code vsix/.test(r.calls), 'lite: панель Claude — из vsix архива vscode: ' + r.calls);
+          assert(/INSTALL openai\.chatgpt marketplace/.test(r.calls), 'lite: Codex — Marketplace (в архив не кладётся)');
+          assert(/INSTALL ms-ceintl\.vscode-language-pack-ru vsix/.test(r.calls), 'lite: русский пакет — из vsix архива vscode');
+          assert(/вшитого vsix нет — ставлю из Marketplace/.test(r.out), 'путь Marketplace назван в журнале');
+        } finally { fs.rmSync(st, { recursive: true, force: true }); }
+      });
+
+      ok('vscode.ps1 (прогон PS 5.1): старый lite-архив (только vscode-setup.exe) — панель уходит в Marketplace (негативный контроль)', () => {
+        const old = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1-oldstage-'));
+        try {
+          fs.mkdirSync(path.join(old, 'apps'));
+          fs.writeFileSync(path.join(old, 'apps', 'vscode-setup.exe'), Buffer.alloc(4096, 3));
+          const r = runVscode({ claude: 'ok', codex: 'ok', vendorDir: old });
+          assert(/INSTALL anthropic\.claude-code marketplace/.test(r.calls),
+            'без vsix в архиве панель идёт из Marketplace — проверка выше это различает: ' + r.calls);
+        } finally { fs.rmSync(old, { recursive: true, force: true }); }
+      });
+    }
+
+    ok('vscode.ps1 (прогон PS 5.1): русский языковой пакет не встал — код выхода тот же (0 остаётся 0, 121 остаётся 121), без автоповтора', () => {
+      const ok0 = runVscode({ claude: 'ok', codex: 'ok', ru: 'fail', vsix: ['vscode-language-pack-ru.vsix'] });
+      assert.strictEqual(ok0.status, 0, 'пакет необязателен — шаг зелёный: ' + ok0.out.slice(-600));
+      assert.strictEqual(ok0.partial.length, 0, 'и не жёлтый: строки ЧАСТИЧНО нет');
+      assert(/русского языкового пакета нет — VS Code останется на английском/.test(ok0.out), 'исход назван в журнале');
+      assert.strictEqual(count(ok0.calls, /INSTALL ms-ceintl\.vscode-language-pack-ru/g), 2,
+        'vsix, затем Marketplace — и всё: минутного автоповтора у необязательного пакета нет: ' + ok0.calls);
+      const p121 = runVscode({ claude: 'ok', codex: 'fail', ru: 'unavailable' });
+      assert.strictEqual(p121.status, 121, 'частичный успех из-за Codex остаётся 121: ' + p121.out.slice(-600));
+      assert.strictEqual(p121.partial.length, 1, 'строка ЧАСТИЧНО одна — про Codex, не про пакет');
+      assert(!/языков/.test(p121.partial[0]), 'пакет в строку ЧАСТИЧНО не попадает: ' + p121.partial[0]);
+    });
+  }
+})();
+
+// ===========================================================================
+// A1b (07.10.2026): русский интерфейс VS Code из вшитого языкового пакета; кнопка
+// «Открыть VS Code» открывает папку И PROMPTS.md (кнопка ✳ панели Claude видна только
+// при открытом файле); claude-start.cmd — chcp 65001 и `call claude`.
+// ===========================================================================
+(function editorFirstRunA1b() {
+  console.log('\n== A1b: русский языковой пакет VS Code, PROMPTS.md при открытии, claude-start.cmd ==');
+  const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+  const FE = require(path.join(ROOT, 'src', 'failure-explain.js'));
+  const rnd = () => Math.random().toString(36).slice(2, 10);
+  const vsSrc = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), 'utf8');
+
+  ok('fetch-vendor.ps1: русский языковой пакет — под минор вшитого VS Code, Marketplace vspackage, гейт манифеста, в проверке полноты', () => {
+    const s = codeOnly(fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor.ps1'), 'utf8'));
+    assertOrder(s, 'os=win32-x64-user', "Join-Path $apps 'vscode-language-pack-ru.vsix'",
+      'пакет подбирается ПОСЛЕ скачивания VS Code — по версии именно вшитого установщика');
+    assert(/VersionInfo\.ProductVersion/.test(s) && /'\^1\\\.\(\\d\+\)\\\.'/.test(s), 'минор берётся из vscode-setup.exe');
+    assert(/MS-CEINTL\.vscode-language-pack-ru/.test(s), 'запрос в Marketplace по точному id пакета');
+    assert(/\('\^1\\\.' \+ \$vsMinor \+ '\\\.'\)/.test(s), 'из списка версий берётся последняя ПОД НАШ минор, а не просто последняя');
+    assert(/publishers\/MS-CEINTL\/vsextensions\/vscode-language-pack-ru\/\$lpVer\/vspackage/.test(s), 'качается версионный vspackage');
+    assert(/-TimeoutSec/.test(s.slice(s.indexOf('vscode-language-pack-ru'))), 'сетевой запрос с таймаутом');
+    const gate = s.slice(s.indexOf('$lpOk = $false'));
+    assert(/Id\\s\*=\\s\*"vscode-language-pack-ru"/.test(gate) && /Publisher\\s\*=\\s\*"MS-CEINTL"/.test(gate),
+      'вшивается только zip с манифестом именно этого пакета');
+    assert(/Microsoft\\\.VisualStudio\\\.Code\\\.Engine/.test(gate) && /-le \$vsMinor/.test(gate),
+      'движок пакета не новее вшитого VS Code');
+    assert(/Remove-Item \$lpvsix/.test(gate), 'не прошёл гейт — файл удаляется и в checksums.json не попадает');
+    assert(/'claude-code\.vsix','vscode-language-pack-ru\.vsix'\)/.test(s), 'пакет — в проверке полноты vendor');
+  });
+
+  ok('vscode.ps1: русский пакет ставится ВНУТРИ try и ДО итоговых exit — finally с настройками видит его в том же прогоне', () => {
+    const s = vsSrc().split(/\r?\n/).map((l) => (l.trim().startsWith('#') ? '' : l)).join('\n');
+    const tryIdx = s.search(/^try \{/m);
+    const call = s.indexOf('Install-HmRuLanguagePack $codeCli $ruVsix');
+    const exit0 = s.indexOf('if ($okClaude -and $okCodex) { exit 0 }');
+    const fin = s.search(/^\} finally \{/m);
+    assert(tryIdx !== -1 && call !== -1 && exit0 !== -1 && fin !== -1, 'опорные строки найдены');
+    assert(tryIdx < call && call < exit0 && exit0 < fin, 'try < установка пакета < первый итоговый exit < finally');
+    assert(/Get-Vsix 'vscode-language-pack-ru\.vsix'/.test(s), 'пакет берётся из вшитого vsix (полное издание и lite)');
+    const fn = s.slice(s.indexOf('function Install-HmRuLanguagePack'), s.indexOf('$codeCli = Get-VsCodeCli'));
+    assert(/Invoke-HmDeElevatedSafe \$cli @\('--install-extension'/.test(fn), 'тот же де-элевированный путь, что у расширений');
+    assert(/Confirm-ExtInstalled \$id \$dirs/.test(fn), 'итог — по каталогу расширений');
+    assert(!/\bexit\b/.test(fn) && !/DeElevFailed/.test(fn), 'код выхода и флаги шага пакет не трогает');
+  });
+
+  ok('vscode.ps1: строки русского пакета не перехватывают этап и причину провала (failure-explain); мутант с многоточием ловится', () => {
+    const fn = vsSrc().slice(vsSrc().indexOf('function Install-HmRuLanguagePack'), vsSrc().indexOf('$codeCli = Get-VsCodeCli'));
+    // Печатаемые строки функции — все литералы с кириллицей (заголовок склеивается из двух).
+    const lits = [];
+    const re = /"([^"]*[А-Яа-яЁё][^"]*)"|'([^']*[А-Яа-яЁё][^']*)'/g;
+    let m;
+    while ((m = re.exec(fn)) !== null) lits.push(m[1] || m[2]);
+    assert(lits.length >= 5, 'строки функции найдены: ' + lits.length);
+    const head = 'Ставлю расширение anthropic.claude-code в VS Code (от имени пользователя, без прав администратора)...';
+    const tail = [head, '  anthropic.claude-code: не подтвердилось.'].concat(lits).join('\n');
+    const sum = FE.summarizeFailure(tail, { code: 1, maxChars: 280, maxLines: 6 });
+    assert.strictEqual(sum.phase, head.replace(/\.\.\.$/, ''), 'этап — по-прежнему расширение Claude: ' + sum.phase);
+    assert.strictEqual(FE.explainScriptFailure(lits.join('\n')), null, 'строки пакета сами по себе не опознаются как провал');
+    const mutant = [head].concat(lits.map((l, i) => (i === 0 ? l + '...' : l))).join('\n');
+    assert.notStrictEqual(FE.summarizeFailure(mutant, { code: 1 }).phase, head.replace(/\.\.\.$/, ''),
+      'контроль: строка пакета с многоточием перехватила бы этап — проверка это видит');
+  });
+
+  ok('deelev-route.editorOpenFiles: только существующий файл; папка с таким именем или отсутствие — пусто', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1b-'));
+    try {
+      assert.deepStrictEqual(DR.editorOpenFiles(d, 'PROMPTS.md'), [], 'файла нет — открываем только папку');
+      assert.deepStrictEqual(DR.editorOpenFiles(d, ''), [], 'файл не задан — пусто (курс открывается без файла)');
+      fs.mkdirSync(path.join(d, 'PROMPTS.md'));
+      assert.deepStrictEqual(DR.editorOpenFiles(d, 'PROMPTS.md'), [], 'каталог с таким именем — не файл');
+      fs.rmdirSync(path.join(d, 'PROMPTS.md'));
+      fs.writeFileSync(path.join(d, 'PROMPTS.md'), '# промпты');
+      assert.deepStrictEqual(DR.editorOpenFiles(d, 'PROMPTS.md'), [path.join(d, 'PROMPTS.md')], 'файл есть — открываем его');
+    } finally { fs.rmSync(d, { recursive: true, force: true }); }
+  });
+
+  if (powershellAvailable()) {
+    ok('deelev-route.psArgList (прогон PS 5.1): папка и PROMPTS.md доходят до программы ОТДЕЛЬНЫМИ аргументами (пробел, кириллица, апостроф, хвостовой слэш)', () => {
+      assert.strictEqual(DR.psArgList([]), null, 'пустой список — null');
+      assert.strictEqual(DR.psArgList(['a"b']), null, 'кавычку в пути не выразить — null, вызывающий откроет без файла');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1b-arg-'));
+      try {
+        const dumper = path.join(base, 'dump.ps1');
+        const out = path.join(base, 'out.txt');
+        fs.writeFileSync(dumper, '\uFEFF' + "[IO.File]::WriteAllLines('" + out.replace(/'/g, "''") +
+          "', [string[]](@('COUNT=' + $args.Count) + $args), (New-Object Text.UTF8Encoding($false)))\r\n", 'utf8');
+        const vals = ['C:\\Users\\John Doe\\Привет\\HamidunStart', "C:\\Users\\O'Brien (x86)\\PROMPTS.md", 'C:\\dir with space\\'];
+        const list = DR.psArgList(vals);
+        const cmd = "$ps = \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"; $al = @(" + list + ");" +
+          " Start-Process -FilePath $ps -ArgumentList (@('-NoProfile','-ExecutionPolicy','Bypass','-File',('\"" + dumper + "\"')) + $al) -Wait -WindowStyle Hidden";
+        const f = path.join(base, 'run.ps1');
+        fs.writeFileSync(f, '\uFEFF' + cmd + '\r\n', 'utf8');
+        spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f], { encoding: 'utf8', timeout: 120000 });
+        const got = fs.existsSync(out) ? fs.readFileSync(out, 'utf8').split(/\r?\n/).filter((l) => l !== '') : [];
+        assert.strictEqual(got[0], 'COUNT=3', 'три значения — три аргумента: ' + JSON.stringify(got));
+        assert.deepStrictEqual(got.slice(1), vals, 'значения дошли без искажений');
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+  }
+
+  ok('main.js: кнопка Открыть VS Code открывает HamidunStart И PROMPTS.md де-элевированно; Cursor — так же; курс — без файла', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    assert(/ipcMain\.handle\('launch-vscode', \(\) => launchVsCodeOn\(path\.join\(os\.homedir\(\), 'HamidunStart'\), \{ openFile: 'PROMPTS\.md' \}\)\)/.test(m),
+      'кнопка «Открыть VS Code» просит открыть PROMPTS.md');
+    const lv = m.slice(m.indexOf('function launchVsCodeOn'), m.indexOf("ipcMain.handle('launch-vscode'"));
+    assert(/winLaunchDeElevated\(codeExe, dir, deelevRoute\.editorOpenFiles\(dir, openFile\)\)/.test(lv), 'VS Code: папка + файл');
+    assert(/winLaunchDeElevated\(cursorExe, dir, deelevRoute\.editorOpenFiles\(dir, openFile\)\)/.test(lv), 'запасной Cursor: так же');
+    const lc = m.slice(m.indexOf("ipcMain.handle('launch-cursor'"), m.indexOf("ipcMain.handle('launch-cursor'") + 1200);
+    assert(/winLaunchDeElevated\(cexe, startDir, deelevRoute\.editorOpenFiles\(startDir, 'PROMPTS\.md'\)\)/.test(lc), 'кнопка Cursor: так же');
+    assert(/launchVsCodeOn\(dir, \{ create: false \}\)/.test(m), 'курс открывается без файла (openFile не передаётся)');
+    const ws = m.slice(m.indexOf('function winShellTokenLaunch'), m.indexOf('async function winLaunchDeElevated'));
+    assert(/\[folderArg\]\.concat\(extraArgs \|\| \[\]\)\.map\(lit\)/.test(ws), 'запасной путь (токен оболочки) передаёт и файл');
+    const wl = m.slice(m.indexOf('async function winLaunchDeElevated'), m.indexOf('function launchVsCodeOn'));
+    const guard = wl.search(/if \(!argList\) \{ rmStagingTree\(dir\);[^\n]*return folderFallback\(\); \}/);
+    assert(guard !== -1 && guard < wl.indexOf('-ArgumentList " + argList'),
+      'папку не выразить аргументом — редактор не запускается, открывается только папка (до сборки обёртки)');
+  });
+
+  // claude-start.cmd исполняется настоящим cmd.exe — текст берётся прямо из main.js.
+  const claudeStartBody = () => {
+    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const i = m.indexOf('const cmdBody = ');
+    const j = m.indexOf("'if errorlevel 1 pause\\r\\n';", i);
+    assert(i !== -1 && j !== -1, 'текст claude-start.cmd найден в main.js');
+    return new Function('return ' + m.slice(i + 'const cmdBody = '.length, j + "'if errorlevel 1 pause\\r\\n'".length))();
+  };
+  ok('claude-start.cmd: chcp 65001 — сразу после @echo off, до него только ASCII; claude вызывается через call', () => {
+    const lines = claudeStartBody().split('\r\n');
+    assert.strictEqual(lines[0], '@echo off');
+    assert.strictEqual(lines[1], 'chcp 65001 >nul', 'кодовая страница UTF-8 — второй строкой');
+    assert(/^[\x00-\x7f]*$/.test(lines.slice(0, 2).join('')), 'до chcp — только ASCII');
+    assert(lines.includes('call claude') && !lines.includes('claude'), 'claude — через call (иначе pause после него не исполняется)');
+  });
+
+  if (process.platform === 'win32') {
+    ok('claude-start.cmd (прогон cmd.exe): после ошибки Claude срабатывает pause; при успехе — нет; мутант без call — pause теряется', () => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1b-cs-'));
+      try {
+        fs.mkdirSync(path.join(base, 'HamidunStart'));
+        fs.mkdirSync(path.join(base, '.local', 'bin'), { recursive: true });
+        // Фейковый claude — .cmd, как у npm: без call управление в лаунчер не вернулось бы.
+        fs.writeFileSync(path.join(base, '.local', 'bin', 'claude.cmd'), '@echo HM-FAKE-CLAUDE\r\n@exit /b %HM_FAKE_RC%\r\n');
+        const run = (body, rc) => {
+          const f = path.join(base, 'claude-start-' + rnd() + '.cmd');
+          fs.writeFileSync(f, body, 'utf8');
+          const r = spawnSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'), ['/d', '/c', f],
+            // windowsHide: своя скрытая консоль — chcp 65001 внутри лаунчера не трогает консоль прогона.
+            { encoding: 'utf8', timeout: 60000, windowsHide: true, input: 'x\r\n',
+              env: Object.assign({}, process.env, { USERPROFILE: base, HM_FAKE_RC: String(rc) }) });
+          return String(r.stdout || '') + String(r.stderr || '');
+        };
+        const body = claudeStartBody();
+        const fail = run(body, 1);
+        assert(/HM-FAKE-CLAUDE/.test(fail), 'лаунчер нашёл claude в ~/.local/bin и запустил его: ' + fail);
+        assert(/\. \. \./.test(fail), 'claude упал — pause сработал, окно не закрылось: ' + fail);
+        const okRun = run(body, 0);
+        assert(/HM-FAKE-CLAUDE/.test(okRun) && !/\. \. \./.test(okRun), 'claude завершился штатно — pause нет: ' + okRun);
+        const mutant = run(body.replace('call claude\r\n', 'claude\r\n'), 1);
+        assert(/HM-FAKE-CLAUDE/.test(mutant) && !/\. \. \./.test(mutant),
+          'контроль: без call управление не вернулось и pause потерялся — проверка это видит: ' + mutant);
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+  }
+})();
+
+// ===========================================================================
+// A1c (09.10.2026): итоги проверки первого коммита пятью линзами. Запасной путь, который сам
+// отказывает (строка длиннее предела CreateProcessWithTokenW), кавычки-«ёлочки» в пути, причина
+// частичного успеха, которая в бою терялась, красный/жёлтый выход vscode.ps1 и «Повторить»
+// для тех, у кого редактор есть, а панели нет. Здесь — то, чего не покрывают тесты выше:
+// кавычки U+2018/2019/201A/201B в литералах (PS и JS, настоящим парсером PowerShell), сквозная
+// проверка Invoke-HmDeElevatedSafe на настоящем _deelev.ps1 со стабами примитивов, текст отказа
+// Handy без внутренних слов, Cursor через общий примитив, поиск Code.exe рядом с CLI.
+// ===========================================================================
+(function deElevationReviewFixesA1c() {
+  console.log('\n== A1c: кавычки в литералах, сквозная проверка запасного пути, Handy, Cursor, поиск Code.exe ==');
+  const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+  const DEELEV = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+  const rnd = () => Math.random().toString(36).slice(2, 10);
+  const runPs = (body, extraEnv) => {
+    const f = path.join(os.tmpdir(), 'hm-a1c-' + rnd() + '.ps1');
+    fs.writeFileSync(f, '﻿[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n. \'' +
+      DEELEV.replace(/'/g, "''") + '\'\r\n' + body + '\r\n', 'utf8');
+    try {
+      return spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: 180000, env: Object.assign({}, process.env, extraEnv || {}) });
+    } finally { try { fs.rmSync(f, { force: true }); } catch (e) { /* */ } }
+  };
+  const json = (r) => {
+    const line = String((r && r.stdout) || '').split(/\r?\n/).find((l) => l.startsWith('HMJSON:'));
+    assert(line, 'PowerShell не вернул HMJSON: ' + String((r && (r.stderr || r.stdout)) || '').slice(0, 500));
+    return JSON.parse(line.slice('HMJSON:'.length));
+  };
+  const main = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const QUOTES = ['\u2018', '\u2019', '\u201A', '\u201B'];
+  // Значения, в которых каждый из пяти знаков-ограничителей встречается внутри пути.
+  const VALUES = [
+    'C:\\Users\\O\u2019Brien\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd',
+    'C:\\Users\\L\u2018x\u201Ay\u201Bz\\f.vsix',
+    "C:\\Users\\It's\\a b\\f.vsix",
+    'C:\\Users\\\u2019\u2019\\ & (x86)\\f.vsix'
+  ];
+
+  if (powershellAvailable()) {
+    ok('A1c (прогон PS 5.1): типографские кавычки в пути (O’Brien) не ломают обёртку задачи — разбор без ошибок, литералы означают ровно исходные значения; прежнее удвоение одного ASCII ломало', () => {
+      const body = [
+        // ConvertFrom-Json в PS 5.1 отдаёт JSON-массив ОДНИМ объектом: перебираем без @(...), иначе цикл один.
+        "$vals = ConvertFrom-Json $env:HM_T_VALS",
+        "$res = @()",
+        "foreach ($v in $vals) {",
+        "  $back = & ([scriptblock]::Create(\"'\" + (ConvertTo-HmPsLiteral $v) + \"'\"))",
+        "  $b = New-HmDeElevWrapperBody -S32 'C:\\Windows\\System32' -SysRoot 'C:\\Windows' -Whoami 'C:\\Windows\\System32\\whoami.exe' -Exe $v -Arguments @($v, 'x') -Label 'lbl' -LogPath $v",
+        "  $tok = $null; $err = $null",
+        "  $ast = [System.Management.Automation.Language.Parser]::ParseInput($b, [ref]$tok, [ref]$err)",
+        "  $consts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })",
+        "  $oldLit = \"'\" + ($v -replace \"'\", \"''\") + \"'\"",
+        "  $oTok = $null; $oErr = $null",
+        "  [void][System.Management.Automation.Language.Parser]::ParseInput($oldLit, [ref]$oTok, [ref]$oErr)",
+        "  $oldBack = ''",
+        "  try { $oldBack = [string](& ([scriptblock]::Create($oldLit))) } catch { $oldBack = '<ошибка>' }",
+        "  $res += [pscustomobject]@{ back = [string]$back; errors = @($err).Count; asConst = @($consts | Where-Object { $_ -eq $v }).Count; oldErrors = @($oErr).Count; oldBack = $oldBack }",
+        "}",
+        "$res += [pscustomobject]@{ back = (ConvertTo-HmPsLiteral $null); errors = 0; asConst = 0; oldErrors = 0; oldBack = '' }",
+        "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject $res -Compress -Depth 4))"
+      ].join('\r\n');
+      const rows = json(runPs(body, { HM_T_VALS: JSON.stringify(VALUES) }));
+      VALUES.forEach((v, i) => {
+        assert.strictEqual(rows[i].back, v, 'литерал означает то же значение (PS): ' + v);
+        assert.strictEqual(rows[i].errors, 0, 'тело обёртки разбирается без ошибок: ' + v);
+        // exe, оба аргумента-значения и журнал — четыре независимых литерала с одним и тем же значением.
+        assert(rows[i].asConst >= 3, 'значение стоит в обёртке отдельными строковыми литералами (' + rows[i].asConst + '): ' + v);
+        if (QUOTES.some((q) => v.includes(q))) {
+          assert(rows[i].oldErrors > 0 || rows[i].oldBack !== v, 'контроль: удвоение одного ASCII ломало литерал с типографской кавычкой: ' + v);
+        }
+      });
+      assert.strictEqual(rows[VALUES.length].back, '', 'пустое значение -> пустой литерал');
+    });
+
+    ok('A1c (прогон PS 5.1): deelev-route.psQuoteBody/psLit/psArgList — те же литералы со стороны Node; значения доходят неискажёнными (настоящий парсер PowerShell)', () => {
+      const lits = VALUES.map((v) => DR.psLit(v));
+      const lists = VALUES.map((v) => DR.psArgList([v, 'C:\\dir with space\\']));
+      const body = [
+        "$lits = ConvertFrom-Json $env:HM_T_LITS",
+        "$lists = ConvertFrom-Json $env:HM_T_LISTS",
+        "$a = @(); foreach ($l in $lits) { $a += ,[string](& ([scriptblock]::Create($l))) }",
+        "$b = @(); foreach ($l in $lists) { $b += ,(@(& ([scriptblock]::Create('@(' + $l + ')'))) -join '|') }",
+        "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject ([pscustomobject]@{ a = $a; b = $b }) -Compress -Depth 4))"
+      ].join('\r\n');
+      const o = json(runPs(body, { HM_T_LITS: JSON.stringify(lits), HM_T_LISTS: JSON.stringify(lists) }));
+      VALUES.forEach((v, i) => {
+        assert.strictEqual(o.a[i], v, 'psLit: значение то же: ' + v);
+        // psArgList: два аргумента, каждый в своих кавычках; хвостовой «\» удвоен.
+        assert.strictEqual(o.b[i], '"' + v + '"|"C:\\dir with space\\\\"', 'psArgList: ' + v);
+      });
+      assert.strictEqual(DR.psQuoteBody(null), '');
+      assert.strictEqual(DR.psQuoteBody("a'b"), "a''b");
+      QUOTES.forEach((q) => assert.strictEqual(DR.psQuoteBody('x' + q + 'y'), 'x' + q + q + 'y', 'знак ' + q.charCodeAt(0).toString(16) + ' удваивается'));
+    });
+  }
+
+  ok('main.js: литералы PowerShell в запуске скриптов, защищённом каталоге, запасном пути и обёртке запуска редактора — только через deelevRoute.psQuoteBody/psLit', () => {
+    const m = main();
+    const bare = /\.replace\(\/'\/g, "''"\)/;
+    const slice = (a, b) => { const i = m.indexOf(a); const j = m.indexOf(b, i + 1); assert(i !== -1 && j > i, 'опорные строки найдены: ' + a); return m.slice(i, j); };
+    const run = slice('const psScript =', '"& \'" + psScript');
+    assert(/deelevRoute\.psQuoteBody\(script\)/.test(run) && !bare.test(run), 'запуск скриптов компонентов (путь в профиле — O’Brien)');
+    const dir = slice('async function winMakeSecureDir', 'function winShellTokenLaunch');
+    assert(!bare.test(dir) && (dir.match(/deelevRoute\.psQuoteBody\(/g) || []).length >= 4, 'защищённый каталог: четыре литерала через общую функцию');
+    const sh = slice('function winShellTokenLaunch', 'async function winLaunchDeElevated');
+    assert(!bare.test(sh) && /const lit = deelevRoute\.psLit;/.test(sh), 'запасной путь запуска редактора');
+    const wl = slice('async function winLaunchDeElevated', 'function launchVsCodeOn');
+    assert(!bare.test(wl) && (wl.match(/deelevRoute\.psQuoteBody\(/g) || []).length >= 4, 'обёртка запуска редактора: четыре литерала');
+    const ps = codeOnly(fs.readFileSync(DEELEV, 'utf8'));
+    const wrapper = ps.slice(ps.indexOf('function New-HmDeElevWrapperBody'), ps.indexOf('function Invoke-HmDeElevated'));
+    assert(!/-replace "'", "''"/.test(wrapper) && (wrapper.match(/ConvertTo-HmPsLiteral/g) || []).length >= 6, 'обёртка задачи: все литералы через ConvertTo-HmPsLiteral');
+  });
+
+  // --- m11: сквозная проверка Invoke-HmDeElevatedSafe (настоящий _deelev.ps1, стабы двух примитивов) ----
+  if (powershellAvailable()) {
+    ok('A1c (прогон PS 5.1): Invoke-HmDeElevatedSafe зовёт запасной путь РОВНО при доказанной тишине задачи; во всех остальных исходах — нет', () => {
+      const body = [
+        "$script:calls = @()",
+        "function Invoke-HmDeElevated { param($Exe, [string[]]$Arguments = @(), [string]$Label = '')",
+        "  $script:calls += 'task'; $script:HmDeElevStage = $env:HM_T_STAGE",
+        "  if ($env:HM_T_TASK -eq 'null') { return $null }",
+        "  $v = Get-HmTaskVerdict -LastResult $env:HM_T_TASK",
+        "  return [pscustomobject]@{ Gate = $v.Gate; Code = $v.Code; Hex = $v.Hex; Kind = $v.Kind; LastResult = $env:HM_T_TASK } }",
+        "function Invoke-HmAsShellUser { param($Exe, [string[]]$Arguments = @(), [string]$Label = '', [int]$TimeoutSec = 600)",
+        "  $script:calls += 'shell'",
+        "  return [pscustomobject]@{ Route = 'shell-token'; Gate = $env:HM_T_SHELL; Code = 0; Reason = 'тест'; ProcessId = 1; Logged = $true; LogNote = '' } }",
+        "$rows = @()",
+        "foreach ($c in (ConvertFrom-Json $env:HM_T_CASES)) {",
+        "  $env:HM_T_STAGE = $c.stage; $env:HM_T_TASK = $c.task; $env:HM_T_SHELL = $c.shell; $script:calls = @()",
+        "  $r = Invoke-HmDeElevatedSafe -Exe 'C:\\x\\code.cmd' -Arguments @('--install-extension', 'a.b', '--force') -Label ('t-' + $c.name) 6>$null",
+        "  $rows += [pscustomobject]@{ name = $c.name; calls = ($script:calls -join ','); gate = $r.Gate; route = $r.Route; finished = [bool]$r.Finished; code = $r.Code; shellGate = $r.ShellGate }",
+        "}",
+        "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject $rows -Compress -Depth 4))"
+      ].join('\r\n');
+      const cases = [
+        // stage, task (Last Result или null), shell Gate -> ожидаемые вызовы и итог
+        { name: 'prereq', stage: 'prereq', task: 'null', shell: 'medium', calls: 'task,shell', gate: 'medium', route: 'shell-token', finished: true },
+        { name: 'staging', stage: 'staging', task: 'null', shell: 'medium', calls: 'task,shell', gate: 'medium', route: 'shell-token', finished: true },
+        { name: 'create', stage: 'create', task: 'null', shell: 'medium', calls: 'task,shell', gate: 'medium', route: 'shell-token', finished: true },
+        { name: 'run', stage: 'run', task: 'null', shell: 'medium', calls: 'task,shell', gate: 'medium', route: 'shell-token', finished: true },
+        { name: 'running', stage: 'running', task: 'null', shell: 'medium', calls: 'task', gate: 'unknown', route: 'task', finished: false },
+        { name: 'notstarted', stage: 'done', task: '-2147024891', shell: 'medium', calls: 'task,shell', gate: 'medium', route: 'shell-token', finished: true },
+        { name: 'notstarted-shell-unavailable', stage: 'done', task: '-2147024891', shell: 'unavailable', calls: 'task,shell', gate: 'unavailable', route: 'none', finished: true },
+        { name: 'notstarted-shell-unknown', stage: 'done', task: '-2147024891', shell: 'unknown', calls: 'task,shell', gate: 'unknown', route: 'shell-token', finished: false },
+        { name: 'refused-210', stage: 'done', task: '210', shell: 'refused', calls: 'task,shell', gate: 'refused', route: 'none', finished: true },
+        { name: 'exit0', stage: 'done', task: '0', shell: 'medium', calls: 'task', gate: 'medium', route: 'task', finished: true },
+        { name: 'exit1', stage: 'done', task: '1', shell: 'medium', calls: 'task', gate: 'medium', route: 'task', finished: true },
+        { name: 'exit211', stage: 'done', task: '211', shell: 'medium', calls: 'task', gate: 'medium', route: 'task', finished: true },
+        { name: 'terminated', stage: 'done', task: '267014', shell: 'medium', calls: 'task', gate: 'terminated', route: 'task', finished: false },
+        { name: 'sched-status', stage: 'done', task: '267009', shell: 'medium', calls: 'task', gate: 'unknown', route: 'task', finished: false },
+        { name: 'no-result', stage: 'done', task: '', shell: 'medium', calls: 'task', gate: 'unknown', route: 'task', finished: false }
+      ];
+      const rows = json(runPs(body, { HM_T_CASES: JSON.stringify(cases) }));
+      assert.strictEqual(rows.length, cases.length);
+      cases.forEach((c, i) => {
+        assert.strictEqual(rows[i].calls, c.calls, c.name + ': вызовы примитивов');
+        assert.strictEqual(rows[i].gate, c.gate, c.name + ': итоговый Gate');
+        assert.strictEqual(rows[i].route, c.route, c.name + ': какой путь сработал');
+        assert.strictEqual(rows[i].finished, c.finished, c.name + ': можно ли считать запуск законченным');
+      });
+      assert.strictEqual(rows[cases.findIndex((c) => c.name === 'exit1')].code, 1, 'код программы доходит как есть');
+    });
+  }
+
+  // --- m10: отказ Handy — обычными словами, без внутренних Gate-слов -----------------------------------
+  if (powershellAvailable()) {
+    ok('A1c (прогон PS 5.1): Handy — причина отказа записи микрофона обычным языком (refused/unavailable не печатаются), ручной способ назван', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'handy.ps1'), 'utf8');
+      const a = src.indexOf('function Grant-HmHandyMic');
+      const b = src.indexOf('\r\n}\r\n', a);
+      assert(a !== -1 && b > a, 'функция найдена');
+      const fn = src.slice(a, b + 4);
+      const body = [
+        "$DRY = $false; $env:HM_HANDY_MIC = '1'",
+        fn,
+        "function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = '', [int]$TimeoutSec = 600)",
+        "  if ($Label -eq 'handy-mic-query') { return [pscustomobject]@{ Gate = 'medium'; Code = 1; ShellReason = '' } }",
+        "  return [pscustomobject]@{ Gate = $env:HM_T_GATE; Code = -1; ShellReason = $env:HM_T_WHY } }",
+        "$out = @()",
+        "foreach ($g in @('refused', 'unavailable', 'unknown', 'weird')) {",
+        "  $env:HM_T_GATE = $g; $env:HM_T_WHY = 'тестовая причина'",
+        "  $text = (Grant-HmHandyMic -ExePath 'C:\\Users\\hm-a1c-nobody\\AppData\\Local\\Handy\\handy.exe' 6>&1 | Out-String -Width 4000)",
+        "  $out += [pscustomobject]@{ gate = $g; text = $text }",
+        "}",
+        "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject $out -Compress -Depth 4))"
+      ].join('\r\n');
+      const rows = json(runPs(body));
+      assert.strictEqual(rows.length, 4);
+      rows.forEach((r) => {
+        assert(/Микрофон: разрешение записать не удалось \(запись от имени пользователя недоступна: /.test(r.text), r.gate + ': ' + r.text);
+        assert(!/\b(refused|unavailable|unknown|weird|Gate)\b/.test(r.text), r.gate + ': внутренние слова не печатаются: ' + r.text);
+        assert(/\(тестовая причина\)/.test(r.text), r.gate + ': техническая причина — в скобках');
+        assert(/Разрешить вручную: Параметры/.test(r.text), r.gate + ': ручной способ назван');
+      });
+      assert(/UAC выключен/.test(rows[0].text), 'refused объяснён: ' + rows[0].text);
+    });
+  }
+
+  // --- m4: Cursor (extension.ps1) идёт через общий примитив с запасным путём --------------------------
+  ok('extension.ps1: Cursor ставится через Invoke-HmDeElevatedSafe, голого Invoke-HmDeElevated нет, второй запуск только после доказанно отработавшего первого', () => {
+    const e = codeOnly(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'extension.ps1'), 'utf8'));
+    assert(/Invoke-HmDeElevatedSafe \$cli @\('--install-extension', \$target, '--force'\) -Label "cursor-\$extId"/.test(e), 'установка из vsix/Marketplace — через обёртку');
+    assert(!/Invoke-HmDeElevated \$cli/.test(e), 'голого примитива нет');
+    assert(/\$r\.Gate -eq 'medium'/.test(e), 'второй запуск (Marketplace) — только после доказанно отработавшего первого');
+  });
+
+  if (powershellAvailable()) {
+    // Песочница extension.ps1: настоящий скрипт + настоящий _deelev.ps1, поверх — стаб Invoke-HmDeElevatedSafe.
+    const STUB = [
+      '',
+      'function Start-Sleep { param($Seconds, $Milliseconds) }',
+      'function Invoke-HmDeElevatedSafe { param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)',
+      '  $tgt = if ($Arguments.Count -ge 2) { [string]$Arguments[1] } else { "" }',
+      '  Add-Content -LiteralPath $env:HM_T_LOG -Value ("INSTALL " + $Label + " " + $(if ($tgt -like "*.vsix") { "vsix" } else { "marketplace" }))',
+      '  $mode = $env:HM_T_MODE',
+      '  if ($mode -eq "ok") { New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE (".cursor\\extensions\\anthropic.claude-code-9.9.9")) | Out-Null',
+      '    return [pscustomobject]@{ Gate = "medium"; Code = 0; Finished = $true; ShellReason = "" } }',
+      '  if ($mode -eq "refused") { return [pscustomobject]@{ Gate = "refused"; Code = -1; Finished = $true; ShellReason = "тест" } }',
+      '  if ($mode -eq "running") { return [pscustomobject]@{ Gate = "unknown"; Code = -1; Finished = $false; ShellReason = "" } }',
+      '  return [pscustomobject]@{ Gate = "medium"; Code = 1; Finished = $true; ShellReason = "" }',
+      '}',
+      ''
+    ].join('\r\n');
+    const runCursorExt = ({ mode, vsix }) => {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1c-ext-'));
+      const sb = (p) => path.join(base, p);
+      ['scripts', 'vendor\\apps', 'temp', 'home', 'appdata', 'la\\Programs\\cursor\\resources\\app\\bin'].forEach((d) => fs.mkdirSync(sb(d), { recursive: true }));
+      fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', 'extension.ps1'), sb('scripts\\extension.ps1'));
+      fs.writeFileSync(sb('scripts\\_verify.ps1'), 'function Confirm-HmArtifact { param($p) }\r\nfunction Test-HmArtifact { param($p) $true }\r\n');
+      fs.writeFileSync(sb('scripts\\_deelev.ps1'), fs.readFileSync(DEELEV, 'utf8') + STUB, 'utf8');
+      fs.writeFileSync(sb('la\\Programs\\cursor\\resources\\app\\bin\\cursor.cmd'), '@echo off\r\n');
+      if (vsix) fs.writeFileSync(sb('vendor\\apps\\claude-code.vsix'), Buffer.alloc(4096, 5));
+      fs.writeFileSync(sb('calls.log'), '');
+      const env = Object.assign({}, process.env, {
+        TEMP: sb('temp'), TMP: sb('temp'), LOCALAPPDATA: sb('la'), APPDATA: sb('appdata'), USERPROFILE: sb('home'),
+        HM_VENDOR: sb('vendor'), HM_T_LOG: sb('calls.log'), HM_T_MODE: mode
+      });
+      delete env.HM_DRY_RUN; delete env.HM_CURSOR_AUTOSTARTED;
+      try {
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & '" + sb('scripts\\extension.ps1') + "'; exit $LASTEXITCODE"],
+          { encoding: 'utf8', timeout: 240000, env });
+        return { status: r.status, out: String(r.stdout || ''), calls: fs.readFileSync(sb('calls.log'), 'utf8').trim().split(/\r?\n/).filter(Boolean) };
+      } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ } }
+    };
+
+    ok('extension.ps1 (прогон PS 5.1): расширение Cursor встало — exit 0; отказ по политике — fail-closed exit 1 с одним запуском; vsix не встал при Gate medium — второй запуск из Marketplace; ещё идёт — второго нет', () => {
+      const good = runCursorExt({ mode: 'ok' });
+      assert.strictEqual(good.status, 0, good.out.slice(-500));
+      assert.deepStrictEqual(good.calls, ['INSTALL cursor-anthropic.claude-code marketplace']);
+      const refused = runCursorExt({ mode: 'refused', vsix: true });
+      assert.strictEqual(refused.status, 1, refused.out.slice(-500));
+      assert.deepStrictEqual(refused.calls, ['INSTALL cursor-anthropic.claude-code vsix'], 'ничего не запущено, второй запуск бессмысленен');
+      assert(/не удалось безопасно \(от имени пользователя\) установить — пропускаю \(fail-closed/.test(refused.out), 'причина названа: ' + refused.out.slice(-500));
+      const fallbackToMarket = runCursorExt({ mode: 'fail', vsix: true });
+      assert.deepStrictEqual(fallbackToMarket.calls, ['INSTALL cursor-anthropic.claude-code vsix', 'INSTALL cursor-anthropic.claude-code marketplace'],
+        'vsix отработал, расширения нет -> Marketplace');
+      const running = runCursorExt({ mode: 'running', vsix: true });
+      assert.deepStrictEqual(running.calls, ['INSTALL cursor-anthropic.claude-code vsix'], 'первый запуск мог ещё идти -> второго нет');
+      assert.strictEqual(running.status, 1);
+    });
+  }
+
+  // --- m3: поиск Code.exe рядом с CLI из PATH (main.js) ---------------------------------------------
+  ok('main.js (прогон): winVsCodeExe — стандартные места, затем Code.exe рядом с code.cmd из PATH; один code.cmd (шим Cursor, остаток удаления) редактором не считается', () => {
+    const m = main();
+    const i = m.indexOf('function winVsCodeExe()');
+    const j = m.indexOf('\n}\n', i);
+    assert(i !== -1 && j > i, 'функция найдена');
+    const src = m.slice(i, j + 2);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1c-vsx-'));
+    try {
+      const mk = (rel, text) => { const f = path.join(base, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text || 'x'); return f; };
+      const make = (la, pf, cli) => new Function('path', 'firstExisting', 'winLocalAppData', 'winPF', 'resolveExecutable',
+        src + '; return winVsCodeExe;')(path,
+        (ps) => { for (const p of ps) { try { if (p && fs.existsSync(p)) return p; } catch (e) { /* */ } } return ''; },
+        () => la, () => pf, () => cli);
+      const stdExe = mk('la1\\Programs\\Microsoft VS Code\\Code.exe');
+      assert.strictEqual(make(path.join(base, 'la1'), path.join(base, 'pf-none'), '')(), stdExe, 'стандартная папка пользователя');
+      const pfExe = mk('pf2\\Microsoft VS Code\\Code.exe');
+      assert.strictEqual(make(path.join(base, 'la-none'), path.join(base, 'pf2'), '')(), pfExe, 'Program Files');
+      const customCli = mk('D\\Apps\\VSCode\\bin\\code.cmd');
+      const customExe = mk('D\\Apps\\VSCode\\Code.exe');
+      assert.strictEqual(make(path.join(base, 'la-none'), path.join(base, 'pf-none'), customCli)(), customExe, 'своя папка: Code.exe рядом с CLI из PATH');
+      const lone = mk('E\\leftover\\bin\\code.cmd');
+      assert.strictEqual(make(path.join(base, 'la-none'), path.join(base, 'pf-none'), lone)(), '', 'один code.cmd без Code.exe — не редактор');
+      const cursorShim = mk('F\\cursor\\resources\\app\\bin\\code.cmd');
+      assert.strictEqual(make(path.join(base, 'la-none'), path.join(base, 'pf-none'), cursorShim)(), '', 'шим Cursor (code.cmd, но не VS Code) — не редактор');
+      assert.strictEqual(make(path.join(base, 'la-none'), path.join(base, 'pf-none'), '')(), '', 'нигде нет — пусто');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
+  // --- Invoke-HmAsShellUser на ПОДМЕНЁННОМ системном слое ---------------------------------------------
+  // Настоящий CreateProcessWithTokenW в тесте недоступен (нужен SeImpersonatePrivilege администратора),
+  // поэтому вызовы системного слоя (Get-HmNativeApi) подменены классом, который записывает командные
+  // строки и отвечает заданными кодами. Всё остальное — настоящее: план запуска, политика токена,
+  // проверка уровня копии, подготовка журнала, переход на запуск без журнала, таймаут.
+  if (powershellAvailable()) {
+    ok('A1c (прогон PS 5.1): Invoke-HmAsShellUser на подменённом системном слое — подготовка журнала, затем программа; журнал не открылся — программа напрямую; слишком длинная строка — отказ без запуска; политика токена стоит ДО любого запуска', () => {
+      const cs = [
+        'using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text; using System.Threading;',
+        'public static class HmFakeNative {',
+        '  public static List<string> Lines = new List<string>(); public static List<string> Apps = new List<string>();',
+        '  public static Dictionary<long, bool> Prep = new Dictionary<long, bool>();',
+        '  public static uint PrepExit = 0; public static uint MainExit = 0; public static uint MainWait = 0;',
+        '  public static bool DuplicateTokenEx(IntPtr h, uint access, IntPtr attrs, int imp, int type, ref IntPtr dup) { dup = (IntPtr)0x7700; return true; }',
+        '  public static bool CreateProcessWithTokenW(IntPtr tok, uint logon, string app, StringBuilder cmd, uint flags, IntPtr env, string cwd, IntPtr si, IntPtr pi) {',
+        '    string line = cmd.ToString(); Lines.Add(line); Apps.Add(app);',
+        '    long h = 0x100 + Lines.Count; Prep[h] = line.Contains("exit 0 || exit 1");',
+        '    Marshal.WriteIntPtr(pi, 0, (IntPtr)h); Marshal.WriteIntPtr(pi, IntPtr.Size, (IntPtr)0x900); Marshal.WriteInt32(pi, 2 * IntPtr.Size, 4000 + Lines.Count);',
+        '    return true; }',
+        '  public static uint WaitForSingleObject(IntPtr h, uint ms) { if (Prep.ContainsKey((long)h) && Prep[(long)h]) return 0; if (MainWait != 0) Thread.Sleep(30); return MainWait; }',
+        '  public static bool GetExitCodeProcess(IntPtr h, ref uint code) { code = (Prep.ContainsKey((long)h) && Prep[(long)h]) ? PrepExit : MainExit; return true; }',
+        '  public static bool CloseHandle(IntPtr h) { return true; }',
+        '  public static void Reset() { Lines.Clear(); Apps.Clear(); Prep.Clear(); PrepExit = 0; MainExit = 0; MainWait = 0; }',
+        '}'
+      ].join('\r\n');
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1c-sim-'));
+      const tgtCmd = path.join(base, 'tgt.cmd');
+      fs.writeFileSync(tgtCmd, '@echo off\r\n');
+      try {
+        const body = [
+          "Add-Type -TypeDefinition @'",
+          cs,
+          "'@",
+          "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+          "$script:ShellIl = 'S-1-16-8192'; $script:DupIl = 'S-1-16-8192'; $script:ShellUser = $me",
+          "function Get-HmNativeApi { return [HmFakeNative] }",
+          "function Open-HmShellToken { return [pscustomobject]@{ Handle = [IntPtr]0x55; ProcessId = 1; UserSid = $script:ShellUser; IntegritySid = $script:ShellIl; Reason = '' } }",
+          "function Get-HmTokenSid { param($Token, $Class) return $script:DupIl }",
+          "$who = \"$env:SystemRoot\\System32\\whoami.exe\"",
+          "function Run($name, $exe, $a, [hashtable]$o) {",
+          "  [HmFakeNative]::Reset()",
+          "  [HmFakeNative]::PrepExit = [uint32]$(if ($o.prep -ne $null) { $o.prep } else { 0 })",
+          "  [HmFakeNative]::MainExit = [uint32]$(if ($o.main -ne $null) { $o.main } else { 0 })",
+          "  [HmFakeNative]::MainWait = [uint32]$(if ($o.wait -ne $null) { $o.wait } else { 0 })",
+          "  $script:ShellIl = $(if ($o.shellIl) { $o.shellIl } else { 'S-1-16-8192' })",
+          "  $script:DupIl = $(if ($o.dupIl) { $o.dupIl } else { 'S-1-16-8192' })",
+          "  $script:ShellUser = $(if ($o.user) { $o.user } else { $me })",
+          "  if ($o.nowait) { $r = Invoke-HmAsShellUser -Exe $exe -Arguments $a -Label 'sim' -NoWait } else { $r = Invoke-HmAsShellUser -Exe $exe -Arguments $a -Label 'sim' -TimeoutSec $(if ($o.timeout) { $o.timeout } else { 60 }) }",
+          "  [pscustomobject]@{ name = $name; gate = $r.Gate; code = $r.Code; logged = [bool]$r.Logged; note = [string]$r.LogNote; reason = [string]$r.Reason; lines = @([HmFakeNative]::Lines.ToArray()); apps = @([HmFakeNative]::Apps.ToArray()) }",
+          "}",
+          // Длина аргумента, при которой прямая строка ещё умещается в 1024, а строка с журналом уже нет:
+          // окно узкое (~80 знаков) и зависит от длины пути профиля, поэтому ищем его на этой машине.
+          "$cmdExe = \"$env:SystemRoot\System32\cmd.exe\"",
+          "function Find-Window($exe) { foreach ($k in 600..1020) { $p = Get-HmShellLaunchPlan -CmdExe $cmdExe -Exe $exe -Arguments @('x' * $k) -LogPath (Get-HmDeElevLogPath -Label 'sim') -Label 'sim'; if ($p.Mode -eq 'direct' -and $p.Note -match 'длиннее') { return $k } }; return 0 }",
+          "$kWho = Find-Window $who",
+          "$kBat = Find-Window '" + tgtCmd.replace(/'/g, "''") + "'",
+          "$rows = @()",
+          "$rows += Run 'logged' $who @('/groups') @{ prep = 0; main = 7 }",
+          "$rows += Run 'prep-fails' $who @('/groups') @{ prep = 1; main = 7 }",
+          "$rows += Run 'long-arg' $who @('x' * $kWho) @{ main = 3 }",
+          "$rows += Run 'too-long' $who @('x' * 1100) @{ }",
+          "$rows += Run 'nowait-exit' $who @('C:\\dir', 'C:\\dir\\PROMPTS.md') @{ nowait = $true; main = 5; wait = 0 }",
+          "$rows += Run 'nowait-alive' $who @('C:\\dir') @{ nowait = $true; main = 5; wait = 258 }",
+          "$rows += Run 'timeout' $who @('/groups') @{ wait = 258; timeout = 2 }",
+          "$rows += Run 'shell-high' $who @('/groups') @{ shellIl = 'S-1-16-12288' }",
+          "$rows += Run 'dup-high' $who @('/groups') @{ dupIl = 'S-1-16-12288' }",
+          "$rows += Run 'other-user' $who @('/groups') @{ user = 'S-1-5-21-1-2-3-1001' }",
+          "$rows += Run 'batch-direct' '" + tgtCmd.replace(/'/g, "''") + "' @('x' * $kBat) @{ main = 2 }",
+          "$rows += Run 'batch-logged' '" + tgtCmd.replace(/'/g, "''") + "' @('a b') @{ main = 2 }",
+          "$rows += Run 'percent-batch' '" + tgtCmd.replace(/'/g, "''") + "' @('a%PATH%b') @{ }",
+          "Write-Output ('HMJSON:' + (ConvertTo-Json -InputObject $rows -Compress -Depth 5))"
+        ].join('\r\n');
+        const rows = json(runPs(body));
+        const by = {}; rows.forEach((r) => { by[r.name] = r; });
+        const arr = (v) => (Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]));
+        // 1) обычный ход: подготовка журнала (код 0), затем программа с записью вывода; код программы доходит как есть
+        assert.strictEqual(by.logged.gate, 'medium');
+        assert.strictEqual(by.logged.code, 7, 'код программы');
+        assert.strictEqual(by.logged.logged, true, 'вывод пишется в журнал');
+        assert.strictEqual(arr(by.logged.lines).length, 2, 'два запуска: подготовка журнала и программа');
+        assert(/exit 0 \|\| exit 1/.test(by.logged.lines[0]) && !/whoami/i.test(by.logged.lines[0]), 'сначала — подготовка журнала, без программы');
+        assert(/whoami\.exe" "\/groups" >>"[^"]*sim\.log" 2>&1/i.test(by.logged.lines[1]), 'потом — программа ОДНА, с записью вывода: ' + by.logged.lines[1]);
+        // 2) журнал не открылся: программа всё равно запускается — напрямую, без записи
+        assert.strictEqual(by['prep-fails'].gate, 'medium');
+        assert.strictEqual(by['prep-fails'].code, 7, 'программа запущена, несмотря на сбой журнала');
+        assert.strictEqual(by['prep-fails'].logged, false);
+        assert(/журнал недоступен/.test(by['prep-fails'].note), 'причина названа: ' + by['prep-fails'].note);
+        assert.strictEqual(arr(by['prep-fails'].lines).length, 2);
+        assert(!/>>/.test(by['prep-fails'].lines[1]) && /^"[^"]*whoami\.exe" "\/groups"$/i.test(by['prep-fails'].lines[1]), 'прямая форма: ' + by['prep-fails'].lines[1]);
+        // 3) строка с журналом не умещается, прямая умещается: один запуск, без журнала, причина — предел
+        assert.strictEqual(by['long-arg'].gate, 'medium');
+        assert.strictEqual(arr(by['long-arg'].lines).length, 1, 'подготовки журнала нет — сразу программа');
+        assert(by['long-arg'].lines[0].length <= 1024, 'прямая строка в пределе: ' + by['long-arg'].lines[0].length);
+        assert(/длиннее предела/.test(by['long-arg'].note) && by['long-arg'].logged === false, by['long-arg'].note);
+        // 4) и прямая не умещается — отказ БЕЗ запуска
+        assert.strictEqual(by['too-long'].gate, 'unavailable');
+        assert.strictEqual(arr(by['too-long'].lines).length, 0, 'слишком длинную строку системе не отдаём');
+        assert(/длиннее предела/.test(by['too-long'].reason), by['too-long'].reason);
+        // 5) окно редактора: журнала нет по замыслу, один запуск; быстрый выход виден, живой процесс — код 0
+        assert.strictEqual(arr(by['nowait-exit'].lines).length, 1);
+        assert.strictEqual(by['nowait-exit'].code, 5, 'мгновенный отказ редактора виден');
+        assert.strictEqual(by['nowait-alive'].code, 0, 'окно живёт — код 0');
+        assert.strictEqual(by['nowait-alive'].gate, 'medium');
+        assert.strictEqual(by['nowait-exit'].note, '', 'журнал не предполагался — объяснять нечего');
+        // 6) не дождались — «возможно, ещё идёт», а не провал и не успех
+        assert.strictEqual(by.timeout.gate, 'unknown');
+        assert.strictEqual(arr(by.timeout.lines).length, 2, 'подготовка и программа запущены; второго запуска нет');
+        // 7) политика токена стоит ДО любого запуска: ни одна строка системе не передана
+        ['shell-high', 'dup-high', 'other-user'].forEach((n) => {
+          assert.strictEqual(by[n].gate, 'refused', n + ': отказ');
+          assert.strictEqual(arr(by[n].lines).length, 0, n + ': ничего не запущено');
+        });
+        assert(/UAC/.test(by['shell-high'].reason), by['shell-high'].reason);
+        assert(/другой учётной записи/.test(by['other-user'].reason) && /Параметры/.test(by['other-user'].reason), by['other-user'].reason);
+        // 8) .cmd запускается через cmd /c — и с журналом, и напрямую; «%» в пути .cmd — отказ
+        assert(/cmd\.exe$/i.test(by['batch-logged'].apps[0] || '') && arr(by['batch-logged'].lines).length === 2, '.cmd с журналом — через cmd.exe: ' + JSON.stringify(by['batch-logged']));
+        assert.strictEqual(arr(by['batch-direct'].lines).length, 1, '.cmd, строка с журналом не умещается: один запуск ' + JSON.stringify(by['batch-direct']));
+        assert(/cmd\.exe$/i.test(by['batch-direct'].apps[0]) && /^"[^"]*cmd\.exe" \/d \/e:on \/v:off \/s \/c ""/i.test(by['batch-direct'].lines[0]) && !/>>/.test(by['batch-direct'].lines[0]),
+          '.cmd напрямую — cmd /c без записи вывода: ' + by['batch-direct'].lines[0]);
+        assert(by['batch-direct'].lines[0].length <= 1024 && by['batch-direct'].code === 2, 'в пределе, код доходит');
+        assert.strictEqual(by['percent-batch'].gate, 'unavailable', '«%» в .cmd: cmd /c раскрыл бы его');
+        assert.strictEqual(arr(by['percent-batch'].lines).length, 0);
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    });
+  }
+
+
+  // --- macOS: кнопки (дополнение 09.10) ---------------------------------------------------------------
+  ok('main.js (macOS): Открыть VS Code открывает папку и PROMPTS.md одним вызовом open (в запасном Cursor так же), Finder — только папку', () => {
+    const m = main();
+    const i = m.indexOf("const files = deelevRoute.editorOpenFiles(dir, openFile);");
+    const j = m.indexOf("return rf.status === 0 ? 'finder' : false;", i);
+    assert(i !== -1 && j > i, 'ветка macOS найдена');
+    const seg = m.slice(i, j);
+    assert(/\['-a', 'Visual Studio Code', dir\]\.concat\(files\)/.test(seg), 'VS Code: папка + PROMPTS.md');
+    assert(/\['-a', 'Cursor', dir\]\.concat\(files\)/.test(seg), 'запасной Cursor: так же');
+    assert(/spawnSync\('\/usr\/bin\/open', \[dir\],/.test(seg), 'Finder — только папка (редактора нет, файл открывать нечем)');
+    assert(/launchVsCodeOn\(path\.join\(os\.homedir\(\), 'HamidunStart'\), \{ openFile: 'PROMPTS\.md' \}\)/.test(m), 'кнопка просит PROMPTS.md');
+  });
+
+  ok('deelev-route.claudeTerminalOsaArgs: Terminal в ~/HamidunStart — путь отдельным аргументом osascript, а не в тексте скрипта; без папки — прежний сценарий', () => {
+    const tricky = ["/Users/O'Brien/HamidunStart", '/Users/a "b" c/HamidunStart', '/Users/$HOME `x`/Hamidun\\Start', '/Users/Анастасия В/HamidunStart'];
+    tricky.concat(['/Users/plain/HamidunStart']).forEach((p) => {
+      const a = DR.claudeTerminalOsaArgs(p);
+      assert.strictEqual(a[a.length - 1], p, 'путь — последний аргумент, без изменений: ' + p);
+      const flags = a.slice(0, -1);
+      assert(flags.every((x, k) => (k % 2 === 0 ? x === '-e' : typeof x === 'string' && x.length > 0)), 'до пути — только пары -e <оператор>');
+      const script = flags.filter((x, k) => k % 2 === 1).join('\n');
+      assert(!script.includes(p) && !/HamidunStart/.test(script), 'в тексте скрипта пути нет — экранировать AppleScript-литерал не требуется: ' + p);
+      assert(/^on run argv\n/.test(script) && /\nend run$/.test(script), 'обработчик run argv закрыт');
+      assert(/set cmd to "cd " & quoted form of \(item 1 of argv\) & " && claude"/.test(script), 'cd в path через quoted form of');
+      assert(script.indexOf('set cmd to') < script.indexOf('tell application "Terminal"'), 'команда собрана ДО tell (argv внутри блока ушёл бы приложению)');
+      assert(/do script cmd\nend tell/.test(script) && /activate/.test(script), 'Terminal выводится вперёд и получает готовую команду');
+    });
+    const legacy = DR.claudeTerminalOsaArgs('');
+    assert.deepStrictEqual(legacy, ['-e', 'tell application "Terminal" to activate', '-e', 'tell application "Terminal" to do script "claude"'],
+      'папки нет — прежний сценарий (Terminal в домашней папке)');
+  });
+
+  ok('main.js (macOS): кнопка входа в Claude создаёт ~/HamidunStart и открывает в нём Terminal через claudeTerminalOsaArgs', () => {
+    const m = main();
+    const h = m.indexOf("ipcMain.handle('open-claude-terminal'");
+    const mi = m.indexOf('if (IS_MAC) {', h);
+    const mend = m.indexOf("setTimeout(() => done(false), 120000);", mi);
+    assert(h !== -1 && mi > h && mend > mi, 'ветка macOS найдена');
+    const seg = m.slice(mi, mend);
+    assertOrder(seg, "fs.mkdirSync(startDir, { recursive: true })", "deelevRoute.claudeTerminalOsaArgs(", 'папка создаётся до запуска Terminal');
+    assert(/path\.join\(os\.homedir\(\), 'HamidunStart'\)/.test(seg), 'папка — ~/HamidunStart, как на Windows');
+    assert(/statSync\(startDir\)\.isDirectory\(\)/.test(seg) && /inStart \? startDir : ''/.test(seg), 'не каталог — прежний сценарий');
+    assert(!/do script "claude"/.test(m), 'голого do script "claude" в main.js не осталось (он живёт в helper как запасной)');
+  });
+
 })();
