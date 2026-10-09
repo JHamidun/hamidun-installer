@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
 const { spawn, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -200,6 +200,12 @@ let mainWindow = null;
 const CHILDREN = new Set();
 // Замок «идёт установка компонента» на уровне ПРОЦЕССА (переживает Ctrl+R окна).
 let _installBusy = false;
+// Шаг, который идёт прямо сейчас: id, дочерний процесс и состояние сторожа молчания.
+// Нужен кнопке «Пропустить шаг» (остановить ровно этот шаг) и отчёту о прерванной
+// установке (назвать шаг, на котором закрыли окно). null — между шагами.
+let CURRENT_STEP = null;
+// Последний запущенный шаг — на случай, если окно закрыли в паузе между шагами.
+let _lastStepId = '';
 
 // win32: Admins-only staging-каталоги докачки, ЖИВЫЕ в этом процессе (remoteId → dir).
 // Нужны для двух вещей: (1) ретрай компонента в той же сессии переиспользует УЖЕ
@@ -216,31 +222,37 @@ const SECURE_DIRS = new Map();
 //   Windows: taskkill /T /F walks and terminates the child tree by pid.
 //   macOS:   each child is spawned detached (its own process-group leader), so
 //            process.kill(-pid) signals the entire group at once.
-function killChildren() {
-  for (const c of CHILDREN) {
-    try {
-      if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } continue; }
-      if (IS_WIN) {
-        // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
-        // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
-        // #6: НИКАКОГО fallback в короткое имя 'taskkill.exe' (это вернуло бы
-        // PATH-резолв). System32 не валиден → fail-closed: рвём только сам child.
-        const tk = remoteFetch.sysBin('taskkill.exe');
-        if (tk) {
-          try {
-            execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
-              { windowsHide: true, stdio: 'ignore' });
-          } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
-        } else {
-          try { c.kill(); } catch (e2) { /* ignore */ }
-        }
+// Одно дерево — отдельной функцией: ей же пользуется кнопка «Пропустить шаг», которая
+// останавливает ровно ОДИН шаг, а не все процессы установщика.
+function killProcessTree(c) {
+  try {
+    // Уже вышедший процесс не трогаем: по его PID дерево не найти, а если Windows отдала PID
+    // другому процессу, taskkill убил бы чужое.
+    if (c && runOutcome.childExited(c)) return;
+    if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } return; }
+    if (IS_WIN) {
+      // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
+      // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
+      // #6: НИКАКОГО fallback в короткое имя 'taskkill.exe' (это вернуло бы
+      // PATH-резолв). System32 не валиден → fail-closed: рвём только сам child.
+      const tk = remoteFetch.sysBin('taskkill.exe');
+      if (tk) {
+        try {
+          execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
+            { windowsHide: true, stdio: 'ignore' });
+        } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
       } else {
-        // Negative pid => the child's whole process group (needs detached spawn).
-        try { process.kill(-c.pid, 'SIGKILL'); }
-        catch (e) { try { c.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+        try { c.kill(); } catch (e2) { /* ignore */ }
       }
-    } catch (e) { /* ignore */ }
-  }
+    } else {
+      // Negative pid => the child's whole process group (needs detached spawn).
+      try { process.kill(-c.pid, 'SIGKILL'); }
+      catch (e) { try { c.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+    }
+  } catch (e) { /* ignore */ }
+}
+function killChildren() {
+  for (const c of CHILDREN) killProcessTree(c);
   CHILDREN.clear();
 }
 
@@ -379,13 +391,28 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
+// Закрытое посреди установки окно раньше не оставляло следа: финальный отчёт шлёт
+// финиш, а до финиша такой прогон не доходил. Бот видел «начал ставить» и тишину —
+// ни шага, ни причины. Теперь перед выходом уходит отчёт «прервано на шаге X», и
+// выход ждёт его не дольше пары секунд (sendAbortReportIfNeeded / waitTelemetryThen).
 app.on('window-all-closed', () => {
+  sendAbortReportIfNeeded();   // ДО killChildren: идущий шаг ещё известен
   killChildren();
   cleanupAllSecureDirs();
-  if (!IS_MAC) app.quit();
+  if (!IS_MAC) waitTelemetryThen(() => app.quit());
 });
 
-app.on('before-quit', () => { killChildren(); cleanupAllSecureDirs(); });
+app.on('before-quit', (ev) => {
+  if (sendAbortReportIfNeeded()) {
+    // Выход по Cmd+Q / из меню посреди установки: даём отчёту уйти, потом выходим.
+    // Повторный before-quit сюда уже не попадёт — отчёт отправлен один раз.
+    ev.preventDefault();
+    killChildren(); cleanupAllSecureDirs();
+    waitTelemetryThen(() => app.quit());
+    return;
+  }
+  killChildren(); cleanupAllSecureDirs();
+});
 
 // ---- IPC -------------------------------------------------------------
 
@@ -541,6 +568,9 @@ ipcMain.handle('bootstrap', () => {
     remoteSizes: remoteSizesForRenderer(),
     logPath: LOG_PATH,
     freeGB,
+    // Корень тома, на котором меряли место («C:\»), — чтобы экран говорил «свободно на C:»,
+    // а не безадресное «на диске»: у людей с двумя дисками это и был вопрос.
+    homeRoot: path.parse(os.homedir()).root,
     osRelease: os.release(),
     // Absolute path to the bundled resources dir (vendor/agent/assets live here).
     // The renderer needs it to open the offline START-HERE fallback locally.
@@ -868,6 +898,9 @@ function buildInstallEnv(rendererEnv) {
 // в объяснение для ученика. Вынесен в модуль — его напрямую гоняет test/run-tests.js
 // (main.js целиком в тесте не поднять: это Electron-точка входа).
 const failureExplain = require('./failure-explain.js');
+// Исход шага по коду возврата (121 = частичный успех, причина пропуска, сторож
+// молчания) — чистые функции, тест зовёт их напрямую.
+const runOutcome = require('./run-outcome.js');
 
 // Run one component script, streaming output back to the renderer.
 //
@@ -1070,7 +1103,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         // повтор бессмыслен). Сеть, недоступные зеркала, отказ создать staging и прочая
         // среда — 'fetch': пользователю честно предлагаем «Повторить».
         const integrity = /sha-?256|checksums\.json|не совпал|подмен/i.test(errMsg);
-        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg };
+        // Не всё, что упало на докачке, — сеть. «EPERM при публикации распаковки» — это
+        // антивирус держит файл, «HTTP 403» — сервер отказал в доступе. Раньше и то и
+        // другое человек видел как «Сеть оборвалась» и бесконечно проверял интернет.
+        // Причину берём из того же словаря, что и для скриптов; сетевую оставляем сетью.
+        const why = integrity ? null : failureExplain.explainScriptFailure([errMsg]);
+        const notNet = !!(why && why.kind !== 'network');
+        if (notNet) {
+          const head = '[почему] ' + why.short + ':';
+          send(head); logLine(head);
+          why.lines.forEach((l) => { const m = '  ' + l; send(m); logLine(m); });
+        }
+        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg,
+          hint: notNet ? why.short : '', hintKind: notNet ? why.kind : '' };
       }
     } else {
       remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
@@ -1255,6 +1300,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       return;
     }
     CHILDREN.add(child);
+    // Состояние сторожа молчания ЭТОГО шага. optional — из вшитого components.json
+    // (COMPONENT_META), а не из renderer: renderer недоверенный и не решает, что можно
+    // убивать. offered — кнопка «Пропустить шаг» показана в текущем эпизоде молчания.
+    const stall = { optional: !!(meta && meta.optional === true), offered: false, skipRequested: false, skipMins: 0 };
+    CURRENT_STEP = { id, child, stall, lastOut: () => lastOut };
+    _lastStepId = id;
 
     // Легаси-строки "HM-RECEIPT <type> <value>" из stdout скриптов ТОЛЬКО
     // фильтруются из UI-лога. Как источник целей удаления они НЕ используются:
@@ -1285,6 +1336,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       return {
         push: (buf) => {
           lastOut = Date.now();
+          // Шаг ожил после того, как ему предложили «Пропустить» — кнопку убираем:
+          // убивать живую установку по устаревшему предложению нельзя.
+          if (stall.offered) { stall.offered = false; sendChannel('step-stall', { id, state: 'alive' }); }
           const parts = (tail + dec.write(buf)).split(/\r?\n/);
           tail = parts.pop();
           parts.forEach(emitLine);
@@ -1299,10 +1353,28 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // Watchdog БЕЗ убийства: msiexec/pip/playwright легально идут десятками минут, а
     // kill посреди MSI-транзакции хуже висяка. Но молчащий шаг без единого признака
     // жизни — это «установщик завис, что делать?»: раз в 10 минут честно говорим.
+    // Исключение — НЕОБЯЗАТЕЛЬНЫЙ компонент: после 8 минут тишины человеку предлагается
+    // кнопка «Пропустить шаг» (убивает только этот шаг и только по его нажатию). Живые
+    // случаи: ChatGPT Desktop молчал 72 минуты, Cursor — 2,7 часа, а выхода, кроме
+    // закрыть всё окно, не было.
     let stallWarned = 0;
     const stallTimer = setInterval(() => {
-      const mins = Math.floor((Date.now() - lastOut) / 60000);
-      if (mins >= 10 && mins >= stallWarned + 10) {
+      const d = runOutcome.stallDecision({ silentMs: Date.now() - lastOut, optional: stall.optional,
+        offered: stall.offered, warnedAtMin: stallWarned });
+      const mins = d.mins;
+      if (d.offerSkip) {
+        stall.offered = true;
+        // Тишина не всегда зависание: при медленном интернете большая загрузка идёт молча
+        // (Claude Desktop качает установщик без прогресса). Убить такую — потерять почти готовое.
+        const o = '[внимание] шаг «' + id + '» молчит ' + mins + ' мин. Это необязательный компонент. ' +
+          'Молчание не всегда значит зависание: при медленном интернете большая загрузка идёт без вывода — ' +
+          'тогда лучше подождать. Если ничего не качается и не меняется — можно нажать «Пропустить шаг» ' +
+          'рядом с ним: шаг остановится, установка пойдёт дальше без него, а поставить его можно позже, ' +
+          'запустив установщик ещё раз.';
+        send(o); logLine(o);
+        sendChannel('step-stall', { id, state: 'stalled', mins });
+      }
+      if (d.warn) {
         stallWarned = mins;
         // Текст намеренно НЕ называет одну причину: раньше здесь стояло «системный
         // установщик ждёт другую установку Windows», и на шаге «vscode» это уводило
@@ -1331,11 +1403,28 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
+      if (CURRENT_STEP && CURRENT_STEP.child === child) CURRENT_STEP = null;
       invalidatePathCache();   // скрипт мог дописать в PATH — перечитаем при следующей детекции
       try { clearInterval(stallTimer); } catch (e) { /* ignore */ }
       try { outR.flush(); errR.flush(); } catch (e) { /* ignore */ }  // последняя строка без \n
       logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
+      // Шаг остановлен кнопкой «Пропустить шаг» (только необязательный, см. skip-step).
+      // Разбираем ДО маркеров и провала: убитый процесс вернул ненулевой код, но это не
+      // поломка, а решение человека. Если процесс успел честно завершиться сам (0; 120 —
+      // свой пропуск со своей причиной; 121 — частичный успех: компонент работает)
+      // одновременно с нажатием — верим факту, а не кнопке.
+      if (stall.skipRequested && !okRun && !runOutcome.isSkipExit(code) && !runOutcome.isPartialExit(code)) {
+        cleanupSecureCache();
+        // Убитый посреди установки установщик мог оставить недоустановленную программу, а
+        // детект по файлам потом сочтёт её установленной — об этом честно говорим сразу.
+        const why = 'пропущен по кнопке «Пропустить шаг» после ' + stall.skipMins +
+          ' мин без вывода — поставить его можно позже, запустив установщик ещё раз. ' +
+          'Если после остановки программа всё же появилась и не запускается — удали её и поставь заново';
+        logLine('=== компонент «' + id + '» ' + why + ' ===');
+        resolve({ id, ok: true, code, skipped: true, userSkipped: true, skipReason: why });
+        return;
+      }
       // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
       // (receipts.EXIT_SKIP) — НЕ ошибка, но и НЕ установка: маркер НЕ пишем.
       const skipped = receipts.isSkipExit(code);
@@ -1441,19 +1530,44 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       //
       // Причину берём из последней содержательной строки вывода: скрипты печатают её
       // прямо перед exit 120 — это их собственное объяснение, а не наша догадка.
-      let skipReason = '';
-      if (skipped) {
-        const lines = String(outTail || '').split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l && !/^\[(dry-run|debug)\]/i.test(l));
-        skipReason = lines.length ? lines[lines.length - 1].slice(0, 240) : '';
-      }
+      // (outTail — МАССИВ строк. Прежнее String(outTail).split склеивало его через
+      // запятую, и «последней строкой» оказывалось НАЧАЛО вывода — на финише стояла
+      // первая строка шага вместо причины. Разбор теперь в run-outcome.js под тестом.)
+      const skipReason = skipped ? runOutcome.skipReasonFrom(outTail) : '';
       resolve({ id, ok: okRun || skipped, code, skipped, skipReason });
     });
   });
   } finally {
     _installBusy = false;   // замок снимается ТОЛЬКО после реального завершения шага
   }
+});
+
+// «Пропустить шаг» — остановить ОДИН зависший необязательный шаг и идти дальше.
+// Renderer лишь просит; решает main (runOutcome.canSkipNow): шаг идёт прямо сейчас,
+// он необязательный по вшитому components.json и по-прежнему молчит не меньше
+// STALL_SKIP_MIN минут. Иначе отказ с причиной. Убиваем только дерево этого шага —
+// тем же примитивом, что killChildren при закрытии окна.
+ipcMain.handle('skip-step', (_e, payload) => {
+  const st = CURRENT_STEP;
+  const silentMs = st ? Date.now() - st.lastOut() : 0;
+  const v = runOutcome.canSkipNow({
+    running: !!st, id: st && st.id, requestedId: payload && payload.id,
+    optional: !!(st && st.stall.optional), silentMs,
+    exited: !!(st && runOutcome.childExited(st.child)),
+  });
+  if (!v.ok) {
+    // Скрипт ушёл, а 'close' не приходит (его держит внук с унаследованными пайпами): рвём
+    // свои концы пайпов, чтобы шаг наконец завершился, и убивать никого не надо.
+    if (st && st.child && runOutcome.childExited(st.child)) {
+      try { if (st.child.stdout) st.child.stdout.destroy(); if (st.child.stderr) st.child.stderr.destroy(); } catch (e) { /* ignore */ }
+    }
+    return { ok: false, reason: v.reason };
+  }
+  st.stall.skipRequested = true;
+  st.stall.skipMins = Math.floor(silentMs / 60000);
+  logToFile(st.id, '[пропуск] шаг остановлен по кнопке «Пропустить шаг» после ' + st.stall.skipMins + ' мин без вывода');
+  killProcessTree(st.child);
+  return { ok: true };
 });
 
 ipcMain.handle('open-external', (_e, url) => {
@@ -1499,6 +1613,9 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       // не может: иначе он бы приписывал установки чужим людям.
       uid: INSTALL_UID || null,
       edition: isLiteEdition() ? 'lite' : 'offline',
+      // 'repair' = прогон «Проверить и починить» (только verify, ничего не ставилось). Закрытый
+      // список, как и у event: renderer не может придумать свой режим.
+      mode: p.mode === 'repair' ? 'repair' : 'install',
       ok: !!p.ok,
       failed: ids(p.failed),
       skipped: ids(p.skipped),
@@ -1516,7 +1633,28 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       // duration_sec клампим в [0, 24ч] — мусорные значения не улетают.
       duration_sec: Math.max(0, Math.min(86400, Math.round(Number(p.durationSec) || 0))),
     });
+    // Прогон начат / закончен — для отчёта о прерванной установке (sendAbortReportIfNeeded).
+    if (event === 'install_started') { _runReport.started = true; _runReport.finished = false; _runReport.startedAt = Date.now(); _runReport.mode = p.mode === 'repair' ? 'repair' : 'install'; }
+    if (event === 'installed') _runReport.finished = true;
+    postTelemetry(url, body);
+  } catch (e) { /* swallow — see above */ }
+  return { ok: true };
+});
+
+// Сколько отчётов ещё в пути. Выход из приложения ждёт их не дольше пары секунд:
+// иначе отчёт о закрытом посреди установки окне умирал бы вместе с процессом.
+let _telemetryInFlight = 0;
+// Что уже сказано о текущем прогоне: «начат» (согласие на отчёт было — иначе renderer
+// не прислал бы install_started) и «закончен» (финиш отчитался сам).
+const _runReport = { started: false, finished: false, startedAt: 0, mode: 'install' };
+let _abortReportSent = false;
+
+function postTelemetry(url, body) {
+  let settled = false;
+  const done = () => { if (!settled) { settled = true; _telemetryInFlight = Math.max(0, _telemetryInFlight - 1); } };
+  try {
     const u = new URL(url);
+    _telemetryInFlight++;
     const req = https.request({
       hostname: u.hostname,
       port: u.port || 443,
@@ -1524,13 +1662,58 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
       timeout: 5000,
-    }, (res) => { res.resume(); }); // ответ не важен — просто дренируем сокет
-    req.on('timeout', () => { try { req.destroy(); } catch (e) { /* ignore */ } });
-    req.on('error', () => { /* молча: телеметрия не должна ломать установку */ });
+    }, (res) => { res.on('end', done); res.on('close', done); res.resume(); }); // ответ не важен — дренируем сокет
+    req.on('timeout', () => { try { req.destroy(); } catch (e) { /* ignore */ } done(); });
+    req.on('error', () => { done(); /* молча: телеметрия не должна ломать установку */ });
+    req.on('close', done);
     req.end(body);
-  } catch (e) { /* swallow — see above */ }
-  return { ok: true };
-});
+  } catch (e) { done(); }
+}
+
+// Отчёт «установку прервали»: прогон начат, финиш не отчитался, а окно закрывают.
+// Называет шаг, который шёл (или последний запущенный), и сколько прошло минут.
+// Возвращает true, если отчёт ушёл сейчас (тогда выход стоит подождать).
+function sendAbortReportIfNeeded() {
+  try {
+    if (_abortReportSent || !_runReport.started || _runReport.finished) return false;
+    const cfg = readJson('config.json', {});
+    const url = String((cfg.telemetry && cfg.telemetry.url) || '');
+    if (!/^https:\/\//i.test(url)) return false;
+    _abortReportSent = true;
+    const stepId = String((CURRENT_STEP && CURRENT_STEP.id) || _lastStepId || 'unknown')
+      .slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-');
+    const sec = Math.max(0, Math.min(86400, Math.round((Date.now() - (_runReport.startedAt || Date.now())) / 1000)));
+    const body = JSON.stringify({
+      event: 'installed',
+      platform: IS_WIN ? 'win' : 'mac',
+      uid: INSTALL_UID || null,
+      edition: isLiteEdition() ? 'lite' : 'offline',
+      mode: _runReport.mode === 'repair' ? 'repair' : 'install',
+      ok: false,
+      failed: [stepId],
+      skipped: [],
+      selected: [],
+      errors: [{ id: stepId, stage: 'aborted',
+        error: 'установку прервали: окно закрыто' + (CURRENT_STEP ? ' во время шага' : ' между шагами') +
+          ' через ' + Math.round(sec / 60) + ' мин после начала' }],
+      duration_sec: sec,
+    });
+    postTelemetry(url, body);
+    if (!process.env.HM_DRY_RUN) {
+      logToFile('setup', '[отчёт] установка прервана закрытием окна на шаге «' + stepId + '» — отчёт отправлен');
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+function waitTelemetryThen(fn) {
+  const deadline = Date.now() + 2500;
+  const tick = () => {
+    if (_telemetryInFlight <= 0 || Date.now() > deadline) { try { fn(); } catch (e) { /* ignore */ } return; }
+    setTimeout(tick, 100);
+  };
+  tick();
+}
 
 // shell.openPath резолвится СТРОКОЙ: пустая = успех, непустая = текст ошибки.
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
@@ -1552,6 +1735,13 @@ ipcMain.handle('open-path', async (_e, p) => {
     return { ok: false, error: e.message };
   }
 });
+
+// Памятка START-HERE.html с числами из сводки конфига (src/pack-summary.js → fillStartHere).
+// Читает вшитый файл по уже проверенному пути и подставляет числа между маркерами PACK-COUNTS.
+function startHereHtml(src) {
+  const raw = fs.readFileSync(src, 'utf8');
+  return packSummary.fillStartHere(raw, packSummary.readSummaryJson({ home: os.homedir() }));
+}
 
 // Копируем памятку START-HERE.html на рабочий стол — чтобы к ней можно было
 // вернуться в любой момент (не зависит от того, где лежит установщик/ресурсы).
@@ -1597,7 +1787,10 @@ ipcMain.handle('save-start-here', () => {
     if (dst && dst.nlink > 1) {
       return { ok: false, dest: '', src, error: 'dest-hardlinked' };
     }
-    fs.copyFileSync(src, dest);
+    // Числа в памятке («N навыков, M команд, K помощников») — из сводки конфига ЭТОГО человека, а не
+    // зашитые в файл. Не получилось подставить — кладём файл как есть: памятка важнее цифр.
+    try { fs.writeFileSync(dest, startHereHtml(src), 'utf8'); }
+    catch (e2) { fs.copyFileSync(src, dest); }
     return { ok: true, dest, src };
   } catch (e) {
     // src отдаём и при ошибке — renderer откроет вшитую копию как фолбэк.
@@ -1619,7 +1812,9 @@ ipcMain.handle('read-start-here', () => {
     const src = path.resolve(root, rel);
     if (!src.startsWith(root + path.sep)) return { ok: false, html: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, html: '', error: 'source-missing' };
-    return { ok: true, html: fs.readFileSync(src, 'utf8'), error: '' };
+    let html = fs.readFileSync(src, 'utf8');
+    try { html = startHereHtml(src); } catch (e2) { /* без чисел — памятка всё равно читается */ }
+    return { ok: true, html, error: '' };
   } catch (e) {
     return { ok: false, html: '', error: e.message };
   }
@@ -3600,3 +3795,145 @@ ipcMain.handle('mac-selfheal-status', () => {
 });
 
 ipcMain.handle('quit', () => app.quit());
+
+// ---- после установки: отчёт для поддержки, связь с Anthropic, сводка пака ----
+// Секция стоит в конце файла намеренно: обработчики новые, и вставка в середину
+// сдвинула бы все ссылки «файл:строка» из docs/specs на нижележащий код.
+
+const supportReport = require('./support-report.js'); // текст отчёта + вырезание секретов
+const netCheck = require('./net-check.js');           // проба api.anthropic.com + прокси
+
+// Итог последней проверки связи — одной строкой в отчёт для поддержки.
+let _lastNetSummary = '';
+
+// «Скопировать отчёт для поддержки»: шаг, ошибка, хвост журнала, ОС, издание, версия,
+// uid — одним куском текста в буфер обмена. Хвост журнала читает MAIN (renderer путь
+// не передаёт), всё чистится от ПД и секретов в src/support-report.js.
+ipcMain.handle('support-report', (_e, payload) => {
+  try {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    const tail = supportReport.readLogTail(LOG_PATH, supportReport.LOG_TAIL_LINES);
+    const text = supportReport.buildSupportReport({
+      meta: {
+        version: app.getVersion(),
+        edition: isLiteEdition() ? 'lite' : 'offline',
+        platform: process.platform,
+        // На macOS os.release() — версия ядра Darwin («24.1.0» для macOS 15): поддержка читала её
+        // как версию системы. process.getSystemVersion() отдаёт настоящую.
+        osRelease: (process.platform === 'darwin' && typeof process.getSystemVersion === 'function')
+          ? process.getSystemVersion() : os.release(),
+        arch: process.arch,
+        uid: INSTALL_UID,
+        outcome: String(p.outcome || '').slice(0, 120),
+        running: p.running === true,   // отчёт посреди установки: «ничего не встало» — не итог
+      },
+      steps: Array.isArray(p.steps) ? p.steps.slice(0, 10) : [],
+      logTail: tail.lines,
+      net: _lastNetSummary,
+      scrub: (s) => scrubText(s),
+    });
+    clipboard.writeText(text);
+    return { ok: true, text, logRead: tail.ok };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+
+// Системный прокси Windows — тот, через который ходит браузер. Читаем HKCU пакетом
+// (один запуск интерпретатора). Не прочитали — честное «не знаем», не догадка.
+const WIN_INET_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+function readWinSystemProxy() {
+  if (!IS_WIN) return { enabled: false, reason: 'platform' };
+  const r = regQueryManyDotNet([
+    { key: WIN_INET_KEY, name: 'ProxyEnable' },
+    { key: WIN_INET_KEY, name: 'ProxyServer' },
+  ]);
+  if (!r[0] || !r[0].ok) return { enabled: false, reason: 'read-failed' };
+  const val = (x) => ((x && x.ok && x.found) ? x.data : '');
+  return netCheck.parseWinProxy(val(r[0]), val(r[1]));
+}
+
+// Проверка связи из консольного стека (так пойдёт сам Claude Code). Ничего не
+// блокирует и ничего не меняет — только смотрит и рассказывает.
+ipcMain.handle('net-check', async () => {
+  try {
+    if (process.env.HM_DRY_RUN) return { kind: 'skipped' };
+    const res = { kind: 'unknown', proxy: null, configured: '' };
+    // Прокси, уже прописанный в настройках Claude Code (прошлым запуском или руками),
+    // меняет картину: напрямую может не пускать, а Claude Code ходит через него.
+    const configured = netCheck.readProxyEnv(os.homedir()).httpsProxy;
+    const cfgProxy = netCheck.classifyConfiguredProxy(configured);
+    // Прописан, но не разобрали (логин:пароль@хост, socks, мусор): на экран значение НЕ отдаём —
+    // в нём может быть пароль, — и системный прокси предлагать вместо него нельзя.
+    res.configured = cfgProxy.unreadable ? '' : (configured || '');
+    res.configuredUnreadable = cfgProxy.unreadable;
+    const direct = await netCheck.probeDirect();
+    res.kind = netCheck.classifyProbe(direct);
+    res.detail = netCheck.describeKind(res.kind);   // фраза для экрана — одна на экран и отчёт
+    if (res.kind !== 'reachable' && cfgProxy.parsed) {
+      const via = await netCheck.probeViaProxy({ host: cfgProxy.parsed.host, port: cfgProxy.parsed.port });
+      res.configuredKind = netCheck.classifyProbe(via);
+    }
+    if (res.kind !== 'reachable' && !res.configuredKind && !res.configuredUnreadable && IS_WIN) {
+      const px = readWinSystemProxy();
+      res.proxy = { enabled: !!px.enabled, local: !!px.local, socksOnly: !!px.socksOnly, url: px.local ? px.url : '' };
+      if (px.local && px.host && px.port) {
+        const via = await netCheck.probeViaProxy({ host: px.host, port: px.port });
+        res.proxy.kind = netCheck.classifyProbe(via);
+        res.proxy.works = res.proxy.kind === 'reachable';
+      }
+    }
+    _lastNetSummary = netCheck.describeKind(res.kind) +
+      (res.configuredKind ? '; через прокси из настроек Claude Code: ' + netCheck.describeKind(res.configuredKind) : '') +
+      (res.proxy && res.proxy.url ? '; системный прокси ' + res.proxy.url + ': ' + netCheck.describeKind(res.proxy.kind) : '');
+    logToFile('net', '[связь с Anthropic] ' + _lastNetSummary);
+    return res;
+  } catch (e) {
+    return { kind: 'unknown', error: String((e && e.message) || e) };
+  }
+});
+
+// Прописать прокси VPN-клиента в ~/.claude/settings.json → env. Только по нажатию и
+// согласию в окне. Адрес НЕ принимается от renderer: main сам заново читает системный
+// прокси, требует локальный (127.0.0.1) и проверяет, что через него Anthropic отвечает.
+ipcMain.handle('apply-proxy', async () => {
+  try {
+    if (!IS_WIN) return { ok: false, reason: 'platform' };
+    const px = readWinSystemProxy();
+    if (!px.local || !px.url || !px.host || !px.port) return { ok: false, reason: 'no-local-proxy' };
+    const via = await netCheck.probeViaProxy({ host: px.host, port: px.port });
+    const kind = netCheck.classifyProbe(via);
+    if (kind !== 'reachable') return { ok: false, reason: 'proxy-not-working', kind };
+    // Уже прописанный ДРУГОЙ прокси (рабочий, с паролем, socks) молча не заменяем: экран такого
+    // предложения не показывает, а эта проверка не даёт обойти его устаревшей кнопкой.
+    const existing = netCheck.readProxyEnv(os.homedir()).httpsProxy;
+    if (existing && existing !== px.url) return { ok: false, reason: 'existing-proxy' };
+    const w = netCheck.writeProxyEnv(px.url, { home: os.homedir() });
+    logToFile('net', w.ok
+      ? '[прокси] записан в ' + w.path + ': HTTPS_PROXY/HTTP_PROXY=' + px.url + (w.backup ? ' (копия: ' + w.backup + ')' : '')
+      : '[прокси] НЕ записан: ' + w.reason + (w.error ? ' (' + w.error + ')' : ''));
+    if (w.ok) _lastNetSummary += '; прокси прописан в настройки Claude Code';
+    return w.ok ? { ok: true, url: px.url, path: w.path, backup: w.backup } : w;
+  } catch (e) {
+    return { ok: false, reason: 'error', error: String((e && e.message) || e) };
+  }
+});
+
+// Сводка установленного пака (её пишет config-скрипт в ~/.hamidun-setup/config-summary.json):
+// «Установлено N скиллов, M агентов» + где лежит каталог. Нет файла — молчим. Разбор —
+// в src/pack-summary.js (файл лежит в профиле, форме его не доверяем).
+const packSummary = require('./pack-summary.js');
+ipcMain.handle('pack-summary', () => packSummary.readPackSummary({ home: os.homedir() }));
+
+// Показать каталог скиллов в Проводнике/Finder. Путь фиксированный, от renderer не
+// принимается; открываем папку с выделенным файлом, а не сам .md: из процесса с правами
+// администратора shell.openPath запустил бы редактор .md (часто — VS Code из профиля
+// пользователя) тоже с правами администратора.
+ipcMain.handle('reveal-catalog', () => {
+  try {
+    const target = path.join(os.homedir(), '.claude', 'CATALOG.md');
+    if (!fs.existsSync(target)) return false;
+    shell.showItemInFolder(target);
+    return true;
+  } catch (e) { return false; }
+});

@@ -176,13 +176,63 @@ if ($why) {
 }
 Write-Host "winget.exe проверен: цепочка к машинному корню + O='$PUBLISHER_O' + Code Signing EKU. Ставлю ChatGPT из Microsoft Store..."
 
-# --- Установка из Microsoft Store (MSIX MS-signed) ---
+# --- Установка из Microsoft Store (MSIX MS-signed) — С ПОТОЛКОМ ВРЕМЕНИ ---
+# Раньше winget звался без лимита. Живой случай: шаг «ChatGPT Desktop» молчал 72 минуты
+# (магазин ждал входа в аккаунт или висел на загрузке), и кроме как закрыть всё окно
+# установщика, сделать было нечего. Теперь потолок $WINGET_TIMEOUT_SEC: по нему дерево
+# процесса winget гасится taskkill /T, а шаг честно пропускается (exit 120). 20 минут —
+# с запасом на ~300 МБ по медленному каналу, но втрое меньше того, что ждали люди.
+# Вывод читаем построчно (ReadLineAsync) — журнал живёт, а не молчит до самого конца;
+# его же потом разбираем, чтобы назвать причину («нет в Store вашего региона»).
+$WINGET_TIMEOUT_SEC = 1200
+$wingetOut = New-Object System.Collections.Generic.List[string]
+$code = $null
+$timedOut = $false
 try {
-    & $winget install --id $STORE_ID --exact --source msstore --accept-package-agreements --accept-source-agreements --silent 2>&1 |
-        ForEach-Object { Write-Host $_ }
-    $code = $LASTEXITCODE
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $winget
+    $psi.Arguments = "install --id $STORE_ID --exact --source msstore --accept-package-agreements --accept-source-agreements --silent"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $errTask = $proc.StandardError.ReadToEndAsync()   # дренируем stderr, чтобы winget не встал на полном буфере
+    $lineTask = $proc.StandardOutput.ReadLineAsync()
+    $deadline = (Get-Date).AddSeconds($WINGET_TIMEOUT_SEC)
+    while ($true) {
+        if ($lineTask.IsCompleted) {
+            $line = $lineTask.Result
+            if ($null -eq $line) { break }                  # конец вывода — winget завершается
+            if ($line.Trim()) { Write-Host $line; $wingetOut.Add($line) }
+            $lineTask = $proc.StandardOutput.ReadLineAsync()
+            continue
+        }
+        if ((Get-Date) -gt $deadline) { $timedOut = $true; break }
+        Start-Sleep -Milliseconds 200
+    }
+    if ($timedOut) {
+        # Дерево целиком: winget держит дочерние процессы. taskkill — по абсолютному пути.
+        $tk = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        try { & $tk /PID $proc.Id /T /F 2>&1 | Out-Null } catch { try { $proc.Kill() } catch { } }
+    } else {
+        $null = $proc.WaitForExit(30000)
+        try { $code = $proc.ExitCode } catch { $code = $null }
+        try { if ($errTask.Wait(5000)) { $errTask.Result -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-Host $_; $wingetOut.Add($_) } } } catch { }
+    }
 } catch {
     Write-Host "Не удалось запустить winget ($($_.Exception.Message)) — пропускаю ChatGPT. Поставь вручную из Microsoft Store."
+    exit 120
+}
+if ($timedOut) {
+    # Приложение могло успеть встать, пока мы ждали, — тогда это успех, а не пропуск.
+    if (Test-ChatGptDesktopInstalled) {
+        Write-Host "OK: ChatGPT Desktop установлен из Microsoft Store."
+        exit 0
+    }
+    Write-Host "Microsoft Store не ответил за $([math]::Round($WINGET_TIMEOUT_SEC / 60)) минут — ожидание остановлено, ChatGPT Desktop пропускаю. Он необязателен, всё остальное работает. Возможно, магазин ждёт входа в аккаунт или загрузка ещё идёт: проверь позже в Microsoft Store → «Библиотека»."
     exit 120
 }
 
@@ -197,5 +247,14 @@ if ($installed) {
     exit 0
 }
 
-Write-Host "winget завершился с кодом $code, но приложение ChatGPT не подтвердилось. Возможно, нужна авторизация в Microsoft Store — открой Store, найди «ChatGPT» и нажми «Установить». Пропускаю (skip)."
+# Причина — по факту, а не «нужна авторизация» на всё подряд. Живой журнал: winget
+# написал «No package found matching input criteria» — магазин не отдаёт приложение для
+# региона системы, а человеку советовали войти в Store, что не помогло бы ничем.
+# 0x8A150014 (-1978335212) — тот же «пакет не найден», когда текст пришёл на другом языке.
+$wingetText = ($wingetOut -join "`n")
+if ($code -eq -1978335212 -or $wingetText -match 'No package found matching input criteria|Не найден пакет|Не найдено пакетов') {
+    Write-Host "ChatGPT Desktop недоступен в Microsoft Store вашего региона (магазин не нашёл приложение для страны, указанной в Windows) — это не поломка и не обрыв сети. Приложение необязательно, всё остальное работает. Пропускаю (skip)."
+    exit 120
+}
+Write-Host "winget завершился с кодом $code, но приложение ChatGPT не подтвердилось. Открой Microsoft Store, найди «ChatGPT» и нажми «Установить» — там будет видно, что мешает (вход в аккаунт, регион, свободное место). Пропускаю (skip)."
 exit 120

@@ -68,6 +68,7 @@ async function init() {
   STATE.config = boot.config || {};
   STATE.logPath = boot.logPath || '';
   STATE.freeGB = (typeof boot.freeGB === 'number') ? boot.freeGB : null;
+  STATE.homeRoot = boot.homeRoot || '';   // «C:\» — на каком томе меряли место
   STATE.resourcesRoot = boot.resourcesRoot || '';
   STATE.userWarning = boot.userWarning || '';
   STATE.vendorAvailable = boot.vendorAvailable !== false;
@@ -121,6 +122,8 @@ async function init() {
   showInitialScreen();
 
   $('#btn-install').addEventListener('click', startInstall);
+  const repairBtn = $('#btn-repair');
+  if (repairBtn) repairBtn.addEventListener('click', () => startInstall({ repair: true }));
   $('#btn-welcome-go').addEventListener('click', goToSelect);
   const wcWhatBtn = $('#btn-wc-what');
   if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
@@ -165,6 +168,9 @@ async function init() {
   });
   $('#packs-all').addEventListener('click', () => setAllPacks(true));
   $('#packs-none').addEventListener('click', () => setAllPacks(false));
+  // Сторож молчания из main: «шаг молчит N мин» → кнопка «Пропустить шаг» у
+  // необязательного шага; «ожил» → кнопку убрать.
+  if (window.installer.onStepStall) window.installer.onStepStall(onStepStall);
   setupMascots();
   // Детекция состояния — best-effort, после первичного рендера (не блокирует UI).
   detectAndApply();
@@ -393,14 +399,13 @@ function renderGroups() {
 // components.json полем `needsConfig` — путь через точку («bridge.enrollEndpoint»), а
 // текст предупреждения — соседним `needsConfigNote`.
 //
-// ЗАЧЕМ. AI-мост требует прав администратора, ставит прокси, PAC и автозапуск — а
-// enrollEndpoint в config.json пуст, и без адреса сервера мост встаёт и простаивает.
-// Человек отдавал права, видел зелёную галочку и не получал ничего. Скрывать карточку
-// целиком (как `hidden` у verify) — нельзя: (1) на ней же живут «уже установлено» и
-// «Удалить», и мост исчез бы у тех, кто его уже поставил; (2) агент умеет работать и
-// без enroll — по SSH-доступу, вписанному в его конфиг вручную. Поэтому карточка
-// остаётся, но говорит правду. Заполнил адрес в config.json — бейдж и подпись пропали
-// сами, править код не нужно.
+// ЗАЧЕМ. AI-мост просит права администратора, ставит прокси, PAC и автозапуск, а без
+// адреса сервера в config.json встаёт и простаивает. Пока адрес пуст, такой компонент
+// из выбора убирает и запускать не даёт MAIN (components.json → `hideWhileUnconfigured`,
+// src/component-visibility.js). До экрана доходит только мост, уже поставленный нашим
+// установщиком (квитанция): на его карточке живут «уже установлено» и «Удалить». Для
+// него карточка и говорит правду — бейдж «не настроен» и подпись ниже. Заполнил адрес в
+// config.json — компонент вернулся в выбор, бейдж и подпись пропали сами.
 function configValueByPath(pathStr) {
   return String(pathStr || '').split('.').reduce(
     (obj, key) => (obj && typeof obj === 'object' ? obj[key] : undefined),
@@ -462,6 +467,7 @@ function renderCard(c) {
         ${updBadge}
       </div>
       <div class="card-desc">${c.desc}</div>
+      ${c.brief ? `<div class="card-brief">${escapeHtml(c.brief)}</div>` : ''}
       ${unconfNote}
       ${checked ? renderComponentOptions(c) : ''}
       ${installed ? renderInstalledActions(c) : ''}
@@ -681,15 +687,53 @@ function setAllPacks(on) {
   refreshDerived();
 }
 
-// Preflight: жёлтое предупреждение о нехватке места (не блокирует установку).
+// Сколько места нужно под ВЫБРАННОЕ — оценка с запасом, а не прежние «~4 ГБ на всё».
+// Берутся те же точные размеры, что в окне «что попадёт на мой ПК» (вес дистрибутива в
+// офлайне, размер докачки в lite), и умножаются на DISK_FACTOR: распакованная программа
+// больше своего архива, а пока шаг идёт, на диске лежат и архив, и распаковка. Сверху —
+// DISK_BASE_BYTES на то, что компоненты тянут сами (браузер для скиллов, кэши, журнал).
+// Число — оценка, поэтому на экране оно со знаком «≈» и округлено вверх до 0,5 ГБ.
+const DISK_FACTOR = 2.5;
+const DISK_BASE_BYTES = 0.5 * 1024 * 1024 * 1024;
+function diskNeedGB() {
+  const bytes = selectedIds().reduce((sum, id) => sum + componentSizeBytes(STATE.byId[id]), 0);
+  if (!(bytes > 0)) return 0;
+  const gb = (bytes * DISK_FACTOR + DISK_BASE_BYTES) / (1024 * 1024 * 1024);
+  return Math.ceil(gb * 2) / 2;
+}
+// «на C:» — том, на котором main мерил свободное место (там же профиль, куда всё ставится).
+function diskVolumeLabel() {
+  const m = /^([A-Za-z]:)/.exec(String(STATE.homeRoot || ''));
+  return m ? 'на ' + m[1].toUpperCase() : 'на диске';
+}
+
+// Preflight: строка «нужно ≈X ГБ, свободно Y ГБ на C:» под заголовком; при нехватке —
+// жёлтое предупреждение (не блокирует установку, но «Установить» переспросит). Зовётся
+// из refreshDerived — пересчитывается на каждый клик по галочке.
 function renderPreflight() {
-  if (STATE.freeGB === null || STATE.freeGB >= 4) return;
-  if (document.getElementById('preflight-warn')) return;
+  const old = document.getElementById('preflight-warn');
+  if (old) old.remove();
+  const oldLine = document.getElementById('disk-line');
+  if (oldLine) oldLine.remove();
+  const need = diskNeedGB();
+  // Не смогли измерить или нечего считать — молчим: пугать человека на догадке нельзя.
+  if (STATE.freeGB === null || !(need > 0)) return;
+  const where = diskVolumeLabel();
+  // Где всё окажется — людям нужно знать до старта (выбора диска нет, и «а можно на D:?» спрашивали):
+  // программы и настройки идут в профиль на системном диске, а свои проекты хранятся где угодно —
+  // Claude Code работает в той папке, которую откроешь.
+  const diskNote = 'Всё ставится в твой профиль на этом диске, а свои проекты можно хранить где угодно.';
   const el = document.createElement('div');
-  el.id = 'preflight-warn';
-  el.className = 'preflight-warn';
-  el.innerHTML = `⚠️ На диске свободно всего <b>${STATE.freeGB} ГБ</b>, а для полной установки нужно ~4 ГБ. ` +
-    `Установка может прерваться — освободи место или сними тяжёлые компоненты (Python-пакеты, Nomad).`;
+  if (STATE.freeGB < need) {
+    el.id = 'preflight-warn';
+    el.className = 'preflight-warn';
+    el.innerHTML = `⚠️ Места может не хватить: для выбранного нужно ≈${need} ГБ, а свободно всего <b>${STATE.freeGB} ГБ</b> ${where}. ` +
+      `Освободи место или сними тяжёлые компоненты (Python-пакеты, Nomad, Cursor) — иначе установка может прерваться. ${diskNote}`;
+  } else {
+    el.id = 'disk-line';
+    el.className = 'disk-line';
+    el.textContent = `💾 Понадобится ≈${need} ГБ, свободно ${STATE.freeGB} ГБ ${where}. ${diskNote}`;
+  }
   const hero = document.querySelector('#view-select .hero');
   if (hero) hero.insertAdjacentElement('afterend', el);
 }
@@ -723,11 +767,13 @@ function renderVendorBlock() {
       '<p>macOS поставил приложению «карантин» и запускает его из защищённой копии — офлайн-компоненты рядом с ним недоступны, установка заблокирована.</p>' +
       '<p><b>Почему «просто открыть из окна DMG» часто НЕ помогает:</b> если образ уже смонтирован, снятие карантина на него не подействует — образ надо ЗАКРЫТЬ (отмонтировать) и открыть заново. Команда ниже делает всё это сама.</p>' +
       '<ol style="margin:6px 0 6px 18px;line-height:1.55">' +
-      '<li>Закрой это окно установщика. Если перетащил приложение в «Программы» — удали его оттуда.</li>' +
-      '<li><b>Проще всего — нажми кнопку ниже</b>, установщик всё сделает сам: найдёт образ, снимет карантин, закроет старые окна образа и откроет свежее, а затем перезапустится из него.<br>' +
+      // Порядок важен: кнопка живёт ЭТОМ ЖЕ окне, поэтому «закрой окно» не может стоять раньше неё —
+      // человек закрывал установщик и оставался без кнопки. Сначала кнопка, закрывать окно — только
+      // если она не помогла.
+      '<li><b>Проще всего — нажми кнопку ниже</b>, закрывать это окно не нужно: установщик всё сделает сам — найдёт образ, снимет карантин, закроет старые окна образа, откроет свежее и перезапустится из него.<br>' +
       '<button type="button" id="mac-selfheal" class="btn" style="margin-top:8px">Исправить автоматически</button>' +
       '<div id="mac-selfheal-status" style="font-size:12px;opacity:.85;margin-top:6px"></div></li>' +
-      '<li><b>Если кнопка не помогла</b> — открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter) и вставь <b>ОДНОЙ строкой</b>:<br>' +
+      '<li><b>Если кнопка не помогла</b> — закрой это окно установщика (перетащил приложение в «Программы» — удали его оттуда), открой <b>Терминал</b> (⌘+Пробел → «Терминал» → Enter) и вставь <b>ОДНОЙ строкой</b>:<br>' +
       '<code style="-webkit-user-select:all;user-select:all;font-size:11px;display:block;margin-top:4px;white-space:normal;word-break:break-all">DMG=$(find ~ -maxdepth 4 -iname &quot;Hamidun-Setup-Mac*.dmg&quot; 2&gt;/dev/null | head -1); echo &quot;Нашёл: $DMG&quot;; for v in /Volumes/Hamidun*; do hdiutil detach &quot;$v&quot; -force 2&gt;/dev/null; done; xattr -dr com.apple.quarantine &quot;$DMG&quot;; open &quot;$DMG&quot;</code>' +
       '<br><span style="font-size:12px;opacity:.82">Она сама найдёт образ (даже если он не в «Загрузках»), ЗАКРОЕТ все ранее открытые окна образа и откроет свежий — это ключевой шаг. Если после «Нашёл:» пусто — файла на маке нет, скачай заново.</span></li>' +
       '<li>В открывшемся <b>свежем</b> окне DMG запусти «Hamidun Setup» двойным кликом. Кнопка «Установить» станет активной.</li>' +
@@ -1131,8 +1177,12 @@ async function showStartHereInline() {
   });
 }
 
-// Task 4b: заметная плашка «Не едет? Напиши боту…» на экране прогресса (и финиша —
-// это тот же view). Ссылка ведёт на бота-спутника из config.links.bot.
+// Task 4b: заметная плашка помощи на экране прогресса (и финиша — это тот же view). Раньше
+// она просила «кинь скриншот» и вела на голую ссылку бота: скриншот до бота доходил не
+// всегда, а у застрявшего посреди установки отчёта под рукой не было вовсе (кнопка жила
+// только на финише). Теперь «Скопировать отчёт» работает и ВО ВРЕМЯ установки, а ссылка на
+// бота несёт тот же payload, что и финишная кнопка: адрес собирается В МОМЕНТ клика
+// (botUrlForState), поэтому плашку не нужно перерисовывать после каждого сбоя.
 function renderProgressBotBanner() {
   const el = $('#progress-bot-banner');
   if (!el) return;
@@ -1141,11 +1191,15 @@ function renderProgressBotBanner() {
   if (!botBase) return; // нет бота в конфиге — плашку не показываем
   el.innerHTML =
     '<span class="progress-bot-ico" aria-hidden="true">💬</span>' +
-    '<span class="progress-bot-text">Не едет? Напиши боту, кинь скриншот — проведёт за руку.</span>' +
-    '<button type="button" class="btn-sm progress-bot-btn" data-ext="' + escapeHtml(botBase) + '">Написать боту</button>';
+    '<span class="progress-bot-text">Не едет? Нажми «Скопировать отчёт» и вставь его в чат с ботом — ' +
+    'он увидит, на каком шаге ты застрял, и проведёт за руку. <span id="pb-report-status" class="progress-bot-status"></span></span>' +
+    '<button type="button" class="btn-sm progress-bot-btn" id="pb-report">📋 Скопировать отчёт</button>' +
+    '<button type="button" class="btn-sm progress-bot-btn" id="pb-bot">Написать боту</button>';
   el.classList.remove('hidden');
-  const btn = el.querySelector('[data-ext]');
-  if (btn) btn.addEventListener('click', () => window.installer.openExternal(btn.dataset.ext));
+  const rb = el.querySelector('#pb-report');
+  if (rb) rb.addEventListener('click', () => copySupportReport());
+  const bb = el.querySelector('#pb-bot');
+  if (bb) bb.addEventListener('click', () => window.installer.openExternal(botUrlForState()));
 }
 
 // Байты → человекочитаемо: до ~1 ГБ — «N МБ», дальше — «N,N ГБ». Суммируются ТОЛЬКО
@@ -1253,7 +1307,11 @@ function refreshDerived() {
   // компонентов (реестр). В офлайн-издании dlBytes=0 — ничего не показываем.
   const dlBytes = downloadTotalBytes();
   const dlPart = dlBytes > 0 ? ` · Скачается: ~${fmtBytesRu(dlBytes)}` : '';
-  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}${dlPart}`;
+  // Нечего ставить (всё уже стоит) — «Установить» погашена, но есть что проверить и починить:
+  // без этой подсказки человек видел глухую серую кнопку и не знал, что делать дальше.
+  const repairable = repairAvailable();
+  const repairPart = repairable ? ' · ничего не выбрано — можно «Проверить и починить» (установленное не тронем)' : '';
+  $('#summary').textContent = `Выбрано: ${n} компонентов · наборов скиллов: ${np}/${total}${skillsPart}${dlPart}${repairPart}`;
   // P0-1: кнопка выключена, пока детекция установленного не завершилась — чтобы
   // установка не стартовала с недодетектированным состоянием (режим/галки).
   // App-Translocation / оторванный vendor (STATE.vendorBlocked) — жёсткий стоп:
@@ -1263,11 +1321,18 @@ function refreshDerived() {
   const btnInstall = $('#btn-install');
   btnInstall.disabled = n === 0 || !STATE.detectDone || !STATE.netProbeDone || !!STATE.vendorBlocked;
   btnInstall.textContent = dlBytes > 0 ? `Установить · скачается ~${fmtBytesRu(dlBytes)}` : 'Установить';
+  const btnRepair = $('#btn-repair');
+  if (btnRepair) {
+    btnRepair.classList.toggle('hidden', !repairable);
+    btnRepair.classList.toggle('primary', repairable);   // когда ставить нечего — это главное действие
+  }
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
   const pw = $('#packs-wrap');
   if (pw) pw.classList.toggle('disabled', !configOn);
+  // Место на диске зависит от выбора — пересчитываем строку на каждый клик.
+  renderPreflight();
 }
 
 // ---- install flow ---------------------------------------------------
@@ -1498,7 +1563,7 @@ function firstBrokenDep(id, badSet) {
 const DEP_WHY_TEXT = {
   net: 'не удалось скачать — оборвалось соединение',
   integrity: 'скачанный файл не прошёл проверку подлинности',
-  env: 'не хватило прав администратора',
+  env: 'не подготовилась защищённая папка загрузки — часто мешает антивирус',
   skip: 'его нет в этой сборке — ставить было нечего',
   fail: 'установка не удалась',
 };
@@ -1517,8 +1582,7 @@ function depSkipMessage(id, depId, badWhy) {
 // Провал ДОКАЧКИ бывает двух РАЗНЫХ природ, а main отдаёт для обеих stage:'fetch':
 //   СЕТЬ         — обрыв/таймаут/зеркало не ответило: лечится ретраем;
 //   ЦЕЛОСТНОСТЬ  — SHA-256 не совпал, распаковка fail-closed, нет валидного SHA в
-//                  реестре, нет сборки для платформы, не создан защищённый кэш
-//                  (нужны права администратора). Это ДЕТЕРМИНИРОВАННО: авто-ретрай
+//                  реестре, нет сборки для платформы. Это ДЕТЕРМИНИРОВАННО: авто-ретрай
 //                  бесполезен (и стоит ещё ~1.5 ГБ трафика), а «проверь интернет»
 //                  уводит пользователя не туда — чинить Wi-Fi при подменённом или
 //                  устаревшем артефакте бессмысленно, это надо эскалировать.
@@ -1539,8 +1603,20 @@ function isIntegrityFail(res) {
 // загрузки. Раньше это показывалось как «Сеть оборвалась», и пользователь бесконечно
 // жал «Повторить», хотя чинится это запуском от администратора.
 function isEnvFail(res) { return !!(res && !res.ok && res.stage === 'env'); }
+// main сам распознаёт НЕсетевые провалы докачки («EPERM при публикации распаковки» —
+// антивирус держит файл; «HTTP 403» — сервер отказал) и присылает их вид в hintKind.
+// Такие — не «Сеть оборвалась»: авто-повтор их не лечит, а совет «проверь интернет»
+// уводит не туда. Они идут в ветку с названной причиной (res.hint).
 function isNetFail(res) {
-  return !!(res && !res.ok && res.stage === 'fetch' && !isIntegrityFail(res));
+  return !!(res && !res.ok && res.stage === 'fetch' && !isIntegrityFail(res) &&
+    (!res.hintKind || res.hintKind === 'network'));
+}
+// Автоматический второй заход — на сетевом обрыве И на «файл держит антивирус» (EPERM при
+// публикации распаковки): база повторяла любой нецелостный провал докачки, а после разбора причин
+// file-locked остался без повтора, и тот, кому со второго раза обычно везёт, упирался в оранжевый
+// шаг и кнопку «Повторить». 403, нехватка места и целостность повтора НЕ получают: результат тот же.
+function isAutoRetryFail(res) {
+  return isNetFail(res) || !!(res && !res.ok && res.stage === 'fetch' && res.hintKind === 'file-locked');
 }
 
 async function runComponents(ids, env) {
@@ -1552,6 +1628,7 @@ async function runComponents(ids, env) {
       const m = line.match(/^CHECK (ok|fail|skip)\s+(.*)$/);
       if (m) { STATE.checks.push({ status: m[1], ok: m[1] === 'ok', label: m[2] }); return; }
     }
+    if (STATE.repairMode) collectRepairLine(line);   // что напечатал verify — на финиш ремонта
     appendLog(line);
   });
   const failed = [];
@@ -1561,6 +1638,11 @@ async function runComponents(ids, env) {
   //                     (это НЕ ошибка: не идёт в retry, НЕ ломает okAll, не шлётся в ok:false).
   const depSkipped = [];
   const gracefulSkipped = [];
+  // Необязательные компоненты, которые не встали (components.json → optional): жёлтые,
+  // идут в повтор, но ok прогона не роняют.
+  const softFailed = [];
+  // Частично вставшие (код 121): id → объяснение. Кумулятивно, как badEver.
+  STATE.partialEver = STATE.partialEver || new Map();
   const bad = new Set();
   // Компоненты, пропущенные В ХОДЕ прогона (dep-провал ИЛИ осознанный exit-120-skip).
   // Их убираем из HM_SELECTED перед verify, иначе verify нарисует по ним красный крест.
@@ -1601,17 +1683,18 @@ async function runComponents(ids, env) {
       setStepLabel(id, `${STATE.byId[id].name} — ждёт «${STATE.byId[broken].name}»`);
       appendLog(depSkipMessage(id, broken, badWhy));
       $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-      setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
-      ok, depSkipped.length + gracefulSkipped.length);
+      setRunProgress(ok + failed.length + softFailed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
+      ok, softFailed.length + depSkipped.length + gracefulSkipped.length);
       continue;
     }
     // Свежий прогон проверки — старые результаты чеклиста неактуальны.
     if (id === 'verify') STATE.checks = [];
     setStep(id, 'running');
+    STATE.currentStepId = id;   // отчёт для поддержки посреди прогона называет этот шаг
     startStepClock(id, (STATE.byId[id] && STATE.byId[id].name) || id);
-    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length,
+    setRunProgress(ok + failed.length + softFailed.length + depSkipped.length + gracefulSkipped.length,
       ids.length, (STATE.byId[id] && STATE.byId[id].name) || id, failed.length,
-      ok, depSkipped.length + gracefulSkipped.length);
+      ok, softFailed.length + depSkipped.length + gracefulSkipped.length);
     // Компонент реально ЗАПУСКАЕТСЯ → больше НЕ «осознанно пропущенный» из прошлого
     // прогона: снимаем из кумулятивного skippedEver. Снова graceful-skip (res.skipped
     // ниже) — вернётся; упадёт КРАСНЫМ — останется снятым, и verify обязан проверить
@@ -1654,9 +1737,14 @@ async function runComponents(ids, env) {
     // заново пробует зеркала). Сетевой сбой НИКОГДА не маппится в graceful-skip.
     // Авто-ретрай — ТОЛЬКО на сетевом обрыве. Провал целостности/среды детерминирован:
     // повтор дал бы тот же результат ценой ещё одной полной докачки.
-    if (isNetFail(res)) {
-      appendLog(`[↻] ${STATE.byId[id].name}: сеть оборвалась при докачке (${res.error || 'нет соединения'}) — пробую ещё раз…`);
-      setStepLabel(id, `${comp.name} — сеть оборвалась, повторяю…`);
+    if (isAutoRetryFail(res)) {
+      const locked = !isNetFail(res);
+      appendLog(locked
+        ? `[↻] ${STATE.byId[id].name}: система не дала записать файл (похоже на антивирус) — пробую ещё раз через несколько секунд…`
+        : `[↻] ${STATE.byId[id].name}: сеть оборвалась при докачке (${res.error || 'нет соединения'}) — пробую ещё раз…`);
+      setStepLabel(id, locked ? `${comp.name} — файл занят, повторяю…` : `${comp.name} — сеть оборвалась, повторяю…`);
+      // Антивирусу нужна пара секунд, чтобы отпустить свежераспакованные файлы; сеть ждать не надо.
+      if (locked) await new Promise((r) => setTimeout(r, STATE.fileLockRetryMs == null ? 5000 : STATE.fileLockRetryMs));
       try { res = await window.installer.runComponent(id, runEnv); }
       catch (e) { res = { id, ok: false, code: -1, stage: 'fetch', error: String(e) }; }
     }
@@ -1664,6 +1752,7 @@ async function runComponents(ids, env) {
     stopStepClock();
     if (offP) { offP(); setStepLabel(id, comp.name); } // вернуть обычную подпись
     else setStepLabel(id, (STATE.byId[id] && STATE.byId[id].name) || id);   // снять «идёт М:СС»
+    removeStepSkip(id);   // шаг завершился — кнопка «Пропустить шаг» больше не нужна
 
     if (res && res.skipped) {
       // P1: осознанный пропуск (exit 120 — нечего ставить, напр. VS Code не вшит в
@@ -1680,11 +1769,33 @@ async function runComponents(ids, env) {
       badWhy.set(id, { kind: 'skip', hint: skipWhy });
       badEver.delete(id); // осознанный «нечего ставить» — НЕ нерешённая проблема
       STATE.errorDigest.delete(id);
+      STATE.partialEver.delete(id);
+      // Пропущен кнопкой «Пропустить шаг» (решение человека, а не «нечего ставить»):
+      // подпись шага говорит об этом прямо, чтобы финиш не выглядел как «всё встало».
+      if (res.userSkipped) setStepLabel(id, `${STATE.byId[id].name} — пропущен по твоей кнопке`);
       appendLog(`[~] Пропущено: ${STATE.byId[id].name}${skipWhy ? ' — ' + skipWhy : ' (нечего устанавливать)'}.`);
+    } else if (res && res.partial) {
+      // Код 121: компонент РАБОТАЕТ, а необязательная его часть не встала (например,
+      // редактор и панель Claude на месте, панель Codex — нет). Признак и текст строки
+      // «ЧАСТИЧНО: …» отдаёт main (res.partial / res.partialReason). Жёлтый шаг с
+      // объяснением вместо красного «не установилось»: живой редактор, нарисованный
+      // провалом, люди читали как «ничего не встало». В провалы не идёт, ok не роняет.
+      setStep(id, 'partial'); ok++;
+      badEver.delete(id);
+      STATE.errorDigest.delete(id);
+      STATE.installedEver.add(id);
+      const why = window.HMRunStatus.partialText(res.partialReason);
+      STATE.partialEver.set(id, why);
+      const name = STATE.byId[id].name;
+      const whyShort = why.length > 60 ? why.slice(0, 59).trim() + '…' : why;
+      setStepLabel(id, `${name} — работает, но: ${whyShort}`);
+      addStepRetry(id);   // повтор может доставить недостающую часть
+      appendLog(`[~] ${name}: установлено частично — ${why}. Работать можно; недостающее можно доставить «Повторить».`);
     } else if (res && res.ok) {
       setStep(id, 'done'); ok++;
       badEver.delete(id); // встало — проблема закрыта
       STATE.errorDigest.delete(id);   // поставилось с ретрая — в отчёт ошибка не едет
+      STATE.partialEver.delete(id);   // встало целиком — «частично» больше не про него
       // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
       // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
       STATE.installedEver.add(id);
@@ -1696,8 +1807,13 @@ async function runComponents(ids, env) {
       const isNet = isNetFail(res);
       const isIntegrity = isIntegrityFail(res);
       const isEnv = isEnvFail(res);
-      setStep(id, (isNet || isEnv) ? 'error-net' : 'error');
-      failed.push(id);
+      // НЕОБЯЗАТЕЛЬНЫЙ компонент (components.json → optional: Cursor, десктоп-приложения,
+      // Handy, скрепка, Nomad…) не встал — жёлтый шаг, а не красный: Claude Code и
+      // редактор без него работают, и ok прогона из-за него не падает. Причина и
+      // «Повторить» — те же, что у обязательного.
+      const optional = window.HMRunStatus.isOptional(STATE.byId[id]);
+      setStep(id, optional ? 'warn' : ((isNet || isEnv) ? 'error-net' : 'error'));
+      if (optional) softFailed.push(id); else failed.push(id);
       bad.add(id);
       // Человеческое объяснение из main (res.hint — «нет готовой версии под этот
       // компьютер», «закончилось место на диске», …). Оно уже напечатано в лог
@@ -1720,13 +1836,16 @@ async function runComponents(ids, env) {
         error: (res && res.hintKind ? '[' + res.hintKind + '] ' : '')
           + String((res && res.error) || ('код ' + (res ? res.code : '?'))),
       });
-      badEver.set(id, isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail')));
+      badEver.set(id, optional ? 'optional' : (isNet ? 'net' : (isIntegrity ? 'integrity' : (isEnv ? 'env' : 'fail'))));
       const name = STATE.byId[id].name;
+      if (optional) appendLog(`[~] «${name}» — необязательный компонент: Claude Code и редактор работают и без него.`);
       if (isEnv) {
-        // Не сеть и не подмена: система не дала подготовить защищённый каталог загрузки.
-        // Говорим ПРАВДУ и подсказываем действие — «Повторить» оставляем (после запуска
-        // от администратора оно сработает), но не врём про интернет.
-        setStepLabel(id, `${name} — Нужны права администратора`);
+        // Не сеть, не подмена и не нехватка прав (установщик и так запущен от
+        // администратора): защищённый каталог загрузки не успел подготовиться — чаще всего
+        // его задерживает антивирус или занятый диск. Повтор через пару минут обычно
+        // проходит; повторится — нужен отчёт для поддержки (кнопка на финише).
+        setStepLabel(id, `${name} — не подготовилась защищённая папка загрузки (часто мешает антивирус): ` +
+          'нажми «Повторить»; повторится — «Скопировать отчёт для поддержки» на финише');
         addStepRetry(id);
         appendLog(`[!] ${name}: ${res.error || 'не удалось подготовить защищённый каталог для загрузки'}`);
       } else if (isNet) {
@@ -1737,7 +1856,7 @@ async function runComponents(ids, env) {
         // Скачанный файл не совпал с эталоном / среда не даёт защитить кэш: КРАСНЫЙ шаг,
         // БЕЗ кнопки «Повторить» (повтор детерминированно даст то же) и без «проверь интернет».
         setStepLabel(id, `${name} — Проверка целостности не пройдена`);
-        appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: пришли лог в бота.`);
+        appendLog(`[!] ${name}: файл не прошёл проверку подлинности — ${res.error || 'нет деталей'}. Повтор не поможет: нажми «Скопировать отчёт» и вставь текст в чат с ботом.`);
       } else if (res && res.hint) {
         // Причина опознана: на шаге пишем ЕЁ, а не «код 1». Подробное объяснение
         // («что произошло / что делать») main уже вывел в лог сразу после падения.
@@ -1758,15 +1877,18 @@ async function runComponents(ids, env) {
         addStepRetry(id);
         appendLog(`[!] ${name}: не удалось${ph ? ' на этапе «' + ph + '»' : ''}`
           + '. Что именно не получилось — в строках выше. Попробуй «Повторить»; '
-          + 'если снова не выйдет — пришли журнал установки в бота поддержки.');
+          + 'если снова не выйдет — нажми «Скопировать отчёт» и вставь текст в чат с ботом поддержки.');
       }
     }
-    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length} · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
-    setRunProgress(ok + failed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
-      ok, depSkipped.length + gracefulSkipped.length);
+    $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length}`
+      + (softFailed.length ? ` · Не встало необязательное: ${softFailed.length}` : '')
+      + ` · Пропущено: ${depSkipped.length + gracefulSkipped.length} · Всего: ${ids.length}`;
+    setRunProgress(ok + failed.length + softFailed.length + depSkipped.length + gracefulSkipped.length, ids.length, '', failed.length,
+      ok, softFailed.length + depSkipped.length + gracefulSkipped.length);
   }
   off && off();
   STATE.runActive = false;
+  STATE.currentStepId = '';
   // Финиш строится по КУМУЛЯТИВНОЙ карте нерешённых проблем (badEver), а НЕ по
   // per-прогонным спискам: inline-«Повторить» одного шага запускает прогон только
   // из него (+verify), per-прогонные failed/depSkipped после него пусты — финиш
@@ -1775,10 +1897,14 @@ async function runComponents(ids, env) {
   // когда компонент реально встал (res.ok) или осознанно пропущен (res.skipped).
   const unresolved = Array.from(badEver);
   return {
-    failed: unresolved.filter(([, k]) => k !== 'dep').map(([i]) => i),
+    // failed — только ОБЯЗАТЕЛЬНОЕ: именно оно решает исход прогона.
+    failed: unresolved.filter(([, k]) => k !== 'dep' && k !== 'optional').map(([i]) => i),
+    // Необязательное, что не встало: жёлтым на финише, в повтор — да, в провал — нет.
+    softFailed: unresolved.filter(([, k]) => k === 'optional').map(([i]) => i),
     depSkipped: unresolved.filter(([, k]) => k === 'dep').map(([i]) => i),
     fetchFailed: unresolved.filter(([, k]) => k === 'net').map(([i]) => i),
     integrityFailed: unresolved.filter(([, k]) => k === 'integrity').map(([i]) => i),
+    partial: Array.from(STATE.partialEver.keys()),
     gracefulSkipped,
   };
 }
@@ -1878,17 +2004,33 @@ function stopTips() {
   if (box) box.classList.add('hidden');
 }
 
-async function startInstall() {
+// opts.repair === true — режим «Проверить и починить»: в прогоне ТОЛЬКО скрытый verify
+// (см. repairEnv). Обработчик клика передаёт сюда Event, поэтому режим включается строго
+// по `repair === true`, а не по самому факту аргумента.
+async function startInstall(opts) {
+  const repair = !!(opts && opts.repair === true);
   // Жёсткий стоп при App-Translocation / оторванном vendor: даже если кнопку как-то
   // нажали — установку не начинаем, повторно показываем блокирующее окно.
   if (STATE.vendorBlocked) { renderVendorBlock(); return; }
-  const order = ensureVerifyLast(installOrder());
+  if (repair && !STATE.byId.verify) return;
+  const order = repair ? ['verify'] : ensureVerifyLast(installOrder());
   if (!order.length) return;
+  // Места мало — переспрашиваем ДО начала, а не обрываемся на середине (не блокируем:
+  // оценка с запасом, и человек вправе рискнуть). Ремонт ничего не ставит — не спрашиваем.
+  const needGB = repair ? 0 : diskNeedGB();
+  if (STATE.freeGB !== null && needGB > 0 && STATE.freeGB < needGB) {
+    const go = window.confirm('Места может не хватить.\n\nДля выбранного нужно примерно ' + needGB +
+      ' ГБ, а свободно ' + STATE.freeGB + ' ГБ ' + diskVolumeLabel() + '. Установка может оборваться посередине.\n\n' +
+      'Лучше освободить место или снять тяжёлые компоненты. Всё равно начать?');
+    if (!go) return;
+  }
   // Свежая установка — сбрасываем КУМУЛЯТИВНЫЕ (кросс-прогонные) наборы статусов:
   // installedEver (что реально встало хоть раз) и skippedEver (что осознанно
   // пропущено, exit 120). retryFailed их НЕ сбрасывает — иначе теряется, что
   // vscode/nomad/course не входили в сборку, и после «Повторить» verify рисует
   // ложные красные кресты, а финиш врёт «Агент Nomad уже установлен».
+  STATE.repairMode = repair;   // true только у «Проверить и починить»
+  STATE.repairLines = [];
   STATE.installedEver = new Set();
   STATE.skippedEver = new Set();
   // Карта НЕРЕШЁННЫХ проблем (id → 'net'|'integrity'|'fail'|'dep') — тоже кумулятивная
@@ -1899,6 +2041,7 @@ async function startInstall() {
   // сбрасываются новой установкой, переживают inline-«Повторить».
   STATE.badWhy = new Map();
   STATE.errorDigest = new Map();
+  STATE.partialEver = new Map();   // частично вставшие (код 121) — тоже на весь прогон
   // Защёлки телеметрии сбрасываем вместе с остальным состоянием прогона: иначе вторая
   // попытка (человек починил интернет и запустил установку заново) не отчитается ВООБЩЕ —
   // ни стартом, ни финишем, — а это как раз тот, кому нужна помощь.
@@ -1912,9 +2055,19 @@ async function startInstall() {
   STATE.telemetryConsent = !telOpt || !!telOpt.checked;
   $('#view-select').classList.add('hidden');
   $('#view-progress').classList.remove('hidden');
+  // Повтор ремонта запускают и с финиша того же экрана: прячем прежний итог.
+  const prevFinish = $('#next-steps');
+  if (prevFinish) prevFinish.classList.add('hidden');
+  const finishBtn = $('#btn-finish');
+  if (finishBtn) finishBtn.classList.add('hidden');
   buildSteps(order);
-  startTips();
-  LAST_ENV = envForRun();
+  if (repair) {
+    $('#progress-title').textContent = 'Проверяю и чиню…';
+    $('#progress-sub').textContent = 'Установленное не переустанавливаю — смотрю настройки в твоём профиле. Это быстро.';
+  } else {
+    startTips();
+  }
+  LAST_ENV = repair ? repairEnv() : envForRun();
   sendStartTelemetry(order);
   const res = await runComponents(order, LAST_ENV);
   finishInstall(res);
@@ -1952,28 +2105,44 @@ function finishInstall(res) {
   // в сборку») = НЕ проблема и на исход установки не влияет.
   const depSkipped = res.depSkipped || [];
   const gracefulSkipped = res.gracefulSkipped || [];
+  // Необязательное, что не встало, и частично вставшее (код 121) — жёлтым, без провала.
+  const softFailed = res.softFailed || [];
+  const partial = res.partial || [];
   // Прогон завершён — inline-«Повторить» на error-net-шагах теперь можно нажимать.
   document.querySelectorAll('.step-retry').forEach((b) => { b.disabled = false; });
-  // Независимая проверка (verify) может найти проблему, даже когда все шаги
-  // «прошли». Красный крестик чеклиста = провал; skip (снятые компоненты) — нет.
-  const checkFailed = (STATE.checks || []).some(
-    (c) => (c.status || (c.ok ? 'ok' : 'fail')) === 'fail'
-  );
-  // Осознанный exit-120-skip НЕ ломает okAll — компонент просто не входит в эту сборку.
-  const okAll = failed.length === 0 && depSkipped.length === 0 && !checkFailed;
+  // Итог прогона — ОДНОЙ функцией для экрана и для отчёта боту (run-status.js): так
+  // экран не может сказать «Готово», пока отчёт уходит с ok=False, и наоборот.
+  // Независимая проверка (verify) может найти проблему, даже когда все шаги «прошли»:
+  // красный крестик чеклиста = провал, и компонент проверки называется в отчёте.
+  // Осознанный exit-120-skip, необязательный провал и код 121 okAll НЕ ломают.
+  const report = window.HMRunStatus.installReport({
+    failed, softFailed, depSkipped, partial, gracefulSkipped,
+    checks: STATE.checks, byId: STATE.byId,
+    errors: Array.from(STATE.errorDigest.values()),
+    partialWhy: Object.fromEntries(STATE.partialEver || new Map()),
+  });
+  STATE.lastReport = report;   // «Скопировать отчёт для поддержки» берёт итог отсюда
+  const checkFailed = report.checkFailedIds.length > 0;
+  const okAll = report.ok;
   let title, sub;
-  if (okAll) {
+  if (STATE.repairMode) {
+    // «Проверить и починить»: праздника «Всё установлено» нет — ничего не ставилось.
+    const t = repairTitles(report);
+    title = t.title; sub = t.sub;
+  } else if (okAll) {
     title = 'Готово!';
-    sub = 'Всё установлено. Ниже — три простых шага до первого результата, или нажми кнопку бота — он поведёт дальше.';
-  } else if (failed.length === 0 && depSkipped.length === 0) {
+    sub = (softFailed.length || partial.length)
+      ? 'Главное установлено. Пара необязательных пунктов не встала — подробности ниже, работать это не мешает.'
+      : 'Всё установлено. Ниже — три простых шага до первого результата, или нажми кнопку бота — он поведёт дальше.';
+  } else if (report.hardFailed.length === 0 && report.hardDepSkipped.length === 0) {
     // Все компоненты встали, но verify нашёл проблему — направляем в лог и бота.
     title = 'Установка завершена, но проверка нашла проблемы';
-    sub = 'Нажми «Показать лог для поддержки» ниже и пришли файл в бота — поможем разобраться.';
+    sub = 'Нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ботом — поможем разобраться.';
   } else if (integrityFailed.length && failed.every((id) => integrityFailed.indexOf(id) !== -1)) {
     // ВСЕ провалы — целостность: НЕ сеть. «Проверь интернет» увёл бы не туда —
     // подменённый/устаревший артефакт надо эскалировать, а не ретраить.
     title = 'Файл не прошёл проверку подлинности';
-    sub = 'Скачанный компонент не совпал с эталоном — установка остановлена. Нажми «Показать лог для поддержки» ниже и пришли файл в бота.';
+    sub = 'Скачанный компонент не совпал с эталоном — установка остановлена. Нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ботом.';
   } else if (fetchFailed.length && failed.every((id) => fetchFailed.indexOf(id) !== -1)) {
     // ВСЕ провалы — обрывы докачки: это сеть, а не установка. Говорим прямо.
     title = 'Сеть оборвалась при скачивании';
@@ -1988,11 +2157,13 @@ function finishInstall(res) {
   const mascot = document.querySelector('#view-progress .mascot');
   if (mascot) {
     mascot.src = okAll ? 'mascot/success.webp' : 'mascot/thinking.webp';
-    mascot.alt = okAll ? 'Омлетон доволен — всё установилось' : 'Омлетон задумался — есть проблемы';
+    mascot.alt = okAll ? (STATE.repairMode ? 'Омлетон доволен — проверка прошла' : 'Омлетон доволен — всё установилось') : 'Омлетон задумался — есть проблемы';
   }
-  renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed);
-  sendInstallTelemetry(failed, okAll, gracefulSkipped);
+  if (STATE.repairMode) renderRepairFinish(report);
+  else renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed, softFailed, partial);
+  sendInstallTelemetry(report);
   $('#btn-finish').classList.remove('hidden');
+  renderProgressBotBanner();   // плашка помощи на финише несёт итоговый payload (C09)
 }
 
 // Телеметрия установки: ОДИН POST по завершении (повторные финиши после
@@ -2002,23 +2173,29 @@ function finishInstall(res) {
 // Сам POST делает MAIN (CSP renderer'а запрещает сеть; URL зашит в config.json,
 // renderer его не задаёт); там таймаут 5с и все ошибки глотаются — установка от
 // телеметрии не зависит ни в каком исходе.
-function sendInstallTelemetry(failed, okAll, gracefulSkipped) {
+function sendInstallTelemetry(report) {
   if (STATE.telemetrySent || STATE.telemetryConsent === false) return;
   STATE.telemetrySent = true;
   const durationSec = STATE.installStartedAt
     ? Math.max(0, Math.round((Date.now() - STATE.installStartedAt) / 1000))
     : 0;
+  const r = report || {};
   try {
-    // gracefulSkipped едет отдельным полем (симметрично тому, как main санитизирует
-    // failed) — и НЕ влияет на ok: осознанный «не входит в сборку» это не провал.
+    // Поля собирает run-status.js (installReport): ok=False ВСЕГДА с названным
+    // компонентом (раньше пять отчётов ушли ok=False с пустым failed — проверка нашла
+    // проблему, а шаги «прошли»). Необязательное, что не встало, едет в skipped вместе
+    // с осознанными пропусками (exit 120) и ok не роняет; его причина — в errors.
     const p = window.installer.sendTelemetry({
       event: 'installed',
-      ok: !!okAll,
-      failed: (failed || []).slice(),
-      skipped: (gracefulSkipped || []).slice(),
+      ok: !!r.ok,
+      failed: (r.failed || []).slice(),
+      skipped: (r.skipped || []).slice(),
       // Почему именно упало — без этого помощь человеку сводится к «пришли лог».
-      errors: Array.from(STATE.errorDigest.values()),
+      errors: (r.errors || []).slice(),
       durationSec,
+      // «repair» — прогон «Проверить и починить» (только verify): бот отличает его от
+      // установки, иначе «ничего не встало» читалось бы как провал установки.
+      mode: STATE.repairMode ? 'repair' : 'install',
     });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает финиш */ }
@@ -2031,7 +2208,8 @@ function sendStartTelemetry(order) {
   if (STATE.telemetryStartSent || STATE.telemetryConsent === false) return;
   STATE.telemetryStartSent = true;
   try {
-    const p = window.installer.sendTelemetry({ event: 'install_started', selected: (order || []).slice() });
+    const p = window.installer.sendTelemetry({ event: 'install_started', selected: (order || []).slice(),
+      mode: STATE.repairMode ? 'repair' : 'install' });
     if (p && p.catch) p.catch(() => { /* молча */ });
   } catch (e) { /* телеметрия никогда не ломает установку */ }
 }
@@ -2047,7 +2225,7 @@ function sendStartTelemetry(order) {
 // оставляем в логе (он уже там), не на экране.
 function humanIoError(raw) {
   const s = String(raw || '');
-  if (!s) return 'неизвестная ошибка. Попробуй ещё раз или пришли лог в бота.';
+  if (!s) return 'неизвестная ошибка. Попробуй ещё раз или нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом.';
   if (/EACCES|EPERM/.test(s)) {
     return 'нет прав на запись. Закрой Claude Code и редактор, потом попробуй снова; если не поможет — '
       + 'запусти установщик правым кликом → «Запуск от имени администратора».';
@@ -2055,12 +2233,12 @@ function humanIoError(raw) {
   if (/ENOSPC/.test(s)) return 'на диске кончилось место. Освободи немного и попробуй снова.';
   if (/EBUSY|ETXTBSY/.test(s)) return 'файл занят другой программой. Закрой Claude Code и Cursor, потом попробуй снова.';
   if (/EROFS/.test(s)) return 'диск доступен только для чтения.';
-  if (/EISDIR|ENOTDIR/.test(s)) return 'по этому пути лежит папка вместо файла — так бывает после сбоя. Пришли лог в бота.';
+  if (/EISDIR|ENOTDIR/.test(s)) return 'по этому пути лежит папка вместо файла — так бывает после сбоя. Нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом.';
   if (/EMFILE|ENFILE/.test(s)) return 'система исчерпала лимит открытых файлов. Перезагрузи компьютер и повтори.';
   // Своё осмысленное сообщение (например, из credentials-merge) пропускаем как есть:
   // оно уже написано для человека. Признак — отсутствие «Error:» и кода в верхнем регистре.
   if (!/^Error:|\b[A-Z]{4,}\b/.test(s)) return s;
-  return 'ошибка записи. Пришли лог в бота — там полный текст.';
+  return 'ошибка записи. Нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом — там полный текст.';
 }
 
 function sendOpenEditorTelemetry() {
@@ -2094,13 +2272,15 @@ function showEditorHint(text) {
   return true;
 }
 
-function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed) {
+function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetchFailed, integrityFailed, softFailed, partial) {
   failed = failed || [];
   depSkipped = depSkipped || [];
   gracefulSkipped = gracefulSkipped || [];
   checkFailed = !!checkFailed;
   fetchFailed = fetchFailed || [];
   integrityFailed = integrityFailed || [];
+  softFailed = softFailed || [];
+  partial = partial || [];
   const links = (STATE.config && STATE.config.links) || {};
   const fin = (STATE.config && STATE.config.finish) || {};
   const botH = botHandle();
@@ -2114,7 +2294,9 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
 
   // Retry только реальные провалы и dep-skip (перезапуск зависимости может их
   // разблокировать). gracefulSkipped (exit 120) в retry НЕ идёт — там нечего ставить.
-  const retryList = failed.concat(depSkipped);
+  // Необязательное и частично вставшее — идёт: повтор может их доставить, а исход
+  // прогона они не портят ни до, ни после.
+  const retryList = failed.concat(depSkipped).concat(softFailed).concat(partial);
   const depSkipHtml = depSkipped.length
     ? `<div class="ns-fail">Пропущено (не встала зависимость): <b>${depSkipped.map((i) => STATE.byId[i].name).join(', ')}</b>.</div>`
     : '';
@@ -2126,7 +2308,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   // Провал целостности — НЕ сетевая формулировка: «проверь интернет» тут вреден,
   // повтор детерминированно даст то же — направляем в лог и бота (эскалация).
   const integrityHint = integrityFailed.length
-    ? `<div class="ns-fail-hint">Не прошли проверку подлинности: <b>${integrityFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Повтор не поможет — нажми «Показать лог для поддержки» и пришли файл в ${botH}.</div>`
+    ? `<div class="ns-fail-hint">Не прошли проверку подлинности: <b>${integrityFailed.map((i) => STATE.byId[i].name).join(', ')}</b>. Повтор не поможет — нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ${botH}.</div>`
     : '';
   // Названная причина по КАЖДОМУ упавшему компоненту. Без неё финиш говорил только
   // «не установилось: VS Code» — то есть ровно столько же, сколько «код 1»: человек
@@ -2174,10 +2356,16 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   // когда открывать есть чем, но это Cursor, и звать его «VS Code» было бы ложью.
   const editorMissingName = editorMissing ? nameOf('vscode', 'VS Code') : '';
   const editorReadyName = editorReadyId === 'cursor' ? nameOf('cursor', 'Cursor') : 'VS Code';
-  const failHtml = retryList.length
+  // Красный блок — только при ЖЁСТКОМ провале: не встало обязательное или его зависимость.
+  // Если не встало лишь необязательное или частичное, красного нет вовсе, а «Повторить» живёт
+  // в жёлтом блоке: красная плашка прямо под «Готово!» противоречила заголовку, а её подсказка
+  // посылала к кнопке, спрятанной в «Ещё инструменты».
+  const hardProblem = failed.length > 0 || depSkipped.length > 0;
+  const retryBtnHtml = '<button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>';
+  const failHtml = hardProblem
     ? `<div class="ns-fail">${failed.length ? 'Не установилось: <b>' + failed.map((i) => STATE.byId[i].name).join(', ') + '</b>. ' : ''}
-         <button type="button" id="ns-retry" class="btn-sm">Повторить неустановленное</button>${whyHint}${netHint}${integrityHint}
-         <div class="ns-fail-hint">Если повтор не помогает — нажми «Показать лог для поддержки» ниже и пришли этот файл в ${botH}.</div></div>` + depSkipHtml
+         ${retryBtnHtml}${whyHint}${netHint}${integrityHint}
+         <div class="ns-fail-hint">Если повтор не помогает — нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ${botH}.</div></div>` + depSkipHtml
     : '';
   // Осознанный пропуск (не входит в эту сборку) — нейтральная строка, НЕ ошибка и БЕЗ кнопки повтора.
   // Пропущенные — С ПРИЧИНОЙ у каждого. Прежняя строка объявляла ЛЮБОЙ exit 120
@@ -2197,11 +2385,31 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   const gracefulSkipHtml = gracefulSkipped.length
     ? `<div class="ns-note">Пропущено (устанавливать не стали): ${skipLines.join('; ')}.</div>`
     : '';
+  // Необязательное, что не встало, — жёлтым и С ПРИЧИНОЙ, но не как «установка не
+  // удалась»: Claude Code и редактор работают и без этого. Причина — наш словарь
+  // (failure-explain.js) или этап из вывода скрипта, поэтому экранируем.
+  const softLines = softFailed.map((i) => {
+    const w = (whyMap && whyMap.get(i)) || null;
+    return '<b>' + escapeHtml(nameOfId(i)) + '</b>' + ((w && w.hint) ? ' — ' + escapeHtml(String(w.hint)) : '');
+  });
+  // Кнопка «Повторить» — в первом из жёлтых блоков, и только если красного нет (см. hardProblem).
+  const softHtml = softFailed.length
+    ? `<div class="ns-warn">Не встало необязательное: ${softLines.join('; ')}. Claude Code и редактор работают и без этого — можно поставить позже или попробовать ещё раз. ${hardProblem ? '' : retryBtnHtml}</div>`
+    : '';
+  // Код 121: компонент работает, но без необязательной части. Текст — из строки
+  // «ЧАСТИЧНО: …» скрипта, то есть данные машины: только через escapeHtml.
+  const partialWhy = STATE.partialEver || new Map();
+  const partialHtml = partial.length
+    ? `<div class="ns-warn">Установлено частично: ${partial.map((i) => '<b>' + escapeHtml(nameOfId(i)) + '</b>' +
+        (partialWhy.get(i) ? ' — ' + escapeHtml(String(partialWhy.get(i))) : '')).join('; ')}. Работать можно уже сейчас. ${hardProblem || softFailed.length ? '' : retryBtnHtml}</div>`
+    : '';
 
   // Deep-link в бота — по РЕЗУЛЬТАТУ установки (pure-логика в finish-link.js, шарится
   // с тестами): всё ок → ?start=installed_win|installed_mac; есть упавшие компоненты →
-  // ?start=failed_<первый-упавший-id>_win|_mac (напр. failed_cursor_win).
-  const startPayload = window.HMFinishLink.botStartPayload(failed, isWin, fin.botStartPayload || 'installed');
+  // ?start=failed_<первый-упавший-id>_win|_mac (напр. failed_cursor_win). «Упавшие» берём
+  // из итога прогона (botFailedIds): verify всегда выходит с 0, и красная ТОЛЬКО проверка
+  // после установки раньше давала installed_<os> при ok=False в телеметрии.
+  const startPayload = window.HMFinishLink.botStartPayload(botFailedIds(failed), isWin, fin.botStartPayload || 'installed');
   const botUrl = window.HMFinishLink.botUrl(links.bot || '', startPayload);
   // Заметная CTA-карточка бота академии: новичок должен сразу видеть, куда бежать
   // за помощью. Открытие ссылки — через тот же механизм data-ext → openExternal,
@@ -2276,7 +2484,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
         : 'не выбрано');
       return `<li class="skip" style="opacity:.5"><span class="mark">–</span><span>${escapeHtml(base)} <span style="font-size:11px">(${escapeHtml(why)})</span></span></li>`;
     }
-    return `<li class="${st === 'ok' ? 'ok' : 'fail'}"><span class="mark">${st === 'ok' ? '✓' : '✕'}</span><span>${escapeHtml(c.label)}</span></li>`;
+    return checkLiHtml(st, c.label);   // строка чеклиста и пояснение под красной — в конце файла
   };
   const checksHtml = checks.length
     ? `<div class="ns-checks">
@@ -2388,27 +2596,48 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
        </div>`
     : '';
 
+  // «Скопировать отчёт для поддержки»: когда что-то не так — среди главных кнопок, иначе
+  // в «Ещё инструменты». Текст собирает main (хвост журнала, ОС, издание, uid).
+  const hasProblems = !!(failed.length || checkFailed || softFailed.length || partial.length || depSkipped.length);
+  const reportBtn = `<button type="button" id="ns-report" class="btn-sm">📋 Скопировать отчёт для поддержки</button>`;
+  // Связь с Anthropic из консоли — проверяется ПОСЛЕ отрисовки (runNetCheck) и ничего
+  // не блокирует; блок заполняется сам.
+  const netHtml = `<div class="ns-net" id="ns-net">Проверяю, дойдёт ли Claude Code до серверов Anthropic…</div>`;
+  // Скрепка: что это, как запустить и как убрать — одной строкой (иначе её принимали за чужую
+  // программу). Только если скрепку поставил ЭТОТ прогон: у найденной на диске установщик её
+  // не запускал, и «запустил её один раз после установки» было бы неправдой.
+  const mascotInstalled = !!(STATE.installedEver && STATE.installedEver.has('mascot'));
+  const mascotHtml = mascotInstalled ? `<div class="ns-note ns-mascot">📎 ${escapeHtml(mascotNoteText())}</div>` : '';
+  // Сводка пака («Установлено N скиллов, M агентов» + каталог) — заполняется после отрисовки.
+  const packHtml = `<div class="ns-note ns-pack hidden" id="ns-pack"></div>`;
   const ns = $('#next-steps');
   ns.innerHTML = `
     <div class="ns-title">Что дальше — три простых шага</div>
     <ol class="ns-steps">
       ${editorMissing ? `<li><b>Сначала доустанови редактор</b> — ${editorMissingName} не установился, а первый шаг делается именно в нём. Нажми <b>«Повторить неустановленное»</b> ниже. Не помогло — закрой установщик, запусти его правым кликом → <b>«Запуск от имени администратора»</b>, и отметь только этот компонент.</li>`
       : `<li><b>Открой ${editorReadyName}</b> — синяя кнопка ниже. Это твоя мастерская: слева файлы проекта, сбоку — панель Claude со значком <b>✳</b>. <b>Установщик больше не нужен</b> — Claude Code теперь живёт в ${editorReadyName}: закрыл окно — просто открой ${editorReadyName} снова (ярлык на рабочем столе / в меню Пуск).</li>`}
-      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». Claude Code — это <b>чат</b>: ты пишешь задачу текстом, он делает. При первом запросе он попросит подключить нейросеть — как, смотри в блоке ниже.</li>
+      <li><b>Напиши первый запрос в панели Claude</b> — по-русски, своими словами: например, «сделай мне сайт-визитку». Claude Code — это <b>чат</b>: ты пишешь задачу текстом, он делает. Пиши именно в панель со значком <b>✳</b> — не во встроенный чат редактора справа (это GitHub Copilot, другой продукт) и не в голое окно PowerShell. При первом запросе он попросит подключить нейросеть — как, смотри в блоке ниже.</li>
       ${step3}
     </ol>
     ${accessHtml}
+    ${netHtml}
     ${courseHtml}
+    ${mascotHtml}
+    ${packHtml}
     ${checksHtml}
     ${failHtml}
     ${gracefulSkipHtml}
+    ${partialHtml}
+    ${softHtml}
     <div class="ns-actions">
       ${editorMissing
         ? `<button type="button" id="ns-vscode" class="btn-sm ns-main" disabled title="${editorMissingName} не установился — сначала доустанови его кнопкой «Повторить неустановленное»">▶ Открыть VS Code — сначала доустанови редактор</button>`
         : `<button type="button" id="ns-vscode" class="btn-sm primary ns-main">▶ Открыть ${editorReadyName} — начать здесь</button>`}
       ${videoBtn}
       ${(failed.length || checkFailed) ? logBtn : ''}
+      ${hasProblems ? reportBtn : ''}
     </div>
+    <div class="ns-report-status" id="ns-report-status"></div>
     ${botCta}
     <details class="ns-more">
       <summary>Ещё инструменты ▾</summary>
@@ -2418,6 +2647,7 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
         <button type="button" id="ns-keys" class="btn-sm">Показать файл ключей</button>
         ${startBtn}
         ${(failed.length || checkFailed) ? '' : logBtn}
+        ${hasProblems ? '' : reportBtn}
       </div>
     </details>
     ${keysHtml}
@@ -2601,8 +2831,8 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
       let res = null;
       try { res = await window.installer.openPath(STATE.logPath); } catch (_) { res = null; }
       if (!res || res.ok !== true) {
-        sayNear(logBtnEl, 'Не удалось открыть лог. Он лежит здесь — открой вручную и пришли файл в бота: '
-          + STATE.logPath);
+        sayNear(logBtnEl, 'Не удалось открыть лог. Нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом — '
+          + 'хвост лога уже в нём. Сам файл лежит здесь: ' + STATE.logPath);
       }
     });
   }
@@ -2626,6 +2856,11 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   ns.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => window.installer.openExternal(b.dataset.ext)));
   const retry = $('#ns-retry');
   if (retry) retry.addEventListener('click', () => retryFailed(retryList));
+  const reportBtnEl = $('#ns-report');
+  if (reportBtnEl) reportBtnEl.addEventListener('click', () => copySupportReport());
+  // После отрисовки и без ожидания: связь с Anthropic и сводка пака.
+  runNetCheck();
+  renderPackSummary();
 }
 
 const CRED_KEY_NAMES = ['GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
@@ -2649,6 +2884,475 @@ async function saveCredentialKeys() {
       ? `Сохранено (${(res.saved || []).length}) в .credentials.master.env ✓`
       : 'Не удалось сохранить: ' + humanIoError(res && res.error);
   }
+}
+
+// ---- после установки и во время неё: сторож, отчёт поддержке, связь, сводка ----
+// Функции новые и стоят в конце файла намеренно: вставка в середину сдвинула бы
+// ссылки «файл:строка» из docs/specs на код ниже.
+
+// Имя компонента для текста (сырое; в HTML — только через escapeHtml).
+function nameOfId(id) { return (STATE.byId[id] && STATE.byId[id].name) || String(id); }
+
+// «1 скилл / 3 скилла / 5 скиллов».
+function ruPlural(n, one, few, many) {
+  const a = Math.abs(Number(n) || 0) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
+// Скрепка появлялась без объяснений: её принимали за чужую программу. Одна строка на
+// финише: что это, что установщик запустил её один раз и как запустить снова. Про
+// автозапуск здесь ни слова намеренно — решение владельца 06.10: скрепка больше не
+// ставится в автозагрузку (правит mascot.ps1 / mascot.sh отдельно). Путь к exe — тот же,
+// что в mascot.ps1 ($destDir = %LOCALAPPDATA%\Programs\ClaudeMascot).
+function mascotNoteText() {
+  const again = STATE.platform === 'darwin'
+    ? 'Запустить снова: ⌘+Пробел → «Claude Mascot» (или Finder → домашняя папка → «Программы»).'
+    : 'Запустить снова: Пуск → «Claude Mascot» (или файл %LOCALAPPDATA%\\Programs\\ClaudeMascot\\claude-mascot.exe).';
+  // Как убрать — карточка «Скрепка Claude (маскот)» → «Удалить» (скрепка в REMOVABLE). И честно:
+  // сама она больше не стартует, а хуки Claude Code к ней остаются в настройках, поэтому, пока
+  // скрепка не запущена, они упираются в закрытый порт и притормаживают работу.
+  return 'Скрепка на рабочем столе — помощник Claude: показывает, что он сейчас делает, и даёт кнопки ' +
+    '«Разрешить / Отклонить» прямо на экране. Установщик запустил её один раз после установки. ' + again +
+    ' Убрать совсем: карточка «Скрепка Claude (маскот)» в этом установщике → «Удалить». ' +
+    'Пока скрепка не запущена, Claude Code напрасно обращается к ней и из-за этого может притормаживать: ' +
+    'запусти её или удали.';
+}
+
+// ---- «Пропустить шаг» ------------------------------------------------------
+// main шлёт step-stall: 'stalled' — необязательный шаг молчит STALL_SKIP_MIN минут
+// (кнопку можно показать), 'alive' — шаг снова пишет вывод (кнопку убрать). Решение о
+// пропуске всё равно за main: кнопка лишь просит (skip-step), и отказ показываем честно.
+function onStepStall(p) {
+  if (!p || !p.id) return;
+  if (p.state === 'alive') { removeStepSkip(p.id); return; }
+  if (p.state === 'stalled') addStepSkip(p.id, p.mins);
+}
+
+function addStepSkip(id, mins) {
+  const step = document.querySelector(`.step[data-id="${id}"]`);
+  if (!step || step.querySelector('.step-skip')) return;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn-sm step-skip';
+  b.textContent = 'Пропустить шаг';
+  b.title = 'Шаг молчит ' + (Number(mins) || 8) + ' мин. При медленном интернете большая загрузка идёт молча — тогда лучше подождать. ' +
+    'Ничего не качается — нажми: компонент необязательный, установка продолжится без него, поставить его можно позже.';
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    b.textContent = 'Останавливаю…';
+    let r = null;
+    try { r = await window.installer.skipStep(id); } catch (e) { r = null; }
+    if (r && r.ok) {
+      appendLog(`[~] «${nameOfId(id)}» — останавливаю шаг по кнопке «Пропустить шаг», установка пойдёт дальше…`);
+      return;
+    }
+    removeStepSkip(id);
+    const why = (r && r.reason === 'alive') ? 'шаг снова ожил — пропускать не стал, установка идёт дальше'
+      : (r && r.reason === 'required') ? 'это обязательный компонент — его пропустить нельзя'
+        : 'шаг уже закончился';
+    appendLog(`[~] «${nameOfId(id)}»: ${why}.`);
+  });
+  step.appendChild(b);
+}
+
+function removeStepSkip(id) {
+  const step = document.querySelector(`.step[data-id="${id}"]`);
+  const b = step ? step.querySelector('.step-skip') : null;
+  if (b) b.remove();
+}
+
+// ---- «Скопировать отчёт для поддержки» ---------------------------------------
+// Что не встало и почему — из того же итога, что ушёл в телеметрию (STATE.lastReport):
+// упавшее, необязательное, частичное, жалоба проверки. Текст собирает и чистит MAIN.
+function supportSteps() {
+  // Посреди прогона прежний итог устарел (повтор идёт) — смотрим на живую карту причин.
+  const rep = STATE.runActive === true ? null : STATE.lastReport;
+  const errs = (rep && Array.isArray(rep.errors)) ? rep.errors : Array.from((STATE.errorDigest || new Map()).values());
+  return errs.slice(0, 10).map((e) => ({ id: e.id, name: nameOfId(e.id), stage: e.stage || '', error: e.error || '' }));
+}
+
+async function copySupportReport() {
+  // Кнопка живёт и на финише (#ns-report-status), и в плашке помощи во время установки.
+  const st = document.getElementById('ns-report-status') || document.getElementById('pb-report-status');
+  const say = (t) => { if (st) st.textContent = t; };
+  let r = null;
+  try {
+    r = await window.installer.supportReport({ outcome: supportOutcome(), running: STATE.runActive === true, steps: supportSteps() });
+  } catch (e) { r = null; }
+  if (r && r.ok) {
+    // Не обещаем «ключей нет»: чистка находит известные виды секретов и ПД, а не все возможные.
+    say('Отчёт скопирован — вставь его в чат с ботом-помощником (Ctrl+V, на Mac — ⌘+V). ' +
+      'Имя пользователя, пути и ключи из текста убраны автоматически; всё равно просмотри его перед отправкой.');
+    // Человек вправе видеть, что именно он отправит: показываем скопированный текст.
+    openModal({
+      id: 'report-preview',
+      emoji: '📋',
+      title: 'Отчёт скопирован в буфер обмена',
+      bodyHtml: '<p class="wi-lead">Вставь его боту-помощнику одним сообщением. Вот что в нём:</p>' +
+        '<pre class="report-pre">' + escapeHtml(r.text || '') + '</pre>',
+      closeLabel: 'Понятно',
+      blocking: false,
+    });
+  } else {
+    say('Скопировать не получилось' + (r && r.error ? ' (' + r.error + ')' : '') +
+      '. Открой лог кнопкой «Показать лог для поддержки» и пришли боту файл журнала.');
+  }
+}
+
+// ---- связь с Anthropic из консоли ------------------------------------------
+// Браузер через VPN открывает claude.ai, а Claude Code — консольная программа и
+// системный прокси Windows не видит: «403», «Unable to connect». main проверяет связь
+// тем же сетевым путём, каким пойдёт Claude Code, и находит прокси VPN-клиента. Здесь —
+// только рассказ и кнопка с согласием; установку это не блокирует никогда.
+async function runNetCheck() {
+  const box = document.getElementById('ns-net');
+  if (!box) return;
+  if (!window.installer.netCheck) { box.remove(); return; }
+  let r = null;
+  try { r = await window.installer.netCheck(); } catch (e) { r = null; }
+  renderNetCheck(r);
+}
+
+function tunStepsHtml() {
+  return '<ol class="ns-net-steps">' +
+    '<li>Открой свой VPN-клиент (Happ, v2rayN, Throne, Hiddify — какой есть).</li>' +
+    '<li>Включи режим <b>TUN</b> — в разных клиентах он называется «TUN», «VPN-режим» или «весь трафик». ' +
+    'Режима «системный прокси» мало: через него ходит только браузер.</li>' +
+    '<li>Перезапусти VS Code (или терминал) и открой Claude снова — он подключится.</li>' +
+    '</ol><div class="ns-net-note">Для самой установки VPN не нужен (кроме необязательных Claude Desktop, ChatGPT и Cursor — их сайты без VPN могут не открыться) — он нужен для входа и работы Claude.</div>';
+}
+
+function renderNetCheck(r) {
+  const box = document.getElementById('ns-net');
+  if (!box) return;
+  const res = r || {};
+  if (res.kind === 'skipped') { box.remove(); return; }   // пробный прогон: в сеть не ходили
+  box.className = 'ns-net';
+  if (res.kind === 'reachable') {
+    box.classList.add('ok');
+    box.textContent = '✓ Связь с серверами Claude из консоли есть — Claude Code сможет подключиться.';
+    return;
+  }
+  if (res.configuredKind === 'reachable') {
+    box.classList.add('ok');
+    box.textContent = '✓ Напрямую серверы Claude не отвечают, но Claude Code настроен ходить через прокси ' +
+      (res.configured || '') + ' — через него связь есть.';
+    return;
+  }
+  box.classList.add('warn');
+  const detail = escapeHtml(res.detail || 'проверить не удалось');
+  const note = (t) => '<div class="ns-net-note">' + t + '</div>';
+  // Совет — по ВИДУ ответа, а не один на все случаи: раньше «нужен VPN на весь компьютер» говорилось
+  // и когда нет интернета, и когда соединение подменяет антивирус, и когда упала сама проверка.
+  if (res.kind === 'unknown') {
+    box.innerHTML = '<b>Связь с серверами Anthropic проверить не удалось</b> (' + detail + '). ' +
+      'Это не значит, что связи нет: открой Claude Code и посмотри, подключится ли он. Если нет — включи VPN на весь компьютер (режим TUN).';
+    return;
+  }
+  if (res.kind === 'offline') {
+    box.innerHTML = '<b>Похоже, нет выхода в интернет</b> (' + detail + '). Установку это не портит, но без сети Claude Code не заработает.' +
+      note('Проверь подключение (Wi-Fi или кабель). Когда сеть появится, просто открой Claude Code — заново ставить ничего не нужно.');
+    return;
+  }
+  if (res.kind === 'tls') {
+    box.innerHTML = '<b>Соединение с серверами Anthropic кто-то подменяет</b> (' + detail + '). Установку это не портит, но входу и работе Claude Code это мешает.' +
+      note('Чаще всего это антивирус с проверкой защищённых соединений (HTTPS) или корпоративный прокси. Отключи проверку HTTPS («веб-защиту») ' +
+        'в антивирусе и перезапусти VS Code. На рабочем компьютере спроси администратора про корневой сертификат — его указывают в переменной NODE_EXTRA_CA_CERTS.');
+    return;
+  }
+  let html = '<b>Claude Code пока не достучится до серверов Anthropic</b> (' + detail + '). ' +
+    'Установку это не портит, но для входа и работы нужен VPN на весь компьютер.';
+  if (res.configuredUnreadable) {
+    // Значение прокси на экран не выводим (в адресе бывает пароль) и заменить его не предлагаем.
+    html += note('В настройках Claude Code уже прописан прокси, но разобрать его адрес не получилось, поэтому заменить его я не предлагаю. ' +
+      'Проверь строки HTTPS_PROXY и HTTP_PROXY в файле settings.json в папке .claude твоего профиля — или включи в VPN-клиенте режим TUN.') + tunStepsHtml();
+  } else if (res.configured && res.configuredKind) {
+    html += note('В настройках Claude Code прописан прокси <code>' + escapeHtml(res.configured) +
+      '</code>, но через него связи нет — включи VPN-клиент. Не пользуешься им больше — убери строки HTTPS_PROXY и ' +
+      'HTTP_PROXY из файла settings.json в папке .claude твоего профиля.');
+  } else if (res.proxy && res.proxy.kind === 'geo') {
+    // Прокси VPN-клиента отвечает, но Anthropic отказывает уже ему: дело в стране выходного адреса.
+    html += note('VPN-клиент включён (системный прокси <code>' + escapeHtml(res.proxy.url || '') + '</code>), но Anthropic отказывает и через него: ' +
+      'выходной адрес VPN — в стране, которую он не пускает. Смени сервер или страну в VPN-клиенте и проверь снова.');
+  } else if (res.proxy && res.proxy.works && res.proxy.url) {
+    html += note('Похоже, VPN-клиент включён в режиме «системный прокси» (<code>' +
+      escapeHtml(res.proxy.url) + '</code>): браузер через него ходит, а Claude Code — нет. Могу прописать этот ' +
+      'прокси в настройки Claude Code — тогда он тоже пойдёт через VPN.') +
+      '<button type="button" id="ns-proxy" class="btn-sm">Прописать прокси для Claude Code</button>';
+  } else {
+    html += tunStepsHtml();
+  }
+  box.innerHTML = html;
+  const pb = document.getElementById('ns-proxy');
+  if (pb) pb.addEventListener('click', () => applyProxyClick(res.proxy.url));
+}
+
+const PROXY_FAIL_TEXT = {
+  'existing-proxy': 'в настройках Claude Code уже прописан другой прокси — заменять его не стал',
+  'no-local-proxy': 'системный прокси уже выключен или сменился — проверь VPN-клиент и нажми ещё раз',
+  'proxy-not-working': 'через прокси серверы Claude сейчас не отвечают — ничего не записал',
+  'invalid-json': 'файл ~/.claude/settings.json повреждён (это не JSON) — не трогал его',
+  'env-not-object': 'в ~/.claude/settings.json поле env устроено необычно — не трогал файл',
+  'not-object': 'файл ~/.claude/settings.json устроен необычно — не трогал его',
+  'not-regular-file': 'файл настроек — ссылка или папка, а не обычный файл — не трогал его',
+  'read-failed': 'не получилось прочитать ~/.claude/settings.json — ничего не записал',
+  'write-failed': 'не получилось записать ~/.claude/settings.json',
+};
+
+async function applyProxyClick(url) {
+  const yes = window.confirm('Прописать прокси VPN-клиента в настройки Claude Code?\n\n' +
+    'В файл ~/.claude/settings.json (блок "env") добавятся HTTPS_PROXY и HTTP_PROXY = ' + url +
+    ' и NO_PROXY для локальных адресов. Остальные настройки не меняются, рядом сохранится копия файла.\n\n' +
+    'Важно: пока прокси прописан, Claude Code работает только при ВКЛЮЧЁННОМ VPN-клиенте. ' +
+    'Выключишь клиент — Claude Code перестанет подключаться, пока не включишь его снова или не уберёшь эти строки.\n\n' +
+    'Прописать?');
+  if (!yes) return;
+  const pb = document.getElementById('ns-proxy');
+  if (pb) { pb.disabled = true; pb.textContent = 'Записываю…'; }
+  let r = null;
+  try { r = await window.installer.applyProxy(); } catch (e) { r = null; }
+  const box = document.getElementById('ns-net');
+  if (!box) return;
+  if (r && r.ok) {
+    box.className = 'ns-net ok';
+    box.textContent = '✓ Прокси ' + (r.url || '') + ' прописан в ' + (r.path || '~/.claude/settings.json') +
+      (r.backup ? ' (копия прежнего файла: ' + r.backup + ')' : '') +
+      '. Перезапусти VS Code или терминал — Claude Code пойдёт через VPN.';
+    return;
+  }
+  if (pb) { pb.disabled = false; pb.textContent = 'Прописать прокси для Claude Code'; }
+  const why = (r && PROXY_FAIL_TEXT[r.reason]) || 'не получилось';
+  const note = document.createElement('div');
+  note.className = 'ns-net-note';
+  note.textContent = 'Не прописал: ' + why + '. Надёжнее — включить в VPN-клиенте режим TUN («весь трафик»).';
+  box.appendChild(note);
+}
+
+// ---- сводка пака -------------------------------------------------------------
+// «Что встало и где список»: люди не находили, что за скиллы им поставили и сколько
+// их. Число берём из сводки, которую пишет config-скрипт; нет сводки — молчим.
+async function renderPackSummary() {
+  const box = document.getElementById('ns-pack');
+  if (!box || !window.installer.packSummary) return;
+  const configHere = !!(STATE.installedEver && STATE.installedEver.has('config')) ||
+    !!(STATE.detected && STATE.detected.config && STATE.detected.config.installed);
+  if (!configHere) return;
+  let r = null;
+  try { r = await window.installer.packSummary(); } catch (e) { return; }
+  if (!r || !r.ok) return;
+  const parts = [];
+  if (Number.isFinite(r.skills)) parts.push(r.skills + ' ' + ruPlural(r.skills, 'скилл', 'скилла', 'скиллов'));
+  if (Number.isFinite(r.agents)) parts.push(r.agents + ' ' + ruPlural(r.agents, 'агент', 'агента', 'агентов'));
+  if (!parts.length) return;
+  // Где они работают — людям это не очевидно (искали скиллы в приложении Claude и на claude.ai).
+  box.innerHTML = '🧩 Из конфига в Claude Code установлено ' + parts.join(' и ') + '. ' +
+    'Работают они в Claude Code — в панели ✳ в VS Code или после команды <code>claude</code> в терминале; ' +
+    'в обычном чате приложения Claude, на claude.ai и в телефоне их нет. ' +
+    (r.catalog
+      ? 'Что каждый умеет — в каталоге <code>~/.claude/CATALOG.md</code>. ' +
+        '<button type="button" id="ns-catalog" class="btn-sm">Показать каталог</button>'
+      : 'Они лежат в папке <code>~/.claude/skills</code>.');
+  box.classList.remove('hidden');
+  const cb = document.getElementById('ns-catalog');
+  if (cb) cb.addEventListener('click', async () => {
+    let ok = false;
+    try { ok = await window.installer.revealCatalog(); } catch (e) { ok = false; }
+    if (!ok) cb.textContent = 'Каталог не найден';
+  });
+}
+
+// Строка чеклиста «Проверка установки» на финише (её зовёт renderNextSteps): ✓ или ✕ и
+// ярлык проверки. Под КРАСНОЙ строкой — пояснение «что это и что делать», но только для
+// ярлыков, которые сами этого не говорят (HMRunStatus.checkFailWhy): «Запуск claude в
+// PowerShell» без него читается как «Claude Code не установился», хотя в cmd он работает.
+// Ярлык печатает скрипт, а пояснение живёт в run-status.js, поэтому оба — через escapeHtml.
+// Сбой помощника не должен гасить финишный экран: без пояснения строка рисуется как раньше.
+function checkLiHtml(st, label) {
+  const good = st === 'ok';
+  let why = null;
+  try {
+    const rs = window.HMRunStatus;
+    if (!good && rs && typeof rs.checkFailWhy === 'function') why = rs.checkFailWhy(label);
+  } catch (e) { why = null; }
+  const whyHtml = why ? `<span class="ns-check-why">${escapeHtml(why.hint)}</span>` : '';
+  return `<li class="${good ? 'ok' : 'fail'}${why ? ' has-why' : ''}"><span class="mark">${good ? '✓' : '✕'}</span><span>${escapeHtml(label)}${whyHtml}</span></li>`;
+}
+
+// ---- «Проверить и починить» -----------------------------------------------------
+// У человека, у которого всё уже стоит, «Установить» погашена: детект снял галочки, ставить
+// нечего, и ни одна починка, спрятанная в скрипты компонентов, до него не доезжала. Починки
+// профиля (настройки Claude Code, PATH, политика PowerShell, первый запуск VS Code, старый
+// автозапуск скрепки) живут в скрытом шаге verify: он идёт последним в КАЖДОМ прогоне и
+// чинит то, чего в этом прогоне нет в HM_SELECTED. Кнопка запускает ровно его одного.
+function repairAvailable() {
+  const n = selectedIds().filter((id) => !(STATE.byId[id] && STATE.byId[id].hidden)).length;
+  return n === 0 && !!STATE.detectDone && !STATE.vendorBlocked && !!(STATE.byId && STATE.byId.verify);
+}
+
+// Окружение прогона ремонта. HM_SELECTED = только verify: для verify «выбран» значит «этот
+// прогон поставил компонент сам и починил его в своём скрипте», а здесь не ставится ничего —
+// иначе он пропустил бы починки по компонентам, которых мы не трогали.
+function repairEnv() {
+  const env = envForRun();
+  env.HM_SELECTED = 'verify';
+  return env;
+}
+
+// Строки, которые verify напечатал в прогоне ремонта (CHECK-строки сюда не попадают — они
+// идут в чеклист). Из них на финише складывается «что сделала проверка».
+function collectRepairLine(line) {
+  const t = String(line == null ? '' : line).replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (!t || /^\[debug\]/i.test(t) || /^Финальная проверка/i.test(t)) return;
+  if (!STATE.repairLines) STATE.repairLines = [];
+  if (STATE.repairLines.length < 80 && STATE.repairLines.indexOf(t) === -1) STATE.repairLines.push(t);
+}
+
+// Строки verify о неудаче («починка не удалась», «не удалось»): ok прогона они не роняют
+// (verify по замыслу идёт дальше), но «всё починено» про такой прогон сказать нельзя.
+const REPAIR_TROUBLE_RE = /не удал|ошибк|не смог|пропущен|не нашл/i;
+
+function repairTitles(report) {
+  const lines = STATE.repairLines || [];
+  if (!report.ok) {
+    return {
+      title: 'Проверка нашла проблемы',
+      sub: 'Ничего не переустанавливалось. Что нашлось — ниже. Нажми «Скопировать отчёт для поддержки» и вставь текст в чат с ботом-помощником.',
+    };
+  }
+  if (lines.some((l) => REPAIR_TROUBLE_RE.test(l))) {
+    return {
+      title: 'Проверка завершена, но кое-что не починилось',
+      sub: 'Что именно — ниже. Работать это обычно не мешает; если что-то не запускается, нажми «Скопировать отчёт для поддержки».',
+    };
+  }
+  return lines.length
+    ? { title: 'Проверка и починка завершены', sub: 'Установленное не переустанавливалось. Что именно сделала проверка — ниже.' }
+    : { title: 'Проверка завершена: всё на месте', sub: 'Чинить было нечего. Установленное не переустанавливалось.' };
+}
+
+// Финиш ремонта: не «Всё установлено, три шага», а «что сделала проверка» + чеклист +
+// связь с Anthropic + помощь. Тексты скриптов (строки verify, ярлыки) — только через escapeHtml.
+function renderRepairFinish(report) {
+  const ns = $('#next-steps');
+  const links = (STATE.config && STATE.config.links) || {};
+  const fin = (STATE.config && STATE.config.finish) || {};
+  const botH = botHandle();
+  const lines = STATE.repairLines || [];
+  const shown = lines.slice(0, 12);
+  const more = lines.length - shown.length;
+  const didHtml = shown.length
+    ? '<div class="ns-note ns-repair"><b>Что сделала проверка</b><ul class="ns-repair-list">' +
+      shown.map((l) => '<li>' + escapeHtml(l) + '</li>').join('') + '</ul>' +
+      (more > 0 ? '<div class="ns-repair-more">…и ещё ' + more + ' ' + ruPlural(more, 'строка', 'строки', 'строк') + ' — в журнале.</div>' : '') +
+      '</div>'
+    : '<div class="ns-note ns-repair"><b>Что сделала проверка:</b> менять ничего не пришлось — известных неполадок в настройках профиля не нашлось. Установленное не переустанавливалось.</div>';
+  const restartHint = shown.length
+    ? '<div class="ns-note">Если проверка что-то поменяла (PATH, политику PowerShell, настройки Claude Code), закрой VS Code и все терминалы и открой заново: уже запущенные окна изменений не увидят.</div>'
+    : '';
+  // «skip» (компонент в прогоне не выбирался) в ремонте — это все проверки подряд: показывать
+  // нечего. Остаются только ✓ и ✕, которые verify напечатал.
+  const rows = (STATE.checks || []).filter((c) => (c.status || (c.ok ? 'ok' : 'fail')) !== 'skip');
+  const checksHtml = rows.length
+    ? '<div class="ns-checks"><div class="ns-checks-title">Проверка</div><ul class="ns-check-list">' +
+      rows.map((c) => checkLiHtml(c.status || (c.ok ? 'ok' : 'fail'), c.label)).join('') + '</ul></div>'
+    : '';
+  const failIds = report.failed || [];
+  const failHtml = report.ok ? '' :
+    '<div class="ns-fail">Проверка нашла проблемы' +
+    (failIds.length ? ': <b>' + failIds.map((i) => escapeHtml(nameOfId(i))).join(', ') + '</b>' : '') +
+    '. Починить автоматически не вышло — нажми «Скопировать отчёт для поддержки» ниже и вставь текст в чат с ' + escapeHtml(botH) + ': разберёмся.</div>';
+  const botBase = links.bot || '';
+  const isWin = STATE.platform === 'win32';
+  const botUrl = botBase
+    ? (failIds.length ? window.HMFinishLink.botUrl(botBase, window.HMFinishLink.botStartPayload(failIds, isWin, 'installed')) : botBase)
+    : '';
+  const botBtn = botUrl ? '<button type="button" class="btn-sm" data-ext="' + escapeHtml(botUrl) + '">Спросить бота ' + escapeHtml(botH) + '</button>' : '';
+  const startBtn = fin.startHtmlRelPath ? '<button type="button" id="ns-start" class="btn-sm">📌 Памятка «Что дальше»</button>' : '';
+  const logBtn = STATE.logPath ? '<button type="button" id="ns-log" class="btn-sm">Показать лог для поддержки</button>' : '';
+  ns.innerHTML =
+    '<div class="ns-title">Проверка и починка</div>' +
+    didHtml + restartHint + checksHtml + failHtml +
+    '<div class="ns-net" id="ns-net">Проверяю, дойдёт ли Claude Code до серверов Anthropic…</div>' +
+    '<div class="ns-note ns-pack hidden" id="ns-pack"></div>' +
+    '<div class="ns-actions">' +
+      '<button type="button" id="ns-repair-again" class="btn-sm' + (report.ok ? '' : ' primary') + '">Проверить ещё раз</button>' +
+      '<button type="button" id="ns-report" class="btn-sm">📋 Скопировать отчёт для поддержки</button>' +
+      logBtn + startBtn + botBtn +
+    '</div>' +
+    '<div class="ns-report-status" id="ns-report-status"></div>';
+  ns.classList.remove('hidden');
+  ns.querySelectorAll('[data-ext]').forEach((b) => b.addEventListener('click', () => window.installer.openExternal(b.dataset.ext)));
+  const again = $('#ns-repair-again');
+  if (again) again.addEventListener('click', () => startInstall({ repair: true }));
+  const rep = $('#ns-report');
+  if (rep) rep.addEventListener('click', () => copySupportReport());
+  const logEl = $('#ns-log');
+  if (logEl) logEl.addEventListener('click', async () => {
+    let res = null;
+    try { res = await window.installer.openPath(STATE.logPath); } catch (_) { res = null; }
+    const st = $('#ns-report-status');
+    if ((!res || res.ok !== true) && st) {
+      st.textContent = 'Не удалось открыть лог. Нажми «Скопировать отчёт для поддержки» — хвост лога уже в нём. Файл лежит здесь: ' + STATE.logPath;
+    }
+  });
+  const memo = $('#ns-start');
+  if (memo) memo.addEventListener('click', () => showStartHereInline());
+  runNetCheck();
+  renderPackSummary();
+}
+
+// ---- помощь: payload для бота и итог для отчёта (C09) ------------------------------
+// Финишная кнопка бота строилась из `res.failed`, а verify всегда выходит с кодом 0: когда
+// красной была ТОЛЬКО проверка после установки, бот получал installed_<os>, хотя отчёт
+// ушёл с ok=False. Берём итог прогона (run-status.js): упавшие обязательные + компонент,
+// названный красной проверкой.
+function botFailedIds(failed) {
+  const rep = STATE.lastReport;
+  if (rep && Array.isArray(rep.failed) && rep.failed.length) return rep.failed;
+  return failed || [];
+}
+
+// Нерешённые обязательные провалы ПРЯМО СЕЙЧАС (идёт прогон): корневые причины из badEver,
+// без «пропущен из-за зависимости» и без необязательных.
+function failedIdsNow() {
+  if (STATE.runActive !== true && STATE.lastReport && Array.isArray(STATE.lastReport.failed)) {
+    return STATE.lastReport.failed.slice();
+  }
+  const out = [];
+  if (STATE.badEver && typeof STATE.badEver.forEach === 'function') {
+    STATE.badEver.forEach((kind, id) => { if (['net', 'integrity', 'env', 'fail'].indexOf(kind) !== -1) out.push(id); });
+  }
+  return out;
+}
+
+// Адрес бота для плашки помощи: тот же payload, что у финишной кнопки; ничего не упало —
+// голая ссылка (как было), потому что «installed_*» посреди установки было бы враньём.
+function botUrlForState() {
+  const links = (STATE.config && STATE.config.links) || {};
+  const base = links.bot || '';
+  if (!base) return '';
+  const ids = failedIdsNow();
+  if (!ids.length) return base;
+  const isWin = STATE.platform === 'win32';
+  return window.HMFinishLink.botUrl(base, window.HMFinishLink.botStartPayload(ids, isWin, 'installed'));
+}
+
+// Одна строка «Итог» в отчёте для поддержки — по состоянию прогона: идёт / ремонт / установка.
+function supportOutcome() {
+  const rep = STATE.lastReport || {};
+  if (STATE.runActive === true) {
+    const cur = STATE.currentStepId ? nameOfId(STATE.currentStepId) : '';
+    return 'установка идёт' + (cur ? ', сейчас шаг «' + cur + '»' : '');
+  }
+  const names = (rep.failed || []).map(nameOfId).join(', ');
+  if (STATE.repairMode) return rep.ok ? 'проверка и починка прошли' : 'проверка нашла проблемы: ' + names;
+  return rep.ok
+    ? 'установка прошла' + (rep.errors && rep.errors.length ? ' (есть оговорки ниже)' : '')
+    : 'не встало: ' + names;
 }
 
 document.addEventListener('DOMContentLoaded', init);

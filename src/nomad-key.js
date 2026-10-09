@@ -66,6 +66,28 @@ function buildBlock(keySan, url, model, nl) {
  * @param {string} [opts.file]    путь к config.yaml (по умолчанию nomadConfigPath())
  * @param {string} [opts.newline] перевод строки ('\r\n' на win32)
  */
+// Переименование временного файла поверх config.yaml на Windows спорадически падает с EPERM/EBUSY/EACCES:
+// антивирус или индексатор на миг держит только что записанный файл. Замер: 23 отказа из 800 записей
+// даже на свободной машине — человек видел «Не удалось записать ключ» там, где вторая попытка проходит.
+// Повторяем только эти три кода, с растущей паузой (30, 120, 270, 480, 750 мс — до ~1,7 с в самом плохом
+// случае); любой другой сбой (нет каталога, диск полон) пробрасываем сразу. rename/sleep подменяются в тесте.
+const RENAME_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
+function renameWithRetry(from, to, opts) {
+  const o = opts || {};
+  const rename = o.rename || fs.renameSync;
+  const sleep = o.sleep || ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  let last = null;
+  for (let i = 1; i <= 6; i++) {
+    try { rename(from, to); return; }
+    catch (e) {
+      last = e;
+      if (!e || RENAME_RETRY_CODES.indexOf(e.code) === -1 || i === 6) throw e;
+      sleep(30 * i * i);
+    }
+  }
+  throw last;
+}
+
 function writeNomadKey(key, opts) {
   const o = opts || {};
   const san = sanitizeKey(key);
@@ -113,7 +135,7 @@ function writeNomadKey(key, opts) {
     } finally {
       try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
     }
-    try { fs.renameSync(tmpY, cfgY); }
+    try { renameWithRetry(tmpY, cfgY, o); }
     catch (e2) { try { fs.rmSync(tmpY, { force: true }); } catch (e3) { /* ignore */ } throw e2; }
     return { ok: true, path: cfgY, model };
   } catch (e) {
@@ -124,5 +146,5 @@ function writeNomadKey(key, opts) {
 
 module.exports = {
   MANAGED_BLOCK, BARE_MODEL,
-  nomadConfigPath, sanitizeKey, buildBlock, writeNomadKey,
+  nomadConfigPath, sanitizeKey, buildBlock, renameWithRetry, writeNomadKey,
 };

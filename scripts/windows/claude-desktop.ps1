@@ -227,7 +227,19 @@ try {
     try {
         Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 600
     } catch {
-        Write-Host "Не удалось скачать установщик Claude Desktop (нет сети?) — пропускаю. Всё остальное работает; поставь позже с claude.com/download. ($($_.Exception.Message))"
+        # Причину называем по факту, а не «нет сети?» на всё подряд. Живой журнал:
+        # «(403) Запрещено» с сайта Anthropic — интернет работал, а сервер отказал по
+        # адресу (страна/сеть). Совет в этом случае обратный: не чинить Wi-Fi, а
+        # включить VPN на весь компьютер. Последняя строка — она же причина на финише.
+        $httpCode = 0
+        try { if ($_.Exception.Response) { $httpCode = [int]$_.Exception.Response.StatusCode } } catch { }
+        if ($httpCode -eq 403 -or $httpCode -eq 451) {
+            Write-Host "Сервер Anthropic отказал в скачивании (HTTP $httpCode): загрузка с твоего адреса закрыта — это не обрыв сети. Claude Desktop необязателен, всё остальное работает; поставить его можно позже с claude.com/download при VPN на весь компьютер. Пропускаю."
+        } elseif ($httpCode -gt 0) {
+            Write-Host "Сервер ответил ошибкой HTTP $httpCode — установщик Claude Desktop не скачался. Пропускаю; всё остальное работает, поставь его позже с claude.com/download."
+        } else {
+            Write-Host "Не удалось скачать установщик Claude Desktop: нет соединения с сервером ($($_.Exception.Message)). Пропускаю — всё остальное работает; поставь позже с claude.com/download."
+        }
         exit 120
     }
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {

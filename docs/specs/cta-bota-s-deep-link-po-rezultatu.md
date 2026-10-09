@@ -16,7 +16,7 @@
 
 1. **Источник адреса.** `renderNextSteps()` (`src/renderer/app.js:2022`) читает `STATE.config.links` и `STATE.config.finish`. `STATE.config` целиком приходит из main через IPC `bootstrap` (`src/main.js:515-527`, `config: readJson('config.json', {})`) — то есть из вшитого в сборку `config.json`, renderer его не задаёт.
 2. **Хэндл для текста.** `botHandle()` (`src/renderer/app.js:55-59`) достаёт хэндл регуляркой `/t\.me\/([A-Za-z0-9_]+)/i` из `links.bot` и возвращает `'@' + m[1]`. Совпадения нет (пустой/чужой URL) — возвращается нейтральное `'бота-помощника'`. Тот же хэндл подставляется в приветственный экран при `init()` (`src/renderer/app.js:102-103`, `#wc-bot-handle`) и в тексты про эскалацию на финише (`app.js:2054`, `2085`).
-3. **Payload по результату.** `window.HMFinishLink.botStartPayload(failed, isWin, fin.botStartPayload || 'installed')` (`src/renderer/app.js:2095`). Логика — в `src/renderer/finish-link.js:20-32`:
+3. **Payload по результату.** `window.HMFinishLink.botStartPayload(botFailedIds(failed), isWin, fin.botStartPayload || 'installed')` (`src/renderer/app.js`, `renderNextSteps`). `botFailedIds` берёт упавшие из ИТОГА прогона `STATE.lastReport.failed` (обязательные + компонент, названный красной проверкой) и только если итога нет — `failed` из `finishInstall`: verify всегда выходит с кодом 0, и раньше при одной красной проверке кнопка вела с `installed_<os>`, хотя телеметрия ушла с `ok=False`. Логика — в `src/renderer/finish-link.js:20-32`:
    - `plat = isWin ? 'win' : 'mac'`, `suffix = '_' + plat`; `isWin` считается как `STATE.platform === 'win32'` (`app.js:2032`), `STATE.platform` = `process.platform` из bootstrap (`src/main.js:525`);
    - список падений фильтруется `filter(Boolean)`; **пусто** → `sanitizeId(okBase || 'installed').slice(0, MAX_PAYLOAD - suffix.length) + suffix`;
    - **не пусто** → `'failed_' + sanitizeId(list[0]).slice(0, 64 - 7 - suffix.length) + suffix`;
@@ -28,7 +28,7 @@
 8. **Порядок загрузки.** `finish-link.js` подключается до `app.js` — теги идут `deps.js`, `finish-link.js`, `app.js` (`src/renderer/index.html:194-196`). Оба тега классические, без `defer`/`async`, поэтому выполняются по порядку и оба завершаются до `DOMContentLoaded`, с которого стартует единственная точка входа `init()` (`app.js:2488`). На верхнем уровне `app.js` обращений к `window.HMFinishLink` нет: все три (`app.js:1413`, `2095`, `2096`) лежат внутри функций. То есть сегодня сам порядок тегов на работу не влияет — он зафиксирован тестом как защита на будущее (см. инвариант 8).
 9. **Значения по умолчанию в конфиге:** `finish.botStartPayload = "installed"` (`config.json:52`), `links.bot = "https://t.me/vibecodeguidebot"` (`config.json:59`).
 
-Отдельная плашка на экране прогресса (`renderProgressBotBanner`, `app.js:1125-1138`) ведёт на **голый** `links.bot` без `?start=` — это другой элемент, не часть deep-link по результату.
+Отдельная плашка на экране прогресса (`renderProgressBotBanner`) — кнопки «📋 Скопировать отчёт» и «Написать боту», видна ВО ВРЕМЯ установки и на финише. Адрес бота она собирает в момент клика (`botUrlForState`): идёт прогон и ничего не упало — голый `links.bot`; упал обязательный компонент (корневые причины из `badEver`, без пропусков по зависимости и без необязательных) — тот же `failed_<id>_<os>`; после финиша — по итогу прогона. Раньше плашка вела на голую ссылку и просила скриншот.
 
 ## Инварианты
 

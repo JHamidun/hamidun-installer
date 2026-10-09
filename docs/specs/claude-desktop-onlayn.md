@@ -63,7 +63,12 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 7. Скачивание (строки 220-236): включается TLS 1.2, URL проверяется на префикс
    `https://`, `Invoke-WebRequest -OutFile $installer -MaximumRedirection 5
    -TimeoutSec 600` пишет файл в `$cache\ClaudeSetup.exe` (строка 217). Исключение или
-   отсутствие файла → `exit 120`.
+   отсутствие файла → `exit 120`. Причина при исключении называется по факту (с
+   06.10.2026): код ответа из `$_.Exception.Response.StatusCode`; 403/451 — «сервер
+   Anthropic отказал в скачивании… это не обрыв сети», с советом про VPN на весь
+   компьютер; другой HTTP-код — «сервер ответил ошибкой HTTP N»; ответа нет вовсе — «нет
+   соединения с сервером». Раньше на всё печаталось «(нет сети?)», и в живом журнале
+   «(403) Запрещено» от Anthropic выглядело как обрыв интернета.
 8. Санити размера (строки 238-242): меньше 20 МБ или больше 900 МБ → `exit 120`.
 9. Гейт подписи (строки 244-250) — `Test-HmSignerTrusted -Path $installer
    -ExpectedOrg $PUBLISHER_O -PinnedThumbprint $LEAF_THUMBPRINT`. Внутри функции

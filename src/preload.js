@@ -41,6 +41,23 @@ contextBridge.exposeInMainWorld('installer', {
   // Анонимная телеметрия установки ({ok, failed[], durationSec}) — URL зашит в
   // config.json на стороне main; ошибки там глотаются, ответ не важен.
   sendTelemetry: (payload) => ipcRenderer.invoke('send-telemetry', payload),
+  // Сторож молчания: main сообщает «шаг молчит N мин» (state:'stalled') и «ожил»
+  // (state:'alive'); для необязательного шага рядом появляется «Пропустить шаг».
+  onStepStall: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on('step-stall', handler);
+    return () => ipcRenderer.removeListener('step-stall', handler);
+  },
+  // Просьба остановить шаг; можно ли — решает main (необязательный, молчит, идёт сейчас).
+  skipStep: (id) => ipcRenderer.invoke('skip-step', { id }),
+  // Отчёт для поддержки в буфер обмена (хвост журнала и чистку делает main).
+  supportReport: (payload) => ipcRenderer.invoke('support-report', payload),
+  // Связь с Anthropic из консоли + системный прокси; запись прокси — только по согласию.
+  netCheck: () => ipcRenderer.invoke('net-check'),
+  applyProxy: () => ipcRenderer.invoke('apply-proxy'),
+  // Сводка пака (сколько скиллов и агентов) и каталог скиллов в Проводнике/Finder.
+  packSummary: () => ipcRenderer.invoke('pack-summary'),
+  revealCatalog: () => ipcRenderer.invoke('reveal-catalog'),
   // macOS: снять карантин с образа, перемонтировать и перезапуститься из свежего тома
   macSelfHeal: () => ipcRenderer.invoke('mac-selfheal'),
   // Чем закончилась ПРОШЛАЯ попытка починки: её хвост работает уже после нашего
