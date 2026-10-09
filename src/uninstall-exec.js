@@ -25,6 +25,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// Снос дерева, который НЕ идёт по ссылкам. fs.rmSync(recursive) в Electron 40+ ходит по junction
+// внутрь и стирает чужую цель — подробности и проверка в src/fs-compat.js.
+const { removeTreeNoFollow } = require('./fs-compat');
 
 // Синхронная пауза. Модуль сквозь весь файл синхронный (он крутится в main-процессе
 // до закрытия окна), поэтому await сюда не вставить, а setTimeout не сработает.
@@ -303,11 +306,16 @@ function removeDirTree(p, opts, dry) {
   // ложный успех и осиротевший карантин остаётся навсегда. Если и возврат не удался —
   // путь карантина попадает в сообщение (и в install.log), мусор не невидим.
   const restore = () => renameWithRetry(quarantine, g.norm);
+  const links = [];
   try {
-    // rmSync не следует по симлинкам внутрь (удаляет саму ссылку) — содержимое чужих целей цело.
+    // БЕЗ fs.rmSync: прежний комментарий здесь («rmSync не следует по симлинкам внутрь») описывал
+    // Node 20 и с Electron 40 (Node 24, std::filesystem) стал ЛОЖЬЮ — рантайм заходит по junction
+    // внутрь и стирает содержимое чужой цели с правами администратора. Дерево лежит в месте, куда
+    // пишет любой процесс пользователя (checkTarget проверил цель и её предков, но не нутро), так
+    // что junction внутри — это не фантазия. removeTreeNoFollow снимает ссылку как ссылку.
     // maxRetries/retryDelay — против транзиентных EPERM/EBUSY на Windows (процесс ещё
     // не отпустил образ сразу после taskkill, антивирус держит хендл).
-    fs.rmSync(quarantine, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });
+    removeTreeNoFollow(quarantine, { force: false, maxRetries: 5, retryDelay: 200, onLink: (lp) => links.push(lp) });
   } catch (e) {
     if (fs.existsSync(quarantine)) {
       const back = restore();
@@ -320,7 +328,14 @@ function removeDirTree(p, opts, dry) {
     return res('failed', 'дерево осталось на месте' +
       (back ? ' (возвращено)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
   }
-  return res('removed', 'удалено дерево');
+  return res('removed', 'удалено дерево' + linksNote(links));
+}
+
+// Ссылки (symlink/junction), найденные внутри сносимого дерева, снимаются КАК ссылки, цель не
+// трогается. Это не ошибка, но и не «обычное» удаление — в install.log должна остаться строка.
+function linksNote(links) {
+  if (!links.length) return '';
+  return ' (внутри были ссылки: ' + links.length + ' — сняты как ссылки, содержимое их целей не тронуто)';
 }
 
 // P0-1: подтверждён ли НАШ ownership-маркер — хотя бы один из markerPaths существует
@@ -416,14 +431,16 @@ function removeDirTreeGated(p, opts, markerName, dry) {
 
   if (dry) { restore(); return res('removed', '[dry-run] WOULD remove tree (маркер подтверждён)'); }
 
-  // 5. Маркер подтверждён на ЗАХВАЧЕННОМ каталоге → удаляем quarantine.
+  // 5. Маркер подтверждён на ЗАХВАЧЕННОМ каталоге → удаляем quarantine. Снос — removeTreeNoFollow, а не
+  //    fs.rmSync: рантайм Electron 40+ ходит по junction внутрь дерева (см. removeDirTree выше).
+  const links = [];
   try {
-    fs.rmSync(quarantine, { recursive: true, force: false });
+    removeTreeNoFollow(quarantine, { force: false, onLink: (lp) => links.push(lp) });
   } catch (e) {
     if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e)); }
   }
   if (fs.existsSync(quarantine)) { restore(); return res('failed', 'дерево осталось в карантине'); }
-  return res('removed', 'удалено дерево (карантин, маркер подтверждён)');
+  return res('removed', 'удалено дерево (карантин, маркер подтверждён)' + linksNote(links));
 }
 
 // P1: классификаторы результата launchctl — чистые, тестируемые.

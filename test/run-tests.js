@@ -8629,9 +8629,10 @@ ok('config.json в репозитории без сборочных маркер
   ok('fs-compat: под настоящим Electron-рантаймом rmSync и rmStagingTree сносят дерево с read-only файлами', () => {
     if (process.platform !== 'win32') SKIP('read-only-атрибут и баг libc++ — только Windows');
     const cp = require('child_process');
-    const rel = (() => { try { return fs.readFileSync(path.join(ROOT, 'node_modules', 'electron', 'path.txt'), 'utf8').trim(); } catch (e) { return ''; } })();
-    const exe = rel ? path.join(ROOT, 'node_modules', 'electron', 'dist', rel) : '';
-    if (!exe || !fs.existsSync(exe)) SKIP('нет бинарника Electron (npx install-electron --no) — рантайм не проверить');
+    // node_modules рабочего дерева ИЛИ каталог из NODE_PATH (в worktree сборки своего node_modules нет)
+    const el = require(path.join(ROOT, 'test', 'find-electron.js')).findElectron(ROOT);
+    if (!el) SKIP('нет бинарника Electron (ни в node_modules, ни в NODE_PATH; npx install-electron --no) — рантайм не проверить');
+    const exe = el.exe;
 
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-fsc-'));
     const scriptFile = path.join(base, 'child.js');
@@ -18394,3 +18395,932 @@ ok('config.json в репозитории без сборочных маркер
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 }());
+
+// ===========================================================================
+// Снос дерева БЕЗ перехода по ссылкам (находки F1 и M-7 независимого ревью безопасности, 09.10.2026).
+//
+// С Electron 40 `fs.rmSync(recursive)` — C++ поверх std::filesystem: он ИДЁТ по вложенным
+// junction внутрь и стирает содержимое ЧУЖОЙ цели (в Node 20/22 ссылку снимали саму). Установщик
+// работает под админом, junction создаётся без прав (mklink /J) — любой процесс того же
+// пользователя подкладывает её в дерево, которое человек потом сносит кнопкой «Удалить».
+// Хуже того: junction вида `mklink /J x \\?\Volume{guid}\dir` libuv за ссылку НЕ считает —
+// lstat отдаёт статистику самой цели (isDirectory, isSymbolicLink=false), а readdir идёт насквозь.
+//
+// Тесты ИСПОЛНЯЮТ код на настоящих junction (fs.symlinkSync(..., 'junction') и mklink /J, прав не
+// нужно), а не ищут слова в исходнике. Рантаймовые случаи гоняются дважды: под системным Node и под
+// настоящим Electron из NODE_PATH (SKIP, если его нет). Дочерний сценарий — test/rmtree-runtime-child.js.
+// ===========================================================================
+(function () {
+  console.log('\n== Снос дерева без перехода по ссылкам: removeTreeNoFollow, удаление компонентов, install() ==');
+  const cp = require('child_process');
+  const FCP = path.join(ROOT, 'src', 'fs-compat.js');
+  const UXP = path.join(ROOT, 'src', 'uninstall-exec.js');
+  const CHILD = path.join(ROOT, 'test', 'rmtree-runtime-child.js');
+  const { findElectron } = require(path.join(ROOT, 'test', 'find-electron.js'));
+
+  // Уборка фикстур, НЕЗАВИСИМАЯ от проверяемого кода: сперва снимаем все ссылки (unlink/rmdir по
+  // ссылке не идут внутрь ни в каком рантайме), и лишь потом сносим остаток обычным rmSync.
+  const safeDrop = (p) => {
+    const stack = [p];
+    while (stack.length) {
+      const d = stack.pop();
+      let ents = [];
+      try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { continue; }
+      for (const e of ents) {
+        const q = path.join(d, e.name);
+        if (e.isSymbolicLink()) {
+          try { fs.unlinkSync(q); } catch (e1) { try { fs.rmdirSync(q); } catch (e2) { /* останется — см. ниже */ } }
+        } else if (e.isDirectory()) stack.push(q);
+      }
+    }
+    try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  };
+
+  // \\?\Volume{guid}\ диска, на котором лежат фикстуры (только Windows; '' — не вышло).
+  const volumeGuidOf = (dir) => {
+    if (process.platform !== 'win32') return '';
+    try {
+      const r = cp.spawnSync('mountvol.exe', [path.parse(path.resolve(dir)).root, '/L'], { encoding: 'utf8', timeout: 20000 });
+      const m = /\\\\\?\\Volume\{[0-9a-fA-F-]+\}\\/.exec(String(r.stdout || ''));
+      return m ? m[0] : '';
+    } catch (e) { return ''; }
+  };
+
+  // Запуск дочернего сценария: exe — системный Node или Electron (ELECTRON_RUN_AS_NODE).
+  const runChild = (exe, asElectron) => {
+    // канонический путь — см. mkScratch ниже: иначе checkTarget в removeDirTree отвергнет «домашний» каталог фикстуры
+    const base = (() => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-rtn-')); try { return (fs.realpathSync.native || fs.realpathSync)(d); } catch (e) { return d; } })();
+    try {
+      // КОНТРОЛЬ: копия uninstall-exec со ВЕРНУТЫМ прежним сносом (fs.rmSync) — на Electron 40+ она обязана
+      // стирать цель за junction; так видно, что защищает именно явный вызов removeTreeNoFollow.
+      const oldSrc = fs.readFileSync(UXP, 'utf8');
+      const callLine = 'removeTreeNoFollow(quarantine, { force: false, maxRetries: 5, retryDelay: 200, onLink: (lp) => links.push(lp) });';
+      assert(oldSrc.indexOf(callLine) !== -1, 'контроль применим: в removeDirTree есть вызов removeTreeNoFollow');
+      const oldUx = path.join(base, 'uninstall-exec.old.js');
+      fs.writeFileSync(oldUx, oldSrc
+        .replace(callLine, 'fs.rmSync(quarantine, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });')
+        .replace("require('./fs-compat')", 'require(' + JSON.stringify(FCP) + ')'));
+      const env = Object.assign({}, process.env, {
+        HM_COMPAT: FCP, HM_UX: UXP, HM_UX_OLD: oldUx, HM_BASE: path.join(base, 'w'), HM_VOLGUID: volumeGuidOf(base),
+      });
+      fs.mkdirSync(env.HM_BASE);
+      if (asElectron) env.ELECTRON_RUN_AS_NODE = '1'; else delete env.ELECTRON_RUN_AS_NODE;
+      const r = cp.spawnSync(exe, [CHILD], { env, encoding: 'utf8', timeout: 170000, maxBuffer: 64 * 1024 * 1024 });
+      assert.strictEqual(r.status, 0, 'дочерний сценарий отработал (код ' + r.status + '): ' + String(r.stderr || r.error).slice(0, 600));
+      return JSON.parse(r.stdout);
+    } finally { safeDrop(base); }
+  };
+
+  // Что обязано выполняться под ЛЮБЫМ рантаймом: цель за ссылкой цела, ссылки сняты, дерево снесено.
+  const assertSafeRuntime = (out, label) => {
+    const c = out.cases;
+    // raw-* и ctl-* — КОНТРОЛИ (рантайм/старый код/подменённый fs опасны), «безопасными» быть не обязаны
+    const names = Object.keys(c).filter((n) => !/^(raw|ctl)-/.test(n));
+    assert(names.length >= 11, label + ': сценарий прогнал случаи (' + names.length + ')');
+    ['asar-valid-removeDirTree', 'asar-valid-removeDirTreeGated', 'asar-invalid-removeDirTree', 'asar-nofollow', 'wrapped-asar'].forEach((n) =>
+      assert(names.indexOf(n) !== -1, label + ': случай с .asar внутри дерева прогнан: ' + n));
+    for (const n of names) {
+      const r = c[n];
+      // «через том» не везде создаётся (не NTFS, политика) — такие случаи не засчитываем
+      if (r.setupError && /volume/.test(n)) continue;
+      assert(!r.setupError, label + ' / ' + n + ': фикстура не собралась: ' + r.setupError);
+      assert.strictEqual(r.error, null, label + ' / ' + n + ': снос не бросил: ' + r.error);
+      assert.strictEqual(r.victimAlive, true, label + ' / ' + n + ': ЦЕЛЬ ЗА ССЫЛКОЙ ЦЕЛА (оба файла на месте)');
+      if (r.treeGone !== undefined) assert.strictEqual(r.treeGone, true, label + ' / ' + n + ': дерево снесено');
+      if (r.linkGone !== undefined) assert.strictEqual(r.linkGone, true, label + ' / ' + n + ': корневая ссылка снята');
+      if (r.status !== undefined) {
+        assert.strictEqual(r.status, 'removed', label + ' / ' + n + ': removeDirTree* рапортует removed: ' + r.status + ' ' + r.message);
+        assert.strictEqual(r.targetGone, true, label + ' / ' + n + ': корень удаления исчез');
+        assert.strictEqual(r.quarantineLeft, 0, label + ' / ' + n + ': карантин не остался');
+      }
+    }
+    // обёрнутый install()-ом fs.rmSync: на Windows обёртка обязана быть включена
+    if (process.platform === 'win32') assert.strictEqual(out.installed, true, label + ': install() включился на Windows');
+  };
+
+  const FC = require(FCP);
+  const UX = require(UXP);
+  const IS_WIN = process.platform === 'win32';
+
+  // Каталог фикстур — в КАНОНИЧЕСКОМ виде: guard удаления (checkTarget) отвергает и симлинк в предках
+  // (на macOS os.tmpdir() лежит под /var -> /private/var), и расхождение с каноническим путём (на раннере
+  // Windows TEMP дан в виде 8.3: RUNNER~1). Резолвим один раз при создании, как mkHomeDir выше.
+  const canon = (d) => { try { return (fs.realpathSync.native || fs.realpathSync)(d); } catch (e) { return d; } };
+  const mkScratch = (label) => canon(fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nf-' + label + '-')));
+  // Захват в карантин (rename) в removeDirTree* идёт без повторов: пока Defender/индексатор держат только что
+  // созданные файлы, он транзиентно падает с EPERM/EACCES/EBUSY — прежнее поведение, не предмет этих тестов.
+  // settle() повторяет сам вызов, пока причина отказа — именно это.
+  const settle = (fn) => {
+    let r = null;
+    for (let i = 0; i < 8; i++) {
+      r = fn();
+      if (!/карантин \(rename\): (EPERM|EACCES|EBUSY)|не удалось захватить дерево в карантин/.test((r && r.message) || '')) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    }
+    return r;
+  };
+  const mkVictim = (dir) => {
+    fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'precious.txt'), 'p1');
+    fs.writeFileSync(path.join(dir, 'sub', 'precious2.txt'), 'p2');
+  };
+  const victimAlive = (dir) => fs.existsSync(path.join(dir, 'precious.txt')) && fs.existsSync(path.join(dir, 'sub', 'precious2.txt'));
+  // junction создаётся БЕЗ прав (на POSIX — обычный симлинк); не вышло — честный пропуск
+  const junction = (target, link) => {
+    try { fs.symlinkSync(target, link, 'junction'); } catch (e) { SKIP('не удалось создать junction/симлинк: ' + e.code); }
+  };
+  // junction «через том»: `mklink /J x \\?\Volume{guid}\dir` — libuv её за ссылку не считает (см. fs-compat.js)
+  const volJunction = (link, victimDir) => {
+    if (!IS_WIN) SKIP('junction «через том» — только Windows');
+    const guid = volumeGuidOf(path.dirname(link));
+    if (!guid) SKIP('не удалось узнать GUID тома (mountvol)');
+    const target = guid.replace(/\\?$/, '\\') + victimDir.slice(path.parse(victimDir).root.length);
+    const r = cp.spawnSync('cmd.exe', ['/d', '/c', 'mklink', '/J', link, target], { encoding: 'utf8' });
+    if (r.status !== 0) SKIP('mklink /J на том не создал ссылку: ' + String(r.stdout || r.stderr).slice(0, 120));
+  };
+  const makeReadOnly = (p) => {
+    if (IS_WIN) cp.spawnSync('attrib', ['+R', p]); else fs.chmodSync(p, 0o444);
+  };
+
+  // ---- ФС в памяти ------------------------------------------------------------------------------------
+  // Нужна там, где настоящая ФС не даёт проверить нужное: подмену каталога РОВНО между двумя вызовами,
+  // отказы по расписанию, read-only в стиле libc++ (EPERM на unlink). Поведение списано с проверенных
+  // запусков (Node 22.15 / Electron 44.5.1, Windows 11):
+  //   - lstat по junction «через том» ('redir') отдаёт статистику ЦЕЛИ: каталог, не ссылка, inode цели;
+  //   - unlink по ней — EPERM, rmdir — снимает; unlink по каталогу — EPERM; rmdir по непустому — ENOTEMPTY;
+  //   - 'link' — обычная junction/симлинк (lstat видит ссылку, снимают и unlink, и rmdir);
+  //     'filelink' — файловая ссылка (rmdir по ней не годится).
+  const memFs = (opts) => {
+    const o = opts || {};
+    let nextIno = 100;
+    const roots = new Map();
+    const E = (code, sys, p) => Object.assign(new Error(code + ': ' + sys + " '" + p + "'"), { code, syscall: sys, path: p });
+    const newNode = (t, extra) => Object.assign({ t, ino: nextIno++, ro: false }, t === 'dir' ? { kids: new Map() } : {}, extra || {});
+    const rootNode = (abs) => {
+      const r = path.parse(abs).root;
+      if (!roots.has(r)) roots.set(r, newNode('dir'));
+      return { r, node: roots.get(r) };
+    };
+    const resolve = (p, followLink, followRedir, hops) => {
+      const abs = path.resolve(p);
+      const top = rootNode(abs);
+      const parts = abs.slice(top.r.length).split(path.sep).filter(Boolean);
+      let node = top.node, parent = null, name = '', real = top.r;
+      for (let i = 0; i < parts.length; i++) {
+        if (node.t !== 'dir') throw E('ENOTDIR', 'resolve', p);
+        const child = node.kids.get(parts[i]);
+        if (!child) throw E('ENOENT', 'resolve', p);
+        const last = i === parts.length - 1;
+        const linkish = child.t === 'link' || child.t === 'filelink';
+        if ((linkish && (!last || followLink)) || (child.t === 'redir' && (!last || followRedir))) {
+          if ((hops || 0) > 16) throw E('ELOOP', 'resolve', p);
+          const t = resolve(child.to, true, true, (hops || 0) + 1);
+          parent = t.parent; name = t.name; node = t.node; real = t.real;
+          continue;
+        }
+        parent = node; name = parts[i]; node = child;
+        real = real + (real.endsWith(path.sep) ? '' : path.sep) + parts[i];
+      }
+      return { node, parent, name, real };
+    };
+    const mkStats = (n, big) => {
+      const bits = n.t === 'dir' || n.t === 'redir' ? 0o040000 : (n.t === 'link' || n.t === 'filelink') ? 0o120000 : 0o100000;
+      const num = (v) => (big ? BigInt(v) : v);
+      return {
+        isDirectory: () => n.t === 'dir', isFile: () => n.t === 'file', isSymbolicLink: () => n.t === 'link' || n.t === 'filelink',
+        mode: num(bits | (n.ro ? 0o444 : 0o666)), ino: num(n.ino), dev: num(7),
+      };
+    };
+    const api = {
+      log: [], chmods: [],
+      strictRo: !!o.strictRo,        // как libc++ в Electron 40+: unlink/rmdir read-only объекта — EPERM
+      hook: () => {},                // hook(имя, путь) вызывается в начале операций и после readdir ('readdir:after')
+      fail: null,                    // fail(операция, путь, узел) → код ошибки | falsy
+      add(p, t, extra) {
+        const abs = path.resolve(p);
+        const top = rootNode(abs);
+        const parts = abs.slice(top.r.length).split(path.sep).filter(Boolean);
+        let node = top.node;
+        for (let i = 0; i < parts.length; i++) {
+          const last = i === parts.length - 1;
+          let child = node.kids.get(parts[i]);
+          if (!child) { child = newNode(last ? t : 'dir', last ? extra : null); node.kids.set(parts[i], child); }
+          else if (last) throw new Error('memFs.add: уже есть ' + p);
+          node = child;
+        }
+        return node;
+      },
+      replace(p, t, extra) {          // подмена узла НОВЫМ (с новым inode), как делает атакующий
+        const r = resolve(p, false, false);
+        const n = newNode(t, extra);
+        r.parent.kids.set(r.name, n);
+        return n;
+      },
+      exists(p) { try { resolve(p, false, false); return true; } catch (e) { return false; } },
+      node(p) { return resolve(p, false, false).node; },
+      names(p) { return Array.from(resolve(p, true, true).node.kids.keys()); },
+      lstatSync(p, op) {
+        api.log.push(['lstat', p]); api.hook('lstat', p);
+        return mkStats(resolve(p, false, true).node, !!(op && op.bigint));
+      },
+      readdirSync(p) {
+        api.log.push(['readdir', p]); api.hook('readdir', p);
+        const r = resolve(p, true, true);
+        if (r.node.t !== 'dir') throw E('ENOTDIR', 'scandir', p);
+        const names = Array.from(r.node.kids.keys());
+        api.hook('readdir:after', p);
+        return names;
+      },
+      unlinkSync(p) {
+        api.log.push(['unlink', p]); api.hook('unlink', p);
+        const r = resolve(p, false, false), n = r.node;
+        const f = api.fail && api.fail('unlink', p, n);
+        if (f) throw E(f, 'unlink', p);
+        if (n.t === 'dir' || n.t === 'redir') throw E('EPERM', 'unlink', p);
+        if (api.strictRo && n.ro) throw E('EPERM', 'unlink', p);
+        r.parent.kids.delete(r.name);
+      },
+      rmdirSync(p) {
+        api.log.push(['rmdir', p]); api.hook('rmdir', p);
+        const r = resolve(p, false, false), n = r.node;
+        const f = api.fail && api.fail('rmdir', p, n);
+        if (f) throw E(f, 'rmdir', p);
+        if (n.t === 'file' || n.t === 'filelink') throw E('ENOTDIR', 'rmdir', p);
+        if (n.t === 'dir') {
+          if (n.kids.size) throw E('ENOTEMPTY', 'rmdir', p);
+          if (api.strictRo && n.ro) throw E('EPERM', 'rmdir', p);
+        }
+        r.parent.kids.delete(r.name);
+      },
+      chmodSync(p, mode) {
+        api.log.push(['chmod', p]); api.hook('chmod', p);
+        const r = resolve(p, true, true);
+        api.chmods.push({ p, node: r.node });
+        r.node.ro = !(mode & 0o200);
+      },
+    };
+    api.realpathSync = (p) => resolve(p, true, true).real;
+    api.realpathSync.native = (p) => { api.log.push(['realpath', p]); api.hook('realpath', p); return resolve(p, true, true).real; };
+    return api;
+  };
+  const MEM_BASE = path.join(path.parse(process.cwd()).root, 'hm-mem');   // на диске его нет и не будет
+  const MEM_OPTS = { canonicalGate: true, sleep: () => {} };
+
+  // Цепочка вложенных каталогов 'd' глубиной N с файлом на дне — без N системных вызовов на создание.
+  const chainFs = (N) => {
+    const base = path.join(path.parse(process.cwd()).root, 'hm-chain');
+    let alive = N, leaf = true;
+    const rmdirOrder = [];
+    const E = (code, sys, p) => Object.assign(new Error(code + ': ' + sys), { code, syscall: sys, path: p });
+    const isLeaf = (p) => p.endsWith(path.sep + 'leaf.txt');
+    const depth = (p) => (p.length < base.length && base.startsWith(p) ? -1 : (p.length - base.length) / 2);   // -1: предок базы
+    const stats = (dir, ino, big) => ({
+      isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false,
+      mode: big ? BigInt(0o40666) : 0o40666, ino: big ? BigInt(ino) : ino, dev: big ? 7n : 7,
+    });
+    const api = {
+      base, rmdirOrder,
+      lstatSync(p, op) {
+        const big = !!(op && op.bigint);
+        if (isLeaf(p)) { if (!leaf) throw E('ENOENT', 'lstat', p); return stats(false, N + 5, big); }
+        const k = depth(p);
+        if (k > alive) throw E('ENOENT', 'lstat', p);
+        return stats(true, k + 1, big);
+      },
+      readdirSync(p) {
+        const k = depth(p);
+        if (k > alive) throw E('ENOENT', 'scandir', p);
+        if (k < 0) return ['hm-chain'];
+        if (k === N) return leaf ? ['leaf.txt'] : [];
+        return k + 1 <= alive ? ['d'] : [];
+      },
+      unlinkSync(p) {
+        if (!isLeaf(p)) throw E('EPERM', 'unlink', p);
+        if (!leaf) throw E('ENOENT', 'unlink', p);
+        leaf = false;
+      },
+      rmdirSync(p) {
+        const k = depth(p);
+        if (k !== alive || (k === N && leaf)) throw E('ENOTEMPTY', 'rmdir', p);
+        rmdirOrder.push(k);
+        alive--;
+      },
+      chmodSync() {},
+      get alive() { return alive; },
+    };
+    api.realpathSync = (p) => { if (depth(p) > alive) throw E('ENOENT', 'realpath', p); return p; };
+    api.realpathSync.native = api.realpathSync;
+    return api;
+  };
+
+  // «Старый/уязвимый» вариант модуля: исходник fs-compat.js с ТОЧЕЧНО вырезанной защитой. Каждая правка
+  // обязана примениться — иначе негативный контроль молча перестал бы что-либо проверять.
+  const loadMutated = (muts) => {
+    let src = fs.readFileSync(FCP, 'utf8');
+    muts.forEach(([from, to]) => {
+      assert(src.indexOf(from) !== -1, 'мутация применима (строка есть в fs-compat.js): ' + from.slice(0, 60));
+      src = src.replace(from, to);
+    });
+    const m = { exports: {} };
+    new Function('require', 'module', 'exports', '__dirname', src)(require, m, m.exports, path.dirname(FCP));
+    return m.exports;
+  };
+
+  // ---- 1. реальные ссылки на реальной ФС (системный Node) -----------------------------------------------
+
+  ok('removeTreeNoFollow: вложенная junction снимается как ссылка — дерево снесено, цель с файлами цела; ссылка названа в onLink (реальная ФС)', () => {
+    const base = mkScratch('nested');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const tree = path.join(base, 'tree');
+      fs.mkdirSync(path.join(tree, 'sub', 'deeper'), { recursive: true });
+      fs.writeFileSync(path.join(tree, 'a.txt'), 'a');
+      fs.writeFileSync(path.join(tree, 'sub', 'deeper', 'b.txt'), 'b');
+      junction(victim, path.join(tree, 'sub', 'evil'));
+      const links = [];
+      FC.removeTreeNoFollow(tree, { onLink: (p) => links.push(p) });
+      assert(!fs.existsSync(tree), 'дерево снесено целиком');
+      assert(victimAlive(victim), 'цель за junction цела (оба файла на месте)');
+      assert.deepStrictEqual(links, [path.join(tree, 'sub', 'evil')], 'ссылка названа в onLink (для журнала)');
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: корень сноса — junction на каталог, и файловый симлинк: снимается сама ссылка, цель цела', () => {
+    const base = mkScratch('root');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const lnk = path.join(base, 'rootlink');
+      junction(victim, lnk);
+      FC.removeTreeNoFollow(lnk, { force: false });
+      assert(!fs.existsSync(lnk) && !fs.readdirSync(base).includes('rootlink'), 'ссылка снята');
+      assert(victimAlive(victim), 'цель цела');
+      // файловый симлинк (без developer mode / прав не создаётся — тогда этот кусок пропускаем)
+      const flink = path.join(base, 'filelink');
+      let made = true;
+      try { fs.symlinkSync(path.join(victim, 'precious.txt'), flink, 'file'); } catch (e) { made = false; }
+      if (made) {
+        FC.removeTreeNoFollow(flink, { force: false });
+        assert(!fs.readdirSync(base).includes('filelink'), 'файловая ссылка снята');
+        assert(victimAlive(victim), 'файл-цель цел');
+      }
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: junction на несуществующую цель и петля из двух junction не зависают и не мешают сносу', () => {
+    const base = mkScratch('loop');
+    try {
+      const tree = path.join(base, 'tree');
+      const gone = path.join(base, 'gone'); fs.mkdirSync(gone);
+      fs.mkdirSync(path.join(tree, 'd1'), { recursive: true });
+      fs.mkdirSync(path.join(tree, 'd2'), { recursive: true });
+      junction(gone, path.join(tree, 'dangling'));
+      fs.rmdirSync(gone);                                              // цель исчезла — junction висит
+      junction(path.join(tree, 'd2'), path.join(tree, 'd1', 'j'));
+      junction(path.join(tree, 'd1'), path.join(tree, 'd2', 'j'));    // d1/j -> d2, d2/j -> d1
+      fs.writeFileSync(path.join(tree, 'd1', 'f.txt'), 'x');
+      const links = [];
+      FC.removeTreeNoFollow(tree, { onLink: (p) => links.push(p) });
+      assert(!fs.existsSync(tree), 'дерево снесено');
+      assert.strictEqual(links.length, 3, 'три ссылки сняты как ссылки: ' + links.join(' | '));
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: junction "через том" (lstat её за ссылку не считает) — вложенная, корневая и висячая: цель цела', () => {
+    const base = mkScratch('vol');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const tree = path.join(base, 'tree');
+      fs.mkdirSync(path.join(tree, 'sub'), { recursive: true });
+      fs.writeFileSync(path.join(tree, 'a.txt'), 'a');
+      volJunction(path.join(tree, 'sub', 'evil'), victim);
+      // сама ловушка: lstat видит КАТАЛОГ, а не ссылку — иначе тест ничего не доказывал бы
+      const st = fs.lstatSync(path.join(tree, 'sub', 'evil'));
+      assert(st.isDirectory() && !st.isSymbolicLink(), 'lstat принимает junction «через том» за обычный каталог (ловушка libuv на месте)');
+      const links = [];
+      FC.removeTreeNoFollow(tree, { onLink: (p) => links.push(p) });
+      assert(!fs.existsSync(tree), 'дерево снесено');
+      assert(victimAlive(victim), 'ЦЕЛЬ ЦЕЛА: обход не пошёл через junction «через том»');
+      assert.deepStrictEqual(links, [path.join(tree, 'sub', 'evil')], 'ссылка снята как ссылка');
+
+      // корень сноса — такая junction
+      const lnk = path.join(base, 'rootvol');
+      volJunction(lnk, victim);
+      FC.removeTreeNoFollow(lnk, { force: false });
+      assert(!fs.readdirSync(base).includes('rootvol'), 'корневая ссылка снята');
+      assert(victimAlive(victim), 'цель цела и после сноса корневой ссылки');
+
+      // висячая: цель исчезла, lstat даёт ENOENT, но запись в каталоге есть
+      const t2 = path.join(base, 't2'); fs.mkdirSync(t2);
+      const doomed = path.join(base, 'doomed'); fs.mkdirSync(doomed);
+      volJunction(path.join(t2, 'dangling'), doomed);
+      fs.rmdirSync(doomed);
+      assert.deepStrictEqual(fs.readdirSync(t2), ['dangling'], 'висячая запись видна в readdir');
+      FC.removeTreeNoFollow(t2, { force: false });
+      assert(!fs.existsSync(t2), 'каталог с висячей junction снесён (она снята rmdir)');
+    } finally { safeDrop(base); }
+  });
+
+  ok('негативный контроль: наивный обход "только lstat" (без сверки канонического пути) ходит через junction "через том" и стирает цель', () => {
+    const base = mkScratch('naive');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const tree = path.join(base, 'tree'); fs.mkdirSync(tree);
+      volJunction(path.join(tree, 'evil'), victim);
+      // тот же обход, но сверка путей выключена — это и есть «простое» исправление через isSymbolicLink()
+      FC.removeTreeNoFollow(tree, { canonicalGate: false });
+      assert(!victimAlive(victim), 'контроль: без сверки канонического пути цель стёрта — значит, сверка держит защиту');
+    } finally { safeDrop(base); }
+  });
+
+  ok('негативный контроль: если обход смотрит stat вместо lstat (мутация), обычная junction ведёт его в цель и стирает её', () => {
+    const base = mkScratch('nolink');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const tree = path.join(base, 'tree'); fs.mkdirSync(tree);
+      junction(victim, path.join(tree, 'evil'));
+      const mutated = loadMutated([['ctx.f.lstatSync(p, { bigint: true })', 'ctx.f.statSync(p, { bigint: true })']]);
+      try { mutated.removeTreeNoFollow(tree, { canonicalGate: false }); } catch (e) { /* ошибка тоже возможна */ }
+      assert(!victimAlive(victim), 'контроль: мутант со stat прошёл по junction внутрь — именно lstat держит первый слой защиты');
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: предок корня — junction (профиль перенесён) и иной регистр букв в пути — обычный снос, ложных срабатываний нет', () => {
+    const base = mkScratch('anc');
+    try {
+      const real = path.join(base, 'real'); fs.mkdirSync(path.join(real, 'tree', 'sub'), { recursive: true });
+      fs.writeFileSync(path.join(real, 'tree', 'sub', 'f.txt'), 'x');
+      fs.writeFileSync(path.join(real, 'keep.txt'), 'k');
+      const prof = path.join(base, 'prof');
+      junction(real, prof);
+      FC.removeTreeNoFollow(path.join(prof, 'tree'), { force: false });
+      assert(!fs.existsSync(path.join(real, 'tree')), 'дерево за junction-предком снесено');
+      assert(fs.existsSync(path.join(real, 'keep.txt')), 'соседнее не тронуто');
+      if (IS_WIN) {
+        fs.mkdirSync(path.join(real, 'Tree2', 'Sub'), { recursive: true });
+        fs.writeFileSync(path.join(real, 'Tree2', 'Sub', 'f.txt'), 'x');
+        FC.removeTreeNoFollow(path.join(base, 'REAL', 'tREE2'), { force: false });
+        assert(!fs.existsSync(path.join(real, 'Tree2')), 'путь в другом регистре — тот же каталог, снос идёт');
+      }
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: кириллица, пробелы и ’ (U+2019) в пути, пустые каталоги, одиночный файл и read-only файл на реальной ФС', () => {
+    const base = mkScratch('кириллица и пробел’s');
+    try {
+      const tree = path.join(base, 'Папка с пробелом’ и ёжиком', 'Меню Пуск');
+      fs.mkdirSync(path.join(tree, 'пустой'), { recursive: true });
+      fs.mkdirSync(path.join(tree, 'вложенный', 'ещё'), { recursive: true });
+      fs.writeFileSync(path.join(tree, 'вложенный', 'ещё', 'файл ’1.txt'), 'x');
+      const ro = path.join(tree, 'только чтение.txt');
+      fs.writeFileSync(ro, 'x'); makeReadOnly(ro);
+      FC.removeTreeNoFollow(path.join(base, 'Папка с пробелом’ и ёжиком'), { force: false });
+      assert(!fs.existsSync(path.join(base, 'Папка с пробелом’ и ёжиком')), 'дерево с кириллицей и read-only снесено');
+      const single = path.join(base, 'one.txt'); fs.writeFileSync(single, 'x'); makeReadOnly(single);
+      FC.removeTreeNoFollow(single, { force: false });
+      assert(!fs.existsSync(single), 'одиночный (read-only) файл удалён тем же вызовом');
+    } finally { safeDrop(base); }
+  });
+
+  ok('removeTreeNoFollow: force и ENOENT как у fs.rmSync — молчит только с force, код ошибки сохраняется; корень ФС, пустой путь и чужие типы отклоняются, Buffer и file:// принимаются', () => {
+    const base = mkScratch('args');
+    try {
+      const missing = path.join(base, 'нет такого');
+      assert.strictEqual(FC.removeTreeNoFollow(missing, { force: true }), undefined, 'force: отсутствие молчит');
+      assert.throws(() => FC.removeTreeNoFollow(missing, { force: false }), (e) => e.code === 'ENOENT' && e instanceof Error && e.message.indexOf('нет такого') !== -1, 'без force — ENOENT с кодом и путём');
+      assert.throws(() => FC.removeTreeNoFollow(missing), (e) => e.code === 'ENOENT', 'по умолчанию force=false, как у rmSync');
+      // корень файловой системы: отказ ДО любого обращения к диску
+      assert.throws(() => FC.removeTreeNoFollow(path.parse(process.cwd()).root, { force: true }), (e) => e.code === 'EINVAL', 'корень ФС не сносим');
+      assert.throws(() => FC.removeTreeNoFollow('', { force: true }), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'пустая строка не превращается в текущий каталог');
+      assert.throws(() => FC.removeTreeNoFollow('a\u0000b'), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'NUL в пути');
+      assert.throws(() => FC.removeTreeNoFollow({}), (e) => e.code === 'ERR_INVALID_ARG_TYPE', 'не строка/Buffer/URL');
+      const viaBuf = path.join(base, 'b'); fs.mkdirSync(viaBuf);
+      FC.removeTreeNoFollow(Buffer.from(viaBuf));
+      assert(!fs.existsSync(viaBuf), 'Buffer-путь принят');
+      const viaUrl = path.join(base, 'u'); fs.mkdirSync(viaUrl);
+      FC.removeTreeNoFollow(require('url').pathToFileURL(viaUrl));
+      assert(!fs.existsSync(viaUrl), 'file://-URL принят');
+    } finally { safeDrop(base); }
+  });
+
+  // ---- 2. ФС в памяти: read-only, повторы, ошибки, глубина, подмена по ходу ---------------------------------
+
+  ok('removeTreeNoFollow: read-only (как у libc++ в Electron 40+) — EPERM → атрибут снят у файла и каталога → повтор ровно раз; EPERM не про атрибут — исходная ошибка без chmod', () => {
+    const mem = memFs({ strictRo: true });
+    const T = path.join(MEM_BASE, 'ro');
+    mem.add(path.join(T, 'a.txt'), 'file', { ro: true });
+    mem.add(path.join(T, 'dir', 'b.txt'), 'file');
+    mem.node(path.join(T, 'dir')).ro = true;                       // read-only КАТАЛОГ
+    mem.add(path.join(MEM_BASE, 'outside', 'o.txt'), 'file', { ro: true });
+    const cleared = [];
+    FC.removeTreeNoFollow(T, Object.assign({ fs: mem, onReadOnly: (p) => cleared.push(p) }, MEM_OPTS));
+    assert(!mem.exists(T), 'дерево снесено');
+    assert.deepStrictEqual(mem.chmods.map((c) => c.p).sort(), [path.join(T, 'a.txt'), path.join(T, 'dir')].sort(), 'chmod только у read-only объектов дерева');
+    assert.deepStrictEqual(cleared.sort(), mem.chmods.map((c) => c.p).sort(), 'onReadOnly назвал те же объекты');
+    assert(mem.node(path.join(MEM_BASE, 'outside', 'o.txt')).ro === true, 'вне дерева ничего не тронуто');
+    assert.strictEqual(mem.log.filter((c) => c[0] === 'unlink' && c[1] === path.join(T, 'a.txt')).length, 2, 'unlink: попытка и ровно один повтор');
+
+    // EPERM, но не про атрибут: запрет на удаление по ACL
+    const mem2 = memFs();
+    const T2 = path.join(MEM_BASE, 'acl');
+    mem2.add(path.join(T2, 'locked.txt'), 'file');
+    mem2.fail = (op, p) => (op === 'unlink' && p.endsWith('locked.txt') ? 'EPERM' : null);
+    assert.throws(() => FC.removeTreeNoFollow(T2, Object.assign({ fs: mem2 }, MEM_OPTS)), (e) => e.code === 'EPERM' && e.path === path.join(T2, 'locked.txt'), 'исходная EPERM с путём');
+    assert.strictEqual(mem2.chmods.length, 0, 'снимать было нечего — chmod не вызывался');
+    assert.strictEqual(mem2.log.filter((c) => c[0] === 'unlink').length, 1, 'и повтора нет');
+
+    // негативный контроль: мутант без снятия атрибута на таком дереве падает
+    const mem3 = memFs({ strictRo: true });
+    mem3.add(path.join(T, 'a.txt'), 'file', { ro: true });
+    const mutated = loadMutated([['&& clearOneReadOnly(ctx, p, false, fr)', '&& false']]);
+    assert.throws(() => mutated.removeTreeNoFollow(T, Object.assign({ fs: mem3 }, MEM_OPTS)), (e) => e.code === 'EPERM', 'контроль: без снятия атрибута снос read-only файла падает EPERM');
+  });
+
+  ok('removeTreeNoFollow: транзиентные EBUSY/EPERM/ENOTEMPTY/EMFILE повторяются maxRetries раз с линейной паузой retryDelay×n; остальные коды — сразу; исчерпание — та же ошибка', () => {
+    const run = (code, failures, maxRetries) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'retry-' + code);
+      mem.add(path.join(T, 'f.txt'), 'file');
+      let left = failures;
+      mem.fail = (op, p) => (op === 'unlink' && left-- > 0 ? code : null);
+      const pauses = [];
+      let err = null;
+      try { FC.removeTreeNoFollow(T, { fs: mem, canonicalGate: true, maxRetries, retryDelay: 50, sleep: (ms) => pauses.push(ms) }); } catch (e) { err = e; }
+      return { err, pauses, unlinks: mem.log.filter((c) => c[0] === 'unlink').length, gone: !mem.exists(T) };
+    };
+    ['EBUSY', 'EPERM', 'ENOTEMPTY', 'EMFILE', 'ENFILE'].forEach((code) => {
+      const r = run(code, 2, 3);
+      assert.strictEqual(r.err, null, code + ': после двух отказов третья попытка прошла');
+      assert.deepStrictEqual(r.pauses, [50, 100], code + ': пауза растёт линейно');
+      assert.strictEqual(r.unlinks, 3, code + ': три вызова unlink');
+      assert(r.gone, code + ': дерево снесено');
+    });
+    const stuck = run('EBUSY', 99, 2);
+    assert(stuck.err && stuck.err.code === 'EBUSY', 'исчерпание повторов — та же ошибка с кодом EBUSY');
+    assert.strictEqual(stuck.unlinks, 3, 'попытка + 2 повтора');
+    const hard = run('EIO', 99, 5);
+    assert(hard.err && hard.err.code === 'EIO' && hard.unlinks === 1 && hard.pauses.length === 0, 'нетранзиентный код (EIO) — сразу, без пауз');
+    const none = run('EBUSY', 1, 0);
+    assert(none.err && none.err.code === 'EBUSY' && none.unlinks === 1, 'maxRetries по умолчанию 0 — как у rmSync');
+  });
+
+  ok('removeTreeNoFollow: файл, который не удаляется, оставляет точную ошибку (код, путь, syscall); обход останавливается на нём, ранее снесённое не возвращается, дальнейшее не тронуто', () => {
+    const mem = memFs();
+    const T = path.join(MEM_BASE, 'stuck');
+    mem.add(path.join(T, 'a.txt'), 'file');
+    mem.add(path.join(T, 'b.txt'), 'file');
+    mem.add(path.join(T, 'c.txt'), 'file');
+    mem.fail = (op, p) => (op === 'unlink' && p.endsWith('b.txt') ? 'EACCES' : null);
+    let err = null;
+    try { FC.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+    assert(err && err.code === 'EACCES' && err.path === path.join(T, 'b.txt') && err.syscall === 'unlink', 'ошибка с кодом, путём и syscall: ' + (err && err.message));
+    assert.deepStrictEqual(mem.names(T), ['b.txt', 'c.txt'], 'a.txt снесён, b.txt остался, c.txt не тронут');
+  });
+
+  ok('removeTreeNoFollow: глубина 8000 уровней — без рекурсии (стек цел), каталоги уходят строго снизу вверх', () => {
+    const N = 8000;
+    const chain = chainFs(N);
+    const t0 = Date.now();
+    FC.removeTreeNoFollow(chain.base, { fs: chain, canonicalGate: true, sleep: () => {} });
+    assert.strictEqual(chain.alive, -1, 'снесены все уровни, включая корень');
+    assert.strictEqual(chain.rmdirOrder.length, N + 1, 'rmdir на каждый уровень ровно раз');
+    assert(chain.rmdirOrder.every((k, i) => k === N - i), 'порядок строго от дна к корню');
+    assert(Date.now() - t0 < 120000, 'и за разумное время');
+  });
+
+  ok('removeTreeNoFollow: каталог подменён ссылкой/другим каталогом МЕЖДУ readdir и первой операцией — ERR_HM_TREE_CHANGED, ни одного обращения к чужим файлам', () => {
+    const scenario = (kind, mutatedModule) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'race-' + kind);
+      const V = path.join(MEM_BASE, 'victim-' + kind);
+      mem.add(path.join(T, 'a.txt'), 'file');
+      mem.add(path.join(T, 'X', 'f1.txt'), 'file');
+      mem.add(path.join(T, 'X', 'f2.txt'), 'file');
+      mem.add(path.join(V, 'f1.txt'), 'file');                      // у жертвы файлы с ТЕМИ ЖЕ именами
+      mem.add(path.join(V, 'f2.txt'), 'file');
+      let swapped = false;
+      mem.hook = (name, p) => {
+        if (name === 'readdir:after' && p === path.join(T, 'X') && !swapped) {
+          swapped = true;
+          if (kind === 'link') mem.replace(p, 'link', { to: V });
+          else if (kind === 'redir') mem.replace(p, 'redir', { to: V });
+          else mem.replace(p, 'dir');                                  // другой настоящий каталог
+        }
+      };
+      let err = null;
+      try { (mutatedModule || FC).removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      const touchedVictim = mem.log.some((c) => (c[0] === 'unlink' || c[0] === 'rmdir' || c[0] === 'chmod') && String(c[1]).indexOf(path.join(MEM_BASE, 'victim-')) === 0);
+      const viaLink = mem.log.some((c) => (c[0] === 'unlink' || c[0] === 'rmdir') && c[1] === path.join(T, 'X', 'f1.txt'));
+      return { err, swapped, victimFiles: mem.names(V).length, touchedVictim, viaLink };
+    };
+    ['link', 'redir', 'dir'].forEach((kind) => {
+      const r = scenario(kind);
+      assert(r.swapped, kind + ': подмена состоялась');
+      assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', kind + ': обход остановился с ERR_HM_TREE_CHANGED, а не пошёл дальше: ' + (r.err && r.err.message));
+      assert.strictEqual(r.victimFiles, 2, kind + ': файлы жертвы на месте');
+      assert(!r.viaLink, kind + ': удаления по пути X/f1.txt не было');
+    });
+    // негативный контроль: мутант без сверки каталога перед операцией стирает файлы жертвы по подменённому пути
+    const mutated = loadMutated([['function fenceOk(ctx, fr) {', 'function fenceOk(ctx, fr) { return true;']]);
+    const bad = scenario('link', mutated);
+    assert(bad.swapped && bad.viaLink, 'контроль: без сверки каталога удаление пошло по подменённому пути X/f1.txt');
+    assert.strictEqual(bad.victimFiles, 0, 'контроль: файлы жертвы стёрты — значит, именно эта сверка держит защиту');
+  });
+
+  ok('removeTreeNoFollow: подмена дочернего каталога между проверкой и обходом, исчезновение каталога по ходу и висячие записи — без ложных падений и без захода по ссылке', () => {
+    // (1) дочерний каталог подменён СРАЗУ после того, как его проверили, но до readdir
+    const mem = memFs();
+    const T = path.join(MEM_BASE, 'race2');
+    const V = path.join(MEM_BASE, 'victim2');
+    mem.add(path.join(T, 'X', 'f1.txt'), 'file');
+    mem.add(path.join(V, 'f1.txt'), 'file');
+    let swapped = false;
+    mem.hook = (name, p) => {
+      if (name === 'readdir' && p === path.join(T, 'X') && !swapped) { swapped = true; mem.replace(p, 'link', { to: V }); }
+    };
+    assert.throws(() => FC.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)), (e) => e.code === 'ERR_HM_TREE_CHANGED' || e.code === 'ENOTDIR' || e.code === 'ENOTEMPTY', 'подмена до readdir не приводит к сносу чужого');
+    assert(mem.exists(path.join(V, 'f1.txt')), 'файл жертвы цел');
+
+    // (2) каталог пропал сам по ходу сноса (его снесли без нас) — это не ошибка
+    const mem2 = memFs();
+    const T2 = path.join(MEM_BASE, 'vanish');
+    mem2.add(path.join(T2, 'X', 'f.txt'), 'file');
+    mem2.add(path.join(T2, 'z.txt'), 'file');
+    mem2.hook = (name, p) => {
+      if (name === 'readdir:after' && p === path.join(T2, 'X')) { const r = mem2.node(T2); r.kids.delete('X'); }
+    };
+    FC.removeTreeNoFollow(T2, Object.assign({ fs: mem2 }, MEM_OPTS));
+    assert(!mem2.exists(T2), 'остаток дерева снесён, исчезнувший каталог ошибкой не стал');
+
+    // (3) запись есть в readdir, а lstat даёт ENOENT (висячая junction «через том»): снимается rmdir
+    const mem3 = memFs();
+    const T3 = path.join(MEM_BASE, 'dangling');
+    mem3.add(path.join(T3, 'ghost'), 'redir', { to: path.join(MEM_BASE, 'nowhere') });
+    FC.removeTreeNoFollow(T3, Object.assign({ fs: mem3 }, MEM_OPTS));
+    assert(!mem3.exists(T3), 'висячая запись снята, каталог снесён');
+  });
+
+  ok('removeTreeNoFollow: перенаправление-каталог (redir) снимается rmdir, а "ссылка" с содержимым не удаляется и подписана в ошибке; unlink отказывает — rmdir как запасной путь', () => {
+    const mem = memFs();
+    const T = path.join(MEM_BASE, 'redir');
+    const V = path.join(MEM_BASE, 'victim3');
+    mem.add(path.join(V, 'p.txt'), 'file');
+    mem.add(path.join(T, 'a.txt'), 'file');
+    mem.add(path.join(T, 'evil'), 'redir', { to: V });
+    const links = [];
+    FC.removeTreeNoFollow(T, Object.assign({ fs: mem, onLink: (p) => links.push(p) }, MEM_OPTS));
+    assert(!mem.exists(T) && mem.exists(path.join(V, 'p.txt')), 'дерево снесено, цель цела');
+    assert.deepStrictEqual(links, [path.join(T, 'evil')], 'redir снят как ссылка');
+    assert(mem.log.some((c) => c[0] === 'unlink' && c[1] === path.join(T, 'evil')) && mem.log.some((c) => c[0] === 'rmdir' && c[1] === path.join(T, 'evil')), 'сначала unlink (EPERM), затем rmdir');
+
+    // каталог сочтён ссылкой, а на деле настоящий и не пуст (имитация: канонический путь не сходится) — не трогаем
+    const mem2 = memFs();
+    const T2 = path.join(MEM_BASE, 'notlink');
+    mem2.add(path.join(T2, 'sub', 'keep.txt'), 'file');
+    const real = mem2.realpathSync.native;
+    mem2.realpathSync.native = (p) => (p === path.join(T2, 'sub') ? path.join(MEM_BASE, 'elsewhere') : real(p));
+    assert.throws(() => FC.removeTreeNoFollow(T2, Object.assign({ fs: mem2 }, MEM_OPTS)), (e) => e.code === 'ENOTEMPTY' && /не трогаю/.test(e.message), 'ENOTEMPTY с пояснением, почему отказ');
+    assert(mem2.exists(path.join(T2, 'sub', 'keep.txt')), 'содержимое не тронуто');
+  });
+
+  // ---- 3. снятие read-only без перехода по ссылкам (рецензия M-7) ---------------------------------------------
+
+  ok('clearReadOnlyTree (M-7): не идёт по ссылкам и не делает chmod за пределами дерева — ни по готовой ссылке, ни при подмене каталога по ходу; возвращает число снятых, не бросает', () => {
+    const mem = memFs();
+    const T = path.join(MEM_BASE, 'cl');
+    const V = path.join(MEM_BASE, 'victim4');
+    mem.add(path.join(T, 'x.txt'), 'file', { ro: true });
+    mem.add(path.join(T, 'lnk'), 'link', { to: V });
+    mem.add(path.join(V, 'ro.txt'), 'file', { ro: true });
+    assert.strictEqual(FC.clearReadOnlyTree(T, mem), 1, 'снят ровно один атрибут — у x.txt');
+    assert(mem.node(path.join(V, 'ro.txt')).ro === true, 'за ссылкой read-only остался');
+    assert.deepStrictEqual(mem.chmods.map((c) => c.p), [path.join(T, 'x.txt')], 'chmod был один — по объекту дерева');
+
+    // подмена каталога МЕЖДУ readdir и операцией внутри него (путь a/sub/victim.txt из рецензии)
+    const mem2 = memFs();
+    const T2 = path.join(MEM_BASE, 'cl2');
+    const V2 = path.join(MEM_BASE, 'victim5');
+    mem2.add(path.join(T2, 'sub', 'victim.txt'), 'file', { ro: true });
+    mem2.add(path.join(V2, 'victim.txt'), 'file', { ro: true });
+    let swapped = false;
+    mem2.hook = (name, p) => { if (name === 'readdir:after' && p === path.join(T2, 'sub') && !swapped) { swapped = true; mem2.replace(p, 'link', { to: V2 }); } };
+    let n = -1;
+    assert.doesNotThrow(() => { n = FC.clearReadOnlyTree(T2, mem2); }, 'не бросает даже при подмене');
+    assert(swapped && n === 0, 'ничего не снято: ' + n);
+    assert(mem2.node(path.join(V2, 'victim.txt')).ro === true, 'read-only чужого файла остался');
+    assert.strictEqual(mem2.chmods.length, 0, 'chmod не вызывался вовсе');
+    assert.strictEqual(FC.clearReadOnlyTree(path.join(MEM_BASE, 'нет-такого'), mem2), 0, 'несуществующий путь — 0, без ошибки');
+
+    // реальная ФС: read-only файл за настоящей junction остаётся read-only
+    const base = mkScratch('clr');
+    try {
+      const victim = path.join(base, 'victim'); fs.mkdirSync(victim);
+      const vf = path.join(victim, 'ro.txt'); fs.writeFileSync(vf, 'x'); makeReadOnly(vf);
+      const tree = path.join(base, 'tree'); fs.mkdirSync(tree);
+      junction(victim, path.join(tree, 'evil'));
+      const mine = path.join(tree, 'mine.txt'); fs.writeFileSync(mine, 'x'); makeReadOnly(mine);
+      assert.strictEqual(FC.clearReadOnlyTree(tree), 1, 'снят атрибут у своего файла');
+      assert.strictEqual(fs.lstatSync(vf).mode & 0o200, 0, 'чужой файл за junction остался read-only');
+      assert(fs.lstatSync(mine).mode & 0o200, 'свой файл стал записываемым');
+    } finally { safeDrop(base); }
+  });
+
+  // ---- 4. обёртка rmSync и install() ---------------------------------------------------------------------------
+
+  ok('wrapRmSync(noFollowRecursive): рекурсивные вызовы уходят в removeTreeNoFollow и не доходят до рантайма; нерекурсивные идут в рантайм с прежним EPERM-повтором; без опции — всё по-старому', () => {
+    const mem = memFs();
+    const T = path.join(MEM_BASE, 'wr');
+    const V = path.join(MEM_BASE, 'victim6');
+    mem.add(path.join(T, 'a.txt'), 'file');
+    mem.add(path.join(T, 'evil'), 'link', { to: V });
+    mem.add(path.join(V, 'p.txt'), 'file');
+    const calls = [];
+    const orig = function (p, o) { calls.push([p, o]); };
+    const logs = [];
+    const w = FC.wrapRmSync(orig, { noFollowRecursive: true, fs: mem, onLink: (p) => logs.push(p) });
+    w(T, { recursive: true, force: true });
+    assert.strictEqual(calls.length, 0, 'рантайм не вызывался');
+    assert(!mem.exists(T) && mem.exists(path.join(V, 'p.txt')), 'дерево снесено, цель цела');
+    assert.deepStrictEqual(logs, [path.join(T, 'evil')], 'ссылка попала в журнал');
+    w('some-file', { force: true });
+    assert.deepStrictEqual(calls, [['some-file', { force: true }]], 'нерекурсивный вызов ушёл в рантайм');
+    // force: молчит только с ним
+    assert.doesNotThrow(() => w(path.join(MEM_BASE, 'nothing'), { recursive: true, force: true }));
+    assert.throws(() => w(path.join(MEM_BASE, 'nothing'), { recursive: true }), (e) => e.code === 'ENOENT');
+    // maxRetries/retryDelay из опций вызова доходят до обхода
+    const mem2 = memFs();
+    mem2.add(path.join(T, 'f.txt'), 'file');
+    let left = 2;
+    mem2.fail = (op) => (op === 'unlink' && left-- > 0 ? 'EBUSY' : null);
+    const w2 = FC.wrapRmSync(orig, { noFollowRecursive: true, fs: mem2 });
+    w2(T, { recursive: true, maxRetries: 3, retryDelay: 0 });
+    assert(!mem2.exists(T), 'повторы из опций вызова сработали');
+    // без noFollowRecursive рекурсивный вызов идёт в рантайм (прежний контракт обёртки)
+    calls.length = 0;
+    FC.wrapRmSync(orig, { fs: mem })(T, { recursive: true });
+    assert.strictEqual(calls.length, 1, 'без опции — рантайм, как раньше');
+  });
+
+  ok('install(): на Windows рекурсивный fs.rmSync уходит в обход без перехода по ссылкам и пишет в журнал строку о снятой ссылке; вне Windows ничего не меняется', () => {
+    const base = mkScratch('inst');
+    try {
+      const victim = path.join(base, 'victim'); mkVictim(victim);
+      const tree = path.join(base, 'tree'); fs.mkdirSync(tree);
+      fs.writeFileSync(path.join(tree, 'a.txt'), 'a');
+      junction(victim, path.join(tree, 'evil'));
+      const script = path.join(base, 'child.js');
+      fs.writeFileSync(script, [
+        "const fs = require('fs');",
+        "const orig = fs.rmSync;",
+        "const lines = [];",
+        "const ok = require(process.env.HM_COMPAT).install((l) => lines.push(l));",
+        "fs.rmSync(process.env.HM_TREE, { recursive: true, force: true });",
+        "process.stdout.write(JSON.stringify({ ok, replaced: fs.rmSync !== orig, noFollow: !!fs.rmSync.__hmNoFollow, lines }));",
+      ].join('\n'));
+      const env = Object.assign({}, process.env, { HM_COMPAT: FCP, HM_TREE: tree });
+      delete env.ELECTRON_RUN_AS_NODE;
+      const r = cp.spawnSync(process.execPath, [script], { env, encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(r.status, 0, 'дочерний Node отработал: ' + r.stderr);
+      const o = JSON.parse(r.stdout);
+      assert(!fs.existsSync(tree) && victimAlive(victim), 'дерево снесено, цель цела');
+      if (IS_WIN) {
+        assert(o.ok && o.replaced && o.noFollow, 'install() включил маршрутизацию рекурсивных вызовов');
+        assert(o.lines.some((l) => l.indexOf('снята сама ссылка') !== -1 && l.indexOf('evil') !== -1), 'в журнале строка про снятую ссылку: ' + JSON.stringify(o.lines));
+      } else {
+        assert(!o.ok && !o.replaced && !o.noFollow, 'вне Windows rmSync не подменяется');
+      }
+    } finally { safeDrop(base); }
+  });
+
+  // ---- 5. удаление компонентов (uninstall-exec) ------------------------------------------------------------------
+
+  ok('removeDirTree и removeDirTreeGated: вложенная junction внутри цели снимается как ссылка — статус removed, цель цела, карантина не осталось; fs.rmSync(recursive) больше не зовётся', () => {
+    ['plain', 'gated'].forEach((mode) => {
+      const home = mkScratch('ux-' + mode);
+      const origRm = fs.rmSync;
+      try {
+        const victim = path.join(home, 'victim'); mkVictim(victim);
+        const target = path.join(home, 'AppData', 'Local', 'Programs', 'ClaudeMascot');
+        fs.mkdirSync(path.join(target, 'resources'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'claude-mascot.exe'), 'x');
+        fs.writeFileSync(path.join(target, 'resources', 'data.bin'), 'y');
+        if (mode === 'gated') fs.writeFileSync(path.join(target, '.hm-owner'), 'ours');
+        junction(victim, path.join(target, 'evil'));
+        const opts = { home, platform: process.platform };
+        // рекурсивный fs.rmSync здесь запрещён: старый код звал именно его
+        fs.rmSync = function (p, o) { if (o && o.recursive) throw new Error('fs.rmSync(recursive) вызван из удаления компонента'); return origRm.apply(this, arguments); };
+        const r = settle(() => (mode === 'gated' ? UX.removeDirTreeGated(target, opts, '.hm-owner') : UX.removeDirTree(target, opts)));
+        fs.rmSync = origRm;
+        assert.strictEqual(r.status, 'removed', mode + ': ' + JSON.stringify(r));
+        assert(/внутри были ссылки: 1 — сняты как ссылки, содержимое их целей не тронуто/.test(r.message), mode + ': сообщение называет снятые ссылки: ' + r.message);
+        assert(!fs.existsSync(target), mode + ': корень удаления исчез');
+        assert(victimAlive(victim), mode + ': ЦЕЛЬ ЗА ССЫЛКОЙ ЦЕЛА');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(target)).filter((n) => n.indexOf('.hm-quar.') === 0), [], mode + ': карантин не остался');
+      } finally { fs.rmSync = origRm; safeDrop(home); }
+    });
+  });
+
+  ok('removeDirTree и removeDirTreeGated: обычное дерево без ссылок — сообщения прежние (без приписки), сбой удаления возвращает дерево на место', () => {
+    ['plain', 'gated'].forEach((mode) => {
+      const home = mkScratch('ux2-' + mode);
+      const origUnlink = fs.unlinkSync;
+      try {
+        const target = path.join(home, 'HamidunCourse', 'tracks');
+        fs.mkdirSync(path.join(target, 'one'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'one', 'a.txt'), 'a');
+        if (mode === 'gated') fs.writeFileSync(path.join(target, '.hm-owner'), 'ours');
+        const opts = { home, platform: process.platform };
+        const run = () => settle(() => (mode === 'gated' ? UX.removeDirTreeGated(target, opts, '.hm-owner') : UX.removeDirTree(target, opts)));
+        // сбой: файл не удаляется (EACCES не повторяется и не про read-only)
+        fs.unlinkSync = function (p) { if (String(p).endsWith('a.txt')) throw Object.assign(new Error('EACCES: test'), { code: 'EACCES' }); return origUnlink.apply(this, arguments); };
+        const bad = run();
+        fs.unlinkSync = origUnlink;
+        assert.strictEqual(bad.status, 'failed', mode + ': ' + JSON.stringify(bad));
+        assert(/не удалось удалить дерево: EACCES/.test(bad.message), mode + ': причина названа: ' + bad.message);
+        assert(fs.existsSync(path.join(target, 'one', 'a.txt')), mode + ': дерево возвращено на прежний путь');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(target)).filter((n) => n.indexOf('.hm-quar.') === 0), [], mode + ': карантин не остался');
+        // частично снесённое дерево могло потерять маркер (прежнее поведение) — для повтора кладём его обратно
+        if (mode === 'gated') fs.writeFileSync(path.join(target, '.hm-owner'), 'ours');
+        // и повтор без сбоя проходит со старым текстом
+        const good = run();
+        assert.strictEqual(good.status, 'removed', mode + ': повтор без сбоя: ' + JSON.stringify(good));
+        assert.strictEqual(good.message, mode === 'gated' ? 'удалено дерево (карантин, маркер подтверждён)' : 'удалено дерево', mode + ': текст без приписки, как раньше');
+        assert(!fs.existsSync(target), mode + ': снесено');
+      } finally { fs.unlinkSync = origUnlink; safeDrop(home); }
+    });
+  });
+
+  // ---- 6. все места, где main-процесс сносит деревья ---------------------------------------------------------------
+
+  ok('инвентарь рекурсивных сносов в src/: ни fs.rm/promises.rm/rimraf, рекурсивный rmSync только в проверенных местах (админ-деревья), в uninstall-exec — нет вовсе', () => {
+    // Кто пишет в дерево, которое сносят (решение по u2, находка F1):
+    //  - staging-paths.js (rmStagingTree), remote-fetch.js (кэш докачки, unpacking-*/unpacked-*), main.js
+    //    (pruneStaleSecureDirs): деревья ВНУТРИ %ProgramData%\HmDeElev-<hex> — каталога, рождённого атомарно
+    //    с владельцем Administrators и DACL {SYSTEM, Administrators} и перепроверяемого verifyDirSecureWin
+    //    перед использованием; процесс пользователя туда не пишет, junction подложить нельзя. Всё равно
+    //    покрыто install(): на Windows их рекурсивный rmSync идёт через removeTreeNoFollow.
+    //  - uninstall-exec.js: деревья в профиле пользователя (подкладывается что угодно) → только removeTreeNoFollow.
+    // Новое место со сносом? Решай так же: чьё дерево, кто в него пишет; нужно — вызывай removeTreeNoFollow.
+    const SRC = path.join(ROOT, 'src');
+    const files = [];
+    (function walk(d) {
+      fs.readdirSync(d, { withFileTypes: true }).forEach((e) => {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) walk(p); else if (/\.js$/.test(e.name)) files.push(p);
+      });
+    })(SRC);
+    const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|[^:'"`])\/\/.*$/, '$1')).join('\n');
+    const found = {};
+    files.forEach((f) => {
+      const code = strip(fs.readFileSync(f, 'utf8'));
+      const rel = path.relative(SRC, f).split(path.sep).join('/');
+      const rec = (code.match(/\brmSync\s*\([^;{}]*\{[^}]*recursive\s*:\s*true[^}]*\}/g) || []).length;
+      if (rec) found[rel] = rec;
+      assert(!/\bfs\.rm\s*\(|\bpromises\.rm\s*\(|\bfsp\.rm\s*\(|rimraf|\brmdirSync\s*\([^)]*recursive|\bfs\.rmdir\s*\([^)]*recursive/.test(code),
+        rel + ': другой способ рекурсивного сноса мимо install() и removeTreeNoFollow');
+    });
+    // Файлы целиком admin-only (кэш докачки, staging): число вызовов в них не важно, важен СОСТАВ файлов.
+    // main.js — обзорный файл с кучей путей, поэтому там число вызовов закреплено: ровно один (prune staging).
+    assert.deepStrictEqual(Object.keys(found).sort(), ['main.js', 'remote-fetch.js', 'staging-paths.js'],
+      'набор файлов с рекурсивным rmSync изменился — реши, чьё это дерево и кто в него пишет (см. комментарий теста): ' + JSON.stringify(found));
+    assert.strictEqual(found['main.js'], 1, 'в main.js рекурсивный rmSync ровно один (pruneStaleSecureDirs, admin-only каталоги); новый — решай, чьё дерево: ' + JSON.stringify(found));
+    const ux = fs.readFileSync(UXP, 'utf8');
+    assert(/require\('\.\/fs-compat'\)/.test(ux) && (ux.match(/removeTreeNoFollow\(quarantine/g) || []).length === 2, 'removeDirTree и removeDirTreeGated сносят через removeTreeNoFollow');
+    assert(!/rmSync\([^)]*recursive/.test(strip(ux)), 'в uninstall-exec нет рекурсивного fs.rmSync');
+    // и сама обёртка в main.js включена ДО первой уборки (отдельный тест раздела fs-compat держит порядок)
+    const fcs = fs.readFileSync(FCP, 'utf8');
+    assert(/noFollowRecursive:\s*true/.test(fcs), 'install() включает маршрутизацию рекурсивных вызовов');
+  });
+
+  ok('рантайм (системный Node): вложенная и корневая junction, junction "через том" — снос не трогает цель; removeDirTree/removeDirTreeGated и обёрнутый rmSync тоже', () => {
+    const out = runChild(process.execPath, false);
+    assertSafeRuntime(out, out.runtime);
+  });
+
+  ok('рантайм (настоящий Electron из NODE_PATH): голый rmSync идёт по junction — это контроль; removeTreeNoFollow, removeDirTree* и install()-обёртка цель не трогают', () => {
+    if (process.platform !== 'win32') SKIP('junction и баг libc++ — только Windows');
+    const el = findElectron(ROOT);
+    if (!el) SKIP('нет бинарника Electron (ни в node_modules, ни в NODE_PATH) — рантайм не проверить');
+    const out = runChild(el.exe, true);
+    // ДОКУМЕНТИРОВАННЫЙ КОНТРОЛЬ: на Electron 40+ голый rmSync стирает цель за junction. Если рантайм
+    // это перестал делать — вывод «модуль больше не нужен» делается ЧЕЛОВЕКОМ, а не молча зелёным тестом.
+    if (out.electronMajor >= 40) {
+      assert.strictEqual(out.cases['raw-nested-junction'].victimAlive, false,
+        'контроль (' + out.runtime + '): голый fs.rmSync(recursive) должен идти по вложенной junction — иначе пересмотри src/fs-compat.js');
+      assert.strictEqual(out.cases['raw-root-junction'].victimAlive, false,
+        'контроль (' + out.runtime + '): голый fs.rmSync(recursive) на корневой junction тоже стирает цель');
+      // тот же контроль на самом модуле: removeDirTree со ВЕРНУТЫМ fs.rmSync стирает цель — старый код был уязвим
+      assert.strictEqual(out.cases['ctl-old-removeDirTree-junction'].victimAlive, false,
+        'контроль (' + out.runtime + '): прежний removeDirTree (fs.rmSync) стирает цель за вложенной junction');
+      if (out.cases['ctl-old-removeDirTree-volume'] && !out.cases['ctl-old-removeDirTree-volume'].setupError) {
+        assert.strictEqual(out.cases['ctl-old-removeDirTree-volume'].victimAlive, false, 'контроль: и за junction «через том»');
+      }
+    }
+    // Электрон подменяет fs ради .asar: обход через подменённый fs ломается на дереве с настоящим архивом
+    // (архив для него «каталог» с выдуманным inode и он же держит файл открытым). Поэтому снос идёт через original-fs.
+    if (out.hasOriginalFs) {
+      assert.notStrictEqual(out.cases['ctl-asar-patched-fs'].error, null,
+        'контроль (' + out.runtime + '): с подменённым fs снос дерева с .asar не проходит — original-fs нужен');
+    }
+    assertSafeRuntime(out, out.runtime);
+  });
+})();
