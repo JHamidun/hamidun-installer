@@ -6689,7 +6689,7 @@ ok('claude.ps1: офлайн-путь проверяется ЗАПУСКОМ cl
   const s = CLD_PS1();
   assert(/_deelev\.ps1/.test(s), 'дот-сорсит единый примитив де-элевации');
   assert(/function Test-HmClaudeRuns/.test(s), 'проверка запуском объявлена');
-  assert(/Invoke-HmDeElevated \$bin @\('--version'\)/.test(s),
+  assert(/Invoke-HmDeElevated(?:Safe)? \$bin @\('--version'\)/.test(s),
     '--version исполняется ДЕ-ЭЛЕВИРОВАННО (user-writable claude НЕ запускается под админом)');
   assert(!/&\s*\$claudeBin\b/.test(s) && !/&\s*\$bin\s+--version/.test(s),
     'нет прямого elevated-запуска claude-бинаря');
@@ -13570,6 +13570,7 @@ ok('config.json в репозитории без сборочных маркер
       return child;
     };
     const sb = {
+      deelevRoute: require(path.join(ROOT, 'src', 'deelev-route.js')),   // winMakeSecureDir квотирует пути его psQuoteBody
       remoteFetch: {
         winProgramData: () => 'C:\\ProgramData',
         winPowershellPath: () => 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -14589,6 +14590,7 @@ ok('config.json в репозитории без сборочных маркер
     const mk = (script) => {                       // script[i] — что делает i-я попытка: 'hang' | 'ok' | 'fail'
       const budgets = []; let attempt = 0;
       const sb = {
+        deelevRoute: require(path.join(ROOT, 'src', 'deelev-route.js')),   // winMakeSecureDir квотирует пути его psQuoteBody
         remoteFetch: {
           winProgramData: () => 'C:\\ProgramData',
           winPowershellPath: () => 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
