@@ -20742,7 +20742,9 @@ ok('config.json в репозитории без сборочных маркер
 // tools/after-pack.js гасит три fuse ДО подписи, tools/verify-fuses.js — независимый гейт после
 // сборки. Тесты исполняют код, а не читают исходник: синтетические бинари с настоящей проводкой,
 // хук в дочернем процессе (пакет @electron/fuses — ESM), и главное — НАСТОЯЩИЙ Electron 44 с
-// внешним оракулом (маркер-файлы от дочерних процессов). Пакета или Electron нет — честный SKIP.
+// внешним оракулом (маркер-файлы от дочерних процессов). Пакета или Electron нет — честный SKIP; исключение —
+// отказы хука целиком (проглоченная ошибка, удалённые postcheck и assertLibMatches): они идут на подменном пакете
+// в изолированной копии tools/ (isolated) и не пропускаются никогда.
 // Секция только на синхронном ok(): так её можно гонять отдельно (run_section.js).
 // ===========================================================================
 (function () {
@@ -20803,6 +20805,11 @@ ok('config.json в репозитории без сборочных маркер
     "    } };",
     "    await hook.default(ctx, deps);",
     "    out({ ok: true, adhocSaw: saw });",
+    "  } else if (mode === 'afterPackSpy') {", // нейтральная заглушка ad-hoc: только считает вызовы (заглушка выше сама зовёт binariesFor и на linux бросала бы вместо хука)
+    "    const ctx = { electronPlatformName: arg.platform, appOutDir: arg.appOutDir, packager: { appInfo: { productFilename: 'Hamidun Setup' } } };",
+    "    let adhocCalls = 0;",
+    "    try { await hook.default(ctx, { adhoc: async () => { adhocCalls++; } }); out({ ok: true, adhocCalls }); }",
+    "    catch (e) { out({ ok: false, adhocCalls, error: e.message }); process.exitCode = 1; }",
     "  } else if (mode === 'flipFile') {",
     "    const lib = await hook.assertReady();",
     "    await hook.flipFile(lib, arg.file, arg.kind);",
@@ -20827,22 +20834,34 @@ ok('config.json в репозитории без сборочных маркер
     "      if (calls <= arg.failTimes) { const e = new Error(arg.code + ': занят'); e.code = arg.code; throw e; }",
     "      return real.flipFuses(file, cfg);",
     "    } };",
-    "    try { await hook.flipFile(fake, arg.file, 'exe'); out({ ok: true, calls }); }",
-    "    catch (e) { out({ ok: false, calls, error: e.message, code: e.code }); }",
+    "    const t0 = Date.now();", // сколько хук ждал между попытками: мгновенный перебор антивирусу не поможет
+    "    try { await hook.flipFile(fake, arg.file, 'exe'); out({ ok: true, calls, ms: Date.now() - t0 }); }",
+    "    catch (e) { out({ ok: false, calls, ms: Date.now() - t0, error: e.message, code: e.code }); }",
     "  } else if (mode === 'setFuses') {", // только для тестов: выставить ОТДЕЛЬНЫЕ fuse (изоляция «какой fuse что закрывает»)
     "    const lib = await hook.loadFusesLib();",
     "    const cfg = { version: lib.FuseVersion.V1 };",
     "    if ('runAsNode' in arg) cfg[lib.FuseV1Options.RunAsNode] = arg.runAsNode;",
     "    if ('nodeOptions' in arg) cfg[lib.FuseV1Options.EnableNodeOptionsEnvironmentVariable] = arg.nodeOptions;",
     "    if ('inspect' in arg) cfg[lib.FuseV1Options.EnableNodeCliInspectArguments] = arg.inspect;",
-    "    out({ ok: true, wires: await lib.flipFuses(arg.file, cfg) });",
+    // Сразу после пробного запуска Electron свежий 245-МБ exe держит антивирус: открытие на запись даёт EBUSY/EPERM/EACCES
+    // (так упали 2 из 9 прогонов). У боевого хука тот же повтор, но на ~1,5 с; тестовому помощнику нужен запас побольше:
+    // Defender сканирует изменённый exe до 17 с. Прочие ошибки — сразу наружу.
+    "    let wires;",
+    "    for (let i = 0; ; i++) {",
+    "      try { wires = await lib.flipFuses(arg.file, cfg); break; } catch (e) {",
+    "        if (i >= 5 || !e || !/^(EBUSY|EPERM|EACCES)$/.test(e.code)) throw e;",
+    "        await new Promise((r) => setTimeout(r, 300 * (i + 1) * (i + 1)));",
+    "      }",
+    "    }",
+    "    out({ ok: true, wires });",
     "  }",
     "})().catch((e) => { out({ ok: false, error: String(e && e.message) }); process.exitCode = 1; });",
   ].join('\n');
   let driverFile = null;
-  function driver(mode, arg, env) {
+  // tools — необязательная папка с копией хука (см. isolated ниже); по умолчанию настоящий tools/ проекта.
+  function driver(mode, arg, env, tools) {
     if (!driverFile) { driverFile = path.join(tmp('hm-fuses-drv-'), 'driver.js'); fs.writeFileSync(driverFile, DRIVER); }
-    const r = spawnSync(process.execPath, [driverFile, TOOLS, mode, JSON.stringify(arg || {})], {
+    const r = spawnSync(process.execPath, [driverFile, tools || TOOLS, mode, JSON.stringify(arg || {})], {
       encoding: 'utf8', timeout: 300000, env: Object.assign({}, process.env, env || {}),
     });
     const m = /\nRESULT (.*)\s*$/.exec('\n' + String(r.stdout || '').trim());
@@ -20865,6 +20884,49 @@ ok('config.json в репозитории без сборочных маркер
     throw new Error('драйвер хука не ответил, а пакет тут ни при чём: ' + libProbe.stdout + libProbe.stderr);
   }
   const hookRun = (platform, appOutDir, extra) => driver('afterPack', Object.assign({ platform, appOutDir }, extra || {}));
+
+  // --- изолированная копия tools/ с подменным «пакетом» @electron/fuses ----------------------------
+  // Отказы хука (пакет молча ничего не сделал, порядок fuse разошёлся, нет sentinel) настоящим пакетом не вызвать, а
+  // пропускать эти тесты без пакета нельзя: именно они доказывают, что хук ЗАКРЫТ, а не открыт. Поэтому хук исполняется как
+  // есть, но из копии <tmp>/tools/, рядом с которой лежит <tmp>/node_modules/@electron/fuses — подменный пакет. import()
+  // находит его обычным поиском вверх по папкам; настоящий пакет и NODE_PATH не нужны. Копия делается на лету, так что любая
+  // правка tools/*.js попадает в тест. Поведение подмены задаёт переменная HM_FAKE_FUSES (driver(..., env, tools)).
+  const FAKE_LIB = [
+    "import fs from 'node:fs';",
+    "const SENT = Buffer.from('dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX', 'latin1');",
+    "const MODE = process.env.HM_FAKE_FUSES || 'faithful';",
+    "const OFF = 0x30, ON = 0x31;",
+    "export const FuseVersion = { V1: MODE === 'bad-version' ? '2' : '1' };",
+    "export const FuseV1Options = MODE === 'permuted'",
+    "  ? { RunAsNode: 0, EnableNodeOptionsEnvironmentVariable: 3, EnableNodeCliInspectArguments: 2 }",
+    "  : { RunAsNode: 0, EnableCookieEncryption: 1, EnableNodeOptionsEnvironmentVariable: 2, EnableNodeCliInspectArguments: 3 };",
+    // faithful (и permuted, bad-version) ставит ровно то, что просят, как настоящий пакет; остальные режимы «врут о результате»
+    "const FIXED = { noop: {}, partial: { 0: OFF, 2: OFF }, 'also-cookie': { 0: OFF, 1: ON, 2: OFF, 3: OFF } };",
+    "export async function flipFuses(file, cfg) {",
+    "  const buf = fs.readFileSync(file);",
+    "  let edits = FIXED[MODE];",
+    "  if (!edits) { edits = {}; for (const k of Object.keys(cfg)) if (!Number.isNaN(Number(k))) edits[k] = cfg[k] ? ON : OFF; }",
+    "  const offs = [];",
+    "  for (let i = buf.indexOf(SENT); i !== -1; i = buf.indexOf(SENT, i + 1)) offs.push(i);",
+    "  for (const o of offs) for (const k of Object.keys(edits)) buf[o + SENT.length + 2 + Number(k)] = edits[k];",
+    "  fs.writeFileSync(file, buf);",
+    "  return offs.length;",
+    "}",
+  ].join('\n');
+  function isolated(withFake) {
+    const root = tmp('hm-fuses-iso-');
+    const tools = path.join(root, 'tools');
+    fs.mkdirSync(tools);
+    // Список явный: новый require в хуке упадёт здесь громким MODULE_NOT_FOUND (добавь файл сюда), а не позеленеет молча.
+    for (const f of ['after-pack.js', 'verify-fuses.js', 'mac-adhoc-sign.js']) fs.copyFileSync(path.join(TOOLS, f), path.join(tools, f));
+    if (withFake) {
+      const pkg = path.join(root, 'node_modules', '@electron', 'fuses');
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@electron/fuses', version: '0.0.0-test', type: 'module', main: 'index.js' }));
+      fs.writeFileSync(path.join(pkg, 'index.js'), FAKE_LIB);
+    }
+    return { root, tools };
+  }
 
   // ================= Гейт verify-fuses: независимый читатель, без пакета =================
 
@@ -20931,6 +20993,81 @@ ok('config.json в репозитории без сборочных маркер
     assert.strictEqual(vf.checkDir(file).code, 2, 'файл вместо папки');
   });
 
+  ok('fuses: гейт видит HAMIDUN SETUP.EXE в верхнем регистре, не зеленеет из-за нечитаемого бинаря рядом с чистым и отказывает на лишних аргументах', () => {
+    const vf = VF();
+    const base = tmp();
+    // Расширение в верхнем регистре. Файловая система Windows регистр не различает, и exe, названный иначе, не должен выпасть из
+    // проверки: тогда заводская проводка дала бы «нечего проверять» (2) вместо провала (1).
+    const up = path.join(base, 'upper');
+    put(up, 'HAMIDUN SETUP.EXE', pe(STOCK));
+    const stock = vf.checkDir(up);
+    assert.strictEqual(stock.code, 1, '.EXE с заводской проводкой — провал, а не «нечего проверять»: ' + stock.code + ' ' + errs(stock));
+    assert(/HAMIDUN SETUP\.EXE/.test(errs(stock)), 'в отчёте назван именно этот файл: ' + errs(stock));
+    put(up, 'HAMIDUN SETUP.EXE', pe(HARD));
+    const hard = vf.checkDir(up);
+    assert.strictEqual(hard.code, 0, errs(hard));
+    assert.strictEqual(hard.files, 1, '.EXE найден и прочитан');
+
+    // Нечитаемый бинарь (антивирус держит файл: EBUSY/EPERM). Открытие файла подменяется в дочернем процессе — это настоящий код
+    // выхода настоящего CLI. Рядом лежит ЧИСТЫЙ exe: без «failed++» гейт видел бы одну чистую проводку и позеленел бы.
+    const pre = put(tmp('hm-fuses-pre-'), 'deny-open.js', [
+      "const fs = require('fs');",
+      "const open = fs.openSync;",
+      "fs.openSync = function (p) {",
+      "  if (/locked\\.exe$/i.test(String(p))) { const e = new Error('EBUSY: resource busy or locked, open ' + p); e.code = 'EBUSY'; throw e; }",
+      "  return open.apply(fs, arguments);",
+      "};",
+    ].join('\n'));
+    const cli = (args, deny) => spawnSync(process.execPath, (deny ? ['--require', pre] : []).concat([path.join(TOOLS, 'verify-fuses.js')], args),
+      { encoding: 'utf8', timeout: 120000 });
+    const mixed = path.join(base, 'mixed');
+    put(mixed, 'Hamidun Setup.exe', pe(HARD));
+    put(mixed, 'locked.exe', pe(HARD));
+    const calm = cli([mixed], false);
+    assert.strictEqual(calm.status, 0, 'контроль: без подмены обе проводки чистые и гейт зелёный: ' + calm.stdout + calm.stderr);
+    const denied = cli([mixed], true);
+    assert.strictEqual(denied.status, 1, 'нечитаемый exe рядом с чистым — провал, зелёным быть нельзя: ' + denied.stdout + denied.stderr);
+    assert(/ПРОВАЛ: не прочитать [^\n]*locked\.exe/.test(denied.stderr), 'причина названа: ' + denied.stderr);
+    const solo = path.join(base, 'solo');
+    put(solo, 'locked.exe', pe(HARD));
+    const alone = cli([solo], true);
+    assert.strictEqual(alone.status, 1, 'единственный нечитаемый exe — тоже провал (1), а не «нечего проверять» (2): ' + alone.stdout + alone.stderr);
+
+    // Лишние аргументы раньше молча отбрасывались: `<плохая> <хорошая>` падал, а `<хорошая> <плохая>` давал зелёный код.
+    const bad = path.join(base, 'bad');
+    const good = path.join(base, 'good');
+    put(bad, 'Hamidun Setup.exe', pe(STOCK));
+    put(good, 'Hamidun Setup.exe', pe(HARD));
+    assert.strictEqual(cli([bad], false).status, 1, 'контроль: одну плохую папку гейт заваливает');
+    assert.strictEqual(cli([good], false).status, 0, 'контроль: одну хорошую пропускает');
+    for (const args of [[bad, good], [good, bad]]) {
+      const r = cli(args, false);
+      assert.strictEqual(r.status, 2, 'две папки: гейт не вправе молча смотреть одну из них (код 2), а для «' + args.map((a) => path.basename(a)).join(' ') +
+        '» вернул ' + r.status + ': ' + r.stdout + r.stderr);
+      assert(/одна папка сборки/.test(r.stderr), 'причина названа: ' + r.stderr);
+    }
+  });
+
+  ok('fuses: гейт независим от писателя — verify-fuses.js не подключает ни хук, ни @electron/fuses, только fs и path', () => {
+    // «Независимый» = не зависит от того, что пишет байты. Обратная связь задумана: хук читает проводку читателем из гейта
+    // (precheck/postcheck) — поэтому проверяется только сторона гейта. Любой третий модуль (хук, пакет, общий помощник) здесь
+    // красный, а не «ещё один импорт»: зелёный отчёт, полученный через писателя, перестал бы быть независимой сверкой.
+    const judge = (text) => {
+      const code = jsOnly(text);
+      const reqs = (code.match(/\brequire\s*\([^)]*\)/g) || []).map((s) => s.replace(/\s+/g, ''));
+      assert.deepStrictEqual(reqs, ["require('fs')", "require('path')"], 'гейт подключает только fs и path, а подключил: ' + reqs.join(', '));
+      assert(!/(^|[^\w$.])import\s*[({*'"\w]/m.test(code), 'ни статического, ни динамического import');
+      assert(!/createRequire|process\.mainModule|module\.require/.test(code), 'обходных путей к require нет');
+    };
+    const src = fs.readFileSync(path.join(TOOLS, 'verify-fuses.js'), 'utf8');
+    judge(src);
+    // Отрицательные контроли: гейт, дотянувшийся до писателя или пакета любым способом, не проходит.
+    for (const add of ["const hook = require('./after-pack.js');", "const lib = require('@electron/fuses');",
+      "const lib = await import('@electron/fuses');", 'const m = require(process.env.X);', "import fs2 from 'node:fs';"]) {
+      assert.throws(() => judge(src + '\n' + add + '\n'), add + ': должно ловиться');
+    }
+  });
+
   ok('fuses: гейт на macOS — Electron Framework внутри .app, у universal две проводки и зелёный только при обеих выключенных', () => {
     const vf = VF();
     const d = tmp();
@@ -20951,6 +21088,38 @@ ok('config.json в репозитории без сборочных маркер
     const bare = path.join(d, 'bare'); fs.mkdirSync(path.join(bare, 'Hamidun Setup.app', 'Contents', 'MacOS'), { recursive: true });
     put(bare, path.join('Hamidun Setup.app', 'Contents', 'MacOS', 'Hamidun Setup'), mach(STOCK));
     assert.strictEqual(vf.checkDir(bare).code, 2, 'основной исполняемый файл не заменяет Electron Framework');
+    // Запасной путь: Versions/A нет, есть только верхний файл Electron Framework.framework/Electron Framework — его тоже читаем
+    // (без него заводской фреймворк в такой раскладке дал бы «нечего проверять» вместо провала).
+    const flat = path.join(d, 'flat');
+    put(flat, path.join('Hamidun Setup.app', 'Contents', 'Frameworks', 'Electron Framework.framework', 'Electron Framework'), mach(STOCK));
+    const flatBad = vf.checkDir(flat);
+    assert.strictEqual(flatBad.code, 1, 'верхний файл без Versions/A читается и заваливает заводскую проводку: ' + flatBad.code + ' ' + errs(flatBad));
+    assert.strictEqual(flatBad.files, 1);
+  });
+
+  ok('fuses: на настоящей раскладке macOS (верхний файл — симлинк на Versions/A) бинарь Electron Framework считается один раз', () => {
+    const vf = VF();
+    const d = tmp();
+    const app = path.join(d, 'Hamidun Setup.app');
+    const fw = path.join(app, 'Contents', 'Frameworks', 'Electron Framework.framework');
+    put(fw, path.join('Versions', 'A', 'Electron Framework'), fat(HARD, HARD));
+    try { fs.symlinkSync(path.join('Versions', 'A', 'Electron Framework'), path.join(fw, 'Electron Framework'), 'file'); } catch (e) {
+      SKIP('симлинки недоступны на этой машине (' + e.code + ') — раскладку настоящего .app не воспроизвести');
+    }
+    // На настоящем маке верхний файл — ссылка на тот же бинарь. Без схлопывания по realpath он считался бы дважды: гейт показал бы
+    // «2 файла, 4 проводки», а хук гасил бы один и тот же файл два раза.
+    const rel = vf.macFrameworkFiles(app).map((p) => path.relative(app, p));
+    assert.deepStrictEqual(rel, [path.join('Contents', 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Electron Framework')],
+      'один бинарь — одна запись: ' + rel.join(' | '));
+    const r = vf.checkDir(d);
+    assert.strictEqual(r.code, 0, errs(r));
+    assert.strictEqual(r.files, 1, 'один файл, а не два');
+    assert.strictEqual(r.wires, 2, 'две проводки universal-слайсов, а не четыре');
+    const bf = driver('binariesFor', { platform: 'darwin', appOutDir: d });
+    assert(bf.result && bf.result.ok && bf.result.files.length === 1, 'хук получает один бинарь: ' + JSON.stringify(bf.result) + bf.stderr);
+    // контроль: симлинк на заводскую проводку по-прежнему валит гейт (раскладка не делает его слепым)
+    put(fw, path.join('Versions', 'A', 'Electron Framework'), fat(STOCK, STOCK));
+    assert.strictEqual(vf.checkDir(d).code, 1, 'заводская проводка за симлинком — провал');
   });
 
   ok('fuses: sentinel на стыке 8 МиБ-кусков находится ровно один раз, на любом смещении у границы', () => {
@@ -20983,11 +21152,20 @@ ok('config.json в репозитории без сборочных маркер
     assert(/ПРОВАЛ/.test(bad.stderr) && /сборка НЕГОДНА/.test(bad.stderr), bad.stderr);
     const none = run(path.join(d, 'c'));
     assert.strictEqual(none.status, 2, none.stdout + none.stderr);
-    // без аргумента смотрит release/win-unpacked: в чистом чекауте его нет -> 2, а не молчаливый успех
-    if (!fs.existsSync(path.join(ROOT, 'release', 'win-unpacked'))) {
-      const def = spawnSync(process.execPath, [path.join(TOOLS, 'verify-fuses.js')], { encoding: 'utf8', timeout: 120000, cwd: d });
-      assert.strictEqual(def.status, 2, 'по умолчанию — release/win-unpacked: ' + def.stdout + def.stderr);
-    }
+    // Без аргумента гейт смотрит release/win-unpacked от корня проекта (папка уровнем выше tools/). Проверяем на изолированной
+    // копии, где корень свой, а не на настоящем release/: там папка может быть (после сборки) или нет, а опечатка в пути давала бы
+    // тот же код 2 «нет папки» и до первой настоящей сборки оставалась бы незамеченной.
+    const iso = isolated(false);
+    const runDefault = () => spawnSync(process.execPath, [path.join(iso.tools, 'verify-fuses.js')], { encoding: 'utf8', timeout: 120000, cwd: d });
+    const defDir = path.join(iso.root, 'release', 'win-unpacked');
+    const noDir = runDefault();
+    assert.strictEqual(noDir.status, 2, 'в чистом чекауте папки нет -> 2, а не молчаливый успех: ' + noDir.stdout + noDir.stderr);
+    assert(noDir.stderr.includes(defDir), 'в сообщении назван путь по умолчанию ' + defDir + ': ' + noDir.stderr);
+    put(defDir, 'Hamidun Setup.exe', pe(HARD));
+    const defGood = runDefault();
+    assert.strictEqual(defGood.status, 0, 'по умолчанию читается release/win-unpacked: ' + defGood.stdout + defGood.stderr);
+    put(defDir, 'Hamidun Setup.exe', pe(STOCK));
+    assert.strictEqual(runDefault().status, 1, 'и заводская проводка в ней заваливает гейт');
   });
 
   ok('fuses: индексы гейта сверены с FuseV1Options пакета @electron/fuses, расхождение ловится', () => {
@@ -21086,16 +21264,22 @@ ok('config.json в репозитории без сборочных маркер
       assert(re.test(r.result.error), why + ': причина названа (' + re + '): ' + r.result.error);
       assert.strictEqual(Buffer.compare(fs.readFileSync(f), buf), 0, why + ': файл не тронут ни на байт');
     }
-    // Жёсткая ссылка на общий файл: правка на месте испортила бы кэш Electron.
-    const d = tmp();
-    const f = put(d, 'Hamidun Setup.exe', pe(STOCK));
-    const other = path.join(d, 'shared-cache.exe');
-    try { fs.linkSync(f, other); } catch (e) { SKIP('жёсткие ссылки недоступны на этом томе: ' + e.code); }
-    const r = driver('flipFileStub', { file: f, kind: 'exe' });
-    assert(r.result && r.result.ok === false, 'жёсткая ссылка: хук обязан бросить');
-    assert(/жёсткие ссылки/.test(r.result.error), r.result.error);
-    assert.strictEqual(Buffer.compare(fs.readFileSync(f), pe(STOCK)), 0, 'файл не тронут');
-    assert.strictEqual(Buffer.compare(fs.readFileSync(other), pe(STOCK)), 0, 'общий кэш не испорчен');
+    // Жёсткая ссылка на общий файл: правка на месте испортила бы кэш Electron. Охраняются оба вида бинаря (охрана только
+    // для exe оставляла бы Electron Framework на macOS без защиты).
+    for (const [kind, name, content] of [['exe', 'Hamidun Setup.exe', pe(STOCK)], ['framework', 'Electron Framework', mach(STOCK)]]) {
+      const d = tmp();
+      const f = put(d, name, content);
+      const other = path.join(d, 'shared-cache.bin');
+      try { fs.linkSync(f, other); } catch (e) { SKIP('жёсткие ссылки недоступны на этом томе: ' + e.code); }
+      const r = driver('flipFileStub', { file: f, kind });
+      assert(r.result && r.result.ok === false, kind + ': жёсткая ссылка: хук обязан бросить: ' + JSON.stringify(r.result));
+      assert(/жёсткие ссылки/.test(r.result.error), kind + ': ' + r.result.error);
+      // electron-builder копирует Electron без жёстких ссылок (DO_NOT_USE_HARD_LINKS), так что совет «собирай без USE_HARD_LINKS»
+      // не помог бы: ссылку сделали снаружи, и лечится она заменой файла обычной копией.
+      assert(!/USE_HARD_LINKS/.test(r.result.error) && /обычной копией/.test(r.result.error), kind + ': совет рабочий: ' + r.result.error);
+      assert.strictEqual(Buffer.compare(fs.readFileSync(f), content), 0, kind + ': файл не тронут');
+      assert.strictEqual(Buffer.compare(fs.readFileSync(other), content), 0, kind + ': общий кэш не испорчен');
+    }
   });
 
   ok('fuses: fuse гасятся ДО ad-hoc подписи mac-adhoc-sign, который остаётся последним шагом хука', () => {
@@ -21114,9 +21298,9 @@ ok('config.json в репозитории без сборочных маркер
     assert.strictEqual(real2.status, 0, real2.stdout + real2.stderr);
     assertOrder(real2.stdout, '[fuses] darwin', '[adhoc-sign] CSC_LINK задан', 'сначала fuse, потом делегат ad-hoc');
     assert.strictEqual(VF().checkDir(d2).code, 0, 'с настоящим делегатом fuse тоже погашены');
-    // целиком через хук неподдерживаемая платформа тоже бросает, а не пропускает правку молча
-    const lin = hookRun('linux', tmp());
-    assert.notStrictEqual(lin.status, 0, 'linux через весь хук: бросок, а не молчаливый пропуск');
+    // Здесь раньше стоял прогон linux через весь хук «бросает, а не пропускает». Он зеленел и при проглоченном отказе (заглушка
+    // ad-hoc этого режима сама зовёт binariesFor и на linux бросала вместо хука), поэтому отказы хука целиком — включая
+    // неподдерживаемую платформу — проверяет тест «afterPack закрыт наглухо» на нейтральной заглушке.
     // Статика: порядок в коде хука и отрицательный контроль сторожа порядка.
     const src = jsOnly(fs.readFileSync(path.join(TOOLS, 'after-pack.js'), 'utf8'));
     assertOrder(src, 'await flipFuses(context);', 'await d.adhoc(context);', 'fuse раньше ad-hoc подписи');
@@ -21164,6 +21348,73 @@ ok('config.json в репозитории без сборочных маркер
     assert.strictEqual(vf.checkDir(path.dirname(g)).code, 1, 'и гейт его по-прежнему не пропускает');
     const other = driver('retry', { file: g, code: 'ENOENT', failTimes: 99 });
     assert(other.result && other.result.ok === false && other.result.calls === 1, 'прочие ошибки — сразу наружу, без повторов: ' + JSON.stringify(other.result));
+  });
+
+  ok('fuses: повтор правки ловит и EACCES, и выдерживает паузу между попытками, а не перебирает мгновенно', () => {
+    // Подменный пакет (isolated): настоящий не нужен. Тест выше проверяет EBUSY и EPERM на настоящем пакете, здесь —
+    // третий код из списка хука и сама пауза. Антивирус держит свежий exe секундами; три попытки подряд без ожидания
+    // делали бы повтор бессмысленным, а все прочие проверки оставались бы зелёными.
+    const iso = isolated(true);
+    const env = { HM_FAKE_FUSES: 'faithful' };
+    const d = tmp();
+    const f = put(d, 'Hamidun Setup.exe', pe(STOCK));
+    const acc = driver('retry', { file: f, code: 'EACCES', failTimes: 1 }, env, iso.tools);
+    assert(acc.result && acc.result.ok && acc.result.calls === 2, 'EACCES переживается повтором: ' + JSON.stringify(acc.result) + acc.stderr);
+    assert.strictEqual(Buffer.compare(fs.readFileSync(f), pe(HARD)), 0, 'после повтора файл погашен ровно как обычно');
+    assert(/EACCES[^\n]*повтор 1 из 2/.test(acc.stdout), 'повтор виден в логе сборки: ' + acc.stdout);
+    // Две занятости подряд = паузы 300 + 1200 мс. Нижняя граница с запасом на неточность таймера: мгновенный перебор
+    // укладывается в десятки миллисекунд и ей не удовлетворяет.
+    const g = put(d, 'other.exe', pe(STOCK));
+    const slow = driver('retry', { file: g, code: 'EBUSY', failTimes: 2 }, env, iso.tools);
+    assert(slow.result && slow.result.ok && slow.result.calls === 3, JSON.stringify(slow.result) + slow.stderr);
+    assert(slow.result.ms >= 1200, 'между попытками хук ждёт (ожидается около 1500 мс), а прошло ' + slow.result.ms + ' мс');
+  });
+
+  ok('fuses: afterPack закрыт наглухо — любой отказ внутри хука останавливает сборку и не доходит до ad-hoc подписи', () => {
+    // Хук исполняется как есть, но на ПОДМЕННОМ пакете (isolated): настоящий пакет не нужен, а ложь пакета о результате
+    // воспроизводится. Заглушка ad-hoc подписи нейтральная — только считает вызовы. Заглушка режима 'afterPack' сама зовёт
+    // binariesFor и на linux бросала бы вместо хука: отказ выглядел «закрытым», даже будучи проглоченным (try/catch вокруг
+    // flipFuses или flipFile, удалённый postcheck или assertLibMatches оставляли весь раздел зелёным).
+    const iso = isolated(true);
+    const spy = (platform, dir, mode) => driver('afterPackSpy', { platform, appOutDir: dir }, { HM_FAKE_FUSES: mode }, iso.tools);
+    // Контроль: тот же стенд и честный «пакет» — хук проходит, ad-hoc зовётся ровно раз, тройка погашена. Без него красные
+    // случаи ниже могли бы быть красными из-за сломанного стенда, а не из-за хука.
+    const d0 = tmp();
+    const exe0 = put(d0, 'Hamidun Setup.exe', pe(STOCK));
+    const good = spy('win32', d0, 'faithful');
+    assert.strictEqual(good.status, 0, 'контроль: ' + good.stdout + good.stderr);
+    assert(good.result && good.result.ok && good.result.adhocCalls === 1, 'контроль: ad-hoc вызван ровно раз: ' + JSON.stringify(good.result));
+    assert.strictEqual(Buffer.compare(fs.readFileSync(exe0), pe(HARD)), 0, 'контроль: честная правка погасила тройку');
+    const cases = [
+      // [почему, содержимое exe, режим «пакета», сообщение, файл обязан остаться нетронутым]
+      ['нет sentinel: отказ рождается в flipFile, а try/catch вокруг него (или вокруг flipFuses) превратил бы его в строку лога',
+        Buffer.concat([Buffer.from('MZ'), junk(4000, 3)]), 'faithful', /не найден sentinel/, true],
+      ['«пакет» ничего не сделал: только проверка ПОСЛЕ правки видит, что fuse остались включены',
+        pe(STOCK), 'noop', /после правки fuse всё ещё не выключены/, true],
+      ['«пакет» погасил не всё: --inspect остался включённым',
+        pe(STOCK), 'partial', /после правки fuse всё ещё не выключены/, false],
+      ['«пакет» заодно тронул чужой fuse (cookie)',
+        pe(STOCK), 'also-cookie', /fuse #1 изменился/, false],
+      ['порядок fuse в пакете разошёлся с читателем гейта — отказ до единой записи',
+        pe(STOCK), 'permuted', /порядок fuse разошёлся/, true],
+      ['версия проводки в пакете другая — отказ до единой записи',
+        pe(STOCK), 'bad-version', /версия проводки/, true],
+    ];
+    for (const [why, buf, mode, re, untouched] of cases) {
+      const d = tmp();
+      const f = put(d, 'Hamidun Setup.exe', buf);
+      const r = spy('win32', d, mode);
+      assert(r.result && r.result.ok === false, why + ': хук обязан отказать, а ответил ' + JSON.stringify(r.result) + ' ' + r.stderr);
+      assert.notStrictEqual(r.status, 0, why + ': процесс сборки обязан упасть');
+      assert.strictEqual(r.result.adhocCalls, 0, why + ': после отказа ad-hoc подпись вызываться не должна');
+      assert(re.test(r.result.error), why + ': причина названа (' + re + '): ' + r.result.error);
+      if (untouched) assert.strictEqual(Buffer.compare(fs.readFileSync(f), buf), 0, why + ': файл не тронут ни на байт');
+    }
+    // платформа, которую хук не умеет править: бросок, а не молчаливый пропуск правки
+    const lin = spy('linux', tmp(), 'faithful');
+    assert(lin.result && lin.result.ok === false && /не поддержана/.test(lin.result.error), 'linux: ' + JSON.stringify(lin.result));
+    assert.notStrictEqual(lin.status, 0, 'linux: процесс сборки обязан упасть');
+    assert.strictEqual(lin.result.adhocCalls, 0, 'linux: после отказа ad-hoc подпись вызываться не должна');
   });
 
   ok('fuses: проверка хука ПОСЛЕ правки ловит чужой fuse, сдвиг размера, непогашенную тройку и смену числа проводок', () => {
@@ -21236,6 +21487,13 @@ ok('config.json в репозитории без сборочных маркер
     const lite = jsOnly(fs.readFileSync(path.join(ROOT, 'tools', 'build-lite.js'), 'utf8'));
     const gateCall = /execFileSync\(process\.execPath, \[path\.join\(ROOT, 'tools', 'verify-fuses\.js'\)\]\s*\.concat\(target === 'mac' \? \[path\.join\(ROOT, 'release', 'mac-universal'\)\] : \[\]\), \{ cwd: ROOT, stdio: 'inherit' \}\);/;
     assert(gateCall.test(lite), 'build-lite: гейт вызывается execFileSync с stdio inherit (код ≠ 0 роняет сборку); на macOS — release/mac-universal, на Windows — папка по умолчанию');
+    // Гейт — отдельный оператор СРАЗУ за вызовом electron-builder. Точный вызов выше проходил бы и внутри `try { … } catch { лог }`
+    // (провал гейта превращается в строку лога), и под `if (…)`; смежность с вызовом сборки этого не допускает.
+    const builderCall = /execFileSync\('npx', \['electron-builder'\]\.concat\(t\.builderArgs\), \{ cwd: ROOT, stdio: 'inherit', shell: true \}\);/;
+    const adjacent = new RegExp(builderCall.source + '\\s*' + gateCall.source);
+    assert(adjacent.test(lite), 'build-lite: гейт стоит отдельным оператором сразу после electron-builder — без try/catch, if и && вокруг');
+    const wrapped = lite.replace(gateCall, (m) => 'try { ' + m + ' } catch (e) { console.log(e.message); }');
+    assert(gateCall.test(wrapped) && !adjacent.test(wrapped), 'контроль: гейт в try/catch проходит точный вызов, но смежность его ловит');
     const at = lite.search(gateCall);
     assert(at > lite.indexOf("['electron-builder'].concat(t.builderArgs)") && lite.indexOf("['electron-builder'].concat(t.builderArgs)") !== -1, 'build-lite: гейт после electron-builder');
     assert(at < lite.indexOf("'verify-packed-vendor.js'") && lite.indexOf("'verify-packed-vendor.js'") !== -1, 'build-lite: гейт fuse до проверки vendor');

@@ -34,6 +34,9 @@
  *
  * Бинарь правится прямо в папке сборки (appOutDir). Это копия, но проверка nlink стоит на случай
  * жёстких ссылок на общий кэш Electron: правка через них испортила бы кэш для всех сборок.
+ * electron-builder сам копирует dist Electron БЕЗ жёстких ссылок (ElectronFramework.js:
+ * DO_NOT_USE_HARD_LINKS, переменная USE_HARD_LINKS на это не влияет), поэтому ссылку мог сделать
+ * только кто-то снаружи — и лечится она заменой файла обычной копией, а не флагами сборки.
  */
 const fs = require('fs');
 const path = require('path');
@@ -180,8 +183,9 @@ async function flipFile(lib, file, kind) {
   }
   if (!st.isFile()) throw new Error('[fuses] ' + file + ' — не файл.');
   if (st.nlink > 1) {
-    throw new Error('[fuses] ' + file + ': у файла ' + st.nlink + ' жёсткие ссылки — правка на месте испортила бы общий кэш Electron ' +
-      'для всех сборок. Собирай без USE_HARD_LINKS=true.');
+    throw new Error('[fuses] ' + file + ': у файла ' + st.nlink + ' жёсткие ссылки — правка на месте испортила бы и все остальные ' +
+      'его имена (общий кэш Electron или чужую копию). electron-builder сам копирует Electron без жёстких ссылок, значит их сделали ' +
+      'снаружи: замени файл обычной копией (удали и скопируй заново) и повтори сборку.');
   }
   const before = vf.scanFile(file);
   precheck(before, kind, file);
