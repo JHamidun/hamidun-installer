@@ -140,7 +140,10 @@ if [ -z "$DRY" ]; then
   # артефактами сборки (иначе повторный прогон дал бы ложное «vendor подменён»).
   BUILD_SRC="$(mktemp -d "${TMPDIR:-/tmp}/hm-nomad-build.XXXXXX")" || {
     echo "ОШИБКА: не удалось создать временный каталог для сборки Nomad."; exit 1; }
-  trap 'rm -rf "$BUILD_SRC"' EXIT
+  WHL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hm-nomad-whl.XXXXXX")" || {
+    echo "ОШИБКА: не удалось создать временный каталог для сборки Nomad."; exit 1; }
+  NOMAD_LOG="$WHL_DIR/uv-output.log"
+  trap 'rm -rf "$BUILD_SRC" "$WHL_DIR"' EXIT
   cp -R "$SRC/." "$BUILD_SRC/" || {
     echo "ОШИБКА: не удалось скопировать проверенный nomad-src во временный каталог."; exit 1; }
 
@@ -159,14 +162,64 @@ if [ -z "$DRY" ]; then
   # обращением к неустановленной переменной и роняет установку. То есть аккуратная
   # на вид сборка аргументов в массив сломала бы Apple Silicon — большинство маков —
   # ради Intel. Тесты это поймали сразу; ветки дешевле и честнее.
+  CONSTRAINTS=""
   if [ "$(arch_tag)" = "x64" ]; then
     CONSTRAINTS="$BUILD_SRC/.hm-constraints.txt"
     echo 'cryptography>=46.0.7,<49' > "$CONSTRAINTS"
     echo "  Intel-мак: cryptography ограничена версией с готовым колесом (<49)."
-    uv tool install --python 3.12 -c "$CONSTRAINTS" "$BUILD_SRC"
-  else
-    uv tool install --python 3.12 "$BUILD_SRC"
   fi
+
+  # Компилировать ли зависимости (решение и живой случай — hm_build_policy в _lib.sh).
+  # Intel, Rosetta и Mac без инструментов разработчика: зависимости ТОЛЬКО готовыми
+  # сборками (--no-build) — uv сам берёт самые новые версии, у которых готовая сборка
+  # под этот Mac есть, и не запускает ни Rust, ни CMake, ни системный cc с его окном.
+  # Сам Nomad — чистый Python, его пакет собираем отдельно (uv build): --no-build
+  # запрещает сборку и корневого каталога, так что ставим уже готовый .whl.
+  NOMAD_POLICY="$(hm_build_policy "$(arch_tag)" "$(hm_rosetta_flag)" "$(hm_clt_flag)")"
+  nomad_uv() {  # вывод uv — и в журнал установки, и в файл для разбора причины
+    "$@" 2>&1 | tee -a "$NOMAD_LOG"; return "${PIPESTATUS[0]}"
+  }
+  case "$NOMAD_POLICY" in
+    wheels-only:*)
+      hm_build_policy_note "$NOMAD_POLICY"
+      echo "  Собираю пакет самого Nomad (чистый Python, без компилятора)..."
+      if ! nomad_uv uv build --wheel --python 3.12 --out-dir "$WHL_DIR" "$BUILD_SRC"; then
+        echo "ОШИБКА: пакет Nomad не собрался (вывод выше). Проверь интернет и нажми «Повторить»."
+        exit 1
+      fi
+      NOMAD_WHL="$(ls "$WHL_DIR"/*.whl 2>/dev/null | head -n 1 || true)"
+      if [ -z "$NOMAD_WHL" ]; then
+        echo "ОШИБКА: сборка Nomad завершилась без пакета (.whl) — установка остановлена."
+        exit 1
+      fi
+      NOMAD_REQ="nomad-agent @ file://${NOMAD_WHL// /%20}"
+      : > "$NOMAD_LOG"
+      if [ -n "$CONSTRAINTS" ]; then
+        if nomad_uv uv tool install --python 3.12 --no-build -c "$CONSTRAINTS" "$NOMAD_REQ"; then NOMAD_RC=0; else NOMAD_RC=$?; fi
+      else
+        if nomad_uv uv tool install --python 3.12 --no-build "$NOMAD_REQ"; then NOMAD_RC=0; else NOMAD_RC=$?; fi
+      fi
+      if [ "$NOMAD_RC" != "0" ]; then
+        if hm_uv_no_wheel "$NOMAD_LOG"; then
+          echo "--------------------------------------------------------------"
+          echo "  Nomad: части нужных ему библиотек нет в готовом виде под этот Mac."
+          echo "  Компилировать их здесь установщик не стал: на обычном Mac для этого нет"
+          echo "  инструментов, а попытка только грела бы компьютер и вызывала системное"
+          echo "  окно «требуются инструменты разработчика»."
+          echo "  Это НЕ ошибка установки. Claude Code и остальное работают без Nomad."
+          echo "--------------------------------------------------------------"
+          echo "Nomad пропущен: под этот Mac нет готовых сборок нужных ему библиотек, а компилировать их здесь установщик не стал."
+          exit 120
+        fi
+        echo "ОШИБКА: установка Nomad не удалась (код $NOMAD_RC) — причина в выводе выше."
+        exit "$NOMAD_RC"
+      fi
+      ;;
+    *)
+      # Apple Silicon с инструментами разработчика — как раньше.
+      uv tool install --python 3.12 "$BUILD_SRC"
+      ;;
+  esac
   export PATH="$HOME/.local/bin:$PATH"
   # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
   # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в

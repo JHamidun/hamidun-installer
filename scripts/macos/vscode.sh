@@ -20,6 +20,14 @@ CODE_CLI="$APP/Contents/Resources/app/bin/code"; source "$DIR/vscode-firstrun.sh
 echo "Проверяю VS Code..."
 if [ -d "$APP" ]; then
   echo "VS Code уже установлен — доставлю только расширения."
+  # VS Code, поставленный прежней версией установщика, принадлежит root, и его
+  # самообновление каждый раз просит пароль (A42). Без спроса не чиним — это ещё одно
+  # окно с паролем посреди установки, — но говорим прямо и даём команду. Тот же текст
+  # печатает always-run touchup-vscode-owner.sh: он доходит и до тех, у кого VS Code уже
+  # установлен и при повторном запуске снят с выбора (сюда они не попадают).
+  if hm_app_is_root_owned "$APP"; then
+    echo "  $(hm_vscode_owner_hint "$APP")"
+  fi
 else
   ZIP="${HM_VENDOR:-}/apps/vscode.zip"
   if [ -z "${HM_VENDOR:-}" ] || [ ! -f "$ZIP" ]; then
@@ -61,7 +69,11 @@ else
       exit 1
     fi
     echo "Проверяю подпись и устанавливаю VS Code в /Applications (может потребоваться пароль администратора)..."
-    if ! admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH" hm_vscode_install "$ZIP" "$VSCODE_TEAM_ID" "$APP"; then
+    # Копирует root, поэтому без передачи владения бандл остался бы root-овым — и каждое
+    # самообновление VS Code просило бы пароль или Touch ID (A42). Отдаём его человеку
+    # за экраном прямо в том же root-скрипте, уже после проверки подписи.
+    VSCODE_OWNER="$(hm_console_user || true)"
+    if ! admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH" hm_vscode_install "$ZIP" "$VSCODE_TEAM_ID" "$APP" "$VSCODE_OWNER"; then
       # Один код возврата — три разные причины, и советы у них РАЗНЫЕ. Раньше все
       # три сливались в «подпись/нотаризация не подтверждены (fail-closed)», после
       # которого человек не знал, что делать. Разводим текстом.
@@ -79,6 +91,13 @@ else
     if [ -d "$APP" ]; then
       echo "VS Code установлен."
       echo "HM-RECEIPT path $APP"
+      # Факт проверяем по диску, а не по коду root-скрипта: chown там не валит установку.
+      APP_OWNER_NOW="$(stat -f %Su "$APP" 2>/dev/null || true)"
+      if [ -n "$VSCODE_OWNER" ] && [ "$APP_OWNER_NOW" = "$VSCODE_OWNER" ]; then
+        echo "  VS Code принадлежит пользователю $VSCODE_OWNER — обновляться будет сам, без пароля администратора."
+      else
+        echo "  ВНИМАНИЕ: VS Code принадлежит «${APP_OWNER_NOW:-?}», а не тебе — при обновлении macOS может спросить пароль администратора."
+      fi
     else
       echo "ВНИМАНИЕ: VS Code не подтвердил установку — расширения всё равно попробую доставить."
     fi

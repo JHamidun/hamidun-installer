@@ -50,6 +50,8 @@ if [ -n "${HM_DRY_RUN:-}" ]; then
   else
     echo "  [dry-run] WOULD (repair): перезаписать НАШИ базовые файлы свежими, пользовательское (ключи/память/история/settings.local/CLAUDE.md) исключено; БЕЗ mv/wipe"
   fi
+  echo "  [dry-run] WOULD: убрать из settings.json известные дефекты прошлых версий пака (копия до правки рядом); положить CATALOG.md и сводку конфига"
+  echo "  [dry-run] WOULD: если на машине есть Codex (~/.codex или расширение openai.chatgpt-*) — положить AGENTS.md пака в ~/.codex/AGENTS.md (существующий файл не перезаписывается: к нему дописывается отмеченный блок)"
   echo "[dry-run] Конфиг: без изменений."
   exit 0
 fi
@@ -272,6 +274,11 @@ for _kid in "$CLAUDE_HOME"/* "$CLAUDE_HOME"/.[!.]* "$CLAUDE_HOME"/..?*; do
   fi
 done
 
+# Был ли settings.json ДО раскладки: не было — после неё это наш свежий файл из пака, а не
+# выбор человека (см. правку settings.json ниже).
+SETTINGS_EXISTED=0
+if [ -f "$CLAUDE_HOME/settings.json" ]; then SETTINGS_EXISTED=1; fi
+
 # === Merge-copy НАШЕЙ базы ПОВЕРХ ~/.claude (БЕЗ переноса/стирания) ===
 # add-missing: rsync --ignore-existing (существующее не трогаем) / hm_copy missing.
 # repair:      rsync без --ignore-existing (перезапись наших базовых) / hm_copy overwrite.
@@ -299,11 +306,37 @@ fi
 
 # settings.json — НАШ базовый: add-missing (rsync --ignore-existing пропускает существующий) /
 # перезапись в repair. settings.local.json (пользовательский) — в preserve-list, цел всегда.
+# Вместо мержа — точечная правка ИЗВЕСТНЫХ дефектов прошлых версий пака (плагины без
+# токена, Write(...), хуки VSCODE_PORT, mcpServers, опрос): без неё исправления пака до тех,
+# кто поставил раньше, не доходили никогда. Правила — scripts/macos/_cfgmigrate.js, зеркало
+# scripts/windows/_cfgmigrate.ps1. Всё прочее в файле (модель, effort, режим, свои правила
+# и хуки) не трогается; копия до правки — рядом. Свежим файл считаем, если его не было до
+# раскладки или repair только что его перезаписал.
+# Движок — node: Node ставится раньше конфига (requires), а python3 на чистом маке без
+# Command Line Tools — заглушка с системным окном. Нет node — правку пропускаем с
+# понятной строкой, файл не трогаем (fail-closed).
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ -f "$CLAUDE_HOME/settings.json" ] || [ -L "$CLAUDE_HOME/settings.json" ]; then
+  SETTINGS_FRESH=0
+  if [ "$SETTINGS_EXISTED" -eq 0 ] || [ "$ADDITIVE" -eq 0 ]; then SETTINGS_FRESH=1; fi
+  if [ -z "$NODE_BIN" ]; then
+    echo "Настройки Claude Code: node не найден — правку settings.json прошлых версий пака пропускаю (файл не трогаю)."
+  elif ! "$NODE_BIN" "$DIR/_cfgmigrate.js" "$CLAUDE_HOME/settings.json" "$SETTINGS_FRESH" "$HOME/.hamidun-setup/config-migrations.json"; then
+    echo "Настройки Claude Code: правка settings.json не удалась (node завершился с ошибкой) — до правки снимается копия settings.json.hamidun-bak-* рядом с файлом."
+  fi
+fi
 
 # CLAUDE.md в корне профиля — ПОЛЬЗОВАТЕЛЬСКИЙ: добавляем ТОЛЬКО если отсутствует (в ОБОИХ
 # режимах — не затираем правки юзера даже в repair). Сбой копирования → COPY_FAILED.
 if [ -f "$SRC_CLAUDE_MD" ] && [ ! -f "$HOME/CLAUDE.md" ]; then
   cp "$SRC_CLAUDE_MD" "$HOME/CLAUDE.md" || { COPY_FAILED=1; echo "ВНИМАНИЕ: не удалось скопировать ~/CLAUDE.md."; }
+fi
+# AGENTS.md пака — в ~/.codex/AGENTS.md, где Codex ищет глобальные инструкции. Только если на
+# машине есть Codex; файл человека не перезаписывается — к нему дописывается отмеченный блок.
+# Сбой не фатален для конфига: модуль сам печатает причину и наружу выходит кодом 0. Нет node
+# (а Codex — редкий гость) — молча: настройки Claude Code выше уже сказали про node.
+if [ -n "$NODE_BIN" ] && [ -f "$CLONE/AGENTS.md" ]; then
+  "$NODE_BIN" "$DIR/_cfgmigrate.js" --codex "$HOME" "$CLONE/AGENTS.md" || echo "Codex: карту конфига положить не удалось — на остальную установку это не влияет."
 fi
 # credentials-шаблон — только если ключей ещё нет (в ОБОИХ режимах: preserve-list).
 if [ -f "$CLONE/.credentials.template.env" ] && [ ! -f "$CLAUDE_HOME/.credentials.master.env" ]; then
@@ -531,6 +564,13 @@ if [ "$DEPLOYED" -eq 1 ]; then
       echo "  Python ставится следующим компонентом («Python-пакеты»); после него запусти:"
       echo "  python3 \"$RUNTIME_SCRIPT\""
     fi
+  fi
+
+  # Опись поставленного: CATALOG.md пака — в ~/.claude, цифры — в сводку для финального экрана
+  # (~/.hamidun-setup/config-summary.json). Считается ПОСЛЕ фильтра наборов; сбой на установку
+  # не влияет (зеркало Write-HmConfigSummary в config.ps1).
+  if [ -n "$NODE_BIN" ]; then
+    "$NODE_BIN" "$DIR/_cfgmigrate.js" --summary "$CLAUDE_HOME" "$HOME/.hamidun-setup" "$CLONE" || echo "Опись конфига: не удалась (node завершился с ошибкой) — на установку это не влияет."
   fi
 
   # #19: маркер завершённости (зеркало config.ps1) — детекция в main.js смотрит на него,
