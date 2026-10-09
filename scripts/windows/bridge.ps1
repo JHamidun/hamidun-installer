@@ -63,27 +63,51 @@ $wheels = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'pywheels' } else { '' 
 # скрипте (установщик requireAdministrator -> high integrity) исполнил бы user-writable python
 # под АДМИНОМ: medium-малварь ТОГО ЖЕ юзера подменяет python -> RCE под админом. Плюс
 # 'pip install --user' под админ-токеном ставит в ЧУЖОЙ (админский) профиль, а не юзера.
-# Поэтому pip install И import-check гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevated, medium integrity,
-# schtasks). FAIL-CLOSED: примитив недоступен ($null) или отработал НЕ на medium (Gate!='medium')
-# -> трей-пакеты ПРОПУСКАЕМ и предупреждаем; НЕ откатываемся на '& $py' под high integrity.
+# Поэтому pip install И import-check гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevatedSafe: задача
+# планировщика, а если доказано, что она ничего не запустила, — токен оболочки Explorer; оба на
+# medium). FAIL-CLOSED: не отработал ни один путь (Gate!='medium') -> трей-пакеты ПРОПУСКАЕМ и
+# предупреждаем; НЕ откатываемся на '& $py' под high integrity.
+# '--user' ОБЯЗАТЕЛЕН: pydeps ставит Python для пользователя (InstallAllUsers=0, site-packages
+# пишется от него), но Python ищется и по МАШИННОМУ PATH (Get-Command выше) — а у Python «для
+# всех» в Program Files site-packages на medium не пишется, и pip без --user падал бы отказом в
+# доступе. --user кладёт пакеты в %APPDATA%\Python\Python3XY\site-packages — годится для обоих.
 $pipArgs = if ($wheels -and (Test-Path $wheels)) {
     @('-m', 'pip', 'install', '--user', '--no-index', '--find-links', $wheels, 'pystray', 'pillow')
 } else {
     @('-m', 'pip', 'install', '--user', 'pystray', 'pillow')
 }
-$trayOk   = $false
-$pipExit  = -1
-$deElevOk = $false
-$pipRes = Invoke-HmDeElevated $py $pipArgs
+# pystray и PIL на ДИСКЕ: пользовательский site-packages (pip --user) или site-packages самого
+# Python (если пакеты уже стояли). Только чтение — это аттестация, а не вывод pip.
+function Test-HmBridgeTrayPackages($pyExe) {
+    $roots = @()
+    if ($env:APPDATA) {
+        $roots += @(Get-ChildItem -LiteralPath (Join-Path $env:APPDATA 'Python') -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'site-packages' })
+    }
+    $roots += (Join-Path (Split-Path $pyExe) 'Lib\site-packages')
+    foreach ($r in $roots) {
+        if ((Test-Path -LiteralPath (Join-Path $r 'pystray')) -and (Test-Path -LiteralPath (Join-Path $r 'PIL'))) { return $true }
+    }
+    return $false
+}
+$trayOk    = $false
+$pipExit   = -1
+$deElevOk  = $false
+$deElevWhy = ''
+$pipRes = Invoke-HmDeElevatedSafe $py $pipArgs -Label 'bridge-pip'
 if ($null -ne $pipRes -and $pipRes.Gate -eq 'medium') {
     $deElevOk = $true
     $pipExit  = $pipRes.Code
     # import-check ТОЖЕ де-элевированно (запуск user-writable python под админом = тот же вектор).
-    $impRes = Invoke-HmDeElevated $py @('-c', 'import pystray, PIL')
-    $trayOk = ($null -ne $impRes -and $impRes.Gate -eq 'medium' -and $impRes.Code -eq 0)
+    $impRes = Invoke-HmDeElevatedSafe $py @('-c', 'import pystray, PIL') -Label 'bridge-import'
+    # Итог — по ДИСКУ (пакеты на месте). Код импорта — второе мнение: может забраковать
+    # (пакеты битые), но подтвердить без файлов на диске не может.
+    $trayOk = (Test-HmBridgeTrayPackages $py) -and ($impRes.Gate -ne 'medium' -or $impRes.Code -eq 0)
+} elseif ($null -ne $pipRes) {
+    $deElevWhy = [string]$pipRes.ShellReason
 }
 if (-not $deElevOk) {
-    Write-Host "ВНИМАНИЕ: безопасная (де-элевированная) установка недоступна — пропускаю пакеты трея (pystray/pillow), НЕ ставлю их под правами администратора."
+    Write-Host "ВНИМАНИЕ: безопасная (де-элевированная) установка недоступна$(if ($deElevWhy) { " ($deElevWhy)" }) — пропускаю пакеты трея (pystray/pillow), НЕ ставлю их под правами администратора."
     Write-Host "Мост будет работать в фоне; значок в трее появится после ручной установки от своего пользователя: py -m pip install --user pystray pillow"
 } elseif (-not $trayOk) {
     Write-Host "ВНИМАНИЕ: pystray/pillow не установились (pip exit=$pipExit) — значок в трее будет недоступен."
@@ -134,12 +158,14 @@ $agentPath = Join-Path $dst 'bridge_agent.py'
 # прогоняется режимом --selftest (без побочных эффектов: не берёт порт-замок, не поднимает
 # серверы, не трогает системный прокси) ДО записи HKCU\Run. Раньше Run прописывался ВСЛЕПУЮ —
 # заведомо нерабочий агент молча запускался бы при каждом входе в Windows.
-# SECURITY (#6): $py user-writable — selftest гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevated),
-# как pip/import выше. FAIL-CLOSED: примитив недоступен ($null) или Gate != 'medium' →
+# SECURITY (#6): $py user-writable — selftest гоним ДЕ-ЭЛЕВИРОВАННО (Invoke-HmDeElevatedSafe),
+# как pip/import выше. FAIL-CLOSED: ни один путь не отработал (Gate != 'medium') →
 # работоспособность НЕ доказана → автозапуск НЕ прописываем. Существующий Run-ключ, если
 # он был, НЕ трогаем — как bridge.sh не трогает прежний LaunchAgent при провале пробы.
+# Здесь код выхода и ЕСТЬ проверяемый факт: самопроверка — функциональная проба агента,
+# следа на диске у неё нет; ошибка в ней стоит лишь автозапуска, а не прав.
 $agentOk = $false
-$stRes = Invoke-HmDeElevated $py @($agentPath, '--selftest')
+$stRes = Invoke-HmDeElevatedSafe $py @($agentPath, '--selftest') -Label 'bridge-selftest'
 if ($null -ne $stRes -and $stRes.Gate -eq 'medium' -and $stRes.Code -eq 0) { $agentOk = $true }
 if ($agentOk) {
     New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
@@ -158,8 +184,13 @@ if ($agentOk) {
     } catch {
         Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."
     }
+} elseif ($null -eq $stRes -or $stRes.Gate -ne 'medium') {
+    # Не «агент сломан», а «проверить нечем»: разные беды, разные советы человеку.
+    $stWhy = if ($null -ne $stRes -and $stRes.ShellReason) { " ($($stRes.ShellReason))" } else { '' }
+    Write-Host "  ВНИМАНИЕ: самопроверку агента от имени пользователя запустить не удалось$stWhy — автозапуск НЕ прописываю."
+    Write-Host "  Запусти мост вручную от своего пользователя: pythonw `"$agentPath`""
 } else {
-    Write-Host "  ВНИМАНИЕ: агент моста не прошёл самопроверку на этой системе — автозапуск НЕ прописываю."
+    Write-Host "  ВНИМАНИЕ: агент моста не прошёл самопроверку на этой системе (код $($stRes.Code)) — автозапуск НЕ прописываю."
     Write-Host "  (иначе Windows молча запускала бы нерабочий агент при каждом входе)"
 }
 

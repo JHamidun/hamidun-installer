@@ -216,6 +216,78 @@ if (Test-Path $cxvsix) {
   }
 }
 
+Write-Host "[vendor] Русский языковой пакет VS Code (MS-CEINTL.vscode-language-pack-ru, офлайн)..."
+# Интерфейс VS Code на английском — повторяющаяся беда новичков. Пакет ставит vscode.ps1
+# (необязательно), а vscode-settings.ps1 включает "locale":"ru", только когда пакет на диске.
+# Пакет ПРИВЯЗАН к версии редактора: его engines.vscode = ^1.<minor>.0, и пакет новее
+# вшитого VS Code не встанет («not compatible»). VS Code выше качается как «последний
+# stable», поэтому минор берём из самого вшитого установщика, а не из «последнего пакета».
+$lpvsix = Join-Path $apps 'vscode-language-pack-ru.vsix'
+$vsMinor = $null
+try {
+  $vsPv = [string](Get-Item -LiteralPath (Join-Path $apps 'vscode-setup.exe') -ErrorAction Stop).VersionInfo.ProductVersion
+  if ($vsPv -match '^1\.(\d+)\.') { $vsMinor = [int]$Matches[1] }
+} catch { }
+if (Test-Path $lpvsix) {
+  Write-Host "  skip vscode-language-pack-ru.vsix"
+} elseif ($null -eq $vsMinor) {
+  Write-Host "  ! версия вшитого VS Code не определена — языковой пакет не вшиваю (подобрать совместимый не по чему)"
+} else {
+  $lpVer = $null
+  try {
+    # flags 0x1 — список версий (новые первыми). Нужна последняя версия ровно под наш минор.
+    $q = '{"filters":[{"criteria":[{"filterType":7,"value":"MS-CEINTL.vscode-language-pack-ru"}]}],"flags":1}'
+    $resp = Invoke-RestMethod 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1' -Method Post -Body $q -ContentType 'application/json' -Headers $UA -TimeoutSec 120
+    $lpVer = (@($resp.results[0].extensions[0].versions) | Where-Object { [string]$_.version -match ('^1\.' + $vsMinor + '\.') } | Select-Object -First 1).version
+  } catch { }
+  if ($lpVer) {
+    Dl "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/MS-CEINTL/vsextensions/vscode-language-pack-ru/$lpVer/vspackage" $lpvsix
+  } else {
+    Write-Host "  ! Marketplace не отдал пакет под VS Code 1.$vsMinor — не вшиваю (поставится онлайн при установке)"
+  }
+}
+if (Test-Path $lpvsix) {
+  # Как у claude-code.vsix: Marketplace часто отдаёт vspackage в gzip, IWR в PS 5.1 его не снимает.
+  try {
+    $fs = [IO.File]::OpenRead($lpvsix); $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte(); $fs.Close()
+    if ($b0 -eq 0x1f -and $b1 -eq 0x8b) {
+      Write-Host "  ответ Marketplace в gzip — распаковываю в .vsix"
+      $gzTmp = "$lpvsix.gz.tmp"
+      Move-Item $lpvsix $gzTmp -Force
+      $in  = [IO.File]::OpenRead($gzTmp)
+      $gz  = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+      $out = [IO.File]::Create($lpvsix)
+      $gz.CopyTo($out)
+      $out.Close(); $gz.Close(); $in.Close()
+      Remove-Item $gzTmp -Force
+    }
+  } catch { Write-Host "  ! постобработка языкового пакета не удалась - $($_.Exception.Message)" }
+  # Гейт честности (как у chatgpt.vsix): вшиваем ТОЛЬКО zip с манифестом именно этого пакета и
+  # движком не новее вшитого редактора. Иначе файл удаляется и в checksums.json не попадает.
+  $lpOk = $false
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $za = [IO.Compression.ZipFile]::OpenRead($lpvsix)
+    try {
+      $entry = $za.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' } | Select-Object -First 1
+      if ($entry) {
+        $sr = New-Object IO.StreamReader($entry.Open())
+        try { $lpManifest = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        $idOk  = ($lpManifest -match 'Id\s*=\s*"vscode-language-pack-ru"') -and ($lpManifest -match 'Publisher\s*=\s*"MS-CEINTL"')
+        $engOk = $true
+        if ($lpManifest -match 'Microsoft\.VisualStudio\.Code\.Engine"\s+Value\s*=\s*"\^?1\.(\d+)\.') { $engOk = ($null -eq $vsMinor) -or ([int]$Matches[1] -le $vsMinor) }
+        $lpOk = $idOk -and $engOk
+      }
+    } finally { $za.Dispose() }
+  } catch { }
+  if ($lpOk) {
+    Write-Host "  ok vscode-language-pack-ru.vsix (MS-CEINTL, под VS Code 1.$vsMinor)"
+  } else {
+    Remove-Item $lpvsix -Force -ErrorAction SilentlyContinue
+    Write-Host "  ! vscode-language-pack-ru.vsix не тот пакет, битый zip или движок новее вшитого VS Code — НЕ вшиваю, поставится онлайн при установке"
+  }
+}
+
 Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
 $font = Join-Path $apps 'JetBrainsMono-Regular.ttf'
 if (Test-Path $font) {
@@ -667,7 +739,7 @@ try {
 
 Write-Host "[vendor] Проверка полноты vendor..."
 $missing = @()
-foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','vscode-setup.exe','cursor-setup.exe','claude-code.vsix')) {
+foreach ($name in @('git-setup.exe','node-lts.msi','python-setup.exe','vscode-setup.exe','cursor-setup.exe','claude-code.vsix','vscode-language-pack-ru.vsix')) {
   $f = Get-Item (Join-Path $apps $name) -ErrorAction SilentlyContinue
   if (-not $f -or $f.Length -eq 0) { $missing += "apps/$name" }
 }

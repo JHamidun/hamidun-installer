@@ -47,6 +47,28 @@ const DAY = 24 * 60 * 60 * 1000;
 // на него могут ссылаться уже розданные сборки). Подробности — docs/adr/003-uv-bundled-only.md.
 const NO_REGISTRY_OK = new Set(['uv', 'course']);
 
+// Члены, которые ОБЯЗАН нести опубликованный архив компонента, — иначе издание молча
+// теряет офлайн-путь, а сборка остаётся зелёной. vscode (win32): vsix панели Claude едет
+// ВНУТРИ архива редактора (tools/publish-vendor.py, COMPONENTS['vscode']). Запись, которая
+// его не несёт, опубликована до этого правила: lite с ней снова ставит панель только из
+// Marketplace через планировщик — ровно то, что давало главный красный пункт телеметрии.
+// Сверяем по gatedFiles записи: push-component пишет туда каждый член архива из манифеста.
+// Там же — русский языковой пакет VS Code: без него lite остаётся с английским интерфейсом.
+const REQUIRED_GATED = { win32: { vscode: ['vscode-setup.exe', 'claude-code.vsix', 'vscode-language-pack-ru.vsix'] } };
+function missingRequiredGated(reg, platform) {
+  const out = [];
+  const req = REQUIRED_GATED[platform] || {};
+  for (const rid of Object.keys(req)) {
+    const e = ((reg && reg.components) || []).find((c) => c && c.remoteId === rid && (c.platform || 'win32') === platform);
+    if (!e) continue;   // отсутствие самой записи ловят проверки выше по списку
+    const gated = (e.gatedFiles && typeof e.gatedFiles === 'object') ? e.gatedFiles : {};
+    for (const name of req[rid]) {
+      if (!Object.prototype.hasOwnProperty.call(gated, name)) out.push({ remoteId: rid, member: name });
+    }
+  }
+  return out;
+}
+
 const results = [];   // {section, level:'ok'|'warn'|'fail', msg}
 function add(section, level, msg) { results.push({ section, level, msg }); }
 const okLine = (s, m) => add(s, 'ok', m);
@@ -257,6 +279,15 @@ function checkRegistry(platforms, chk) {
       + `Либо vendor неполон (npm run fetch:vendor), либо запись опубликована из другой сборки (перепубликуй компонент).`);
   }
   if (gatedSkippedPlat.size) warn(S, `gatedFiles записей ${[...gatedSkippedPlat].join(', ')} НЕ сверены: на диске манифест ${process.platform}. Прогони release-check на той ОС — иначе рассинхрон «файл подменён» вылезет только у пользователя.`);
+
+  // 4e'. обязательные члены архивов (REQUIRED_GATED) — по ВСЕМ запрошенным платформам:
+  // это свойство публикации, а не манифеста ОС, проверять его можно откуда угодно.
+  for (const plat of platforms) {
+    const miss = missingRequiredGated(reg, plat);
+    for (const m of miss) {
+      fail(S, `опубликованный «${m.remoteId}/${plat}» не несёт ${m.member} — запись выложена до того, как архив стал составным. Перепубликуй: python tools/publish-vendor.py --platform ${plat} --only ${m.remoteId}`);
+    }
+  }
 
   // 4f. схема записей (то же, что стерегут юнит-тесты — но здесь это часть вердикта).
   const seen = new Set();
@@ -600,7 +631,8 @@ async function main(argv) {
   return fails.length ? 1 : 0;
 }
 
-module.exports = { checkVendor, checkSizes, checkConfigPack, checkRegistry, checkMirrors, NO_REGISTRY_OK };
+module.exports = { checkVendor, checkSizes, checkConfigPack, checkRegistry, checkMirrors, NO_REGISTRY_OK,
+  REQUIRED_GATED, missingRequiredGated };
 
 if (require.main === module) {
   main(process.argv).then((code) => process.exit(code)).catch((e) => { console.error('FATAL release-check:', e); process.exit(1); });

@@ -32,9 +32,29 @@ const TOMBSTONE_SUFFIX = '.uninst';
 // «Удалить» → uninstall снёс бы чужие venv/шимы). Любой ненулевой код тоже не пишет.
 const EXIT_SKIP = 120;
 function isSkipExit(code) { return code === EXIT_SKIP; }
-// Маркер установки пишем ТОЛЬКО при реальном успехе (код 0), не в dry-run, не hidden.
+// Код 121 = «частичный успех»: компонент РАБОТАЕТ, необязательной части нет. Контракт со
+// скриптами: перед выходом печатается ровно одна строка «ЧАСТИЧНО: <причина и что сделать>».
+// Первый пользователь — vscode.ps1: редактор стоит, а панель Claude или Codex не встала.
+// Раньше такой исход был красным «VS Code не встал», и человек переустанавливал то, что
+// уже стоит. Для потока установки это успех (зависимые идут дальше), а renderer получает
+// partial: true и partialReason — и рисует шаг жёлтым.
+const EXIT_PARTIAL = 121;
+function isPartialExit(code) { return code === EXIT_PARTIAL; }
+// Причина частичного успеха — последняя строка «ЧАСТИЧНО:» хвоста вывода (без префикса).
+// main.js отдаёт хвост МАССИВОМ строк (outTail), тесты и скрипты — одной строкой: принимаем
+// оба вида. String(массив) склеивал бы строки запятой, «ЧАСТИЧНО:» переставала стоять в
+// начале строки, и причина в бою всегда была пустой — человек видел общую фразу.
+function partialReason(outTail) {
+  const raw = Array.isArray(outTail) ? outTail : [outTail];
+  const lines = raw.map((x) => String(x == null ? '' : x)).join('\n').split(/\r?\n/)
+    .map((l) => l.trim()).filter((l) => /^ЧАСТИЧНО:/.test(l));
+  if (!lines.length) return '';
+  return lines[lines.length - 1].replace(/^ЧАСТИЧНО:\s*/, '').slice(0, 300);
+}
+// Маркер установки пишем ТОЛЬКО когда компонент реально встал (0, или 121 — работает без
+// необязательной части), не в dry-run, не hidden.
 function shouldRecordInstall(code, isDryRun, hidden) {
-  return code === 0 && !isDryRun && !hidden;
+  return (code === 0 || code === EXIT_PARTIAL) && !isDryRun && !hidden;
 }
 
 // Легаси-типы строк 'HM-RECEIPT <type> <value>' в stdout install-скриптов.
@@ -304,7 +324,7 @@ function removeReceipt(homedir, id) {
 
 module.exports = {
   SCHEMA_VERSION, DIR_NAME, SUB_DIR, ALLOWED_TYPES, TOMBSTONE_SUFFIX,
-  EXIT_SKIP, isSkipExit, shouldRecordInstall,
+  EXIT_SKIP, isSkipExit, EXIT_PARTIAL, isPartialExit, partialReason, shouldRecordInstall,
   receiptsDir, receiptPath, tombstonePath, parseReceiptLine, buildReceipt,
   writeReceipt, readReceipt, hasReceipt,
   deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt,
