@@ -446,4 +446,14 @@ try {
     exit 121
 } finally {
     Remove-HmVsixTemps
+    # Настройки VS Code для новичка (vscode-settings.ps1) — на ЛЮБОМ исходе шага и ПОСЛЕ
+    # расширений: русский интерфейс включается, только если языковой пакет уже на диске.
+    # Код выхода шага не меняется: exit выше уже задан, а сбой внутри ловится здесь.
+    # Тем, у кого VS Code уже стоит и карточка снята, этот блок не достаётся (vscode.ps1 у них
+    # не стартует) — для них то же самое делает touchup-vscode.ps1, его зовёт проверка.
+    # Прогон этого скрипта целиком в песочнице обязан задать HM_FIRSTRUN_ROOT (папка внутри
+    # %TEMP%), иначе блок пишет в настоящий профиль и на настоящий рабочий стол.
+    $hmFirstRun = Join-Path $PSScriptRoot 'vscode-settings.ps1'
+    if (-not (Test-Path -LiteralPath $hmFirstRun)) { Write-Host "Настройки VS Code для новичка: файла vscode-settings.ps1 нет в этой сборке — пропускаю." }
+    else { try { & $hmFirstRun } catch { Write-Host "Настройки VS Code для новичка: шаг остановлен ($($_.Exception.GetType().Name -replace 'Exception$', '')) — редактор работает и без них." } }
 }

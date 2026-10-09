@@ -15,7 +15,7 @@ APP_USER="$HOME/Applications/Visual Studio Code.app"
 if   [ -d "$APP_SYS" ];  then APP="$APP_SYS"
 elif [ -d "$APP_USER" ]; then APP="$APP_USER"
 else APP="$APP_SYS"; fi   # ни одного нет -> цель установки по умолчанию /Applications
-CODE_CLI="$APP/Contents/Resources/app/bin/code"
+CODE_CLI="$APP/Contents/Resources/app/bin/code"; source "$DIR/vscode-firstrun.sh"   # настройки VS Code для новичка: ловушка EXIT
 
 echo "Проверяю VS Code..."
 if [ -d "$APP" ]; then
