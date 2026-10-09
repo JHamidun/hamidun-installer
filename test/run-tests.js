@@ -58,7 +58,12 @@ let pass = 0, fail = 0, skipped = 0;
 // показывают её как ⏭ и считают отдельно от pass/fail.
 const HM_SKIP = Symbol('hm-skip');
 function SKIP(reason) { const e = new Error(reason || 'пропуск'); e[HM_SKIP] = true; throw e; }
+// Отладка: HM_ONLY="часть названия|другая часть" — выполнять только тесты, в названии которых есть
+// одна из подстрок; остальные молча пропускаются и в счётчики не попадают. Без переменной всё как раньше.
+const HM_ONLY = String(process.env.HM_ONLY || '').split('|').map((s) => s.trim()).filter(Boolean);
+const hmWanted = (name) => !HM_ONLY.length || HM_ONLY.some((p) => String(name).includes(p));
 function ok(name, fn) {
+  if (!hmWanted(name)) return;
   if (fn && fn.constructor && fn.constructor.name === 'AsyncFunction') {
     console.log('  ❌ ' + name + '  -> async-тест передан в синхронный ok(): используй okAsync + await');
     fail++;
@@ -71,6 +76,7 @@ function ok(name, fn) {
   }
 }
 async function okAsync(name, fn) {
+  if (!hmWanted(name)) return;
   try { await fn(); console.log('  ✅ ' + name); pass++; }
   catch (e) {
     if (e && e[HM_SKIP]) { console.log('  ⏭  ' + name + '  -> ПРОПУЩЕН: ' + e.message); skipped++; return; }
