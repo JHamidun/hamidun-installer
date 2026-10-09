@@ -21835,18 +21835,31 @@ ok('config.json в репозитории без сборочных маркер
     } finally { safeDrop(base); }
   };
 
+  // Случаи "через том" (junction на \\?\Volume{guid}\…): ловушка libuv, ради которой в обходе стоит сверка канонических
+  // путей. Дочерний сценарий создаёт их только если узнал GUID тома, поэтому без отдельной проверки они могут исчезнуть
+  // молча (mountvol/mklink не вышли → зелёная галочка без единого такого случая).
+  const VOLUME_CASES = ['nofollow-nested-volume', 'nofollow-root-volume', 'uninstall-removeDirTree-volume',
+    'uninstall-removeDirTreeGated-volume', 'wrapped-nested-volume', 'wrapped-root-volume'];
+
   // Что обязано выполняться под ЛЮБЫМ рантаймом: цель за ссылкой цела, ссылки сняты, дерево снесено.
+  // Возвращает список причин, по которым случаи "через том" не прогнаны (пусто — прогнаны все): остальное уже проверено,
+  // а вызывающий превращает непустой список в честный пропуск (SKIP), а не в молчаливый ✅.
   const assertSafeRuntime = (out, label) => {
     const c = out.cases;
+    const volumeGaps = [];
     // raw-* и ctl-* — КОНТРОЛИ (рантайм/старый код/подменённый fs опасны), «безопасными» быть не обязаны
     const names = Object.keys(c).filter((n) => !/^(raw|ctl)-/.test(n));
     assert(names.length >= 11, label + ': сценарий прогнал случаи (' + names.length + ')');
     ['asar-valid-removeDirTree', 'asar-valid-removeDirTreeGated', 'asar-invalid-removeDirTree', 'asar-nofollow', 'wrapped-asar'].forEach((n) =>
       assert(names.indexOf(n) !== -1, label + ': случай с .asar внутри дерева прогнан: ' + n));
+    if (IS_WIN) {
+      if (!out.volGuid) volumeGaps.push('GUID тома не получен (mountvol) — случаев "через том" в сценарии нет');
+      else VOLUME_CASES.forEach((n) => assert(names.indexOf(n) !== -1, label + ': случай "через том" ' + n + ' пропал из сценария при известном GUID тома'));
+    }
     for (const n of names) {
       const r = c[n];
-      // «через том» не везде создаётся (не NTFS, политика) — такие случаи не засчитываем
-      if (r.setupError && /volume/.test(n)) continue;
+      // «через том» не везде создаётся (не NTFS, политика) — такие случаи не засчитываем, но и молча не теряем
+      if (r.setupError && /volume/.test(n)) { volumeGaps.push(n + ': ' + String(r.setupError).replace(/\s+/g, ' ').slice(0, 120)); continue; }
       assert(!r.setupError, label + ' / ' + n + ': фикстура не собралась: ' + r.setupError);
       assert.strictEqual(r.error, null, label + ' / ' + n + ': снос не бросил: ' + r.error);
       assert.strictEqual(r.victimAlive, true, label + ' / ' + n + ': ЦЕЛЬ ЗА ССЫЛКОЙ ЦЕЛА (оба файла на месте)');
@@ -21860,6 +21873,11 @@ ok('config.json в репозитории без сборочных маркер
     }
     // обёрнутый install()-ом fs.rmSync: на Windows обёртка обязана быть включена
     if (process.platform === 'win32') assert.strictEqual(out.installed, true, label + ': install() включился на Windows');
+    return volumeGaps;
+  };
+  // Зелёная галочка обязана значить, что случаи "через том" БЫЛИ. Не были — ⏭ с причиной (как у первой группы тестов, volJunction).
+  const skipIfVolumeGaps = (gaps) => {
+    if (gaps.length) SKIP('случаи "через том" не прогнаны, остальные прошли: ' + gaps.join('; '));
   };
 
   const FC = require(FCP);
@@ -21949,10 +21967,11 @@ ok('config.json в репозитории без сборочных маркер
     };
     const mkStats = (n, big) => {
       const bits = n.t === 'dir' || n.t === 'redir' ? 0o040000 : (n.t === 'link' || n.t === 'filelink') ? 0o120000 : 0o100000;
-      const num = (v) => (big ? BigInt(v) : v);
+      // Без bigint Node отдаёт Number: inode выше 2^53 теряет младшие разряды — так и здесь (ino/dev узла можно задать в extra)
+      const num = (v) => (big ? BigInt(v) : Number(v));
       return {
         isDirectory: () => n.t === 'dir', isFile: () => n.t === 'file', isSymbolicLink: () => n.t === 'link' || n.t === 'filelink',
-        mode: num(bits | (n.ro ? 0o444 : 0o666)), ino: num(n.ino), dev: num(7),
+        mode: num(bits | (n.ro ? 0o444 : 0o666)), ino: num(n.ino), dev: num(n.dev || 7),
       };
     };
     const api = {
@@ -22075,6 +22094,23 @@ ok('config.json в репозитории без сборочных маркер
     api.realpathSync = (p) => { if (depth(p) > alive) throw E('ENOENT', 'realpath', p); return p; };
     api.realpathSync.native = api.realpathSync;
     return api;
+  };
+
+  // ФС-СТОРОЖОК: любое обращение к «диску» записывается в log и бросает. Для проверок «отказ случился ДО диска»
+  // на входах, которые при потере защиты стали бы сносом настоящего диска: корень ФС и пустая строка (= текущий
+  // каталог процесса, то есть репозиторий при `node test/run-tests.js`). На настоящей ФС регресс такой защиты
+  // превратил бы сам тест в удалитель; на сторожке он даёт красную строку, а диск не тронут.
+  const tripFs = () => {
+    const log = [];
+    const trap = (name) => function () {
+      log.push(name);
+      throw Object.assign(new Error('ФС-сторожок: обращение к диску: ' + name), { code: 'EHM_TRIPWIRE' });
+    };
+    const f = { log };
+    ['lstatSync', 'readdirSync', 'unlinkSync', 'rmdirSync', 'chmodSync'].forEach((n) => { f[n] = trap(n); });
+    f.realpathSync = trap('realpathSync');
+    f.realpathSync.native = trap('realpathSync.native');
+    return f;
   };
 
   // «Старый/уязвимый» вариант модуля: исходник fs-compat.js с ТОЧЕЧНО вырезанной защитой. Каждая правка
@@ -22252,11 +22288,24 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(FC.removeTreeNoFollow(missing, { force: true }), undefined, 'force: отсутствие молчит');
       assert.throws(() => FC.removeTreeNoFollow(missing, { force: false }), (e) => e.code === 'ENOENT' && e instanceof Error && e.message.indexOf('нет такого') !== -1, 'без force — ENOENT с кодом и путём');
       assert.throws(() => FC.removeTreeNoFollow(missing), (e) => e.code === 'ENOENT', 'по умолчанию force=false, как у rmSync');
-      // корень файловой системы: отказ ДО любого обращения к диску
-      assert.throws(() => FC.removeTreeNoFollow(path.parse(process.cwd()).root, { force: true }), (e) => e.code === 'EINVAL', 'корень ФС не сносим');
-      assert.throws(() => FC.removeTreeNoFollow('', { force: true }), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'пустая строка не превращается в текущий каталог');
-      assert.throws(() => FC.removeTreeNoFollow('a\u0000b'), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'NUL в пути');
-      assert.throws(() => FC.removeTreeNoFollow({}), (e) => e.code === 'ERR_INVALID_ARG_TYPE', 'не строка/Buffer/URL');
+      // корень файловой системы, пустая строка, NUL, чужие типы: отказ ДО любого обращения к диску. Идёт на ФС-сторожке
+      // (tripFs): если защита когда-нибудь пропадёт, тест покраснеет, а не снесёт корень диска или текущий каталог
+      const trip = tripFs();
+      assert.throws(() => FC.removeTreeNoFollow(path.parse(process.cwd()).root, { force: true, fs: trip }), (e) => e.code === 'EINVAL', 'корень ФС не сносим');
+      assert.throws(() => FC.removeTreeNoFollow('', { force: true, fs: trip }), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'пустая строка не превращается в текущий каталог');
+      assert.throws(() => FC.removeTreeNoFollow('a\u0000b', { fs: trip }), (e) => e.code === 'ERR_INVALID_ARG_VALUE', 'NUL в пути');
+      assert.throws(() => FC.removeTreeNoFollow({}, { fs: trip }), (e) => e.code === 'ERR_INVALID_ARG_TYPE', 'не строка/Buffer/URL');
+      assert.deepStrictEqual(trip.log, [], 'все четыре отказа случились ДО диска: ни одного обращения к ФС');
+      // негативный контроль: без этих двух защит обход сразу лезет на диск — сторожок это видит (на настоящей ФС
+      // это был бы снос корня диска / текущего каталога)
+      const noRootGuard = loadMutated([['if (parentOfRoot === rootPath) throw', 'if (false) throw']]);
+      const t1 = tripFs();
+      assert.throws(() => noRootGuard.removeTreeNoFollow(path.parse(process.cwd()).root, { force: true, fs: t1 }), (e) => e.code === 'EHM_TRIPWIRE', 'контроль: без защиты корня ФС обход идёт к диску');
+      assert(t1.log.length > 0, 'контроль: сторожок записал обращение (корень ФС)');
+      const noEmptyGuard = loadMutated([['if (!s || ', 'if (']]);
+      const t2 = tripFs();
+      assert.throws(() => noEmptyGuard.removeTreeNoFollow('', { force: true, fs: t2 }), (e) => e.code === 'EHM_TRIPWIRE', 'контроль: без защиты пустой строки обход идёт к диску (текущий каталог)');
+      assert(t2.log.length > 0, 'контроль: сторожок записал обращение (пустая строка)');
       const viaBuf = path.join(base, 'b'); fs.mkdirSync(viaBuf);
       FC.removeTreeNoFollow(Buffer.from(viaBuf));
       assert(!fs.existsSync(viaBuf), 'Buffer-путь принят');
@@ -22401,7 +22450,9 @@ ok('config.json в репозитории без сборочных маркер
     mem.hook = (name, p) => {
       if (name === 'readdir' && p === path.join(T, 'X') && !swapped) { swapped = true; mem.replace(p, 'link', { to: V }); }
     };
-    assert.throws(() => FC.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)), (e) => e.code === 'ERR_HM_TREE_CHANGED' || e.code === 'ENOTDIR' || e.code === 'ENOTEMPTY', 'подмена до readdir не приводит к сносу чужого');
+    // ровно ERR_HM_TREE_CHANGED: другой код означал бы, что обход упал не на сверке каталога, а где-то случайно по дороге
+    assert.throws(() => FC.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)), (e) => e.code === 'ERR_HM_TREE_CHANGED', 'подмена до readdir не приводит к сносу чужого: обход останавливается на сверке каталога');
+    assert(swapped, 'подмена состоялась');
     assert(mem.exists(path.join(V, 'f1.txt')), 'файл жертвы цел');
 
     // (2) каталог пропал сам по ходу сноса (его снесли без нас) — это не ошибка
@@ -22446,6 +22497,216 @@ ok('config.json в репозитории без сборочных маркер
     assert(mem2.exists(path.join(T2, 'sub', 'keep.txt')), 'содержимое не тронуто');
   });
 
+  // ---- 2б. каждая сверка обхода держится своим тестом (ревью u2: мутанты, которые раньше выживали) --------------
+  // Окно подмены задаёт hook memFs ровно между двумя действиями обхода; подмена — как у атакующего: НОВЫЙ узел
+  // (новый inode) на том же пути. У каждого теста негативный контроль: loadMutated вырезает ровно одну сверку, и
+  // тогда чужое теряется — значит, держит именно она.
+
+  // hook memFs, срабатывающий один раз на операции opName с путём p; возвращает «сработал ли»
+  const once = (mem, opName, p, action) => {
+    let done = false;
+    mem.hook = (name, q) => { if (!done && name === opName && q === p) { done = true; action(); } };
+    return () => done;
+  };
+
+  ok('clearOneReadOnly: объект подменён ссылкой МЕЖДУ проверкой обхода и снятием атрибута — chmod не идёт по ссылке (clearReadOnlyTree, EPERM-повтор removeFile/removeDir), цель за ней остаётся read-only', () => {
+    // chmod ходит ПО ссылке (проверено на Windows/libuv, рецензия M-7), поэтому объект перепроверяется lstat'ом прямо перед
+    // ним: ссылка или объект другого вида — ничего не делаем. Подложенная ссылка помечена read-only сама (attrib +R /L), иначе
+    // проверка `mode & 0o200` остановила бы её раньше и до chmod дело не дошло бы.
+    const cases = [
+      // via: clear — clearReadOnlyTree, remove — removeTreeNoFollow (EPERM на read-only → снять атрибут → повтор);
+      // nth — какой по счёту lstat этого пути подменяем (у каталога classify делает два lstat: сверка пути)
+      { name: 'clear-file', via: 'clear', kind: 'file', swap: 'link', nth: 2 },
+      { name: 'remove-file', via: 'remove', kind: 'file', swap: 'link', nth: 2 },
+      { name: 'remove-dir', via: 'remove', kind: 'dir', swap: 'link', nth: 3 },
+      // lstat такой ссылки (junction «через том») отдаёт каталог-цель: файловую проверку «не ссылка» она проходит
+      { name: 'remove-file-to-redir', via: 'remove', kind: 'file', swap: 'redir', nth: 2 },
+    ];
+    const run = (c, mod) => {
+      const mem = memFs({ strictRo: true });
+      const T = path.join(MEM_BASE, 'cro-' + c.name);
+      const V = path.join(MEM_BASE, 'cro-victim-' + c.name);
+      const p = path.join(T, c.kind === 'dir' ? 'd' : 'a.txt');
+      mem.add(p, c.kind, { ro: true });
+      const toDir = c.kind === 'dir' || c.swap === 'redir';
+      const target = path.join(V, toDir ? 'rodir' : 'ro.txt');
+      mem.add(target, toDir ? 'dir' : 'file', { ro: true });
+      let seen = 0, swapped = false;
+      mem.hook = (name, q) => {
+        if (name === 'lstat' && q === p && ++seen === c.nth) { swapped = true; mem.replace(p, c.swap, { to: target, ro: true }); }
+      };
+      let err = null, cleared = -1;
+      if (c.via === 'clear') cleared = mod.clearReadOnlyTree(T, mem);
+      else { try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; } }
+      return { swapped, err, cleared, chmods: mem.chmods.length, victimRo: mem.node(target).ro };
+    };
+    cases.forEach((c) => {
+      const r = run(c, FC);
+      assert(r.swapped, c.name + ': подмена состоялась (hook сработал на нужном lstat)');
+      assert.strictEqual(r.chmods, 0, c.name + ': chmod не вызывался — по подменённой ссылке снимать нечего');
+      assert.strictEqual(r.victimRo, true, c.name + ': цель за ссылкой осталась read-only');
+      if (c.via === 'clear') assert.strictEqual(r.cleared, 0, c.name + ': clearReadOnlyTree ничего не снял');
+      else assert(r.err && r.err.code === 'EPERM', c.name + ': снос вернул исходный EPERM, а не прошёл молча: ' + (r.err && r.err.message));
+    });
+    // негативные контроли: без проверки «не ссылка» chmod идёт по ссылке и снимает read-only с чужого файла; без проверки
+    // вида (файл/каталог) — то же самое через ссылку «через том»
+    const guardLine = 'if (st.isSymbolicLink() || st.isDirectory() !== wantDir) return false;';
+    const noLinkCheck = loadMutated([[guardLine, 'if (st.isDirectory() !== wantDir) return false;']]);
+    ['clear-file', 'remove-file'].forEach((n) => {
+      const r = run(cases.find((c) => c.name === n), noLinkCheck);
+      assert(r.swapped && r.chmods === 1 && r.victimRo === false, 'контроль без проверки ссылки (' + n + '): chmod прошёл по ссылке, цель потеряла read-only');
+    });
+    const noKindCheck = loadMutated([[guardLine, 'if (st.isSymbolicLink()) return false;']]);
+    const rk = run(cases.find((c) => c.name === 'remove-file-to-redir'), noKindCheck);
+    assert(rk.swapped && rk.chmods === 1 && rk.victimRo === false, 'контроль без проверки вида: chmod прошёл через ссылку «через том» на каталог-цель');
+  });
+
+  ok('clearOneReadOnly: каталог-родитель подменён ПОСЛЕ отказа unlink/rmdir и ДО chmod — сверка каталога перед chmod останавливает снятие атрибута, чужой файл и каталог не тронуты', () => {
+    // Второе место, где нужна сверка: между отказом удаления (EPERM на read-only) и снятием атрибута проходит время, а chmod
+    // идёт ПО ссылке — в том числе по ссылке в середине пути (рецензия M-7). Подмена ложится на сам unlink/rmdir (после
+    // сверки перед ним): отказ у жертвы тоже EPERM, потому что она тоже read-only, и чужое этой операцией не страдает.
+    const scenario = (kind, mod) => {
+      const mem = memFs({ strictRo: true });
+      const T = path.join(MEM_BASE, 'cfence-' + kind);
+      const V = path.join(MEM_BASE, 'cfence-victim-' + kind);
+      let victim, swapped;
+      if (kind === 'file') {
+        mem.add(path.join(T, 'sub', 'ro.txt'), 'file', { ro: true });
+        victim = path.join(V, 'ro.txt');
+        mem.add(victim, 'file', { ro: true });
+        swapped = once(mem, 'unlink', path.join(T, 'sub', 'ro.txt'), () => mem.replace(path.join(T, 'sub'), 'link', { to: V }));
+      } else {
+        mem.add(path.join(T, 'd'), 'dir', { ro: true });
+        victim = path.join(V, 'd');
+        mem.add(victim, 'dir', { ro: true });
+        swapped = once(mem, 'rmdir', path.join(T, 'd'), () => mem.replace(T, 'link', { to: V }));
+      }
+      let err = null;
+      try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      return { err, swapped: swapped(), chmods: mem.chmods.length, victimExists: mem.exists(victim), victimRo: mem.exists(victim) ? mem.node(victim).ro : null };
+    };
+    ['file', 'dir'].forEach((kind) => {
+      const r = scenario(kind, FC);
+      assert(r.swapped, kind + ': подмена состоялась');
+      assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', kind + ': снятие атрибута остановлено сверкой каталога: ' + (r.err && r.err.message));
+      assert.strictEqual(r.chmods, 0, kind + ': chmod не вызывался');
+      assert(r.victimExists && r.victimRo === true, kind + ': жертва на месте и read-only');
+    });
+    // негативный контроль: без этой сверки chmod идёт через подменённый путь, снимает read-only с жертвы, и повторный
+    // unlink/rmdir стирает её
+    const noFence = loadMutated([['if (fr && !fenceOk(ctx, fr)) return false;', '']]);
+    ['file', 'dir'].forEach((kind) => {
+      const bad = scenario(kind, noFence);
+      assert(bad.swapped && bad.chmods === 1 && !bad.victimExists, 'контроль без сверки (' + kind + '): chmod прошёл по подменённому пути, жертва стёрта');
+    });
+  });
+
+  ok('classify: каталог подменён МЕЖДУ сверкой канонического пути и второй lstat — ERR_HM_TREE_CHANGED, в том числе для junction "через том" (её lstat отдаёт статистику цели, выдаёт только сравнение inode)', () => {
+    // порядок в classify: lstat №1 → realpath (канонический путь сошёлся) → lstat №2; подмена ложится перед №2
+    const scenario = (kind, mod) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'cls2-' + kind);
+      const V = path.join(MEM_BASE, 'cls2-victim-' + kind);
+      const X = path.join(T, 'X');
+      mem.add(path.join(X, 'f1.txt'), 'file');
+      mem.add(path.join(V, 'f1.txt'), 'file');                      // у жертвы файлы с ТЕМИ ЖЕ именами
+      mem.add(path.join(V, 'f2.txt'), 'file');
+      let seen = 0, swapped = false;
+      mem.hook = (name, q) => {
+        if (name === 'lstat' && q === X && ++seen === 2) { swapped = true; if (kind === 'dir') mem.replace(X, 'dir'); else mem.replace(X, kind, { to: V }); }
+      };
+      let err = null;
+      try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      const touched = mem.log.filter((c) => c[0] === 'unlink' || c[0] === 'rmdir' || c[0] === 'chmod').length;
+      return { err, swapped, touched, victimFiles: mem.names(V).length };
+    };
+    ['link', 'redir', 'dir'].forEach((kind) => {
+      const r = scenario(kind, FC);
+      assert(r.swapped, kind + ': подмена состоялась');
+      assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', kind + ': обход остановился на второй сверке: ' + (r.err && r.err.message));
+      assert.strictEqual(r.touched, 0, kind + ': ни одного удаления/chmod до остановки');
+      assert.strictEqual(r.victimFiles, 2, kind + ': файлы жертвы на месте');
+    });
+    // негативный контроль: без второй сверки «redir» (каталог, не ссылка, но чужой inode) принимается за свой каталог,
+    // сверка по нему же ничего не замечает — и файлы жертвы стёрты. (Обычную ссылку позже всё равно поймал бы fenceOk.)
+    const mutated = loadMutated([['if (st2.isSymbolicLink() || !st2.isDirectory() || !sameId(idOf(st), idOf(st2))) throw changedError(p);', '']]);
+    const bad = scenario('redir', mutated);
+    assert(bad.swapped && bad.victimFiles === 0, 'контроль: без второй сверки файлы жертвы стёрты через подмену «через том»');
+  });
+
+  ok('removeTreeNoFollow: родитель подменён ссылкой после последней операции в каталоге и до его rmdir — ERR_HM_TREE_CHANGED, пустой каталог за ссылкой цел', () => {
+    const scenario = (mod) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'gparent');
+      const V = path.join(MEM_BASE, 'gparent-victim');
+      mem.add(path.join(T, 'D', 'f.txt'), 'file');
+      mem.add(path.join(V, 'D'), 'dir');                            // пустой каталог с тем же именем — за ссылкой rmdir его снёс бы
+      // подмена на последнем unlink внутри D: следующий шаг обхода — rmdir D, перед которым родителя T надо сверить
+      const swapped = once(mem, 'unlink', path.join(T, 'D', 'f.txt'), () => mem.replace(T, 'link', { to: V }));
+      let err = null;
+      try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      return { err, swapped: swapped(), victimDirAlive: mem.exists(path.join(V, 'D')) };
+    };
+    const r = scenario(FC);
+    assert(r.swapped, 'подмена состоялась');
+    assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', 'rmdir D не выполнен: родитель сверен и подмена поймана: ' + (r.err && r.err.message));
+    assert(r.victimDirAlive, 'пустой каталог за ссылкой цел');
+    // негативный контроль: без сверки родителя перед rmdir каталог жертвы удаляется по подменённому пути
+    const bad = scenario(loadMutated([['if (parent && !guard(parent)) continue;', '']]));
+    assert(bad.swapped && !bad.victimDirAlive, 'контроль: без сверки родителя перед rmdir пустой каталог за ссылкой снесён');
+  });
+
+  ok('removeTreeNoFollow: каталог стал файлом между проверкой и readdir (ENOTDIR) — ERR_HM_TREE_CHANGED, а не сырой ENOTDIR', () => {
+    const scenario = (mod) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'enotdir');
+      const X = path.join(T, 'X');
+      mem.add(path.join(X, 'f1.txt'), 'file');
+      const swapped = once(mem, 'readdir', X, () => mem.replace(X, 'file'));
+      let err = null;
+      try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      return { err, swapped: swapped(), swappedObjectAlive: mem.exists(X) && mem.node(X).t === 'file' };
+    };
+    const r = scenario(FC);
+    assert(r.swapped, 'подмена состоялась');
+    assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', 'ENOTDIR при readdir — это подмена каталога, а не загадочная ошибка ФС: ' + (r.err && r.err.message));
+    assert(r.swappedObjectAlive, 'подложенный объект не тронут');
+    // негативный контроль: без этой ветки наружу уходит сырой ENOTDIR (код, по которому подмену не опознать)
+    const bad = scenario(loadMutated([["else if (e && e.code === 'ENOTDIR') throw changedError(dirPath);", '']]));
+    assert(bad.swapped && bad.err && bad.err.code === 'ENOTDIR', 'контроль: без ветки ENOTDIR → ERR_HM_TREE_CHANGED наружу выходит сырой ENOTDIR');
+  });
+
+  ok('сверка личности каталога: том (dev) и полный 64-битный inode — тот же inode на другом томе и соседний inode выше 2^53 различаются, подмена даёт ERR_HM_TREE_CHANGED', () => {
+    // Подмена — каталог с «тем же» номером: на другом томе (junction «через том» на другой диск; номера файлов NTFS на разных
+    // томах совпадают легко) или с соседним номером, который в Number неотличим (inode NTFS — 64 бита, Number держит 53).
+    const scenario = (orig, swapTo, mod) => {
+      const mem = memFs();
+      const T = path.join(MEM_BASE, 'ident');
+      const X = path.join(T, 'X');
+      mem.add(path.join(X, 'f1.txt'), 'file');
+      Object.assign(mem.node(X), orig);
+      const swapped = once(mem, 'readdir:after', X, () => mem.replace(X, 'dir', swapTo));
+      let err = null;
+      try { mod.removeTreeNoFollow(T, Object.assign({ fs: mem }, MEM_OPTS)); } catch (e) { err = e; }
+      return { err, swapped: swapped(), gone: !mem.exists(T) };
+    };
+    const byDev = [{ ino: 4242, dev: 7 }, { ino: 4242, dev: 9 }];
+    const byBig = [{ ino: 9007199254740993n }, { ino: 9007199254740992n }];          // 2^53+1 и 2^53: в Number оба 2^53
+    assert.strictEqual(Number(byBig[0].ino), Number(byBig[1].ino), 'предпосылка: в Number эти inode неотличимы');
+    [['dev', byDev], ['bigint', byBig]].forEach(([label, pair]) => {
+      const r = scenario(pair[0], pair[1], FC);
+      assert(r.swapped, label + ': подмена состоялась');
+      assert(r.err && r.err.code === 'ERR_HM_TREE_CHANGED', label + ': подмену поймала сверка личности: ' + (r.err && r.err.message));
+    });
+    // негативные контроли: без сравнения тома / без BigInt подмена проходит незамеченной (обход идёт дальше по чужому каталогу)
+    const noDev = loadMutated([['return !(a.dev && b.dev && a.dev !== b.dev);', 'return true;']]);
+    const bd = scenario(byDev[0], byDev[1], noDev);
+    assert(bd.swapped && bd.err === null && bd.gone, 'контроль: без сравнения тома подмена на другой том не замечена');
+    const noBig = loadMutated([['ctx.f.lstatSync(p, { bigint: true })', 'ctx.f.lstatSync(p)']]);
+    const bb = scenario(byBig[0], byBig[1], noBig);
+    assert(bb.swapped && bb.err === null && bb.gone, 'контроль: без BigInt соседний inode выше 2^53 не отличается — подмена не замечена');
+  });
+
   // ---- 3. снятие read-only без перехода по ссылкам (рецензия M-7) ---------------------------------------------
 
   ok('clearReadOnlyTree (M-7): не идёт по ссылкам и не делает chmod за пределами дерева — ни по готовой ссылке, ни при подмене каталога по ходу; возвращает число снятых, не бросает', () => {
@@ -22485,6 +22746,29 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(FC.clearReadOnlyTree(tree), 1, 'снят атрибут у своего файла');
       assert.strictEqual(fs.lstatSync(vf).mode & 0o200, 0, 'чужой файл за junction остался read-only');
       assert(fs.lstatSync(mine).mode & 0o200, 'свой файл стал записываемым');
+    } finally { safeDrop(base); }
+  });
+
+  ok('clearReadOnlyTree (M-7): junction "через том" на реальной ФС — read-only файл за ней остаётся read-only (сверка канонических путей), без сверки атрибут цели снимался бы', () => {
+    // Обычная junction в тесте выше отсекается уже по lstat. Эта — нет: libuv отдаёт для неё статистику цели, и держит
+    // защиту только сверка канонических путей, включённая в clearReadOnlyTree на Windows.
+    const base = mkScratch('clrvol');
+    try {
+      const victim = path.join(base, 'victim'); fs.mkdirSync(victim);
+      const vf = path.join(victim, 'ro.txt'); fs.writeFileSync(vf, 'x'); makeReadOnly(vf);
+      const tree = path.join(base, 'tree'); fs.mkdirSync(tree);
+      volJunction(path.join(tree, 'evil'), victim);                   // нет GUID тома / mklink не вышел → ⏭ с причиной
+      const st = fs.lstatSync(path.join(tree, 'evil'));
+      assert(st.isDirectory() && !st.isSymbolicLink(), 'lstat принимает junction «через том» за обычный каталог (ловушка libuv на месте)');
+      const mine = path.join(tree, 'mine.txt'); fs.writeFileSync(mine, 'x'); makeReadOnly(mine);
+      assert.strictEqual(FC.clearReadOnlyTree(tree), 1, 'снят атрибут только у своего файла');
+      assert.strictEqual(fs.lstatSync(vf).mode & 0o200, 0, 'файл за junction «через том» остался read-only');
+      assert(fs.lstatSync(mine).mode & 0o200, 'свой файл стал записываемым');
+      // негативный контроль: сверка путей выключена → обход идёт через junction и снимает атрибут у чужого файла
+      makeReadOnly(mine);
+      const noGate = loadMutated([["canonicalGate: (process.platform === 'win32') && typeof f.realpathSync === 'function'", 'canonicalGate: false']]);
+      assert.strictEqual(noGate.clearReadOnlyTree(tree), 2, 'контроль: без сверки путей обход зашёл за junction «через том»');
+      assert(fs.lstatSync(vf).mode & 0o200, 'контроль: и снял read-only с чужого файла — значит, держит именно сверка путей');
     } finally { safeDrop(base); }
   });
 
@@ -22613,6 +22897,79 @@ ok('config.json в репозитории без сборочных маркер
     });
   });
 
+  ok('removeDirTree и removeDirTreeGated: отказ сноса называет причину по-русски, а не голым кодом — подмена каталога по ходу (ERR_HM_TREE_CHANGED) и "ссылка с содержимым" (ENOTEMPTY); цель цела, дерево возвращено', () => {
+    // Строка результата уходит и в UI, и в install.log: код вроде ERR_HM_TREE_CHANGED без пояснения не говорит ни человеку,
+    // ни поддержке, почему дерево не снесено и что с ним стало (ревью u2). Подмена делается на настоящей ФС: каталог sub,
+    // уже перечисленный обходом, заменяется junction на чужую цель (на POSIX — симлинком).
+    if (process.versions.electron) SKIP('под Electron fs-compat ходит через original-fs — подмену readdirSync отсюда не перехватить');
+    const retryOp = (fn) => {                                         // Defender/индексатор держат свежие файлы: транзиентные отказы
+      let last = null;
+      for (let i = 0; i < 25; i++) {
+        try { return fn(); } catch (e) { last = e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120); }
+      }
+      throw last;
+    };
+    ['plain', 'gated'].forEach((mode) => {
+      const home = mkScratch('ux3-' + mode);
+      const origReaddir = fs.readdirSync;
+      try {
+        const victim = path.join(home, 'victim'); mkVictim(victim);
+        fs.writeFileSync(path.join(victim, 'x.txt'), 'v');            // то же имя, что внутри сносимого sub
+        const target = path.join(home, 'HamidunCourse', 'tracks');
+        fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'sub', 'x.txt'), 'x');
+        if (mode === 'gated') fs.writeFileSync(path.join(target, '.hm-owner'), 'ours');
+        const opts = { home, platform: process.platform };
+        let swapped = false, swapDone = false;
+        fs.readdirSync = function (p) {
+          const names = origReaddir.apply(this, arguments);
+          if (!swapped && /^\.hm-quar\.[0-9a-f]+$/.test(path.basename(path.dirname(String(p)))) && path.basename(String(p)) === 'sub') {
+            swapped = true;
+            names.forEach((n) => retryOp(() => fs.unlinkSync(path.join(String(p), n))));
+            retryOp(() => fs.rmdirSync(String(p)));
+            retryOp(() => fs.symlinkSync(victim, String(p), 'junction'));
+            swapDone = true;
+          }
+          return names;
+        };
+        let r;
+        try { r = settle(() => (mode === 'gated' ? UX.removeDirTreeGated(target, opts, '.hm-owner') : UX.removeDirTree(target, opts))); }
+        finally { fs.readdirSync = origReaddir; }
+        assert(swapped && swapDone, mode + ': подмена каталога по ходу сноса состоялась');
+        assert.strictEqual(r.status, 'failed', mode + ': ' + JSON.stringify(r));
+        assert(/не удалось удалить дерево: ERR_HM_TREE_CHANGED — каталог подменён во время сноса \(ссылка, junction или другой каталог\), ничего не тронуто: /.test(r.message),
+          mode + ': причина названа по-русски, а не одним кодом: ' + r.message);
+        if (mode === 'plain') assert(/\(дерево возвращено на место\)$/.test(r.message), mode + ': и сказано, что дерево возвращено: ' + r.message);
+        assert(victimAlive(victim) && fs.existsSync(path.join(victim, 'x.txt')), mode + ': ЦЕЛЬ ЗА ССЫЛКОЙ ЦЕЛА (включая одноимённый файл)');
+        assert(fs.existsSync(target), mode + ': дерево возвращено на прежний путь');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(target)).filter((n) => n.indexOf('.hm-quar.') === 0), [], mode + ': карантин не остался');
+      } finally { fs.readdirSync = origReaddir; safeDrop(home); }
+    });
+
+    // ENOTEMPTY с пояснением: каталог сочтён перенаправлением (каноническое имя не сошлось), а внутри не пусто — не трогаем.
+    // Без пояснения человек видел бы голый ENOTEMPTY. Каноническое имя подменяется в одном вложенном каталоге; только Windows
+    // (на POSIX сверки канонических путей нет).
+    if (IS_WIN) {
+      const home = mkScratch('ux3-note');
+      const origRp = fs.realpathSync.native;
+      try {
+        const target = path.join(home, 'HamidunCourse', 'tracks');
+        fs.mkdirSync(path.join(target, 'sub'), { recursive: true });
+        fs.writeFileSync(path.join(target, 'sub', 'keep.txt'), 'k');
+        fs.writeFileSync(path.join(target, '.hm-owner'), 'ours');
+        fs.realpathSync.native = function (p) {
+          return /\.hm-quar\.[0-9a-f]+[\\/]sub$/.test(String(p)) ? path.join(home, 'elsewhere') : origRp.apply(this, arguments);
+        };
+        let r;
+        try { r = settle(() => UX.removeDirTreeGated(target, { home, platform: process.platform }, '.hm-owner')); }
+        finally { fs.realpathSync.native = origRp; }
+        assert.strictEqual(r.status, 'failed', JSON.stringify(r));
+        assert(/не удалось удалить дерево: ENOTEMPTY — это перенаправление\/ссылка, но внутри есть содержимое — не трогаю: /.test(r.message), 'причина ENOTEMPTY объяснена: ' + r.message);
+        assert(fs.existsSync(path.join(target, 'sub', 'keep.txt')), 'содержимое не тронуто, дерево возвращено на место');
+      } finally { fs.realpathSync.native = origRp; safeDrop(home); }
+    }
+  });
+
   // ---- 6. все места, где main-процесс сносит деревья ---------------------------------------------------------------
 
   ok('инвентарь рекурсивных сносов в src/: ни fs.rm/promises.rm/rimraf, рекурсивный rmSync только в проверенных местах (админ-деревья), в uninstall-exec — нет вовсе', () => {
@@ -22657,7 +23014,7 @@ ok('config.json в репозитории без сборочных маркер
 
   ok('рантайм (системный Node): вложенная и корневая junction, junction "через том" — снос не трогает цель; removeDirTree/removeDirTreeGated и обёрнутый rmSync тоже', () => {
     const out = runChild(process.execPath, false);
-    assertSafeRuntime(out, out.runtime);
+    skipIfVolumeGaps(assertSafeRuntime(out, out.runtime));
   });
 
   ok('рантайм (настоящий Electron из NODE_PATH): голый rmSync идёт по junction — это контроль; removeTreeNoFollow, removeDirTree* и install()-обёртка цель не трогают', () => {
@@ -22685,6 +23042,6 @@ ok('config.json в репозитории без сборочных маркер
       assert.notStrictEqual(out.cases['ctl-asar-patched-fs'].error, null,
         'контроль (' + out.runtime + '): с подменённым fs снос дерева с .asar не проходит — original-fs нужен');
     }
-    assertSafeRuntime(out, out.runtime);
+    skipIfVolumeGaps(assertSafeRuntime(out, out.runtime));
   });
 })();

@@ -319,7 +319,7 @@ function removeDirTree(p, opts, dry) {
   } catch (e) {
     if (fs.existsSync(quarantine)) {
       const back = restore();
-      return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e) +
+      return res('failed', 'не удалось удалить дерево: ' + treeFailWhy(e) +
         (back ? ' (дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
     }
   }
@@ -336,6 +336,20 @@ function removeDirTree(p, opts, dry) {
 function linksNote(links) {
   if (!links.length) return '';
   return ' (внутри были ссылки: ' + links.length + ' — сняты как ссылки, содержимое их целей не тронуто)';
+}
+
+// Почему снос дерева отказал — для строки результата (она уходит и в UI, и в install.log). Голые коды
+// ERR_HM_TREE_CHANGED и ENOTEMPTY ничего не объясняют, а русское пояснение лежит в e.message
+// (src/fs-compat.js) и раньше терялось. Код остаётся первым: по нему ищут в логе и сверяют тесты.
+function treeFailWhy(e) {
+  const code = (e && e.code) || e;
+  const msg = String((e && e.message) || '');
+  if (code === 'ERR_HM_TREE_CHANGED') return code + ' — ' + msg.replace(/^ERR_HM_TREE_CHANGED:\s*/, '');
+  if (code === 'ENOTEMPTY') {
+    const note = /\[([^\]]*не трогаю[^\]]*)\]/.exec(msg);   // подпись removeLink: «это перенаправление/ссылка, но внутри есть содержимое»
+    if (note) return code + ' — ' + note[1];
+  }
+  return String(code);
 }
 
 // P0-1: подтверждён ли НАШ ownership-маркер — хотя бы один из markerPaths существует
@@ -437,7 +451,7 @@ function removeDirTreeGated(p, opts, markerName, dry) {
   try {
     removeTreeNoFollow(quarantine, { force: false, onLink: (lp) => links.push(lp) });
   } catch (e) {
-    if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e)); }
+    if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + treeFailWhy(e)); }
   }
   if (fs.existsSync(quarantine)) { restore(); return res('failed', 'дерево осталось в карантине'); }
   return res('removed', 'удалено дерево (карантин, маркер подтверждён)' + linksNote(links));
