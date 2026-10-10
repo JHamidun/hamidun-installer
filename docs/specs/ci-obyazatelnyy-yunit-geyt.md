@@ -46,8 +46,8 @@
   не-кода (75-78): `*.md`, `docs/*`, `.beads/*`, `LICENSE`, `*.webp`, `*.png`,
   `*.jpg`, `*.svg`; любое другое расширение считается кодом. Результат уходит в
   `outputs.code`.
-- `unit-tests-windows` (82-133, `windows-latest`, timeout 15 мин) и `unit-tests-macos`
-  (134-177, `macos-latest`, timeout 15 мин) — обе под условием
+- `unit-tests-windows` (82-133, `windows-latest`, timeout 40 мин; шаг `npx install-electron --no` после `npm ci`) и `unit-tests-macos`
+  (134-177, `macos-latest`, timeout 40 мин) — обе под условием
   `if: needs.changes.outputs.code == 'true'`. Шаги одинаковы: `actions/checkout@v4`,
   `actions/setup-node@v4` (node 20, кеш npm), `npm ci --no-audit --no-fund`, затем
   сам гейт (107-114 / 152-159):
