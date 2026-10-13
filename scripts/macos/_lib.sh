@@ -58,8 +58,9 @@ admin_run() {
   # и payload выполнится КАК ROOT ещё до строки PATH и до codesign. Фикс-PATH в скриптах
   # закрывает ТОЛЬКО PATH; функции/SHELLOPTS/ENV/DYLD он не трогает. `env -i` СТИРАЕТ ВСЁ
   # окружение и передаёт root-шеллу лишь PATH (только системные каталоги) + HOME (osascript
-  # читает префы; root-скрипты используют абсолютные /var/root-пути и НЕ ссылаются на ~/$HOME,
-  # поэтому HOME инертен для root-исполнения). Так root-шелл гарантированно стартует из
+  # читает префы). Дойдёт ли этот HOME до root-инструментов, утверждать нельзя, поэтому
+  # инертность HOME обеспечена не надеждой, а первой строкой каждого HM_*_INSTALL_SH:
+  # `HOME=/var/root; export HOME` (находка M-8). Так root-шелл гарантированно стартует из
   # чистого окружения — весь класс env-hijack закрыт в ОДНОЙ точке (фикс-PATH остаётся как
   # defense-in-depth). Диалог пароля рисует SecurityAgent через Mach-порт (наследуется задачей,
   # не env) — env -i его не ломает.
@@ -71,7 +72,12 @@ admin_run() {
 # ФАЙЛОМ, данные — argv-ом (run(argv) в JS), в текст скрипта ничего не подставляется:
 # той интерполяции, от которой защищает admin_run, здесь нет. Прав не поднимает —
 # исполняется от того же пользователя, что и сам установочный скрипт.
-hm_jxa() { /usr/bin/osascript -l JavaScript "$@"; }
+hm_jxa() { hm_run_with_timeout "${HM_JXA_TIMEOUT:-20}" /usr/bin/osascript -l JavaScript "$@"; }
+# Потолок времени у JXA (находка M-10/N2). Скрипт читает и пишет файлы пользователя; всё, что не
+# возвращается (settings.json, подменённый каналом FIFO или зависшим сетевым томом), держало бы шаг
+# VS Code вечно, а при вызове из touch-up'а — осиротевший osascript после того, как диспетчер убил
+# только bash. hm_run_with_timeout (ниже) снимает всё дерево команды; код 124 — не уложился.
+# 20 с с запасом перекрывают нормальную работу (доли секунды) и меньше лимита диспетчера (30 с).
 arch_tag() { case "$(uname -m)" in arm64) echo arm64 ;; *) echo x64 ;; esac; }
 
 # ---- Архитектура Mac: честный выбор артефакта и честный отказ ----
@@ -321,14 +327,31 @@ hm_tree_sha256() {
 # в admin_run: osascript запускается под `env -i PATH=... HOME=...`, root-шелл стартует
 # из чистого окружения (нет BASH_FUNC_*/ENV/BASH_ENV/SHELLOPTS/DYLD_*/hostile PATH).
 # Фикс-PATH ниже — defense-in-depth: даже если бы окружение утекло, bare-команды (mktemp,
-# head, rm в trap, grep, find) резолвятся ТОЛЬКО из системных каталогов. ПЕРВОЙ строкой
-# КАЖДОГО скрипта фиксируем PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+# head, rm в trap, grep, find) резолвятся ТОЛЬКО из системных каталогов. Первой строкой
+# КАЖДОГО скрипта идёт HOME=/var/root (ниже), второй — PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+#
+# Это закрывает ROOT-шелл. НЕпривилегированный bash, который эту команду собирает, `env -i` не
+# защищает: BASH_ENV/ENV/SHELLOPTS+PS4/BASH_FUNC_* в его окружении выполняются ДО первой строки
+# любого скрипта, и `unset BASH_ENV` внутри скрипта уже опоздал бы. Поэтому лекарство — в окружении,
+# с которым main.js запускает скрипт (installEnv.sanitizePosixEnv) и в самом запуске (`bash -p`),
+# а не здесь (находка M-1).
 
+# HOME в root-шелле (находка M-8). admin_run передаёт osascript HOME пользователя (osascript читает
+# префы), а комментарий выше обещает, что root-скрипты от него не зависят, — на деле эта гарантия
+# держалась только на том, что они не читают ~/$HOME. Теперь она настоящая: ПЕРВАЯ строка каждого
+# HM_*_INSTALL_SH — HOME=/var/root; это присваивание без внешних команд, поэтому порядок с PATH
+# не важен, а всё, что запустится ниже (в том числе скрипты postinstall пакета), увидит домашний
+# каталог root, а не каталог того, кто может в нём писать.
+#
+# Тексты ниже — ТОЛЬКО ASCII и без одинарных кавычек: переменная задана в '...', а `do shell script`
+# получает строку через AppleScript, где не-ASCII зависит от кодировки. Пояснения — здесь, в комментариях.
+#
 # HM_PKG_INSTALL_SH — .pkg под root: $1=путь к .pkg, $2=Developer ID Installer Team ID.
 #   pkgutil --check-signature на staged pkg: exit-код + статус Apple Developer ID +
 #   leaf-серт "1. Developer ID Installer: ... (TeamID)$" (Team ID заякорен в конце CN —
 #   подстрока в середине имени не пройдёт). Затем installer РОВНО staged pkg.
-HM_PKG_INSTALL_SH='PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+HM_PKG_INSTALL_SH='HOME=/var/root; export HOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 set -e
 [ -x /usr/sbin/pkgutil ] || exit 1
 [ -x /usr/sbin/installer ] || exit 1
@@ -344,35 +367,93 @@ printf "%s\n" "$out" | grep -Eq "^[[:space:]]*1\. Developer ID Installer: .* \($
 #   $3=имя бандла в /Applications. codesign --verify -R (нативный designated requirement:
 #   anchor apple generic + ТОЧНЫЙ Team ID через certificate leaf[subject.OU]; крипто-оценка
 #   самой подписи, НЕ парсинг -dv) + spctl --assess (нотаризация) на STAGED копии, затем
-#   cp staged в /Applications. detach mount ПОСЛЕ этого уже не влияет (работаем с копией).
-HM_APP_INSTALL_SH='PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+#   staged-бандл ПЕРЕИМЕНОВЫВАЕТСЯ в /Applications. detach mount ПОСЛЕ этого уже не влияет.
+#
+#   Назначение (находка M-3). /Applications на macOS — root:admin 0775, обычный ученик состоит в
+#   admin, значит ТОТ ЖЕ пользователь, пока открыто окно пароля (оно может висеть сколько угодно),
+#   создаёт /Applications/Cursor.app каталогом со ссылками внутри. Прежний `cp -R staged
+#   /Applications/$3` не отличал это от пустого места: при существующем каталоге клал копию ВНУТРЬ
+#   него, а root писал по ссылкам туда, куда указал не он. Поэтому:
+#     • $3 — ровно ОДНО имя *.app из [A-Za-z0-9 ._+()-] (без «/», без ведущей точки, без
+#       управляющих символов): проверка идёт ДО создания staging и до любого инструмента;
+#     • на месте назначения не должно быть НИЧЕГО (ни файла, ни каталога, ни ссылки, в том числе
+#       висячей). Заменять установленное это скрипт не умеет и не должен: вызывающие (cursor.sh,
+#       handy.sh) вовсе не доходят сюда, если /Applications/<имя> уже есть, а прежний cp -R поверх
+#       существующего каталога давал не обновление, а вложенный «…app/app.app». Занято —
+#       fail-closed;
+#     • на место встаёт ГОТОВЫЙ проверенный staged-бандл одним переименованием (mv -n: на том же
+#       томе это rename(2) — бандл никогда не виден наполовину и ничего не пишется «сквозь» путь);
+#       та самая копия, что прошла codesign+spctl, а не вторая копия с mount;
+#     • окно между проверкой «пусто» и переименованием сведено к одной команде: проверка
+#       повторена прямо перед mv, а после него подтверждено, что на месте назначения именно
+#       наш бандл (не ссылка, и staged действительно ушёл туда, а не ВНУТРЬ чужого каталога).
+#       Полностью закрыть его нельзя — родитель доступен на запись admin-группе, и любая
+#       операция по имени в нём гоняется. Остаток честно назван: если в это окно кто-то успеет
+#       поставить на место назначения каталог или ссылку на каталог, mv положит ПОДЛИННЫЙ
+#       проверенный бандл внутрь него (под именем app.app), проверка «по назначению лежит бандл»
+#       откажет, установка провалится, и ничего чужого не исполнится. Прежний `cp -R` в этой
+#       гонке, а главное — при ЗАРАНЕЕ подложенном каталоге, писал по чужим ссылкам.
+HM_APP_INSTALL_SH='HOME=/var/root; export HOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 set -e
 [ -x /usr/bin/codesign ] || exit 1
 [ -x /usr/sbin/spctl ] || exit 1
+[ -x /bin/mv ] || exit 1
+case "$3" in
+  ""|.*|*/*|*[[:cntrl:]]*|*[!A-Za-z0-9._+\ \(\)-]*) exit 1 ;;
+  *.[aA][pP][pP]) ;;
+  *) exit 1 ;;
+esac
+dest="/Applications/$3"
+[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 1
 d="$(mktemp -d /var/root/hm_app.XXXXXX)" || exit 1
 trap "rm -rf \"$d\"" EXIT
 /bin/cp -R "$1" "$d/app.app" || exit 1
 /usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"$2\"" "$d/app.app" >/dev/null 2>&1 || exit 1
 /usr/sbin/spctl --assess --type execute "$d/app.app" >/dev/null 2>&1 || exit 1
-/bin/cp -R "$d/app.app" "/Applications/$3" || exit 1'
+[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 1
+/bin/mv -n "$d/app.app" "$dest" || exit 1
+[ ! -e "$d/app.app" ] && [ ! -L "$dest" ] && [ -d "$dest/Contents" ] || exit 1'
 
 # HM_VSCODE_INSTALL_SH — вшитый .zip VS Code под root: $1=путь к .zip, $2=Team ID,
 #   $3=ПОЛНЫЙ путь назначения (/Applications/Visual Studio Code.app). cp zip в staging ->
 #   ditto распаковка в staging -> codesign -R (Team ID Microsoft) + spctl (нотаризация)
-#   распакованного .app -> cp .app в назначение -> снять карантин. Всё над root-owned
-#   staging: SHA на вшитом zip НЕ защищает от same-UID подмены (checksums.json тоже
-#   same-UID) — гейт = крипто-подпись Microsoft на распакованном бандле.
+#   распакованного .app -> снять карантин и отдать владельцу ТУТ ЖЕ, на staged -> переименовать
+#   на место. Всё над root-owned staging: SHA на вшитом zip НЕ защищает от same-UID подмены
+#   (checksums.json тоже same-UID) — гейт = крипто-подпись Microsoft на распакованном бандле.
 #   $4 (необязательный) = владелец: .app уже ПРОВЕРЕН и скопирован, отдаём его человеку.
 #   Иначе бандл принадлежит root, и самообновление VS Code каждый раз просит пароль
 #   или Touch ID для «вспомогательной программы» (A42). Имя проверяется здесь же
 #   (только [A-Za-z0-9._-], не root, учётка существует); провал chown установку НЕ валит.
-HM_VSCODE_INSTALL_SH='PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
+#
+#   Назначение (находка M-3) — те же правила, что у HM_APP_INSTALL_SH: $3 обязан быть РОВНО
+#   /Applications/<одно имя>.app, на месте не должно быть ничего (ни ссылки, ни каталога, ни
+#   файла), на место встаёт готовый проверенный бандл одним переименованием. Плюс: xattr и chown
+#   раньше шли по КОНЕЧНОМУ пути (`xattr -dr … "$3"`) уже после копирования — подложенная в
+#   последний момент ссылка превращала их в root-действия над чужим деревом. Теперь оба
+#   выполняются над staged-копией в root-private каталоге (туда пользователь не попадёт), а по
+#   пути в /Applications не делается ничего, кроме проверки и самого rename.
+#   Раньше при негодном владельце скрипт выходил `exit 0` в конце; теперь владелец решается ДО
+#   переименования, поэтому выхода посередине нет — установка заканчивается переименованием.
+HM_VSCODE_INSTALL_SH='HOME=/var/root; export HOME
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 set -e
 [ -x /usr/bin/ditto ] || exit 1
 [ -x /usr/bin/find ] || exit 1
 [ -x /usr/bin/codesign ] || exit 1
 [ -x /usr/sbin/spctl ] || exit 1
 [ -x /usr/bin/xattr ] || exit 1
+[ -x /bin/mv ] || exit 1
+case "$3" in
+  /Applications/*) n="${3#/Applications/}" ;;
+  *) exit 1 ;;
+esac
+case "$n" in
+  ""|.*|*/*|*[[:cntrl:]]*|*[!A-Za-z0-9._+\ \(\)-]*) exit 1 ;;
+  *.[aA][pP][pP]) ;;
+  *) exit 1 ;;
+esac
+[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1
 d="$(mktemp -d /var/root/hm_vsc.XXXXXX)" || exit 1
 trap "rm -rf \"$d\"" EXIT
 /bin/cp "$1" "$d/vscode.zip" || exit 1
@@ -381,11 +462,16 @@ app="$(/usr/bin/find "$d/unz" -maxdepth 2 -type d -name "*.app" | head -n1)"
 [ -n "$app" ] || exit 1
 /usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"$2\"" "$app" >/dev/null 2>&1 || exit 1
 /usr/sbin/spctl --assess --type execute "$app" >/dev/null 2>&1 || exit 1
-/bin/cp -R "$app" "$3" || exit 1
-/usr/bin/xattr -dr com.apple.quarantine "$3" || exit 1
-case "$4" in ""|root|-*|*[!A-Za-z0-9._-]*) exit 0 ;; esac
-/usr/bin/id -u "$4" >/dev/null 2>&1 || exit 0
-/usr/sbin/chown -R -h "$4":staff "$3" || :'
+/usr/bin/xattr -dr com.apple.quarantine "$app" || exit 1
+own=""
+case "$4" in
+  ""|root|-*|*[!A-Za-z0-9._-]*) ;;
+  *) if /usr/bin/id -u "$4" >/dev/null 2>&1; then own="$4"; fi ;;
+esac
+if [ -n "$own" ]; then /usr/sbin/chown -R -h "$own":staff "$app" || :; fi
+[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1
+/bin/mv -n "$app" "$3" || exit 1
+[ ! -e "$app" ] && [ ! -L "$3" ] && [ -d "$3/Contents" ] || exit 1'
 
 # ---- Готовые сборки вместо компиляции на машине человека (Intel / Rosetta / нет CLT) ----
 # Живой случай 23.09.2026 (Mac на Intel, офлайн-издание): pip не нашёл готовую

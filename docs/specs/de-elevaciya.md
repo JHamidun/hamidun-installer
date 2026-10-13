@@ -4,7 +4,7 @@
 
 - **Раздел:** Целостность и гейты
 - **Код:** `scripts/windows/_deelev.ps1`, `src/staging-paths.js`, `src/deelev-route.js`, `src/main.js:1608-2040`, `src/main.js:303-344`, `src/main.js:998-1027`, `src/main.js:2218-2240`, `src/remote-fetch.js:296-331`, `scripts/windows/vscode.ps1:132-258`, `scripts/windows/extension.ps1:111-150`, `scripts/windows/bridge.ps1:60-186`, `scripts/windows/handy.ps1:43-121`, `scripts/windows/claude.ps1:88-110`, `scripts/windows/cursor.ps1:52-95`, `scripts/windows/git.ps1:74-105`, `scripts/windows/node.ps1:117-150`, `scripts/windows/pydeps.ps1:63-95`, `scripts/windows/claude-desktop.ps1:196-215`, `scripts/macos/_lib.sh`, `.github/workflows/staging-primitive.yml`, `test/staging-primitive.ps1`, `package.json`
-- **Тесты:** «_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE staging; env-литералы до cmdlet; абс. whoami; gate; Last Result; fail-closed», «_deelev.ps1: round-trip — де-элевирует команду на MEDIUM (маркер содержит S-1-16-8192), Gate=medium; либо fail-closed $null», «_deelev.ps1: Test-HmExtInstalled — ^${extId}-<цифра> + Directory-only (helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит)», «P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%); env-литералы; абс. whoami; gate; Last Result аттестация; folder-fallback; quoting пробела», «P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::CreateDirectory($dir,$sd) + main.js делегирует, нет fs.mkdirSync+icacls)», «P0 regate#4 (round-trip): New-HmSecureStagingDir -> каталог PROTECTED (наследование снято) без посторонних ACE; либо fail-closed $null», «P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)», «P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed», «P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed», «ИНВАРИАНТ: нет user-writable control/attestation-файлов в trust-пути (_deelev.ps1 + main.js launch)», «_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)», «_deelev.ps1: объявления ДО первого использования; авто-уборка стоит ПОСЛЕДНЕЙ», «_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe», «_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы», «_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)», «PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)», «staging-paths: rmStagingTree сносит ВНЕШНИЙ HmDeElev-<hex>; чужое имя цело (fail-closed)», «main.js: все сносы staging идут через rmStagingTree, голого rmSync(stagingRootOf) нет», «main.js: путь вне %ProgramData% -> отказ БЕЗ удаления», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)», «claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken», «долгие шаги не выглядят зависшими: де-элевированная установка печатает отсчёт, сторож не обвиняет MSI», «причина отказа staging-каталога приходит в UTF-8», «_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0700), verify+install на STAGED, позиционные $N, fail-closed; verify_pkg_team_id удалён», «deelev-route: Last Result 0x80070005 и SCHED_E_* — не стартовало; 210 — отказ гейта; 267014 — прервана; код программы — medium», «deelev-route: второй путь — ТОЛЬКО при доказанной тишине задачи (до /Run, 210, HRESULT); 0/211/служебные/таймаут — нет», «A1 (прогон PS 5.1): Get-HmTaskVerdict и deelev-route.taskVerdict дают ОДИН вердикт на одних числах», «A1 (прогон PS 5.1): второй путь и повтор — только при доказанной тишине; итог и строка журнала», «A1 (прогон PS 5.1): запасной путь — обе строки не длиннее 1024 знаков на реалистичных вызовах (pip с колёсами, Handy, самопроверка, vsix); прежняя строка выходила за предел», «A1 (прогон cmd.exe): подготовка журнала — каталог, ротация, заголовок, код выхода; недоступный журнал даёт код 1, основная строка — код и вывод программы», «A1c (прогон PS 5.1): типографские кавычки в пути (O’Brien) не ломают обёртку задачи — разбор без ошибок, литералы означают ровно исходные значения; прежнее удвоение одного ASCII ломало», «A1c (прогон PS 5.1): deelev-route.psQuoteBody/psLit/psArgList — те же литералы со стороны Node; значения доходят неискажёнными (настоящий парсер PowerShell)», «main.js: литералы PowerShell в запуске скриптов, защищённом каталоге, запасном пути и обёртке запуска редактора — только через deelevRoute.psQuoteBody/psLit», «A1c (прогон PS 5.1): Invoke-HmDeElevatedSafe зовёт запасной путь РОВНО при доказанной тишине задачи; во всех остальных исходах — нет», «extension.ps1: Cursor ставится через Invoke-HmDeElevatedSafe, голого Invoke-HmDeElevated нет, второй запуск только после доказанно отработавшего первого», «extension.ps1 (прогон PS 5.1): расширение Cursor встало — exit 0; отказ по политике — fail-closed exit 1 с одним запуском; vsix не встал при Gate medium — второй запуск из Marketplace; ещё идёт — второго нет», «A1 (прогон PS 5.1): токен оболочки Explorer читается (medium, та же учётная запись); запуск без SeImpersonate — честный отказ, а не обход», «_deelev.ps1: запасной путь — без Add-Type/csc и без explorer.exe; токен проверен ДО CreateProcessWithTokenW; родитель журнал ребёнка НЕ читает», «сторож порядка запасного пути краснеет на мутанте без проверки токена (подлог)», «vscode.ps1/bridge.ps1/handy.ps1: де-элевированные шаги идут через Invoke-HmDeElevatedSafe; итог — по диску/реестру», «A1c (прогон PS 5.1): Invoke-HmAsShellUser на подменённом системном слое — подготовка журнала, затем программа; журнал не открылся — программа напрямую; слишком длинная строка — отказ без запуска; политика токена стоит ДО любого запуска»
+- **Тесты:** «_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE staging; env-литералы до cmdlet; абс. whoami; gate; Last Result; fail-closed», «_deelev.ps1: round-trip — де-элевирует команду на MEDIUM (маркер содержит S-1-16-8192), Gate=medium; либо fail-closed $null», «_deelev.ps1: Test-HmExtInstalled — ^${extId}-<цифра> + Directory-only (helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит)», «P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%); env-литералы; абс. whoami; gate; Last Result аттестация; folder-fallback; quoting пробела», «P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::CreateDirectory($dir,$sd) + main.js делегирует, нет fs.mkdirSync+icacls)», «P0 regate#4 (round-trip): New-HmSecureStagingDir -> каталог PROTECTED (наследование снято) без посторонних ACE; либо fail-closed $null», «P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)», «P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed», «P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed», «ИНВАРИАНТ: нет user-writable control/attestation-файлов в trust-пути (_deelev.ps1 + main.js launch)», «_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)», «_deelev.ps1: объявления ДО первого использования; авто-уборка стоит ПОСЛЕДНЕЙ», «_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe», «_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы», «_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)», «PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)», «staging-paths: rmStagingTree сносит ВНЕШНИЙ HmDeElev-<hex>; чужое имя цело (fail-closed)», «main.js: все сносы staging идут через rmStagingTree, голого rmSync(stagingRootOf) нет», «main.js: путь вне %ProgramData% -> отказ БЕЗ удаления», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)», «claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken», «долгие шаги не выглядят зависшими: де-элевированная установка печатает отсчёт, сторож не обвиняет MSI», «причина отказа staging-каталога приходит в UTF-8», «_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0700), verify+install на STAGED, позиционные $N, fail-closed; verify_pkg_team_id удалён», «deelev-route: Last Result 0x80070005 и SCHED_E_* — не стартовало; 210 — отказ гейта; 267014 — прервана; код программы — medium», «deelev-route: второй путь — ТОЛЬКО при доказанной тишине задачи (до /Run, 210, HRESULT); 0/211/служебные/таймаут — нет», «A1 (прогон PS 5.1): Get-HmTaskVerdict и deelev-route.taskVerdict дают ОДИН вердикт на одних числах», «A1 (прогон PS 5.1): второй путь и повтор — только при доказанной тишине; итог и строка журнала», «A1 (прогон PS 5.1): запасной путь — обе строки не длиннее 1024 знаков на реалистичных вызовах (pip с колёсами, Handy, самопроверка, vsix); прежняя строка выходила за предел», «A1 (прогон cmd.exe): подготовка журнала — каталог, ротация, заголовок, код выхода; недоступный журнал даёт код 1, основная строка — код и вывод программы», «A1c (прогон PS 5.1): типографские кавычки в пути (O’Brien) не ломают обёртку задачи — разбор без ошибок, литералы означают ровно исходные значения; прежнее удвоение одного ASCII ломало», «A1c (прогон PS 5.1): deelev-route.psQuoteBody/psLit/psArgList — те же литералы со стороны Node; значения доходят неискажёнными (настоящий парсер PowerShell)», «main.js: литералы PowerShell в запуске скриптов, защищённом каталоге, запасном пути и обёртке запуска редактора — только через deelevRoute.psQuoteBody/psLit», «A1c (прогон PS 5.1): Invoke-HmDeElevatedSafe зовёт запасной путь РОВНО при доказанной тишине задачи; во всех остальных исходах — нет», «extension.ps1: Cursor ставится через Invoke-HmDeElevatedSafe, голого Invoke-HmDeElevated нет, второй запуск только после доказанно отработавшего первого», «extension.ps1 (прогон PS 5.1): расширение Cursor встало — exit 0; отказ по политике — fail-closed exit 1 с одним запуском; vsix не встал при Gate medium — второй запуск из Marketplace; ещё идёт — второго нет», «A1 (прогон PS 5.1): токен оболочки Explorer читается (medium, та же учётная запись); запуск без SeImpersonate — честный отказ, а не обход», «_deelev.ps1: запасной путь — без Add-Type/csc и без explorer.exe; токен проверен ДО CreateProcessWithTokenW; родитель журнал ребёнка НЕ читает», «сторож порядка запасного пути краснеет на мутанте без проверки токена (подлог)», «vscode.ps1/bridge.ps1/handy.ps1: де-элевированные шаги идут через Invoke-HmDeElevatedSafe; итог — по диску/реестру», «A1c (прогон PS 5.1): Invoke-HmAsShellUser на подменённом системном слое — подготовка журнала, затем программа; журнал не открылся — программа напрямую; слишком длинная строка — отказ без запуска; политика токена стоит ДО любого запуска», «u9/M-3: HM_APP_INSTALL_SH принимает только одно имя *.app из безопасных символов и проверяет его до любых действий», «u9/M-3: HM_APP_INSTALL_SH отвергает подложенную ссылку, каталог или файл на месте назначения», «u9/M-3: HM_APP_INSTALL_SH ставит проверенную staged-копию одним переименованием (mv -n)», «u9/M-3: HM_VSCODE_INSTALL_SH — назначение строго /Applications/<имя>.app, занятое отвергается, xattr и chown на staged-копии до переименования», «u9/M-3: HM_APP_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)», «u9/M-3: HM_VSCODE_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)», «u9/M-8: первая строка каждого HM_*_INSTALL_SH — HOME=/var/root, root-инструменты не видят HOME пользователя»
 
 ## Что обещает человеку
 
@@ -271,23 +271,55 @@ Result `0`. Если задача доказанно ничего не запу�
 
 ### macOS: инверсия вместо де-элевации
 
-На macOS компонентные скрипты запускаются `/bin/bash <script>` из процесса Electron
-(`src/main.js:1225`), который сам **не** повышен. Де-элевировать нечего: по умолчанию
-всё уже идёт от пользователя, а привилегии берутся точечно через `admin_run`
+На macOS компонентные скрипты запускаются `/bin/bash -p <script>` из процесса Electron
+(`src/main.js:1314`), который сам **не** повышен, и с окружением, очищенным списком
+запретов (`installEnv.sanitizePosixEnv`: без `BASH_ENV`, `ENV`, `SHELLOPTS`+`PS4`,
+`BASH_FUNC_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `npm_config_*` и чужих
+`HM_*`; подробности — «Строгий allowlist окружения»). Де-элевировать нечего: по
+умолчанию всё уже идёт от пользователя, а привилегии берутся точечно через `admin_run`
 (`scripts/macos/_lib.sh:38`) — `osascript … "do shell script … with administrator
 privileges"`. Каждый argv-элемент квотируется (`shell_quote_arg`), затем строка
 экранируется для AppleScript, а сам `osascript` запускается под
 `/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME"` — окружение
-medium-шелла до root не доезжает.
+medium-шелла до root не доезжает. Очистка окружения самого bash нужна потому, что
+команду для `admin_run` и тексты root-скриптов собирает именно непривилегированный
+bash: подмена `admin_run` через `BASH_ENV` привела бы к чужому тексту в настоящем
+системном окне пароля.
 
 Root-скрипты (`HM_PKG_INSTALL_SH`, `HM_APP_INSTALL_SH`, `HM_VSCODE_INSTALL_SH`)
 устроены так, что root никогда не исполняет объект, лежащий в пользовательском
-пространстве: сначала `mktemp -d /var/root/…`, затем `cp` артефакта в этот
-root-owned staging, затем проверка (`pkgutil --check-signature` с якорем Team ID в
-конце CN; `codesign --verify --deep --strict -R "=anchor apple generic and
-certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только потом
-установка **ровно** проверенной копии. Внешние значения передаются позиционными
-`$1/$2/$3`, инструменты — абсолютными путями с `|| exit 1`.
+пространстве: первой строкой `HOME=/var/root` (`env -i` передаёт osascript HOME
+пользователя, и он не должен доезжать до root-инструментов), затем `mktemp -d
+/var/root/…`, затем `cp` артефакта в этот root-owned staging, затем проверка
+(`pkgutil --check-signature` с якорем Team ID в конце CN; `codesign --verify --deep
+--strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"$2\""` +
+`spctl --assess`) — и только потом установка **ровно** проверенной копии. Внешние
+значения передаются позиционными `$1/$2/$3`, инструменты — абсолютными путями с
+`|| exit 1`.
+
+Назначение в `/Applications` (`HM_APP_INSTALL_SH`, `HM_VSCODE_INSTALL_SH`) проверяется
+отдельно: `/Applications` на Mac — `root:admin 0775`, а ученик обычно в группе admin,
+значит тот же пользователь, пока окно пароля открыто, может создать
+`/Applications/Cursor.app` каталогом со ссылками внутри. Поэтому имя (`$3`, у VS Code —
+путь `$3`) обязано быть ровно ОДНИМ именем `*.app` из `[A-Za-z0-9 ._+()-]` без ведущей
+точки, `/` и управляющих символов (проверка до создания staging), на месте назначения
+не должно быть ничего (ни файла, ни каталога, ни ссылки, в том числе висячей —
+заменять установленное скрипт не умеет, вызывающие `cursor.sh`/`handy.sh`/`vscode.sh`
+сюда при готовом приложении не доходят), и на место ставится ГОТОВАЯ проверенная
+staged-копия одним `mv -n` — без второго `cp -R` поверх назначения и без `xattr`/`chown`
+по конечному пути (карантин и владелец меняются на staged-копии, до переименования).
+Непосредственно перед `mv -n` назначение проверяется ещё раз: проверка подписи занимает
+минуты, и место могли занять за это время. После переименования проверяется, что
+staged-копия действительно ушла, по назначению лежит бандл (есть `Contents`), а не
+ссылка: `mv -n` на занятое место (по описанию поведения BSD, на настоящем Mac не
+проверялось) может выйти с кодом 0, ничего не сдвинув, а на каталог кладёт копию ВНУТРЬ
+него — поэтому итог проверяется явно, а не по коду возврата. Остаток назван в
+комментарии `_lib.sh`: за
+микросекунды между повторной проверкой и rename тот же пользователь может поставить на
+место каталог (или ссылку на каталог) — тогда подлинный проверенный бандл ляжет внутрь
+него под фиксированным именем, проверка результата откажет и установка провалится;
+ничего не перезаписывается и не исполняется. Обе проверки закреплены исполняемыми
+случаями (заглушка `spctl`/`mv` занимает место во время работы скрипта) и мутантами.
 
 ### CI-гейт
 
@@ -400,8 +432,17 @@ certificate leaf[subject.OU] = \"$2\""` + `spctl --assess`) — и только 
     (`scripts/macos/_lib.sh:302-352`).
 13. **macOS: root-шелл стартует из стёртого окружения.** `admin_run` запускает
     `osascript` под `/usr/bin/env -i` с фиксированным `PATH`
-    (`scripts/macos/_lib.sh:66`), а каждый root-скрипт первой строкой ещё раз
-    фиксирует `PATH` (defense-in-depth).
+    (`scripts/macos/_lib.sh:66`), первой строкой каждого root-скрипта идёт
+    `HOME=/var/root`, второй — ещё раз фиксированный `PATH` (defense-in-depth);
+    все три тела — только ASCII и без одинарных кавычек.
+14а. **macOS: root не пишет в чужое назначение.** `HM_APP_INSTALL_SH` и
+    `HM_VSCODE_INSTALL_SH` принимают только `/Applications/<одно имя>.app`, отказывают
+    при любом занятом месте назначения (файл, каталог, ссылка, висячая ссылка), ставят
+    проверенную staged-копию одним `mv -n` и не вызывают `xattr`/`chown` по конечному
+    пути.
+14б. **macOS: bash компонента стартует без чужого кода из окружения.** Скрипт
+    запускается как `/bin/bash -p` с окружением без `BASH_ENV`/`ENV`/`SHELLOPTS`/
+    `BASH_FUNC_*` и остальных запрещённых переменных (`installEnv.sanitizePosixEnv`).
 16. **Запасной путь не отправляет Windows строку длиннее 1024 знаков.** Обе строки
     (подготовка журнала и основная) проверены в `Get-HmShellLaunchPlan`; не уместились —
     программа идёт напрямую, без журнала, а не обрезается и не отвергается. Сторожит
