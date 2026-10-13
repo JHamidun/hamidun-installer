@@ -17,6 +17,7 @@ const { rmStagingTree } = require('./staging-paths'); // снос staging — т
 const nomadKey = require('./nomad-key');             // запись ключа Nomad в config.yaml
 const deelevRoute = require('./deelev-route');       // «Last Result» задачи → можно ли запасной путь
 const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
+const desktopPath = require('./desktop-path');       // рабочий стол для записи под админом — только из профиля, не из реестра
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -1761,6 +1762,30 @@ function waitTelemetryThen(fn) {
   tick();
 }
 
+// Рабочий стол, в который можно писать и с которого можно убирать файлы из-под администратора.
+// Ответ оболочки (app.getPath('desktop')) берётся из HKCU\...\User Shell Folders, а эту ветку без
+// UAC правит любая программа пользователя: перенаправив «Desktop» в папку, куда она писать не
+// может, а администратор может (автозагрузка всех пользователей, чужой профиль), она получила бы
+// файл, созданный администратором. Поэтому ответ принимается только внутри профиля ИЗ ТОКЕНА
+// (os.userInfo().homedir — не os.homedir(): тот читает переменную USERPROFILE, её тоже подменяют)
+// и без ссылок на пути — см. src/desktop-path.js. '' = стол не годится: файл не пишем, строка в журнале.
+function safeDesktopDir() {
+  let shellDesktop = '';
+  try { shellDesktop = app.getPath('desktop'); } catch (e) { shellDesktop = ''; }
+  let profile = '';
+  try { profile = os.userInfo().homedir; } catch (e) { profile = ''; }
+  let v;
+  try { v = desktopPath.resolveSafeDesktop({ profile, shellDesktop, platform: process.platform }); }
+  catch (e) { v = { ok: false, reason: 'проверка не выполнилась (' + ((e && e.code) || (e && e.message) || e) + ')' }; }
+  if (v.ok) return v.dir;
+  // Ответ оболочки — чужой текст из реестра: в журнал он идёт одной строкой, без переводов строк и управляющих знаков
+  // (иначе значение с \n подделало бы соседние строки журнала).
+  const oneLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '?').slice(0, 300);
+  logToFile('setup', 'Рабочий стол (' + oneLine(shellDesktop || 'оболочка не назвала') + ') не прошёл проверку: ' + oneLine(v.reason) +
+    ' — под администратором на него не пишу и с него ничего не убираю; памятка открывается из ресурсов установщика.');
+  return '';
+}
+
 // shell.openPath резолвится СТРОКОЙ: пустая = успех, непустая = текст ошибки.
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
 ipcMain.handle('open-path', async (_e, p) => {
@@ -1772,8 +1797,13 @@ ipcMain.handle('open-path', async (_e, p) => {
   try {
     const rp = path.resolve(String(p));
     const root = path.resolve(resourceRoot());
-    const desktopMemo = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
-    const allowed = rp === path.resolve(LOG_PATH) || rp === desktopMemo || rp.startsWith(root + path.sep);
+    // Стол проверяем, только если просят именно памятку: на каждый другой путь (журнал, ресурсы)
+    // лишняя проверка и строка об отказе в журнале не нужны. '' — стол не прошёл проверку профиля:
+    // памятка на нём открытию не подлежит.
+    const MEMO_FILE = 'Что дальше — Hamidun.html';
+    const deskDir = path.basename(rp) === MEMO_FILE ? safeDesktopDir() : '';
+    const desktopMemo = deskDir ? path.join(deskDir, MEMO_FILE) : '';
+    const allowed = rp === path.resolve(LOG_PATH) || (desktopMemo !== '' && rp === desktopMemo) || rp.startsWith(root + path.sep);
     if (!allowed) return { ok: false, error: 'bad-path' };
     const err = await shell.openPath(rp);
     return { ok: !err, error: err || '' };
@@ -1805,7 +1835,13 @@ ipcMain.handle('save-start-here', () => {
     src = path.resolve(root, rel);
     if (!src.startsWith(root + path.sep)) return { ok: false, dest: '', src: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, dest: '', src, error: 'source-missing' };
-    const dest = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    // Папка — из профиля, а не «как сказала оболочка» (safeDesktopDir): ответ оболочки лежит в ветке
+    // реестра, которую без UAC правит любая программа пользователя, и перенаправленный в чужую
+    // папку стол получил бы файл, созданный администратором. Отказ — как любой другой сбой
+    // копирования: renderer откроет вшитую копию (src).
+    const desk = safeDesktopDir();
+    if (!desk) return { ok: false, dest: '', src, error: 'desktop-outside-profile' };
+    const dest = path.join(desk, 'Что дальше — Hamidun.html');
     // Проверяем НАЗНАЧЕНИЕ, а не только источник. Раньше здесь был голый
     // copyFileSync: имя на рабочем столе фиксированное и известное заранее, и
     // если по нему заранее подложить symlink или hardlink на чужой файл, копия
@@ -3525,8 +3561,8 @@ function resolveMascotVendorApp() {
 // config.json, vendor. Никаких значений из renderer-env.
 function buildUninstallCtx() {
   const cfg = readJson('config.json', {});
-  let desktop = '';
-  try { desktop = app.getPath('desktop'); } catch (e) { desktop = path.join(os.homedir(), 'Desktop'); }
+  // Стол — только из проверенного (safeDesktopDir); '' → uninstall-targets берёт <профиль>\Desktop.
+  const desktop = safeDesktopDir();
   return {
     platform: process.platform,
     home: os.homedir(),

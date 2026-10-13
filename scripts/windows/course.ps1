@@ -1,6 +1,7 @@
 ﻿# Курс-симулятор «Вайбкодинг с Claude Code» — Windows
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # Get-HmSafeShellFolder / Test-HmShellFolder: стол — из профиля, а не из реестра
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -193,55 +194,78 @@ if ($env:HM_COURSE_GLOBAL -eq '1') {
 
 # --- ярлык запуска на рабочем столе ---
 $shortcutName = if ($env:HM_COURSE_SHORTCUT) { $env:HM_COURSE_SHORTCUT } else { 'Курс вайбкодинг (Claude Code)' }
-try {
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $lnkPath = Join-Path $desktop ($shortcutName + '.lnk')
-    $ws = New-Object -ComObject WScript.Shell
-    $sc = $ws.CreateShortcut($lnkPath)
-    # Логика запуска вынесена в .cmd рядом с курсом, а не втиснута в аргументы ярлыка.
-    #
-    # Внутри cmd связка `claude || codex` означает НЕ то, что читается: `||`
-    # срабатывает на любой ненулевой код, поэтому упавший или прерванный Ctrl+C
-    # Claude Code молча поднимал бы Codex вместо сообщения о сбое. Развилка «есть ли
-    # такая команда» и развилка «чем закончил агент» — разные вопросы, и в одну
-    # строку cmd их без ловушек не свести.
-    #
-    # Codex здесь не «на всякий случай»: курс лежит и в CLAUDE.md, и в AGENTS.md,
-    # то есть читается обоими агентами одинаково. Пока ярлык знал только claude,
-    # ученик с одним лишь Codex утыкался в «команда не найдена».
-    $launcherPath = Join-Path $courseDir 'Запустить курс.cmd'
-    $launcherBody = @(
-        '@echo off',
-        'chcp 65001 >nul',
-        'cd /d "%~dp0"',
-        'where claude >nul 2>&1',
-        'if %errorlevel%==0 (',
-        '  claude',
-        '  goto :eof',
-        ')',
-        'where codex >nul 2>&1',
-        'if %errorlevel%==0 (',
-        '  codex',
-        '  goto :eof',
-        ')',
-        'echo Ни Claude Code, ни Codex не найдены.',
-        'echo Запусти установщик ещё раз и включи компонент Claude Code,',
-        'echo либо открой эту папку в своём агенте и напиши: начать',
-        'pause'
-    ) -join "`r`n"
-    # BOM не пишем: cmd.exe его не понимает и спотыкается на первой строке.
-    [IO.File]::WriteAllText($launcherPath, $launcherBody + "`r`n", (New-Object Text.UTF8Encoding $false))
-    # Целью ярлыка ставим сам .cmd, а не `cmd.exe /c "<путь>"`: у /c своё правило
-    # обработки кавычек, когда строка начинается с кавычки, и путь с пробелами
-    # (а он с пробелами — «Запустить курс.cmd») там разъезжается.
-    $sc.TargetPath = $launcherPath
-    $sc.WorkingDirectory = $courseDir
-    $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,13"
-    $sc.Description = 'Открыть курс-симулятор вайбкодинга в Claude Code'
-    $sc.Save()
-    Write-Host "Ярлык создан: $lnkPath"
-    Write-Host "HM-RECEIPT path $lnkPath"
-} catch { Write-Host "Ярлык не создался (не критично): $($_.Exception.Message)" }
+# Функцией, чтобы тесты гоняли настоящий код на подставной папке стола (в самом скрипте её
+# даёт система). Возвращает путь созданного ярлыка либо $null: папка стола не прошла проверку
+# профиля (причина уже в журнале) или ярлык не создался. Лаунчер «Запустить курс.cmd» лежит
+# в папке курса и пишется в любом случае: без ярлыка курс запускается из папки.
+function New-HmCourseShortcut {
+    param([string]$Name, [string]$CourseDir)
+    try {
+        # Папка стола — из профиля, а не «как сказала оболочка»: ответ оболочки лежит в ветке
+        # реестра, которую без UAC правит любая программа пользователя, и ярлык, созданный
+        # администратором, лёг бы в чужую папку (автозагрузка всех пользователей, чужой профиль).
+        # Get-HmSafeShellFolder принимает только папку внутри профиля, без ссылок на пути.
+        $desktop = Get-HmSafeShellFolder -Kind Desktop
+        # Логика запуска вынесена в .cmd рядом с курсом, а не втиснута в аргументы ярлыка.
+        #
+        # Внутри cmd связка `claude || codex` означает НЕ то, что читается: `||`
+        # срабатывает на любой ненулевой код, поэтому упавший или прерванный Ctrl+C
+        # Claude Code молча поднимал бы Codex вместо сообщения о сбое. Развилка «есть ли
+        # такая команда» и развилка «чем закончил агент» — разные вопросы, и в одну
+        # строку cmd их без ловушек не свести.
+        #
+        # Codex здесь не «на всякий случай»: курс лежит и в CLAUDE.md, и в AGENTS.md,
+        # то есть читается обоими агентами одинаково. Пока ярлык знал только claude,
+        # ученик с одним лишь Codex утыкался в «команда не найдена».
+        $launcherPath = Join-Path $CourseDir 'Запустить курс.cmd'
+        $launcherBody = @(
+            '@echo off',
+            'chcp 65001 >nul',
+            'cd /d "%~dp0"',
+            'where claude >nul 2>&1',
+            'if %errorlevel%==0 (',
+            '  claude',
+            '  goto :eof',
+            ')',
+            'where codex >nul 2>&1',
+            'if %errorlevel%==0 (',
+            '  codex',
+            '  goto :eof',
+            ')',
+            'echo Ни Claude Code, ни Codex не найдены.',
+            'echo Запусти установщик ещё раз и включи компонент Claude Code,',
+            'echo либо открой эту папку в своём агенте и напиши: начать',
+            'pause'
+        ) -join "`r`n"
+        # BOM не пишем: cmd.exe его не понимает и спотыкается на первой строке.
+        [IO.File]::WriteAllText($launcherPath, $launcherBody + "`r`n", (New-Object Text.UTF8Encoding $false))
+        if (-not $desktop) { return $null }   # причину уже напечатал Get-HmSafeShellFolder
+        # Имя приходит из конфига сборки; разделитель пути в нём увёл бы файл из проверенной папки.
+        if ($Name -match '[\\/:*?"<>|]') { throw "в имени ярлыка недопустимые знаки: $Name" }
+        # Поля ярлыка — блоком: сам ярлык New-HmShortcutFile сохраняет под случайным именем во временной
+        # папке и переносит на место одним Move (повторная установка заменяет прежний ярлык). Save() прямо
+        # по пути писал бы сквозь symlink или жёсткую ссылку, заранее положенную на имя ярлыка, и затёр
+        # бы чужой файл из-под администратора; перед Move там же повторяется проверка папки стола.
+        $fill = {
+            param($sc)
+            # Целью ярлыка ставим сам .cmd, а не `cmd.exe /c "<путь>"`: у /c своё правило
+            # обработки кавычек, когда строка начинается с кавычки, и путь с пробелами
+            # (а он с пробелами — «Запустить курс.cmd») там разъезжается.
+            $sc.TargetPath = $launcherPath
+            $sc.WorkingDirectory = $CourseDir
+            $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,13"
+            $sc.Description = 'Открыть курс-симулятор вайбкодинга в Claude Code'
+        }.GetNewClosure()
+        $lnkPath = New-HmShortcutFile -Dir $desktop -Name ($Name + '.lnk') -Fill $fill -ProfileDir (Get-HmProfileRoot) -Replace
+        Write-Host "Ярлык создан: $lnkPath"
+        Write-Host "HM-RECEIPT path $lnkPath"
+        return $lnkPath
+    } catch {
+        Write-Host "Ярлык не создался (не критично): $($_.Exception.Message)"
+        return $null
+    }
+}
+$courseLnk = New-HmCourseShortcut -Name $shortcutName -CourseDir $courseDir
 
 # Честное предупреждение: без claude ярлык откроет голую консоль с «команда не найдена».
 # Ищем ПО АБСОЛЮТНЫМ ПУТЯМ, как Find-ClaudeBinary в claude.ps1: PATH этого процесса урезан
@@ -291,5 +315,9 @@ if (-not $claudeSeen) {
 # её же называет финальный экран установщика. Пока здесь стояло «поехали», человек
 # слышал три разных слова из трёх мест (экран — «начать», скрипт — «поехали»,
 # README курса — «/начать»), и любое из них выглядело как единственно верное.
-Write-Host "OK: курс-симулятор установлен. Открой ярлык «$shortcutName» (или папку $courseDir) и напиши агенту «начать»."
+if ($courseLnk) {
+    Write-Host "OK: курс-симулятор установлен. Открой ярлык «$shortcutName» (или папку $courseDir) и напиши агенту «начать»."
+} else {
+    Write-Host "OK: курс-симулятор установлен. Ярлыка на рабочем столе нет (причина выше): открой папку $courseDir и запусти «Запустить курс.cmd» или напиши своему агенту «начать»."
+}
 exit 0
