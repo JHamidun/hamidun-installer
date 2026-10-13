@@ -18394,3 +18394,1587 @@ ok('config.json в репозитории без сборочных маркер
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 }());
+
+// ===========================================================================
+// security-fix u6: корни профиля берём из ТОКЕНА процесса, а не из окружения (F9), и Python-пакеты
+// определяем по ФАЙЛАМ — интерпретатор под администратором для детекции не запускается (F4 + проба
+// `import playwright` в verify.ps1).
+//
+// F9. Установщик идёт под UAC-токеном, а USERPROFILE/APPDATA/LOCALAPPDATA лежат в HKCU (в том числе в
+// «Volatile Environment» — ключ доступен пользователю на запись) и попадают в окружение процесса.
+// os.homedir() берёт USERPROFILE из окружения ПЕРВЫМ, os.userInfo().homedir — из токена (проверено
+// на рантайме Electron 44.5.1). Тесты: чистая функция resolveProfileRoots (матрица), сторож порядка в
+// main.js (замок ДО LOG_DIR), настоящий рантайм Electron и ЗАГРУЗКА НАСТОЯЩЕГО main.js под заглушкой electron.
+//
+// F4. `python -E -c "import PIL, requests"` НЕ отключает user site-packages: usercustomize.py и import-строки
+// *.pth из %APPDATA%\Python\Python3xx\site-packages выполняются при старте интерпретатора (воспроизведено на
+// настоящем Python в песочнице). Поэтому детекция идёт по файлам (src/py-detect.js), а негативный контроль
+// гоняет СТАРУЮ пробу на том же дереве и показывает, что она исполняла бы подложенный код.
+//
+// Секция — анонимный IIFE с `})();` в конце: tools-раннер run_section.js вырезает её по заголовку.
+// ===========================================================================
+(function () {
+  console.log('\n== Корни профиля из токена (F9) и Python-пакеты по файлам без запуска интерпретатора (F4) ==');
+  const cp = require('child_process');
+  const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const VERIFY = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'verify.ps1'), 'utf8').replace(/^\uFEFF/, '');
+  const E2E = () => fs.readFileSync(path.join(ROOT, 'test', 'e2e-gui.js'), 'utf8');
+  const FIXTURE = (n) => fs.readFileSync(path.join(ROOT, 'test', 'fixtures', n), 'utf8');
+  const codeOnlyJs = (s) => String(s).split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const PE = () => require(path.join(ROOT, 'src', 'profile-env.js'));
+  const PD = () => require(path.join(ROOT, 'src', 'py-detect.js'));
+  const PS51 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+
+  // Бинарник Electron 44: node_modules рабочей копии или NODE_PATH (в рабочем дереве node_modules нет).
+  function electronExe() {
+    try { const p = require('electron'); if (typeof p === 'string' && fs.existsSync(p)) return p; } catch (e) { /* пакета нет */ }
+    try {
+      const rel = fs.readFileSync(path.join(ROOT, 'node_modules', 'electron', 'path.txt'), 'utf8').trim();
+      const p = path.join(ROOT, 'node_modules', 'electron', 'dist', rel);
+      if (rel && fs.existsSync(p)) return p;
+    } catch (e) { /* нет */ }
+    return '';
+  }
+
+  // ---- 1. resolveProfileRoots: чистая функция, матрица ------------------------------------------
+  const TOKEN = 'C:\\Users\\student';
+  const mkEnv = (o) => Object.assign({
+    USERPROFILE: TOKEN, HOMEDRIVE: 'C:', HOMEPATH: '\\Users\\student',
+    APPDATA: TOKEN + '\\AppData\\Roaming', LOCALAPPDATA: TOKEN + '\\AppData\\Local',
+    TEMP: TOKEN + '\\AppData\\Local\\Temp', TMP: TOKEN + '\\AppData\\Local\\Temp',
+  }, o || {});
+  const resolveRoots = (env, tokenHome = TOKEN, platform = 'win32') =>
+    PE().resolveProfileRoots({ env, tokenHome, platform });
+  const names = (r) => r.overrides.map((o) => o.name).sort().join(',');
+
+  ok('profile-env: согласованное окружение не трогается — регистр, слэши, хвостовой слэш, кириллица с пробелом и U+2019, другой диск, нестандартный AppData внутри профиля', () => {
+    let r = resolveRoots(mkEnv());
+    assert.strictEqual(names(r), '', 'базовый случай без переопределений: ' + JSON.stringify(r.overrides));
+    assert.strictEqual(r.home, TOKEN);
+    // регистр, прямые слэши, хвостовой слэш — одно и то же место
+    r = resolveRoots(mkEnv({
+      USERPROFILE: 'c:/USERS/Student/', HOMEPATH: '\\users\\STUDENT\\',
+      APPDATA: 'C:\\users\\STUDENT\\appdata\\roaming\\', LOCALAPPDATA: 'c:/users/student/AppData/Local',
+    }));
+    assert.strictEqual(names(r), '', 'регистр и форма слэшей — не расхождение: ' + JSON.stringify(r.overrides));
+    // кириллица, пробел и правая кавычка U+2019 в имени профиля, регистр кириллицы разный
+    const cyr = 'C:\\Users\\Иван Петров\u2019s';
+    r = resolveRoots(mkEnv({
+      USERPROFILE: cyr.toUpperCase(), HOMEPATH: '\\Users\\иван петров\u2019s',
+      APPDATA: cyr + '\\AppData\\Roaming', LOCALAPPDATA: cyr + '\\AppData\\Local',
+    }), cyr);
+    assert.strictEqual(names(r), '', 'кириллица/пробел/U+2019: ' + JSON.stringify(r.overrides));
+    assert.strictEqual(r.home, cyr, 'домашний каталог отдаётся в написании токена');
+    // профиль на другом диске
+    r = resolveRoots(mkEnv({
+      USERPROFILE: 'D:\\Users\\student', HOMEDRIVE: 'D:',
+      APPDATA: 'D:\\Users\\student\\AppData\\Roaming', LOCALAPPDATA: 'D:\\Users\\student\\AppData\\Local',
+    }), 'D:\\Users\\student');
+    assert.strictEqual(names(r), '', 'профиль на D: — норма: ' + JSON.stringify(r.overrides));
+    // нестандартный, но ВНУТРИ профиля AppData (перенос в OneDrive и т.п.) остаётся как есть
+    const odr = TOKEN + '\\OneDrive\\AppData\\Roaming';
+    const odl = TOKEN + '\\AppData\\Local\\Custom';
+    r = resolveRoots(mkEnv({ APPDATA: odr, LOCALAPPDATA: odl }));
+    assert.strictEqual(names(r), '', 'каталог внутри профиля сохраняется: ' + JSON.stringify(r.overrides));
+    assert.strictEqual(r.appData, odr, 'AppData внутри профиля не заменён дефолтом');
+    assert.strictEqual(r.localAppData, odl);
+    // Имена с точкой или пробелом В НАЧАЛЕ и СЕРЕДИНЕ компонента — обычные имена каталогов: Win32 отбрасывает
+    // только хвостовые. Правило «хвостовая точка или пробел» не должно их задеть.
+    const oddName = TOKEN + '\\.config\\ x\\a.b\\c d\\..hidden\\\u0418\u0432\u0430\u043d\u2019s\\v1.2';
+    r = resolveRoots(mkEnv({ APPDATA: oddName, LOCALAPPDATA: oddName }));
+    assert.strictEqual(names(r), '', 'точка/пробел внутри и в начале имени — не расхождение: ' + JSON.stringify(r.overrides));
+    assert.strictEqual(r.appData, oddName, 'каталог с необычным, но законным именем не заменён дефолтом');
+    // Профили, которые Windows создаёт на самом деле (рецензия: правило не должно отвергнуть законный профиль):
+    // пробел в имени, 8.3, суффикс «.ИМЯ-МАШИНЫ» и «.000» после переноса или восстановления, домен.
+    for (const legit of ['C:\\Users\\John Doe', 'C:\\Users\\JOHNDO~1', 'C:\\Users\\john.DESKTOP-ABC123', 'C:\\Users\\john.000',
+      'C:\\Users\\\u0418\u0432\u0430\u043d \u041f\u0435\u0442\u0440\u043e\u0432', 'D:\\Profiles\\o\u2019brien', 'E:\\Users\\a.b.c']) {
+      const e = { USERPROFILE: legit, HOMEDRIVE: legit.slice(0, 2), HOMEPATH: legit.slice(2),
+        APPDATA: legit + '\\AppData\\Roaming', LOCALAPPDATA: legit + '\\AppData\\Local' };
+      const rl = resolveRoots(e, legit);
+      assert.strictEqual(rl.status, 'ok', 'профиль принят как профиль токена: ' + legit);
+      assert.strictEqual(names(rl), '', 'законный профиль не порождает переопределений: ' + legit + ' ' + JSON.stringify(rl.overrides));
+      assert.deepStrictEqual(rl.respell, [], 'и переписывать в нём нечего: ' + legit);
+    }
+    // Двойник, у которого toLowerCase меняет ДЛИНУ (U+0130 → «i» + U+0307): значение считается «внутри», но отдаётся
+    // профилем в написании токена + хвостом из значения, а не срезом по индексам строки из окружения.
+    const tr = 'C:\\Users\\\u0130van';
+    r = resolveRoots({ USERPROFILE: tr, HOMEDRIVE: 'C:', HOMEPATH: '\\Users\\\u0130van',
+      APPDATA: 'C:\\Users\\i\u0307van\\AppData\\Roaming', LOCALAPPDATA: 'C:\\USERS\\\u0130VAN\\AppData\\Local' }, tr);
+    assert.strictEqual(names(r), '', 'двойник с другой длиной после toLowerCase — то же место: ' + JSON.stringify(r.overrides));
+    assert.strictEqual(r.appData, tr + '\\AppData\\Roaming', 'профиль в написании токена, хвост из значения (не срез по индексу)');
+    assert.strictEqual(r.localAppData, tr + '\\AppData\\Local');
+    // Каноническое написание (рецензия): «то же место», записанное иначе, расхождением не считается и журнала
+    // не пишет, но строка в окружении ПЕРЕПИСЫВАЕТСЯ — иначе скрипты и os.homedir() получили бы значение,
+    // которое Win32 читает не так, как наше сравнение (пробел по краям, ./.., прямые слэши).
+    assert.deepStrictEqual(resolveRoots(mkEnv()).respell, [], 'точное совпадение — переписывать нечего');
+    const spelledEnv = mkEnv({
+      USERPROFILE: ' C:/USERS/Student/.', HOMEDRIVE: 'c:', HOMEPATH: '\\users\\STUDENT\\',
+      APPDATA: 'c:/users/student/AppData/Roaming/', LOCALAPPDATA: TOKEN + '\\AppData\\Local\\.',
+    });
+    const rs = resolveRoots(spelledEnv);
+    assert.deepStrictEqual(rs.overrides, [], 'это то же место: расхождений нет');
+    assert.deepStrictEqual(rs.respell.map((x) => x.name).sort(), ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'USERPROFILE']);
+    PE().applyProfileRoots(spelledEnv, rs);
+    assert.strictEqual(spelledEnv.USERPROFILE, TOKEN, 'USERPROFILE — ровно профиль токена, без пробела и прямых слэшей');
+    assert.strictEqual(spelledEnv.HOMEDRIVE, 'C:');
+    assert.strictEqual(spelledEnv.HOMEPATH, '\\Users\\student');
+    assert.strictEqual(spelledEnv.APPDATA, TOKEN + '\\AppData\\Roaming',
+      'оставленный AppData — профиль В НАПИСАНИИ ТОКЕНА + хвост из значения (регистр и вид слэшей префикса из окружения не доходят до скриптов)');
+    assert.strictEqual(spelledEnv.LOCALAPPDATA, TOKEN + '\\AppData\\Local');
+    assert.strictEqual(spelledEnv.TEMP, TOKEN + '\\AppData\\Local\\Temp', 'TEMP не тронут');
+    // через общий вход замка: переписанное в журнал не попадает, окружение исправлено
+    const spelledEnv2 = mkEnv({ USERPROFILE: ' C:/USERS/Student/.' });
+    const lk = PE().lockProfileRoots({ env: spelledEnv2, platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+    assert.deepStrictEqual(lk.lines, [], 'переписывание написания журнал не пишет');
+    assert.strictEqual(spelledEnv2.USERPROFILE, TOKEN, 'и значение в окружении каноническое');
+    assert.strictEqual(lk.respell.length, 1);
+  });
+
+  ok('profile-env: чужой профиль, AppData вне профиля (диск, UNC, относительный, префиксная ловушка, ..), пустые и незаданные — переопределяются значениями из токена; TEMP и TMP не трогаются', () => {
+    const other = 'C:\\Users\\admin2';
+    let r = resolveRoots(mkEnv({
+      USERPROFILE: other, HOMEPATH: '\\Users\\admin2',
+      APPDATA: other + '\\AppData\\Roaming', LOCALAPPDATA: other + '\\AppData\\Local',
+      TEMP: other + '\\AppData\\Local\\Temp', TMP: other + '\\AppData\\Local\\Temp',
+    }));
+    assert.strictEqual(names(r), 'APPDATA,HOMEPATH,LOCALAPPDATA,USERPROFILE', 'чужой профиль: ' + JSON.stringify(r.overrides));
+    const by = {}; r.overrides.forEach((o) => { by[o.name] = o; });
+    assert.deepStrictEqual(by.USERPROFILE, { name: 'USERPROFILE', from: other, to: TOKEN });
+    assert.strictEqual(by.APPDATA.to, TOKEN + '\\AppData\\Roaming');
+    assert.strictEqual(by.LOCALAPPDATA.to, TOKEN + '\\AppData\\Local');
+    assert.strictEqual(by.HOMEPATH.to, '\\Users\\student');
+    assert(!r.overrides.some((o) => /^(TEMP|TMP)$/i.test(o.name)), 'TEMP/TMP — принятый остаток, не трогаем');
+    assert.strictEqual(r.home, TOKEN);
+    assert.strictEqual(r.appData, TOKEN + '\\AppData\\Roaming');
+    assert.strictEqual(r.localAppData, TOKEN + '\\AppData\\Local');
+    // AppData вне профиля — по одному виду нарушения (остальное окружение согласовано)
+    const outside = {
+      'другой диск': 'D:\\Roaming',
+      'UNC-путь': '\\\\attacker\\share\\Roaming',
+      'относительный путь': 'AppData\\Roaming',
+      'нераскрытая переменная': '%USERPROFILE%\\AppData\\Roaming',
+      'префиксная ловушка (student2 при профиле student)': 'C:\\Users\\student2\\AppData\\Roaming',
+      'выход из профиля через ..': TOKEN + '\\AppData\\..\\..\\admin2\\AppData\\Roaming',
+      'сам профиль (не ниже него)': TOKEN,
+      'пустая строка': '',
+      'тот же путь на другом диске': 'D:\\Users\\student\\AppData\\Roaming',
+      'тот же путь без диска (корень текущего диска)': '\\Users\\student\\AppData\\Roaming',
+      'тот же путь в чужой UNC-шаре': '\\\\srv\\share\\Users\\student\\AppData\\Roaming',
+      // Хвостовые точки и пробелы (рецензия r3): Win32 (GetFullPathName) отбрасывает их у последнего компонента
+      // и читает значение как САМ профиль или как другой путь, чем наше текстовое сравнение. Три первых — примеры
+      // рецензента: первые два Win32 раскрывает в корень профиля, третье прежнее правило переписывало в
+      // «<профиль>\ » (пробел на конце), а это Win32 тоже читает как корень профиля.
+      'три точки: <профиль>\\...': TOKEN + '\\...',
+      'пробел и две точки: <профиль>\\ ..': TOKEN + '\\ ..',
+      'пробел и косая в конце: <профиль>\\\\ /': TOKEN + '\\\\ /',
+      'три точки после законного пути': TOKEN + '\\AppData\\Roaming\\...',
+      'хвостовая точка последнего компонента': TOKEN + '\\AppData\\Roaming.',
+      'хвостовая точка и пробел последнего компонента': TOKEN + '\\AppData\\Roaming. /',
+      'хвостовая точка промежуточного компонента (Win32 её снимает)': TOKEN + '\\AppData.\\Roaming',
+      'хвостовые пробелы промежуточного компонента': TOKEN + '\\AppData \\Roaming',
+      'точка и пробел промежуточного компонента': TOKEN + '\\AppData. \\Roaming',
+      'неразрывный пробел последним компонентом': TOKEN + '\\AppData\\Roaming\\\u00A0\\',
+      'хвостовая точка у самого профиля': 'C:\\Users\\student.\\AppData\\Roaming',
+    };
+    for (const [why, v] of Object.entries(outside)) {
+      const ra = resolveRoots(mkEnv({ APPDATA: v }));
+      assert.strictEqual(names(ra), 'APPDATA', 'APPDATA — ' + why + ': ' + JSON.stringify(ra.overrides));
+      assert.strictEqual(ra.appData, TOKEN + '\\AppData\\Roaming', 'APPDATA — ' + why);
+      const rl = resolveRoots(mkEnv({ LOCALAPPDATA: v }));
+      assert.strictEqual(names(rl), 'LOCALAPPDATA', 'LOCALAPPDATA — ' + why + ': ' + JSON.stringify(rl.overrides));
+      assert.strictEqual(rl.localAppData, TOKEN + '\\AppData\\Local', 'LOCALAPPDATA — ' + why);
+    }
+    // USERPROFILE — тот же профиль только при ТОЧНОМ совпадении: профиль-«сосед» с общим началом имени, дочерний
+    // каталог, родитель и более короткий префикс не засчитываются (граница по разделителю, а не startsWith).
+    // Вход тут — ровно цепочка F9: подмена USERPROFILE на каталог соседней учётки.
+    const profileTraps = {
+      'префикс: student2 при профиле student': 'C:\\Users\\student2',
+      'префикс с точкой: student.DOMAIN': 'C:\\Users\\student.DOMAIN',
+      'дочерний каталог профиля': 'C:\\Users\\student\\sub',
+      'более короткий префикс: studen': 'C:\\Users\\studen',
+      'родитель профиля': 'C:\\Users',
+      'тот же каталог на другом диске': 'D:\\Users\\student',
+      // Win32 читает эти значения как сам профиль, но это не его запись: переопределяется и пишется в журнал
+      'три точки после профиля (Win32: сам профиль)': 'C:\\Users\\student\\...',
+      'хвостовая точка у имени профиля (Win32: сам профиль)': 'C:\\Users\\student.',
+    };
+    for (const [why, v] of Object.entries(profileTraps)) {
+      const rp = resolveRoots(mkEnv({ USERPROFILE: v }));
+      assert.deepStrictEqual(rp.overrides.find((x) => x.name === 'USERPROFILE'), { name: 'USERPROFILE', from: v, to: TOKEN },
+        'USERPROFILE — ' + why + ': ' + JSON.stringify(rp.overrides));
+    }
+    // и в обратную сторону: профиль токена — student2, а в окружении короче, student
+    const longTok = 'C:\\Users\\student2';
+    const rr = resolveRoots(mkEnv({ USERPROFILE: TOKEN }), longTok);
+    assert.deepStrictEqual(rr.overrides.find((x) => x.name === 'USERPROFILE'), { name: 'USERPROFILE', from: TOKEN, to: longTok },
+      'профиль токена длиннее значения в окружении: ' + JSON.stringify(rr.overrides));
+    // контроль: ровно тот же профиль в любом написании переопределения не даёт
+    ['C:\\Users\\student', 'c:\\users\\STUDENT\\', 'C:/Users/student', 'C:\\Users\\student\\.'].forEach((v) => {
+      assert.strictEqual(resolveRoots(mkEnv({ USERPROFILE: v })).overrides.find((x) => x.name === 'USERPROFILE'), undefined, 'то же место: ' + v);
+    });
+    // не заданы вовсе
+    const bare = mkEnv(); delete bare.USERPROFILE; delete bare.APPDATA; delete bare.LOCALAPPDATA;
+    r = resolveRoots(bare);
+    assert.strictEqual(names(r), 'APPDATA,LOCALAPPDATA,USERPROFILE', 'незаданные восполняются: ' + JSON.stringify(r.overrides));
+    r.overrides.forEach((o) => assert.strictEqual(o.from, null, o.name + ': «не было» записано как null'));
+    // имена переменных в другом регистре (обычный объект, не process.env)
+    r = resolveRoots({ UserProfile: other, AppData: other + '\\AppData\\Roaming', LocalAppData: other + '\\AppData\\Local',
+      HomeDrive: 'C:', HomePath: '\\Users\\admin2' });
+    assert.strictEqual(names(r), 'APPDATA,HOMEPATH,LOCALAPPDATA,USERPROFILE', 'регистр имён переменных: ' + JSON.stringify(r.overrides));
+    // каталог-«домашняя папка» из AD (H:\) не профиль: HOMEDRIVE/HOMEPATH выводятся из профиля
+    r = resolveRoots(mkEnv({ HOMEDRIVE: 'H:', HOMEPATH: '\\' }));
+    assert.strictEqual(names(r), 'HOMEDRIVE,HOMEPATH');
+    assert.strictEqual(r.homeDrive, 'C:');
+    assert.strictEqual(r.homePath, '\\Users\\student');
+    // повторный прогон по уже исправленному окружению ничего не находит
+    const env2 = mkEnv({ USERPROFILE: other, APPDATA: 'D:\\x' });
+    PE().applyProfileRoots(env2, resolveRoots(env2));
+    assert.strictEqual(names(resolveRoots(env2)), '', 'после применения расхождений нет');
+    assert.strictEqual(env2.USERPROFILE, TOKEN);
+    assert.strictEqual(env2.TEMP, TOKEN + '\\AppData\\Local\\Temp', 'TEMP не тронут применением');
+    // Идемпотентность (рецензия r3): второй проход по УЖЕ исправленному окружению не находит ни расхождений, ни
+    // переписываний и ничего не меняет — для значений, которые первый проход оставил, переписал и заменил.
+    const nasty = [
+      TOKEN + '\\...', TOKEN + '\\ ..', TOKEN + '\\\\ /', TOKEN + '\\AppData\\Local\\...', TOKEN + '\\AppData.\\Local',
+      TOKEN + '\\AppData\\Local\\\u00A0\\', TOKEN + '\\AppData\\.\\Local\\', ' ' + TOKEN + '\\AppData\\Local ',
+      'c:/USERS/student/AppData/Local/', 'C:\\USERS\\STUDENT\\AppData\\Local\\x\\..\\y', TOKEN + '\\a\\..\\..\\admin2',
+      TOKEN, '', 'D:\\Roaming', '\\\\attacker\\share\\x', TOKEN + '\\.hidden\\ x\\a.b',
+    ];
+    for (const v of nasty) {
+      for (const field of ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE']) {
+        const e = mkEnv({ [field]: v });
+        const first = resolveRoots(e);
+        PE().applyProfileRoots(e, first);
+        const snapshot = JSON.stringify(e);
+        const second = resolveRoots(e);
+        assert.deepStrictEqual(second.overrides, [], 'второй проход не находит расхождений (' + field + ' = ' + JSON.stringify(v) + '): ' + JSON.stringify(second.overrides));
+        assert.deepStrictEqual(second.respell, [], 'и переписывать больше нечего (' + field + ' = ' + JSON.stringify(v) + ')');
+        PE().applyProfileRoots(e, second);
+        assert.strictEqual(JSON.stringify(e), snapshot, 'второй проход окружение не меняет (' + field + ' = ' + JSON.stringify(v) + ')');
+      }
+    }
+    // то же через общий вход замка (его и зовёт main.js): три примера рецензии заменяются ОДИН раз и пишутся в журнал,
+    // повторный вызов молчит
+    for (const v of [TOKEN + '\\...', TOKEN + '\\ ..', TOKEN + '\\\\ /']) {
+      const e = mkEnv({ LOCALAPPDATA: v });
+      const l1 = PE().lockProfileRoots({ env: e, platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+      assert.strictEqual(e.LOCALAPPDATA, TOKEN + '\\AppData\\Local', 'замок вернул LOCALAPPDATA в профиль: ' + JSON.stringify(v));
+      assert.deepStrictEqual(l1.overrides.map((o) => o.name), ['LOCALAPPDATA']);
+      assert(l1.lines.some((x) => /LOCALAPPDATA/.test(x)), 'переопределение записано в журнал: ' + JSON.stringify(l1.lines));
+      const l2 = PE().lockProfileRoots({ env: e, platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+      assert.deepStrictEqual(l2.lines, [], 'повторный замок молчит: ' + JSON.stringify(l2.lines));
+      assert.deepStrictEqual(l2.respell, []);
+    }
+  });
+
+  ok('profile-env: не Windows — ничего не делает; профиль по токену не определён (пусто, относительный, диск без пути, NUL) — ничего не переопределяет и честно сообщает', () => {
+    ['darwin', 'linux'].forEach((p) => {
+      const r = resolveRoots(mkEnv({ USERPROFILE: 'C:\\Users\\admin2' }), TOKEN, p);
+      assert.deepStrictEqual(r.overrides, [], p + ': no-op');
+    });
+    // Корень диска и «голая» UNC-шара — абсолютные пути, но не профиль (граница «строго ниже корня»; рецензия r3:
+    // без этих двух значений мутант `return true` в isUsableHome оставался зелёным). Хвостовые точка/пробел в
+    // последнем компоненте тоже делают значение непригодным.
+    for (const bad of ['', undefined, null, 'Users\\student', 'C:', 'C:\\', 'C:/', '\\\\srv\\share', '\\\\srv\\share\\', '.', '   ',
+      'C:\\Users\\st\u0000udent', 'C:\\Users\\student\\...', 'C:\\Users\\student.', 42]) {
+      const r = PE().resolveProfileRoots({ env: mkEnv({ USERPROFILE: 'C:\\Users\\admin2' }), tokenHome: bad, platform: 'win32' });
+      assert.deepStrictEqual(r.overrides, [], 'без профиля по токену не гадаем: ' + JSON.stringify(bad));
+      assert.strictEqual(r.status, 'no-token-home', JSON.stringify(bad));
+    }
+  });
+
+  ok('profile-env: applyProfileRoots пишет в окружение с прежним написанием имени переменной, без дублей и не трогая посторонние', () => {
+    const env = { UserProfile: 'C:\\Users\\admin2', Path: 'C:\\Windows', TEMP: 'C:\\Users\\admin2\\Temp' };
+    const r = PE().resolveProfileRoots({ env, tokenHome: TOKEN, platform: 'win32' });
+    PE().applyProfileRoots(env, r);
+    assert.strictEqual(env.UserProfile, TOKEN, 'прежнее написание имени сохранено');
+    assert(!('USERPROFILE' in env), 'дубль в другом регистре не заведён');
+    assert.strictEqual(env.APPDATA, TOKEN + '\\AppData\\Roaming', 'отсутствовавшая — заведена каноническим именем');
+    assert.strictEqual(env.Path, 'C:\\Windows', 'посторонние переменные не тронуты');
+    assert.strictEqual(env.TEMP, 'C:\\Users\\admin2\\Temp', 'TEMP остаётся принятым остатком');
+  });
+
+  // Сверка с настоящим Win32 (рецензия r3). Оракул — GetFullPathNameW из kernel32 в PowerShell 5.1 (рантайм
+  // скриптов установки): отбрасывание хвостовых точек и пробелов делает ОС, а не наш код. Свойства значения,
+  // которое модуль отдаёт скриптам как APPDATA: (1) Win32 читает его ровно так, как оно записано; (2) оно строго
+  // ниже профиля в написании токена. Контроль: прежнее правило (текстовое, без хвостовых точек/пробелов) на этом
+  // же наборе нарушает оба свойства, в том числе на трёх примерах рецензента.
+  ok('profile-env: оставленный APPDATA Win32 (GetFullPathName, PowerShell 5.1) читает ровно так, как он записан, и строго внутри профиля в написании токена; прежнее текстовое правило эту сверку не проходило', () => {
+    if (process.platform !== 'win32' || !fs.existsSync(PS51)) SKIP('нужен Windows PowerShell 5.1');
+    const HOMES = ['C:\\Users\\student', 'C:\\Users\\Kelly \u0418\u0432\u0430\u043d\u2019s', 'C:\\Users\\\u0130van'];
+    // детерминированный генератор: один и тот же набор на каждом прогоне
+    let seed = 0x20261012;
+    const rnd = (n) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return (seed >>> 8) % n; };
+    const pick = (a) => a[rnd(a.length)];
+    const comps = ['AppData', 'Roaming', 'Local', 'x', 'a b', '\u0418\u0432\u0430\u043d', '.', '..', '...', '. ', ' .', '.. ', ' ..', ' ',
+      'x.', 'x ', 'x..', 'x. ', '.x', ' x', 'a.b', '\u00A0', '\u3000', 'k\u212A'];
+    const seps = ['\\', '/', '\\\\', '\\/', '/\\'];
+    const headsOf = (h) => [h, h.toLowerCase(), h.toUpperCase(), h.replace(/\\/g, '/'), h + '\\', ' ' + h, h + '.', h + ' ',
+      h.replace(/k/i, '\u212A'), h + '\\.', h + '\\..\\' + h.split('\\').pop(),
+      h.replace(/\u0130/, 'i\u0307'), h.replace(/^C:/, 'D:'), h.slice(2), '\\\\srv\\share' + h.slice(2)];
+    const cases = [];
+    // три примера рецензента идут первыми (по ним контроль проверяется поимённо)
+    const examples = ['\\...', '\\ ..', '\\\\ /'];
+    examples.forEach((tail) => cases.push({ home: HOMES[0], v: HOMES[0] + tail, example: true }));
+    for (const home of HOMES) {
+      const heads = headsOf(home);
+      for (let i = 0; i < 1200; i++) {
+        let v = pick(heads);
+        const n = 1 + rnd(4);
+        for (let k = 0; k < n; k++) v += pick(seps) + pick(comps);
+        if (rnd(4) === 0) v += pick(seps);
+        cases.push({ home, v });
+      }
+    }
+    const envOf = (c) => ({ USERPROFILE: c.home, HOMEDRIVE: 'C:', HOMEPATH: c.home.slice(2), APPDATA: c.v, LOCALAPPDATA: c.home + '\\AppData\\Local' });
+    const decide = (c) => {
+      const r = PE().resolveProfileRoots({ env: envOf(c), tokenHome: c.home, platform: 'win32' });
+      return { kept: !r.overrides.some((o) => o.name === 'APPDATA'), delivered: r.appData };
+    };
+    // прежнее правило (normPath/isInside до правки r3), слово в слово
+    const W = path.win32;
+    const oldNorm = (p) => {
+      if (typeof p !== 'string') return '';
+      let s = p.trim();
+      if (!s || s.indexOf('\u0000') !== -1) return '';
+      s = W.normalize(s.replace(/\//g, '\\'));
+      const root = W.parse(s).root;
+      while (s.length > root.length && s.endsWith('\\')) s = s.slice(0, -1);
+      return s;
+    };
+    const oldInside = (parent, child) => {
+      const a = oldNorm(parent); const b = oldNorm(child);
+      if (!a || !b || !W.isAbsolute(b)) return false;
+      const prefix = (a.endsWith('\\') ? a : a + '\\').toLowerCase();
+      const c = b.toLowerCase();
+      return c.length > prefix.length && c.startsWith(prefix);
+    };
+    const oldDeliver = (c) => (oldInside(c.home, c.v) ? oldNorm(c.v) : W.join(oldNorm(c.home), 'AppData', 'Roaming'));
+
+    const now = cases.map((c) => decide(c).delivered);
+    const before = cases.map((c) => oldDeliver(c));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pe-w32-'));
+    try {
+      const inFile = path.join(dir, 'in.txt');
+      const outFile = path.join(dir, 'out.txt');
+      fs.writeFileSync(inFile, now.concat(before).join('\n'), 'utf8');
+      const driver = path.join(dir, 'oracle.ps1');
+      fs.writeFileSync(driver, '\uFEFF' + [
+        "$ErrorActionPreference = 'Stop'",
+        "Add-Type -MemberDefinition @'",
+        '[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]',
+        'public static extern uint GetFullPathNameW(string lpFileName, uint nBufferLength, System.Text.StringBuilder lpBuffer, System.IntPtr lpFilePart);',
+        "'@ -Name 'K32' -Namespace 'HmPe'",
+        '$enc = New-Object System.Text.UTF8Encoding($false)',
+        '$lines = [System.IO.File]::ReadAllLines($env:HM_PE_IN, $enc)',
+        "$res = New-Object 'System.Collections.Generic.List[string]'",
+        'foreach ($p in $lines) {',
+        '  $sb = New-Object System.Text.StringBuilder 4096',
+        '  $n = [HmPe.K32]::GetFullPathNameW($p, 4096, $sb, [IntPtr]::Zero)',
+        "  if ($n -eq 0 -or $n -ge 4096) { $res.Add('<ERR>') } else { $res.Add($sb.ToString()) }",
+        '}',
+        '[System.IO.File]::WriteAllLines($env:HM_PE_OUT, $res.ToArray(), $enc)',
+        "Write-Output 'DONE'",
+      ].join('\r\n') + '\r\n', 'utf8');
+      const scratchTmp = path.join(dir, 'tmp');
+      fs.mkdirSync(scratchTmp, { recursive: true });
+      const r = cp.spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver], {
+        encoding: 'utf8', timeout: 180000,
+        // песочные профиль и временные каталоги: скрипт ничего не пишет, кроме файла результата
+        env: Object.assign({}, process.env, {
+          USERPROFILE: dir, HOME: dir, APPDATA: path.join(dir, 'ad'), LOCALAPPDATA: path.join(dir, 'la'), HERMES_HOME: path.join(dir, 'hermes'),
+          TEMP: scratchTmp, TMP: scratchTmp, HM_PE_IN: inFile, HM_PE_OUT: outFile,
+        }),
+      });
+      assert.strictEqual(r.status, 0, 'PowerShell отработал: ' + String(r.stderr || '').slice(0, 500) + String(r.stdout || '').slice(0, 300));
+      assert(/DONE/.test(r.stdout), 'драйвер дошёл до конца: ' + r.stdout);
+      const full = fs.readFileSync(outFile, 'utf8').split(/\r?\n/);
+      if (full.length && full[full.length - 1] === '') full.pop();
+      assert.strictEqual(full.length, now.length + before.length, 'оракул ответил на каждое значение');
+      const trim = (s) => s.replace(/\\+$/, '');
+      const violation = (c, delivered, win32) => {
+        if (win32 === '<ERR>') return 'GetFullPathName отказал';
+        if (trim(win32) !== delivered) return 'Win32 читает «' + win32 + '», а записано «' + delivered + '»';
+        if (!(delivered.startsWith(c.home + '\\') && delivered.length > c.home.length + 1)) return 'не строго внутри профиля токена';
+        return '';
+      };
+      // (1) текущее правило: ни одного нарушения
+      const bad = [];
+      let kept = 0;
+      cases.forEach((c, i) => {
+        const why = violation(c, now[i], full[i]);
+        if (why) bad.push(JSON.stringify(c.v) + ' → ' + JSON.stringify(now[i]) + ': ' + why);
+        if (decide(c).kept) kept += 1;
+      });
+      assert.strictEqual(bad.length, 0, 'нарушений при текущем правиле: ' + bad.length + '\n' + bad.slice(0, 8).join('\n'));
+      assert(kept >= 100, 'набор не вырожден: часть значений проходит как «внутри» (' + kept + ')');
+      assert(kept < cases.length - 100, 'и часть заменяется дефолтом (' + kept + ' из ' + cases.length + ')');
+      // (2) контроль: прежнее правило на тех же значениях — нарушает, и по трём примерам рецензента поимённо
+      const oldBad = [];
+      cases.forEach((c, i) => {
+        const why = violation(c, before[i], full[now.length + i]);
+        if (why) oldBad.push({ c, why });
+      });
+      assert(oldBad.length >= 3, 'прежнее правило нарушает свойство (иначе сверка беззубая): ' + oldBad.length);
+      examples.forEach((tail, i) => {
+        assert(oldBad.some((o) => o.c === cases[i]),
+          'прежнее правило отдавало «' + before[i] + '» для ' + JSON.stringify(cases[i].v) + ' — Win32 читает это как сам профиль: ' + full[now.length + i]);
+      });
+    } finally { drop(dir); }
+  });
+
+  // Законные пути без хвостовых точек и пробелов правило не трогает (рецензия r3: «не отвергнуть законный профиль»).
+  ok('profile-env: пути с обычными именами (кириллица, пробел, U+2019, точка внутри и в начале имени, 8.3, скобки) остаются как есть — хвостовое правило касается только имён с точкой или пробелом на конце', () => {
+    const names2 = ['AppData', 'Roaming', 'Local', 'Temp', 'Programs', 'Python313', 'a b', '\u0418\u0432\u0430\u043d', 'o\u2019brien', 'x-y_z',
+      'a.b', '.config', '..hidden', 'v1.2.3', 'OneDrive - Acme Ltd', 'Documents (copy)', 'JOHNDO~1', '\u00E9t\u00E9', ' lead', 'a  b'];
+    for (const home of ['C:\\Users\\student', 'D:\\Users\\John Doe', 'C:\\Users\\\u0418\u0432\u0430\u043d \u041f\u0435\u0442\u0440\u043e\u0432\u2019s']) {
+      for (let i = 0; i < 60; i++) {
+        const depth = 1 + (i % 4);
+        const parts = [];
+        for (let k = 0; k < depth; k++) parts.push(names2[(i * 7 + k * 5) % names2.length]);
+        const v = home + '\\' + parts.join('\\');
+        const r = PE().resolveProfileRoots({ env: { USERPROFILE: home, HOMEDRIVE: home.slice(0, 2), HOMEPATH: home.slice(2), APPDATA: v, LOCALAPPDATA: v },
+          tokenHome: home, platform: 'win32' });
+        assert.deepStrictEqual(r.overrides, [], 'законный путь не заменяется: ' + JSON.stringify(v) + ' ' + JSON.stringify(r.overrides));
+        assert.deepStrictEqual(r.respell, [], 'и не переписывается: ' + JSON.stringify(v));
+        assert.strictEqual(r.appData, v);
+        assert.strictEqual(r.localAppData, v);
+      }
+    }
+  });
+
+  // ---- 2. lockProfileRoots: пятак для разработки и источники профиля по токену --------------------
+  ok('profile-env: пятак HM_ALLOW_PROFILE_ENV действует ТОЛЬКО в неупакованной сборке; упакованная (и неизвестная) его игнорирует — контроль, что переменная из реестра ничего не отключает', () => {
+    const hostile = () => mkEnv({ USERPROFILE: 'C:\\Users\\admin2', HM_ALLOW_PROFILE_ENV: '1' });
+    const lock = (env, extra) => PE().lockProfileRoots(Object.assign({ env, platform: 'win32', getTokenHome: () => TOKEN }, extra));
+    // упакованная сборка: пятак не работает, профиль берётся из токена
+    let env = hostile(); let l = lock(env, { isPackaged: true });
+    assert.strictEqual(env.USERPROFILE, TOKEN, 'упакованная: переменная пятака проигнорирована');
+    assert(l.overrides.some((o) => o.name === 'USERPROFILE'));
+    // «упакована ли» неизвестно — считаем упакованной (закрыто по умолчанию)
+    env = hostile(); l = lock(env, {});
+    assert.strictEqual(env.USERPROFILE, TOKEN, 'неизвестно → как упакованная');
+    env = hostile(); l = lock(env, { isPackaged: 'false' });
+    assert.strictEqual(env.USERPROFILE, TOKEN, 'строка вместо boolean — не «неупакована»');
+    // неупакованная + пятак: окружение не трогаем, одна строка в журнал
+    env = hostile(); l = lock(env, { isPackaged: false });
+    assert.strictEqual(env.USERPROFILE, 'C:\\Users\\admin2', 'разработка: окружение остаётся как задано');
+    assert.strictEqual(l.status, 'dev-env');
+    assert.strictEqual(l.lines.length, 1, 'пятак виден в журнале одной строкой');
+    // неупакованная без пятака (или с другим значением): защита работает как в проде
+    for (const v of [undefined, '', '0', 'true', 'yes']) {
+      env = hostile(); if (v === undefined) delete env.HM_ALLOW_PROFILE_ENV; else env.HM_ALLOW_PROFILE_ENV = v;
+      l = lock(env, { isPackaged: false });
+      assert.strictEqual(env.USERPROFILE, TOKEN, 'пятак только значением 1: ' + JSON.stringify(v));
+    }
+    // не Windows: ничего не происходит вовсе
+    env = hostile(); l = PE().lockProfileRoots({ env, platform: 'darwin', isPackaged: true, getTokenHome: () => TOKEN });
+    assert.strictEqual(env.USERPROFILE, 'C:\\Users\\admin2');
+    assert.strictEqual(l.status, 'noop');
+  });
+
+  ok('profile-env: профиль по токену берётся из os.userInfo, при сбое — из запасного источника; нет обоих — окружение не трогаем и в журнал уходит предупреждение', () => {
+    const env0 = () => mkEnv({ USERPROFILE: 'C:\\Users\\admin2' });
+    // основной источник упал — работает запасной
+    let env = env0();
+    let l = PE().lockProfileRoots({ env, platform: 'win32', isPackaged: true,
+      getTokenHome: () => { throw new Error('ERR_SYSTEM_ERROR'); }, getFallbackHome: () => TOKEN });
+    assert.strictEqual(env.USERPROFILE, TOKEN, 'запасной источник сработал');
+    assert.strictEqual(l.status, 'ok');
+    assert(l.lines.some((s) => /запасной/.test(s)), 'использование запасного источника видно в журнале: ' + JSON.stringify(l.lines));
+    assert.strictEqual(l.lines.length, l.overrides.length + 1, 'строка про запасной источник + по строке на переопределение');
+    // основной вернул мусор — тоже запасной
+    env = env0();
+    l = PE().lockProfileRoots({ env, platform: 'win32', isPackaged: true, getTokenHome: () => 'Users\\student', getFallbackHome: () => TOKEN });
+    assert.strictEqual(env.USERPROFILE, TOKEN);
+    // обоих нет: не угадываем и не ломаем установку, но говорим об этом
+    env = env0();
+    l = PE().lockProfileRoots({ env, platform: 'win32', isPackaged: true,
+      getTokenHome: () => { throw new Error('x'); }, getFallbackHome: () => '' });
+    assert.strictEqual(env.USERPROFILE, 'C:\\Users\\admin2', 'окружение не тронуто');
+    assert.strictEqual(l.status, 'no-token-home');
+    assert.strictEqual(l.lines.length, 1);
+    assert(/токен/i.test(l.lines[0]), 'строка называет причину: ' + l.lines[0]);
+    // каждое переопределение — строка журнала с обоими путями
+    env = env0();
+    l = PE().lockProfileRoots({ env, platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+    assert.strictEqual(l.lines.length, l.overrides.length, 'по строке на переопределение');
+    assert(l.lines.every((s) => typeof s === 'string' && s.length > 10));
+    assert(l.lines.some((s) => s.includes('C:\\Users\\admin2') && s.includes(TOKEN)), 'в строке оба пути');
+  });
+
+  ok('profile-env: значение из окружения не подделывает строку журнала (управляющие символы заменяются), сбой самой проверки не роняет запуск и виден в журнале', () => {
+    // в подделке — переводы строки, разделитель строки U+2028, а также NEL (U+0085) и прочие C1: часть
+    // просмотрщиков и str.splitlines() читают их как конец строки журнала
+    const forged = 'C:\\Users\\admin2\n[2026-01-01T00:00:00.000Z] [config] ВСЁ УСТАНОВЛЕНО\r\u2028end\u0085[2026-01-01T00:00:01.000Z] [x] ЕЩЁ\u009f\u0080\u007f';
+    const l = PE().lockProfileRoots({ env: mkEnv({ USERPROFILE: forged, APPDATA: forged }), platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+    assert(l.lines.length >= 2, 'переопределения есть: ' + l.lines.length);
+    l.lines.forEach((s) => assert(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(s), 'строка журнала однострочная, без управляющих C0/C1: ' + JSON.stringify(s)));
+    assert(l.lines.some((s) => s.includes('ВСЁ УСТАНОВЛЕНО')), 'содержимое не теряется, режутся только управляющие символы');
+    // тот же очиститель отдаётся другим модулям (Nomad пишет им HERMES_HOME в журнал)
+    assert.strictEqual(PE().cleanForLog('a\u0085b\u009fc\u0080d\ne\u2028f\u0000g\u007fh'), 'a?b?c?d?e?f?g?h');
+    assert.strictEqual(PE().cleanForLog('x'.repeat(500)).length, 300, 'длина ограничена');
+    // длинное значение обрезается
+    const long = 'C:\\' + 'x'.repeat(5000);
+    const l2 = PE().lockProfileRoots({ env: mkEnv({ USERPROFILE: long }), platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+    assert(l2.lines.length >= 1 && l2.lines.every((s) => s.length < 900), 'строка ограничена по длине');
+    // сбой самой проверки: окружение бросает исключение на любое обращение
+    const fail = () => { throw new Error('окружение недоступно'); };
+    const boom = new Proxy({}, { get: fail, has: fail, ownKeys: fail, getOwnPropertyDescriptor: fail });
+    const l3 = PE().lockProfileRoots({ env: boom, platform: 'win32', isPackaged: true, getTokenHome: () => TOKEN });
+    assert.strictEqual(l3.status, 'error');
+    assert.strictEqual(l3.lines.length, 1);
+    assert(/окружение недоступно/.test(l3.lines[0]), l3.lines[0]);
+  });
+
+  // ---- 3. main.js: замок стоит ДО всего, что читает профиль -----------------------------------
+  ok('main.js: корни профиля фиксируются по токену ДО LOG_DIR, uid и первого os.homedir(); строки замка уходят в install.log после объявления logToFile; профиль берётся из os.userInfo, а не из USERPROFILE', () => {
+    const m = codeOnlyJs(MAIN());
+    assert(/require\('\.\/profile-env'\)/.test(m), 'модуль подключён');
+    assert(/lockProfileRoots\(/.test(m), 'замок вызывается');
+    assert(/os\.userInfo\(\)\.homedir/.test(m), 'источник — токен (os.userInfo().homedir)');
+    assert(/isPackaged:\s*app\.isPackaged/.test(m), 'признак упаковки берётся у Electron, а не из окружения');
+    assertOrder(m, 'lockProfileRoots(', 'os.homedir()', 'замок раньше ЛЮБОГО os.homedir() в main.js');
+    assertOrder(m, 'lockProfileRoots(', 'const LOG_DIR', 'замок раньше LOG_DIR');
+    assertOrder(m, 'lockProfileRoots(', 'uidTelemetry.resolveUid()', 'замок раньше uid (он читает os.homedir())');
+    assertOrder(m, 'lockProfileRoots(', "require('./remote-fetch')", 'замок раньше остальных модулей');
+    assertOrder(m, 'function logToFile(id, line)', "logToFile('profile-env'", 'строки замка пишутся, когда журнал уже объявлен');
+    assertOrder(m, "logToFile('profile-env'", 'app.whenReady()', 'строки замка записаны до старта приложения');
+    assert(/if \(!process\.env\.HM_DRY_RUN\) for \(const line of PROFILE_LOCK\.lines\) logToFile\('profile-env', line\);/.test(m),
+      'в холостом прогоне (HM_DRY_RUN) строки замка на диск не пишутся (P1-8)');
+    // контроль: замок, вызванный ПОСЛЕ LOG_DIR, сторож порядка обязан поймать
+    const late = m.replace('lockProfileRoots(', 'lockProfileRoo_ts(') + '\nlockProfileRoots(\n';
+    assert.throws(() => assertOrder(late, 'lockProfileRoots(', 'const LOG_DIR', 'контроль'), 'замок после LOG_DIR ловится');
+    // контроль: main.js без замка (как до исправления) не проходит ту же проверку
+    const none = m.replace('lockProfileRoots(', 'lockProfileRoo_ts(');
+    assert.throws(() => assertOrder(none, 'lockProfileRoots(', 'const LOG_DIR', 'контроль'), 'отсутствие замка ловится');
+    assert(/const LOG_DIR = path\.join\(os\.homedir\(\), '\.hamidun-setup'\)/.test(m), 'LOG_DIR по-прежнему строится от os.homedir() — потому замок и обязан идти раньше');
+    // Родные пути Electron (appData / userData / logs) раскрываются лениво и ЗАПОМИНАЮТСЯ при первом
+    // app.getPath: вызов раньше замка закрепил бы враждебное значение (воспроизведено на Electron 44.5.1).
+    // До замка app.getPath / app.setPath быть не должно; внутри самого вызова замка допустим один запасной
+    // источник — 'home' (он считается по токену и каталоги appData/userData не трогает).
+    const useBeforeLock = (text) => {
+      const at = text.indexOf('profileEnv.lockProfileRoots(');
+      const first = text.search(/\bapp\.(getPath|setPath)\(/);
+      return first !== -1 && first < at;
+    };
+    assert.strictEqual(useBeforeLock(m), false, 'до замка нет ни одного app.getPath/app.setPath');
+    const firstUse = m.search(/\bapp\.(getPath|setPath)\(/);
+    assert(/^app\.getPath\('home'\)/.test(m.slice(firstUse)), 'первое обращение к app.getPath — запасной источник home внутри замка');
+    assert(firstUse < m.indexOf("const remoteFetch = require('./remote-fetch')"), 'и оно внутри вызова замка, до следующих require');
+    const early = m.replace("const profileEnv = require('./profile-env');", "const profileEnv = require('./profile-env');\napp.getPath('userData');");
+    assert.notStrictEqual(early, m, 'контроль построен');
+    assert.strictEqual(useBeforeLock(early), true, 'контроль: app.getPath(userData) раньше замка ловится');
+  });
+
+  // ---- 4. настоящий рантайм Electron ----------------------------------------------------------
+  const HOSTILE = {
+    USERPROFILE: 'Z:\\hm-hostile\\Users\\victim', HOMEDRIVE: 'Z:', HOMEPATH: '\\hm-hostile\\Users\\victim',
+    APPDATA: 'Z:\\hm-hostile\\Users\\victim\\AppData\\Roaming', LOCALAPPDATA: 'Z:\\hm-hostile\\Users\\victim\\AppData\\Local',
+  };
+
+  ok('Электрон-рантайм: os.userInfo().homedir не зависит от враждебного USERPROFILE, а os.homedir() зависит; замок возвращает окружение к профилю токена, TEMP и TMP не трогает', () => {
+    if (process.platform !== 'win32') SKIP('профиль по токену Windows — только на Windows');
+    const exe = electronExe();
+    if (!exe) SKIP('нет бинарника Electron 44 (NODE_PATH с electron или node_modules) — рантайм не проверить');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pe-rt-'));
+    try {
+      const child = path.join(tmp, 'child.js');
+      fs.writeFileSync(child, [
+        "const os = require('os');",
+        "const PE = require(process.env.HM_PE);",
+        "const E = process.env;",
+        "const before = { homedir: os.homedir(), userInfo: os.userInfo().homedir, USERPROFILE: E.USERPROFILE };",
+        "const lock = PE.lockProfileRoots({ env: process.env, platform: process.platform, isPackaged: true,",
+        "  getTokenHome: () => os.userInfo().homedir });",
+        "const after = { homedir: os.homedir(), USERPROFILE: E.USERPROFILE, APPDATA: E.APPDATA, LOCALAPPDATA: E.LOCALAPPDATA,",
+        "  HOMEDRIVE: E.HOMEDRIVE, HOMEPATH: E.HOMEPATH, TEMP: E.TEMP, TMP: E.TMP };",
+        "process.stdout.write(JSON.stringify({ runtime: process.versions.electron ? 'electron ' + process.versions.electron : 'node',",
+        "  before, after, status: lock.status, overrides: lock.overrides.map((o) => o.name), lines: lock.lines }));",
+      ].join('\n'));
+      const r = cp.spawnSync(exe, [child], {
+        env: Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: '1', HM_PE: path.join(ROOT, 'src', 'profile-env.js') }, HOSTILE),
+        encoding: 'utf8', timeout: 90000,
+      });
+      assert.strictEqual(r.status, 0, 'Electron-как-Node отработал: ' + (r.stderr || r.error));
+      const out = JSON.parse(r.stdout);
+      const token = os.userInfo().homedir;
+      // ПОСЫЛКА уязвимости: рантайм послушно берёт профиль из окружения
+      assert.strictEqual(out.before.homedir, HOSTILE.USERPROFILE, out.runtime + ': os.homedir() идёт за USERPROFILE из окружения');
+      // …а профиль по токену от него не зависит
+      assert.strictEqual(out.before.userInfo, token, out.runtime + ': os.userInfo().homedir — профиль токена');
+      // после замка os.homedir() и переменные указывают на профиль токена
+      assert.strictEqual(out.status, 'ok');
+      assert.strictEqual(out.after.homedir, token, 'os.homedir() после замка = профиль токена');
+      assert.strictEqual(out.after.USERPROFILE, token);
+      assert.strictEqual(out.after.APPDATA, path.join(token, 'AppData', 'Roaming'));
+      assert.strictEqual(out.after.LOCALAPPDATA, path.join(token, 'AppData', 'Local'));
+      assert.strictEqual(out.after.HOMEDRIVE, path.parse(token).root.replace(/\\$/, ''));
+      assert.strictEqual(out.after.HOMEPATH, token.slice(path.parse(token).root.replace(/\\$/, '').length), 'HOMEPATH выведен из профиля токена');
+      assert.strictEqual(out.after.TEMP, process.env.TEMP, 'TEMP не тронут');
+      assert.strictEqual(out.after.TMP, process.env.TMP, 'TMP не тронут');
+      assert.deepStrictEqual(out.overrides.slice().sort(), ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'USERPROFILE']);
+      assert.strictEqual(out.lines.length, 5, 'по строке на переопределение');
+    } finally { drop(tmp); }
+  });
+
+  ok('Электрон-рантайм: на этой машине живое окружение согласуется с профилем токена — замок ничего не перекраивает (легитимная установка)', () => {
+    if (process.platform !== 'win32') SKIP('Windows-проверка');
+    const exe = electronExe();
+    if (!exe) SKIP('нет бинарника Electron 44 — рантайм не проверить');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pe-ok-'));
+    try {
+      const child = path.join(tmp, 'child.js');
+      fs.writeFileSync(child, [
+        "const os = require('os');",
+        "const PE = require(process.env.HM_PE);",
+        "const lock = PE.lockProfileRoots({ env: process.env, platform: process.platform, isPackaged: true, getTokenHome: () => os.userInfo().homedir });",
+        "process.stdout.write(JSON.stringify({ status: lock.status, names: lock.overrides.map((o) => o.name), lines: lock.lines }));",
+      ].join('\n'));
+      const env = Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: '1', HM_PE: path.join(ROOT, 'src', 'profile-env.js') });
+      delete env.HM_ALLOW_PROFILE_ENV;
+      const r = cp.spawnSync(exe, [child], { env, encoding: 'utf8', timeout: 90000 });
+      assert.strictEqual(r.status, 0, String(r.stderr || r.error));
+      const out = JSON.parse(r.stdout);
+      assert.strictEqual(out.status, 'ok');
+      const core = out.names.filter((n) => /^(USERPROFILE|APPDATA|LOCALAPPDATA)$/.test(n));
+      if (core.length) SKIP('окружение этой машины НЕ согласовано с токеном (' + core.join(',') + ') — замок его бы исправил: ' + out.lines.join(' | '));
+      assert.deepStrictEqual(core, []);
+    } finally { drop(tmp); }
+  });
+
+  // ---- 5. настоящий main.js под заглушкой electron --------------------------------------------
+  ok('main.js целиком (заглушка electron, журнал в памяти): при враждебном окружении bootstrap отдаёт профиль токена, а строки замка попадают в install.log токена; без замка (как до исправления) отдаёт враждебный профиль', () => {
+    if (process.platform !== 'win32') SKIP('профиль по токену Windows — только на Windows');
+    const exe = electronExe();
+    if (!exe) SKIP('нет бинарника Electron 44 — рантайм не проверить');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pe-main-'));
+    try {
+      const child = path.join(tmp, 'load-main.js');
+      fs.writeFileSync(child, [
+        "const Module = require('module'); const fs = require('fs'); const path = require('path');",
+        "const handlers = {}; const logWrites = [];",
+        "const quiet = new Proxy(function () {}, { get: (t, k) => (k === Symbol.toPrimitive ? () => '' : quiet), apply: () => quiet, construct: () => quiet });",
+        "const app = new Proxy({ isPackaged: process.env.HM_FAKE_PACKAGED === '1', requestSingleInstanceLock: () => true,",
+        "  whenReady: () => new Promise(() => {}), getVersion: () => '0.0.0', getPath: (n) => { throw new Error('app.getPath ' + n); },",
+        "  on() {}, once() {}, quit() {}, focus() {} }, { get: (t, k) => (k in t ? t[k] : () => undefined) });",
+        "const electron = { app, ipcMain: { handle: (ch, fn) => { handlers[ch] = fn; }, on() {}, once() {} },",
+        "  BrowserWindow: Object.assign(function () {}, { getAllWindows: () => [] }), shell: quiet, clipboard: quiet };",
+        "const load = Module._load;",
+        "Module._load = function (request) { return request === 'electron' ? electron : load.apply(this, arguments); };",
+        // журнал не пишем на диск: перехватываем открытие install.log и каталога .hamidun-setup
+        "const FD = 987654;",
+        "const openSync = fs.openSync, writeSync = fs.writeSync, mkdirSync = fs.mkdirSync;",
+        "fs.openSync = function (p) { if (/install\\.log$/i.test(String(p))) { logWrites.push({ open: String(p) }); return FD; } return openSync.apply(this, arguments); };",
+        "fs.writeSync = function (fd, s) { if (fd === FD) { logWrites.push({ line: String(s) }); return Buffer.byteLength(String(s)); } return writeSync.apply(this, arguments); };",
+        "fs.mkdirSync = function (p) { if (/\\.hamidun-setup$/i.test(String(p))) { logWrites.push({ mkdir: String(p) }); return undefined; } return mkdirSync.apply(this, arguments); };",
+        // main.js компилируется «на месте» (его настоящий путь → верные __dirname и относительные require),
+        // при HM_NEUTER=1 — с обезвреженным вызовом замка: это и есть поведение до исправления.
+        "const mainPath = process.env.HM_MAIN;",
+        "let source = fs.readFileSync(mainPath, 'utf8');",
+        "if (process.env.HM_NEUTER === '1') {",
+        "  const patched = source.replace('profileEnv.lockProfileRoots(', '((o) => ({ status: \"neutered\", overrides: [], lines: [] }))(');",
+        "  if (patched === source) throw new Error('вызов замка в main.js не найден — контроль не построить');",
+        "  source = patched;",
+        "}",
+        "const mod = new Module(mainPath, module); mod.filename = mainPath; mod.paths = Module._nodeModulePaths(path.dirname(mainPath));",
+        "mod._compile(source, mainPath);",
+        "const boot = handlers.bootstrap();",
+        "process.stdout.write(JSON.stringify({ homedir: boot.homedir, logPath: boot.logPath, logWrites,",
+        "  USERPROFILE: process.env.USERPROFILE, APPDATA: process.env.APPDATA }));",
+        "process.exit(0);",
+      ].join('\n'));
+      const token = os.userInfo().homedir;
+      const run = (neuter) => {
+        const r = cp.spawnSync(exe, [child], {
+          env: Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: '1', HM_MAIN: path.join(ROOT, 'src', 'main.js'), HM_NEUTER: neuter ? '1' : '0' }, HOSTILE),
+          encoding: 'utf8', timeout: 120000,
+        });
+        assert.strictEqual(r.status, 0, 'main.js загрузился под заглушкой (код ' + r.status + '): ' + String(r.stderr || r.error).slice(0, 800));
+        return JSON.parse(r.stdout);
+      };
+      const out = run(false);
+      assert.strictEqual(out.homedir, token, 'bootstrap.homedir = профиль токена, а не враждебный');
+      assert.strictEqual(out.logPath, path.join(token, '.hamidun-setup', 'install.log'), 'журнал — в профиле токена');
+      assert.strictEqual(out.USERPROFILE, token);
+      assert.strictEqual(out.APPDATA, path.join(token, 'AppData', 'Roaming'), 'APPDATA тоже выправлен (его копирует buildInstallEnv)');
+      const lines = out.logWrites.filter((w) => w.line).map((w) => w.line);
+      assert(lines.some((l) => /profile-env/.test(l) && l.includes(HOSTILE.USERPROFILE)), 'переопределение записано в install.log: ' + JSON.stringify(out.logWrites).slice(0, 400));
+      assert(out.logWrites.every((w) => !w.open || w.open === out.logPath), 'открыт только журнал токена');
+      // контроль: тот же main.js с обезвреженным замком (то есть как до исправления) отдаёт враждебный профиль
+      const bad = run(true);
+      assert.strictEqual(bad.homedir, HOSTILE.USERPROFILE, 'без замка bootstrap отдаёт враждебный профиль (негативный контроль)');
+      assert.notStrictEqual(bad.logPath, out.logPath);
+      assert.strictEqual(bad.USERPROFILE, HOSTILE.USERPROFILE);
+      assert.strictEqual(bad.APPDATA, HOSTILE.APPDATA, 'и APPDATA остался враждебным без замка');
+    } finally { drop(tmp); }
+  });
+
+  // ---- 6. e2e-харнесс сохраняет изоляцию профиля ------------------------------------------------
+  ok('e2e-gui.js: изоляция профиля пережила замок — пятак HM_ALLOW_PROFILE_ENV в env прогона, на Windows всегда из исходников (упакованная сборка подмену профиля игнорирует)', () => {
+    const e = codeOnlyJs(E2E());
+    const mk = e.slice(e.indexOf('function makeContext('), e.indexOf('function cleanupContext('));
+    assert(/HM_ALLOW_PROFILE_ENV:\s*'1'/.test(mk), 'env прогона несёт пятак');
+    assert(/USERPROFILE:\s*home/.test(mk), 'подмена профиля на месте');
+    const st = e.slice(e.indexOf('function stageApp('), e.indexOf('function poisonRegistry('));
+    // Проверяем само УСЛОВИЕ if: то же слово 'win32' стоит и в тексте сообщения лога рядом, и его наличие
+    // ничего не доказывает (мутант без win32 в условии пережил бы прежнюю проверку).
+    const cond = /if \(process\.env\.HM_E2E_SOURCE === '1' \|\| process\.platform === 'win32' \|\| !fs\.existsSync\(src\)\) \{/;
+    assert(cond.test(st), 'на Windows упакованная сборка не используется: win32 стоит в условии if');
+    // контроль: условие без win32 (слово в тексте лога остаётся) эту проверку не проходит
+    const noWin = st.replace(" || process.platform === 'win32'", '');
+    assert.notStrictEqual(noWin, st, 'контроль построен');
+    assert(/process\.platform === 'win32'/.test(noWin), 'контроль: слово win32 в тексте лога осталось');
+    assert(!cond.test(noWin), 'контроль: условие без win32 проверку не проходит');
+    // контроль: харнесс без пятака не проходит ту же проверку
+    assert(!/HM_ALLOW_PROFILE_ENV:\s*'1'/.test(mk.replace(/HM_ALLOW_PROFILE_ENV:\s*'1',?/, '')), 'контроль: без пятака проверка краснеет');
+  });
+
+  // ---- 7. py-detect: пакеты по файлам, интерпретатор не запускается -----------------------------
+  // Дерево: <root>/local/Programs/Python/Python312/python.exe (пользовательский),
+  //         <root>/pf/Python312/python.exe (для всех), <root>/appdata/Python/Python312/site-packages (user site).
+  function mkTree(name) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-pyd-' + (name || '') ));
+    return { root, appData: path.join(root, 'appdata'), local: path.join(root, 'local'), pf: path.join(root, 'pf') };
+  }
+  const touch = (...parts) => { const p = path.join(...parts); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, ''); return p; };
+  const mkPkg = (site, mod, withInit) => { if (withInit === false) touch(site, mod, 'Image.py'); else touch(site, mod, '__init__.py'); };
+  const mkDist = (site, dist, ver) => { fs.mkdirSync(path.join(site, dist + '-' + (ver || '1.0') + '.dist-info'), { recursive: true }); };
+  const userSite = (t, minor) => path.join(t.appData, 'Python', 'Python' + minor, 'site-packages');
+  const detect = (t, pyExe, extra) => PD().detectPythonPackages(Object.assign({ pyExe, appData: t.appData }, extra || {}));
+
+  // Набор, который pydeps ставит и который проверяет итоговый verify.ps1 (все три обязательны для «установлено»).
+  const PYDEPS3 = ['PIL', 'requests', 'playwright'];
+  const mkAll = (site) => PYDEPS3.forEach((m) => mkPkg(site, m));
+
+  ok('py-detect: user site и общий Lib/site-packages, ВСЕ ТРИ пакета обязательны (PIL, requests, playwright), каталог без __init__.py, похожий dist-info и чужая версия Python не засчитываются; dist-info заменяет каталог', () => {
+    const t = mkTree('m');
+    try {
+      const perUser = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      const US = userSite(t, '312');
+      // пусто
+      let r = detect(t, perUser);
+      assert.strictEqual(r.installed, false); assert.deepStrictEqual(r.missing.slice().sort(), ['PIL', 'playwright', 'requests']);
+      // user site: все три каталогами с __init__.py
+      mkAll(US);
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, true, 'user site: ' + JSON.stringify(r));
+      // каждый из трёх обязателен: без любого одного — не установлено, и назван именно он
+      for (const m of PYDEPS3) {
+        drop(path.join(US, m));
+        r = detect(t, perUser);
+        assert.strictEqual(r.installed, false, 'без ' + m + ' не установлено');
+        assert.deepStrictEqual(r.missing, [m], 'назван недостающий: ' + m);
+        mkPkg(US, m);
+      }
+      assert.strictEqual(detect(t, perUser).installed, true, 'вернули — снова установлено');
+      // Карточка не мягче итогового verify.ps1: PIL и requests на месте, playwright нет (частый случай:
+      // `pip install pillow requests` вручную) — НЕ «уже установлено»
+      drop(path.join(US, 'playwright'));
+      assert.strictEqual(detect(t, perUser).installed, false, 'без playwright карточка не снимает галку');
+      mkPkg(US, 'playwright');
+      // каталог без __init__.py (и без dist-info) — не пакет
+      drop(path.join(US, 'requests'));
+      touch(US, 'requests', 'sessions.py');
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, false, 'каталог без __init__.py не засчитан');
+      // dist-info вместо каталога (Pillow ставит модуль PIL, имя в dist-info — Pillow)
+      drop(path.join(US, 'requests'));
+      mkDist(US, 'requests', '2.32.3');
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, true, 'dist-info: ' + JSON.stringify(r));
+      // dist-info чужого пакета с похожим именем не подходит
+      drop(path.join(US, 'requests-2.32.3.dist-info'));
+      mkDist(US, 'requests_toolbelt', '1.0');
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, false, 'requests_toolbelt — не requests');
+      mkDist(US, 'requests', '2.32.3');
+      drop(path.join(US, 'PIL'));
+      mkDist(US, 'Pillow', '10.4.0');
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, true, 'Pillow-*.dist-info задаёт PIL: ' + JSON.stringify(r));
+      // playwright: dist-info соседнего пакета (playwright_stealth) не подходит, настоящий — подходит
+      drop(path.join(US, 'playwright'));
+      mkDist(US, 'playwright_stealth', '1.0.6');
+      r = detect(t, perUser);
+      assert.strictEqual(r.installed, false, 'playwright_stealth — не playwright: ' + JSON.stringify(r));
+      assert.deepStrictEqual(r.missing, ['playwright']);
+      mkDist(US, 'playwright', '1.47.0');
+      assert.strictEqual(detect(t, perUser).installed, true, 'playwright-*.dist-info задаёт playwright');
+      // пакеты ДРУГОЙ версии Python (311), а интерпретатор 3.12 — не подходит
+      const t2 = mkTree('v');
+      try {
+        const py312 = touch(t2.local, 'Programs', 'Python', 'Python312', 'python.exe');
+        mkAll(userSite(t2, '311'));
+        assert.strictEqual(detect(t2, py312).installed, false, 'user site 3.11 не относится к интерпретатору 3.12');
+        const py311 = touch(t2.local, 'Programs', 'Python', 'Python311', 'python.exe');
+        assert.strictEqual(detect(t2, py311).installed, true, 'тот же user site для интерпретатора 3.11');
+      } finally { drop(t2.root); }
+      // общий Python: Program Files\Python312\Lib\site-packages; пакеты в двух разных каталогах — сумма
+      const t3 = mkTree('p');
+      try {
+        const machine = touch(t3.pf, 'Python312', 'python.exe');
+        const lib = path.join(t3.pf, 'Python312', 'Lib', 'site-packages');
+        mkPkg(lib, 'PIL'); mkPkg(lib, 'playwright');
+        assert.strictEqual(detect(t3, machine).installed, false, 'requests ещё нет нигде');
+        mkPkg(userSite(t3, '312'), 'requests');
+        assert.strictEqual(detect(t3, machine).installed, true, 'PIL и playwright в общем, requests в user site — вместе годится');
+      } finally { drop(t3.root); }
+    } finally { drop(t.root); }
+  });
+
+  ok('py-detect: версия берётся из python3XY.dll рядом, из pyvenv.cfg виртуального окружения и из суффиксов -32/-arm64; магазинный псевдоним WindowsApps исключён даже при готовых пакетах', () => {
+    const t = mkTree('d');
+    try {
+      // нестандартный каталог (conda/scoop/pyenv): версия по python312.dll
+      const odd = touch(t.root, 'tools', 'py', 'python.exe');
+      assert.strictEqual(detect(t, odd).installed, false);
+      mkAll(userSite(t, '312'));
+      assert.strictEqual(detect(t, odd).installed, false, 'версии не знаем — user site не угадываем');
+      touch(t.root, 'tools', 'py', 'python3.dll');            // stable-ABI dll без версии не годится
+      assert.strictEqual(detect(t, odd).installed, false);
+      touch(t.root, 'tools', 'py', 'python312.dll');
+      assert.strictEqual(detect(t, odd).installed, true, 'python312.dll → Python312');
+      // магазинный псевдоним: готовые пакеты + python312.dll рядом, но это WindowsApps — не засчитываем
+      const alias = touch(t.local, 'Microsoft', 'WindowsApps', 'python.exe');
+      touch(t.local, 'Microsoft', 'WindowsApps', 'python312.dll');
+      const ar = detect(t, alias);
+      assert.strictEqual(ar.installed, false, 'WindowsApps исключён: ' + JSON.stringify(ar));
+      // нет интерпретатора вовсе
+      assert.strictEqual(PD().detectPythonPackages({ pyExe: '', appData: t.appData }).installed, false);
+    } finally { drop(t.root); }
+    // Каждая ветка определения — в СВОЁМ чистом дереве, где её не может подменить соседняя: пакеты лежат
+    // ровно там, куда ведёт только эта ветка (иначе удаление ветки осталось бы незамеченным).
+    // 1) venv: Scripts\python.exe, пакеты ТОЛЬКО в <venv>\Lib\site-packages (user site пуст, версия не нужна)
+    const tv = mkTree('e');
+    try {
+      const venv = path.join(tv.root, 'venv');
+      const vpy = touch(venv, 'Scripts', 'python.exe');
+      fs.writeFileSync(path.join(venv, 'pyvenv.cfg'), 'home = C:\\Python\nversion = 3.12.4\n');
+      assert.strictEqual(detect(tv, vpy).installed, false, 'venv без пакетов — не установлено');
+      mkAll(path.join(venv, 'Lib', 'site-packages'));
+      assert.strictEqual(detect(tv, vpy).installed, true, 'пакеты в Lib\\site-packages окружения (рядом с каталогом Scripts)');
+    } finally { drop(tv.root); }
+    // 2) версия ТОЛЬКО из pyvenv.cfg: имя каталога и dll версию не дают, пакеты лишь в user site 3.12
+    const tc = mkTree('c');
+    try {
+      const venv2 = path.join(tc.root, 'venv2');
+      const cpy = touch(venv2, 'Scripts', 'python.exe');
+      mkAll(userSite(tc, '312'));
+      assert.strictEqual(detect(tc, cpy).installed, false, 'без pyvenv.cfg версию не угадываем — user site не смотрим');
+      fs.writeFileSync(path.join(venv2, 'pyvenv.cfg'), 'home = C:\\Python\nversion = 3.12.4\n');
+      assert.strictEqual(detect(tc, cpy).installed, true, 'version = 3.12.4 из pyvenv.cfg → Python312');
+      fs.writeFileSync(path.join(venv2, 'pyvenv.cfg'), 'home = C:\\Python\nversion_info = 3.11.9.final.0\n');
+      assert.strictEqual(detect(tc, cpy).installed, false, 'version_info = 3.11 — пакеты 3.12 к нему не относятся');
+      fs.writeFileSync(path.join(venv2, 'pyvenv.cfg'), 'home = C:\\Python\nversion_info = 3.12.4.final.0\n');
+      assert.strictEqual(detect(tc, cpy).installed, true, 'version_info (uv) читается так же');
+    } finally { drop(tc.root); }
+    // 3) 32-битная и ARM64-сборки: каталог Python312-32 / Python312-arm64 и user site с тем же суффиксом
+    for (const sfx of ['-32', '-arm64']) {
+      const t32 = mkTree('3');
+      try {
+        const p32 = touch(t32.local, 'Programs', 'Python', 'Python312' + sfx, 'python.exe');
+        assert.strictEqual(detect(t32, p32).installed, false, 'Python312' + sfx + ': пусто');
+        mkAll(path.join(t32.appData, 'Python', 'Python312' + sfx, 'site-packages'));
+        assert.strictEqual(detect(t32, p32).installed, true, 'user site Python312' + sfx);
+      } finally { drop(t32.root); }
+    }
+  });
+
+  ok('py-detect: кириллица, пробелы и U+2019 в пути профиля; интерпретатор НЕ запускается — ни один вызов child_process за время детекции, в модуле нет child_process', () => {
+    const t = mkTree('\u0418\u0432\u0430\u043d \u041f\u0435\u0442\u0440\u043e\u0432\u2019s ');
+    const modPath = path.join(ROOT, 'src', 'py-detect.js');
+    const src = fs.readFileSync(modPath, 'utf8');
+    assert(!/child_process/.test(codeOnlyJs(src)), 'модуль не подключает child_process');
+    const calls = [];
+    const real = {}; const names2 = ['execFileSync', 'execSync', 'spawnSync', 'spawn', 'exec', 'execFile', 'fork'];
+    names2.forEach((n) => { real[n] = cp[n]; cp[n] = function () { calls.push(n); throw new Error('запуск процесса при детекции: ' + n); }; });
+    try {
+      delete require.cache[modPath];
+      const fresh = require(modPath);
+      // «интерпретатор» — файл, который при запуске был бы ошибкой формата; он и не запускается
+      const py = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      fs.writeFileSync(py, 'MZ not a real executable');
+      mkAll(userSite(t, '312'));
+      const r = fresh.detectPythonPackages({ pyExe: py, appData: t.appData });
+      assert.strictEqual(r.installed, true, 'путь с кириллицей/пробелом/U+2019: ' + JSON.stringify(r));
+      assert.deepStrictEqual(calls, [], 'процессов не запускали');
+    } finally {
+      names2.forEach((n) => { cp[n] = real[n]; });
+      delete require.cache[modPath];
+      drop(t.root);
+    }
+  });
+
+  // ---- 8. main.js: блок детекции pydeps -------------------------------------------------------
+  // Блок вырезается из main.js и исполняется с заглушками: так проверяется ПОВЕДЕНИЕ, а не слова.
+  function pydepsBlock(src) {
+    const a = src.indexOf('  // pydeps (best-effort');
+    const b = src.indexOf('  // course (папка курса)');
+    assert(a !== -1 && b > a, 'блок детекции pydeps найден в main.js');
+    return codeOnlyJs(src.slice(a, b));
+  }
+  function runPydepsBlock(block, o) {
+    const execCalls = [];
+    const out = {};
+    const stubs = {
+      IS_WIN: !!o.win, IS_MAC: !!o.mac,
+      resolveExecutable: () => o.py || '',
+      winLocalAppData: () => o.local || '',
+      xcodeCltPresent: () => !!o.clt,
+      winSafeToExec: () => { if (o.win) execCalls.push('winSafeToExec'); return true; },
+      execFileSync: (bin, args, opts) => { execCalls.push([bin, args, opts && opts.env ? 'env' : '-']); if (o.execFails) throw new Error('boom'); return Buffer.from(''); },
+      detectSpawnEnv: () => ({ PATH: 'x' }),
+      remoteFetch: { winSystemRoot: () => 'C:\\Windows' },
+      pyDetect: o.pyDetect || PD(),
+      path, fs, home: o.home || os.homedir(), out,
+      process: { env: Object.assign({}, process.env, { APPDATA: o.appData || '' }) },
+    };
+    const keys = Object.keys(stubs);
+    new Function(...keys, block)(...keys.map((k) => stubs[k]));
+    return { out, execCalls };
+  }
+
+  ok('main.js: детекция pydeps на Windows не запускает python (ни -E, ни winSafeToExec-гейт): пакеты и браузер по файлам, user-python тоже находится; ветка macOS прежняя', () => {
+    const block = pydepsBlock(MAIN());
+    // статически: в ветке Windows нет запуска процессов; execFileSync(py …) остался только вне неё (macOS/Linux)
+    const wi = block.indexOf('if (IS_WIN) {');
+    assert(wi !== -1, 'ветка IS_WIN на месте');
+    let depth = 0;
+    let wend = -1;
+    for (let k = block.indexOf('{', wi); k < block.length; k++) {
+      if (block[k] === '{') depth++;
+      else if (block[k] === '}') { depth--; if (depth === 0) { wend = k; break; } }
+    }
+    assert(wend > wi, 'ветка IS_WIN разобрана до закрывающей скобки');
+    const winBranch = block.slice(wi, wend + 1);
+    assert(!/execFileSync|spawnSync|spawn\(|execFile|exec\(|winSafeToExec|detectSpawnEnv|child_process/.test(winBranch),
+      'ветка Windows не запускает процессов: ' + winBranch.slice(0, 160));
+    assert(/pyDetect\.detectPythonPackages\(/.test(winBranch), 'ветка Windows спрашивает файлы через py-detect');
+    assert(block.indexOf('execFileSync(py') > wend, 'execFileSync(py …) остался только вне ветки Windows');
+    const t = mkTree('b');
+    try {
+      const py = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      const base = { win: true, py, local: t.local, appData: t.appData, home: t.root };
+      // пакеты есть, браузера нет → «не установлен» (семантика «пакеты И браузер» сохранена)
+      mkAll(userSite(t, '312'));
+      let r = runPydepsBlock(block, base);
+      assert.strictEqual(r.out.pydeps.installed, false, 'нет браузера Playwright');
+      assert.deepStrictEqual(r.execCalls, [], 'python не запускали');
+      // + пустой каталог браузера не считается, chromium-* — считается
+      fs.mkdirSync(path.join(t.local, 'ms-playwright'), { recursive: true });
+      assert.strictEqual(runPydepsBlock(block, base).out.pydeps.installed, false, 'пустой ms-playwright — нет браузера');
+      fs.mkdirSync(path.join(t.local, 'ms-playwright', 'chromium-1234'), { recursive: true });
+      r = runPydepsBlock(block, base);
+      assert.strictEqual(r.out.pydeps.installed, true, 'пакеты + браузер → установлен');
+      assert.deepStrictEqual(r.execCalls, [], 'python по-прежнему не запускали (в т.ч. не звали winSafeToExec)');
+      // PIL и requests есть и каталог браузера есть (его создаёт и `npx playwright install`), а пакета playwright нет —
+      // карточка не мягче итогового verify.ps1: НЕ «установлено», галка остаётся
+      drop(path.join(userSite(t, '312'), 'playwright'));
+      assert.strictEqual(runPydepsBlock(block, base).out.pydeps.installed, false, 'без playwright карточка галку не снимает, даже при браузере');
+      mkPkg(userSite(t, '312'), 'playwright');
+      // пакетов нет → не установлен
+      drop(path.join(userSite(t, '312'), 'PIL'));
+      assert.strictEqual(runPydepsBlock(block, base).out.pydeps.installed, false);
+      // python не найден вовсе
+      assert.strictEqual(runPydepsBlock(block, Object.assign({}, base, { py: '' })).out.pydeps.installed, false);
+      // macOS-ветка прежняя: запуск `python3 -c "import PIL, requests"` без изменений и без -E, шим без CLT не пускается
+      const mac = { win: false, mac: true, py: '/opt/homebrew/bin/python3', home: t.root };
+      r = runPydepsBlock(block, mac);
+      assert.strictEqual(r.execCalls.length, 1, 'mac: python запускается один раз');
+      assert.strictEqual(r.execCalls[0][0], '/opt/homebrew/bin/python3');
+      assert.deepStrictEqual(r.execCalls[0][1], ['-c', 'import PIL, requests'], 'mac: аргументы прежние');
+      assert.strictEqual(runPydepsBlock(block, Object.assign({}, mac, { py: '/usr/bin/python3', clt: false })).execCalls.length, 0, 'mac: стаб Apple без CLT не запускается');
+      assert.strictEqual(runPydepsBlock(block, Object.assign({}, mac, { py: '/usr/bin/python3', clt: true })).execCalls.length, 1);
+    } finally { drop(t.root); }
+  });
+
+  ok('main.js: прежний блок детекции pydeps (до исправления) на Windows запускал бы интерпретатор — негативный контроль для проверки выше', () => {
+    const old = FIXTURE('main-pydeps-block-before-u6.txt');
+    const t = mkTree('o');
+    try {
+      const py = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      mkPkg(userSite(t, '312'), 'PIL'); mkPkg(userSite(t, '312'), 'requests');
+      const r = runPydepsBlock(codeOnlyJs(old), { win: true, py, local: t.local, appData: t.appData, home: t.root,
+        pyDetect: { detectPythonPackages: () => { throw new Error('прежний блок не знает py-detect'); } } });
+      const execs = r.execCalls.filter((c) => Array.isArray(c));
+      assert.strictEqual(execs.length, 1, 'прежний код запускал python: ' + JSON.stringify(r.execCalls));
+      assert.deepStrictEqual(execs[0][1], ['-E', '-c', 'import PIL, requests']);
+    } finally { drop(t.root); }
+  });
+
+  // ---- 9. verify.ps1 --------------------------------------------------------------------------
+  const cutFn = (src, name) => {
+    const m = src.match(new RegExp('function ' + name + '\\b[\\s\\S]*?\\r?\\n\\}'));
+    assert(m, name + ' извлекается из verify.ps1');
+    return m[0];
+  };
+  const psBlock = (src) => {
+    const a = src.indexOf('# --- Python-пакеты');
+    const b = src.indexOf('# --- Расширение Claude Code');
+    assert(a !== -1 && b > a, 'блок Python-пакетов найден в verify.ps1');
+    return src.slice(a, b);
+  };
+  // Повторы $pyExe допустимы только как присваивание, условие и аргумент проверки по файлам.
+  const pyExeMisuse = (block) => {
+    const stripped = block
+      .split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n')
+      .replace(/-PyExe\s+\$pyExe\b/g, '')
+      .replace(/\$pyExe\s*=/g, '')
+      .replace(/\(-not\s+\$pyExe\)/g, '')
+      .replace(/\$pyExe\s*=\s*\$cmd\.Source/g, '');
+    return stripped.match(/\$pyExe\b[^\n]*/g) || [];
+  };
+
+  ok('verify.ps1: проверка playwright идёт по файлам — интерпретатор в блоке нигде не вызывается (ни оператором вызова, ни ключом -c с import), метки CHECK прежние', () => {
+    const v = VERIFY();
+    const blk = codeOnly(psBlock(v));   // комментарии вырезаны: объяснение старой беды в них — не код
+    assert(!/&\s*\$pyExe\b/.test(blk), 'нет вызова `& $pyExe`');
+    assert(!/-c\s+["']import\b/.test(blk), 'нет `-c "import …"`');
+    assert(!/Start-Process[^\n]*\$pyExe|Invoke-Expression|\biex\b/i.test(blk), 'нет других способов запуска');
+    assert.deepStrictEqual(pyExeMisuse(blk), [], '$pyExe нигде не вызывается: ' + JSON.stringify(pyExeMisuse(blk)));
+    assert(/Test-HmPyPackage\s+-PyExe\s+\$pyExe\s+-Module\s+'playwright'/.test(blk), 'вызывается проверка по файлам');
+    assert(/Write-Host "CHECK ok Python-пакеты"/.test(blk) && /Write-Host "CHECK fail Python-пакеты"/.test(blk), 'метки CHECK прежние');
+    assert(/Browser|браузер/i.test(blk) && /ms-playwright/.test(blk), 'проверка браузера Playwright осталась');
+    // выбор интерпретатора прежний, WindowsApps исключён
+    assert(/Programs\\Python\\Python313\\python\.exe/.test(blk) && /Programs\\Python\\Python312\\python\.exe/.test(blk));
+    assert(/\\WindowsApps\\/.test(blk));
+    // функции проверки определены в verify.ps1 ДО блока
+    assertOrder(v, 'function Test-HmPyPackage', '# --- Python-пакеты', 'функции определены раньше блока');
+    // контроль: прежний блок эти проверки не проходит
+    const oldBlk = FIXTURE('verify-python-block-before-u6.txt');
+    assert(/&\s*\$pyExe\b/.test(oldBlk), 'контрольный образец содержит `& $pyExe`');
+    assert(pyExeMisuse(oldBlk).length > 0, 'и проверка злоупотреблений его ловит');
+  });
+
+  ok('verify.ps1 (PowerShell 5.1, фейковые деревья): Test-HmPyPackage находит playwright в user site и в Lib/site-packages, различает версию Python (имя каталога, python3XY.dll, pyvenv.cfg, суффиксы -32 и -arm64), видит venv (Scripts и Lib рядом), не засчитывает каталог без __init__.py, соседний dist-info (playwright_stealth) и псевдоним WindowsApps, кириллица и U+2019 в пути', () => {
+    if (process.platform !== 'win32' || !fs.existsSync(PS51)) SKIP('нужен Windows PowerShell 5.1');
+    const v = VERIFY();
+    const fns = ['Get-HmPyMinor', 'Test-HmPySitePackage', 'Test-HmPyPackage'].map((n) => cutFn(v, n)).join('\r\n\r\n');
+    const t = mkTree('\u0418\u0432\u0430\u043d \u2019s ');
+    try {
+      // Каждый случай — в СВОЁМ каталоге APPDATA и со своим интерпретатором: ветки определения версии и
+      // каталогов не могут подменить друг друга (общий user site скрыл бы удаление любой из них).
+      const cases = [];
+      let n = 0;
+      const nextAd = () => path.join(t.root, 'ad' + (++n));
+      const addCase = (name, py, want, appData) => cases.push({ name, py, want, appData: appData || nextAd() });
+      const siteIn = (ad, dirName) => path.join(ad, 'Python', dirName, 'site-packages');
+      // 1) user site, версия по имени каталога
+      const ad1 = nextAd();
+      const py1 = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      mkPkg(siteIn(ad1, 'Python312'), 'playwright');
+      addCase('user-site', py1, true, ad1);
+      // 2) тот же user site, но интерпретатор 3.11 → пакета для него нет
+      const py2 = touch(t.local, 'Programs', 'Python', 'Python311', 'python.exe');
+      addCase('другая-версия', py2, false, ad1);
+      // 3) общий Python: Lib\site-packages рядом
+      const py3 = touch(t.pf, 'Python313', 'python.exe');
+      mkPkg(path.join(t.pf, 'Python313', 'Lib', 'site-packages'), 'playwright');
+      addCase('общий-Lib', py3, true);
+      // 4) dist-info вместо каталога
+      const py4 = touch(t.pf, 'Python310', 'python.exe');
+      mkDist(path.join(t.pf, 'Python310', 'Lib', 'site-packages'), 'playwright', '1.47.0');
+      addCase('dist-info', py4, true);
+      // 5) каталог без __init__.py
+      const py5 = touch(t.pf, 'Python39', 'python.exe');
+      touch(t.pf, 'Python39', 'Lib', 'site-packages', 'playwright', 'sync_api.py');
+      addCase('без-init', py5, false);
+      // 6) версия по python3XY.dll, нестандартный каталог; пакет только в user site 3.12
+      const ad6 = nextAd();
+      const py6 = touch(t.root, 'tools', 'py', 'python.exe');
+      touch(t.root, 'tools', 'py', 'python312.dll');
+      mkPkg(siteIn(ad6, 'Python312'), 'playwright');
+      addCase('по-dll', py6, true, ad6);
+      // 6б) то же без dll — версию не знаем, user site не угадываем
+      const ad6b = nextAd();
+      const py6b = touch(t.root, 'tools', 'py-nodll', 'python.exe');
+      mkPkg(siteIn(ad6b, 'Python312'), 'playwright');
+      addCase('нет-dll', py6b, false, ad6b);
+      // 7) псевдоним Магазина (пакет и dll «готовы», но это WindowsApps)
+      const ad7 = nextAd();
+      const py7 = touch(t.local, 'Microsoft', 'WindowsApps', 'python.exe');
+      touch(t.local, 'Microsoft', 'WindowsApps', 'python312.dll');
+      mkPkg(siteIn(ad7, 'Python312'), 'playwright');
+      addCase('WindowsApps', py7, false, ad7);
+      // 8) нет пакетов вовсе
+      const py8 = touch(t.pf, 'Python38', 'python.exe');
+      addCase('пусто', py8, false);
+      // 9) venv: Scripts\python.exe, пакет ТОЛЬКО в <venv>\Lib\site-packages (user site пуст, версия не нужна)
+      const py9 = touch(t.root, 'venv9', 'Scripts', 'python.exe');
+      mkPkg(path.join(t.root, 'venv9', 'Lib', 'site-packages'), 'playwright');
+      addCase('venv-Scripts', py9, true);
+      const py9b = touch(t.root, 'venv9b', 'Scripts', 'python.exe');
+      addCase('venv-пуст', py9b, false);
+      // 10) соседний пакет: playwright_stealth-*.dist-info — не playwright (граница имени по «-<цифра>»)
+      const py10 = touch(t.pf, 'Python311', 'python.exe');
+      mkDist(path.join(t.pf, 'Python311', 'Lib', 'site-packages'), 'playwright_stealth', '1.0.6');
+      addCase('stealth-не-playwright', py10, false);
+      const py10b = touch(t.pf, 'Python37', 'python.exe');
+      mkDist(path.join(t.pf, 'Python37', 'Lib', 'site-packages'), 'playwright_stealth', '1.0.6');
+      mkDist(path.join(t.pf, 'Python37', 'Lib', 'site-packages'), 'playwright', '1.47.0');
+      addCase('stealth-и-playwright', py10b, true);
+      // 11) 32-битная и ARM64-сборки: user site в каталоге с суффиксом платформы
+      for (const sfx of ['-32', '-arm64']) {
+        const adS = nextAd();
+        const pyS = touch(t.local, 'Programs', 'Python', 'Python312' + sfx, 'python.exe');
+        mkPkg(siteIn(adS, 'Python312' + sfx), 'playwright');
+        addCase('user-site' + sfx, pyS, true, adS);
+      }
+      // 12) версия ТОЛЬКО из pyvenv.cfg (имя каталога и dll версию не дают); пакет лишь в user site 3.12
+      const ad12 = nextAd();
+      const py12 = touch(t.root, 'venv12', 'Scripts', 'python.exe');
+      fs.writeFileSync(path.join(t.root, 'venv12', 'pyvenv.cfg'), 'home = C:\\Python\nversion = 3.12.4\n');
+      mkPkg(siteIn(ad12, 'Python312'), 'playwright');
+      addCase('pyvenv-cfg', py12, true, ad12);
+      const ad12b = nextAd();
+      const py12b = touch(t.root, 'venv12b', 'Scripts', 'python.exe');
+      mkPkg(siteIn(ad12b, 'Python312'), 'playwright');
+      addCase('pyvenv-нет-cfg', py12b, false, ad12b);
+      const ad12c = nextAd();
+      const py12c = touch(t.root, 'venv12c', 'Scripts', 'python.exe');
+      fs.writeFileSync(path.join(t.root, 'venv12c', 'pyvenv.cfg'), 'home = C:\\Python\nversion_info = 3.12.4.final.0\n');
+      mkPkg(siteIn(ad12c, 'Python312'), 'playwright');
+      addCase('pyvenv-version_info', py12c, true, ad12c);
+      const script = [
+        fns,
+        "$cases = Get-Content -LiteralPath $env:HM_CASES -Raw -Encoding UTF8 | ConvertFrom-Json",
+        "foreach ($c in $cases) { $env:APPDATA = [string]$c.appData; $r = Test-HmPyPackage -PyExe $c.py -Module 'playwright'; Write-Output ('RESULT ' + $c.name + ' ' + $r) }",
+        "Write-Output 'DONE'",
+      ].join('\r\n');
+      const casesFile = path.join(t.root, 'cases.json');
+      fs.writeFileSync(casesFile, JSON.stringify(cases), 'utf8');
+      const driver = path.join(t.root, 'driver.ps1');
+      fs.writeFileSync(driver, '\uFEFF[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' + script);
+      const scratchTmp = path.join(t.root, 'tmp');
+      fs.mkdirSync(scratchTmp, { recursive: true });
+      const r = cp.spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver], {
+        encoding: 'utf8', timeout: 180000,
+        // профиль, AppData и временные каталоги — песочные: ни одна ветка не дотянется до настоящего профиля
+        env: Object.assign({}, process.env, {
+          USERPROFILE: t.root, HOME: t.root, APPDATA: t.appData, LOCALAPPDATA: t.local, HERMES_HOME: path.join(t.root, 'hermes'),
+          TEMP: scratchTmp, TMP: scratchTmp, HM_CASES: casesFile,
+        }),
+      });
+      assert.strictEqual(r.status, 0, 'PowerShell отработал: ' + (r.stderr || '').slice(0, 500) + (r.stdout || '').slice(0, 300));
+      assert(/DONE/.test(r.stdout), 'драйвер дошёл до конца: ' + r.stdout);
+      const got = {};
+      (r.stdout.match(/^RESULT .+$/gm) || []).forEach((l) => { const m = /^RESULT (\S+) (True|False)\s*$/.exec(l.trim()); if (m) got[m[1]] = m[2] === 'True'; });
+      cases.forEach((c) => assert.strictEqual(got[c.name], c.want, c.name + ': ожидали ' + c.want + ', получили ' + got[c.name] + '\n' + r.stdout));
+      assert(cases.length >= 18, 'набор случаев не усох: ' + cases.length);
+    } finally { drop(t.root); }
+  });
+
+  ok('verify.ps1 целиком (PowerShell 5.1, сухой прогон): строка CHECK для Python-пакетов по фейковому дереву — нет пакета, пакет без браузера, пакет и браузер; прежний вызов интерпретатора на том же дереве краснел бы', () => {
+    if (process.platform !== 'win32' || !fs.existsSync(PS51)) SKIP('нужен Windows PowerShell 5.1');
+    const t = mkTree('w');
+    try {
+      const scriptsDir = path.join(t.root, 'scripts');
+      fs.mkdirSync(scriptsDir, { recursive: true });
+      const vSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'verify.ps1'), 'utf8');   // с BOM и CRLF, как есть
+      const verifyPath = path.join(scriptsDir, 'verify.ps1');
+      fs.writeFileSync(verifyPath, vSrc);
+      const py = touch(t.local, 'Programs', 'Python', 'Python312', 'python.exe');
+      fs.writeFileSync(py, 'MZ-not-a-real-executable');
+      const home = path.join(t.root, 'home');
+      fs.mkdirSync(home, { recursive: true });
+      const scratchTmp = path.join(t.root, 'tmp');
+      fs.mkdirSync(scratchTmp, { recursive: true });
+      // HM_DRY_RUN=1: блоки починок профиля и touch-up только печатают «WOULD» — реестр и профиль не трогаются;
+      // и профиль, и AppData, и каталог Hermes, и временные каталоги — песочные (на случай регресса скрипта)
+      const run = (file) => {
+        const env = Object.assign({}, process.env, {
+          USERPROFILE: home, HOME: home, APPDATA: t.appData, LOCALAPPDATA: t.local, HERMES_HOME: path.join(home, '.hermes'),
+          TEMP: scratchTmp, TMP: scratchTmp, HM_DRY_RUN: '1', HM_SELECTED: 'pydeps',
+        });
+        const r = cp.spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', timeout: 180000, env });
+        return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+      };
+      const verdict = (o) => { const m = /^CHECK (ok|fail|skip) Python-пакеты\s*$/m.exec(o.out); return m ? m[1] : 'нет строки CHECK: ' + o.out.slice(0, 400) + o.err.slice(0, 300); };
+      // пакета нет
+      let o = run(verifyPath);
+      assert.strictEqual(o.status, 0, 'verify всегда выходит с 0: ' + o.err.slice(0, 300));
+      assert.strictEqual(verdict(o), 'fail', 'нет пакета → fail');
+      assert(/playwright не найдена среди установленных пакетов/.test(o.out), 'причина названа: ' + o.out.slice(0, 300));
+      // пакет в user site, браузера нет → fail с названной причиной про браузер
+      mkPkg(userSite(t, '312'), 'playwright');
+      o = run(verifyPath);
+      assert.strictEqual(verdict(o), 'fail', 'пакет без браузера → fail');
+      assert(/браузер Playwright не распакован/.test(o.out) && !/playwright не найдена/.test(o.out), 'назван именно браузер: ' + o.out.slice(0, 300));
+      // пакет и браузер → ok, интерпретатор не запускали (мусорный python.exe дал бы ошибку запуска)
+      fs.mkdirSync(path.join(t.local, 'ms-playwright', 'chromium-1234'), { recursive: true });
+      o = run(verifyPath);
+      assert.strictEqual(verdict(o), 'ok', 'пакет + браузер → ok: ' + o.out.slice(0, 300) + o.err.slice(0, 300));
+      assert(!/python\.exe|не является внутренней|not recognized|не распознан|не удалось запустить|failed to run/i.test(o.out + o.err), 'интерпретатор не запускали: ' + (o.out + o.err).slice(0, 300));
+      // контроль: тот же скрипт со старым вызовом интерпретатора на ТОМ ЖЕ дереве краснеет (мусорный python.exe не запускается)
+      const oldCall = "$impOk = Test-HmPyPackage -PyExe $pyExe -Module 'playwright'";
+      assert(vSrc.includes(oldCall), 'в verify.ps1 есть вызов проверки по файлам');
+      const oldVerify = vSrc.replace(oldCall, '& $pyExe -c "import playwright" 2>$null\r\n        $impOk = ($LASTEXITCODE -eq 0)');
+      const oldPath = path.join(scriptsDir, 'verify-old.ps1');
+      fs.writeFileSync(oldPath, oldVerify);
+      const oo = run(oldPath);
+      assert.strictEqual(verdict(oo), 'fail', 'прежний вызов интерпретатора не справился бы с тем же деревом: ' + oo.out.slice(0, 300));
+    } finally { drop(t.root); }
+  });
+
+  // ---- 10. F4 на настоящем Python: прежняя проба исполняла подложенный код ------------------------
+  function realPython() {
+    const cands = [process.env.HM_PY];
+    try {
+      const w = cp.spawnSync('where', ['python'], { encoding: 'utf8', timeout: 20000 });
+      String(w.stdout || '').split(/\r?\n/).forEach((l) => { if (l.trim()) cands.push(l.trim()); });
+    } catch (e) { /* нет where */ }
+    for (const c of cands) {
+      if (!c || /[\\/]WindowsApps[\\/]/i.test(c) || !fs.existsSync(c)) continue;
+      // нужен обычный интерпретатор с включённым user site (у venv он выключен — воспроизводить нечего)
+      const r = cp.spawnSync(c, ['-c', 'import sys,site;print(sys.version_info[0], sys.version_info[1], site.ENABLE_USER_SITE)'], { encoding: 'utf8', timeout: 30000 });
+      const m = /^3 (\d+) True$/.exec(String(r.stdout || '').trim());
+      if (r.status === 0 && m) return { exe: c, minor: '3' + m[1] };
+    }
+    return null;
+  }
+
+  ok('F4 на настоящем Python (песочный APPDATA): прежняя проба -E -c с import PIL исполняла usercustomize.py и .pth из user site, детекция по файлам — нет', () => {
+    if (process.platform !== 'win32') SKIP('сценарий Windows (APPDATA/user site)');
+    const py = realPython();
+    if (!py) SKIP('нет настоящего python.exe (не WindowsApps) — воспроизведение не проверить');
+    const t = mkTree('r');
+    try {
+      const site = userSite(t, py.minor);
+      const markUc = path.join(t.root, 'marker-usercustomize.txt');
+      const markPth = path.join(t.root, 'marker-pth.txt');
+      touch(site, 'usercustomize.py'); fs.writeFileSync(path.join(site, 'usercustomize.py'), 'open(r"' + markUc + '", "w").write("x")\n');
+      fs.writeFileSync(path.join(site, 'evil.pth'), 'import sys; open(r"' + markPth + '", "w").write("x")\n');
+      const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+      const env = { SystemRoot: sysRoot, windir: sysRoot, PATH: path.join(sysRoot, 'System32'), Path: path.join(sysRoot, 'System32'),
+        PATHEXT: '.COM;.EXE;.BAT;.CMD', USERPROFILE: t.root, APPDATA: t.appData, LOCALAPPDATA: t.local, TEMP: os.tmpdir(), TMP: os.tmpdir() };
+      const spawnProbe = (args) => {
+        [markUc, markPth].forEach((m) => { try { fs.unlinkSync(m); } catch (e) { /* нет */ } });
+        cp.spawnSync(py.exe, args, { env, cwd: path.join(sysRoot, 'System32'), windowsHide: true, timeout: 60000 });
+        return { uc: fs.existsSync(markUc), pth: fs.existsSync(markPth) };
+      };
+      // ЭТО делал main.js до исправления (те же аргументы, доверенное окружение, cwd=System32)
+      const oldProbe = spawnProbe(['-E', '-c', 'import PIL, requests']);
+      assert(oldProbe.uc && oldProbe.pth, 'прежняя проба -E исполнила подложенный код: ' + JSON.stringify(oldProbe));
+      const verifyProbe = spawnProbe(['-c', 'import playwright']);
+      assert(verifyProbe.uc && verifyProbe.pth, 'проба verify.ps1 исполнила подложенный код: ' + JSON.stringify(verifyProbe));
+      assert(!spawnProbe(['-E', '-s', '-c', 'import PIL, requests']).uc, 'контроль: -s user site отключает (значит механизм именно в нём)');
+      // детекция по файлам на ТОМ ЖЕ дереве: ничего не исполняется
+      [markUc, markPth].forEach((m) => { try { fs.unlinkSync(m); } catch (e) { /* нет */ } });
+      mkAll(site);
+      const interp = touch(t.local, 'Programs', 'Python', 'Python' + py.minor, 'python.exe');
+      const r = PD().detectPythonPackages({ pyExe: interp, appData: t.appData });
+      assert.strictEqual(r.installed, true);
+      assert(!fs.existsSync(markUc) && !fs.existsSync(markPth), 'детекция по файлам подложенный код не исполняет');
+    } finally { drop(t.root); }
+  });
+
+  // ---- 11. принципал одноразовой задачи запуска редактора — из ТОКЕНА, а не из окружения -----------
+  // Остаток F9 (рецензия): <UserId> задачи собирался из process.env.USERDOMAIN + USERNAME. Обе переменные
+  // лежат в HKCU\Volatile Environment рядом с USERPROFILE и пишутся процессом того же пользователя; подмена
+  // на учётку ДРУГОГО человека с интерактивным сеансом заставила бы планировщик запустить обёртку (а с ней и
+  // подложенный рядом с code.cmd Code.exe) в ЕГО сеансе. Теперь SID читает whoami.exe — из токена процесса.
+  const TOKEN_SID = 'S-1-5-21-1111111111-2222222222-3333333333-1001';
+  const DR = () => require(path.join(ROOT, 'src', 'deelev-route.js'));
+  const LAUNCH_DRIVER = path.join(ROOT, 'test', 'fixtures', 'winlaunch-sandbox.js');
+  // Текст функции верхнего уровня: от заголовка до первой строки «}» в нулевой колонке.
+  const fnSource = (src, header) => {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в main.js найдено: ' + header);
+    const m = /\r?\n\}\r?\n/.exec(src.slice(i));
+    assert(m, 'конец функции ' + header);
+    return src.slice(i, i + m.index + m[0].length);
+  };
+  // Настоящий текст winLaunchDeElevated в отдельном процессе с заглушками системных вызовов (см. фикстуру).
+  function runLaunchSandbox(fnSrc, o) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-wl-'));
+    try {
+      const cfgFile = path.join(tmp, 'cfg.json');
+      fs.writeFileSync(cfgFile, JSON.stringify(Object.assign({
+        fnSrc, deelevRoute: path.join(ROOT, 'src', 'deelev-route.js'),
+        env: {}, osUser: 'tokenuser', whoamiOut: '', whoamiThrows: false,
+        staging: 'C:\\ProgramData\\HmDeElev-0123456789abcdef0123456789abcdef',
+        exe: 'C:\\Program Files\\Microsoft VS Code\\Code.exe', folder: 'C:\\Users\\student\\HamidunStart',
+      }, o)), 'utf8');
+      const r = cp.spawnSync(process.execPath, [LAUNCH_DRIVER, cfgFile], { encoding: 'utf8', timeout: 60000 });
+      const m = /HMJSON:([\s\S]*)$/.exec(String(r.stdout || ''));
+      assert(m, 'песочница ответила (код ' + r.status + '): ' + String(r.stderr || r.stdout).slice(0, 500));
+      const out = JSON.parse(m[1]);
+      assert(!out.error, 'песочница без исключения: ' + out.error);
+      return out;
+    } finally { drop(tmp); }
+  }
+
+  ok('deelev-route.parseWhoamiUserSid: SID из вывода whoami /user /fo csv /nh (обычный, кириллица и U+2019 в имени, Azure AD, заголовок любой локали); мусор, подделка SID, два разных SID и лишние поля — пустой ответ', () => {
+    assert.strictEqual(typeof DR().parseWhoamiUserSid, 'function', 'parseWhoamiUserSid экспортирован');
+    const P = (s) => DR().parseWhoamiUserSid(s);
+    const AAD = 'S-1-12-1-1111111111-2222222222-3333333333-4444444444';
+    const good = {
+      'обычный': ['"msi\\student","' + TOKEN_SID + '"\r\n', TOKEN_SID],
+      'без перевода строки': ['"msi\\student","' + TOKEN_SID + '"', TOKEN_SID],
+      'кириллица, пробел и U+2019 в имени': ['"ПК-ИВАН\\Иван Петров\u2019s","' + TOKEN_SID + '"\r\n', TOKEN_SID],
+      'Azure AD (S-1-12-1-…)': ['"azuread\\johndoe","' + AAD + '"\r\n', AAD],
+      'заголовок на русском + строка': ['"Имя пользователя","SID"\r\n"msi\\student","' + TOKEN_SID + '"\r\n', TOKEN_SID],
+      'пустые строки вокруг': ['\r\n\r\n"msi\\student","' + TOKEN_SID + '"\r\n\r\n', TOKEN_SID],
+      'тот же SID дважды': ['"a\\b","' + TOKEN_SID + '"\n"a\\b","' + TOKEN_SID + '"\n', TOKEN_SID],
+      'пятнадцать подцентров (предел)': ['"a\\b","S-1-5' + '-1'.repeat(15) + '"', 'S-1-5' + '-1'.repeat(15)],
+    };
+    for (const [why, [text, want]] of Object.entries(good)) assert.strictEqual(P(text), want, why);
+    const bad = {
+      'пусто': '', 'null': null, 'undefined': undefined, 'число': 42, 'пробелы': '   \r\n',
+      'только заголовок': '"UserName","SID"\r\n',
+      'без кавычек': 'msi\\student ' + TOKEN_SID,
+      'одно поле': '"' + TOKEN_SID + '"',
+      'три поля': '"msi\\student","' + TOKEN_SID + '","x"',
+      'нижний регистр s': '"a\\b","s-1-5-21-1-2-3-1001"',
+      'не тот номер ревизии': '"a\\b","S-2-5-21-1-2-3-1001"',
+      'буквы вместо цифр': '"a\\b","S-1-5-21-abc-2-3-1001"',
+      'нет подцентров': '"a\\b","S-1-5"',
+      'пробелы внутри кавычек': '"a\\b"," ' + TOKEN_SID + ' "',
+      'хвост после SID (внедрение в XML)': '"a\\b","' + TOKEN_SID + '</UserId><Command>x"',
+      'кавычка в SID': '"a\\b","S-1-5-21-1-2-3-1001\\""',
+      'два разных SID': '"a\\b","' + TOKEN_SID + '"\r\n"c\\d","S-1-5-21-9-9-9-1002"\r\n',
+      'шестнадцать подцентров (больше предела)': '"a\\b","S-1-5' + '-1'.repeat(16) + '"',
+      'сообщение об ошибке whoami': 'ОШИБКА: Недопустимый параметр или аргумент - \'/user\'.',
+    };
+    for (const [why, text] of Object.entries(bad)) assert.strictEqual(P(text), '', why);
+  });
+
+  ok('main.js winLaunchDeElevated (песочница): <UserId> задачи — SID из токена (whoami /user в доверенном окружении), а не USERDOMAIN и USERNAME из окружения; SID не прочитан — задача не создаётся, причина в журнале; прежний вывод userId даёт чужую учётку', () => {
+    const src = fnSource(MAIN(), 'async function winLaunchDeElevated(');
+    const hostile = { SystemRoot: 'C:\\Windows', USERDOMAIN: 'EVILPC', USERNAME: 'victimB' };
+    const who = '"msi\\student","' + TOKEN_SID + '"\r\n';
+    const xmlOf = (out) => {
+      assert.strictEqual(out.written.length, 1, 'task.xml записан один раз: ' + JSON.stringify(out.calls));
+      return out.written[0].data.replace(/^\uFEFF/, '');
+    };
+    // 1) окружение подменено на чужую учётку, токен свой: в XML — SID токена
+    let out = runLaunchSandbox(src, { env: hostile, osUser: 'student', whoamiOut: who });
+    let xml = xmlOf(out);
+    assert(xml.includes('<UserId>' + TOKEN_SID + '</UserId>'), 'принципал — SID токена: ' + xml.slice(0, 400));
+    assert(!/victimB|EVILPC/i.test(xml), 'ни имени, ни домена из окружения в XML нет');
+    assert(/<LogonType>InteractiveToken<\/LogonType><RunLevel>LeastPrivilege<\/RunLevel>/.test(xml), 'тип входа и уровень прав прежние (medium)');
+    assert.strictEqual(out.result, true, 'путь через задачу дошёл до успеха');
+    const asked = out.calls.filter((c) => c.exec === 'whoami.exe');
+    assert.strictEqual(asked.length, 1, 'whoami зовут один раз');
+    assert.deepStrictEqual(asked[0].args, ['/user', '/fo', 'csv', '/nh']);
+    assert.strictEqual(asked[0].trustedEnv, true, 'запуск — в доверенном окружении (detectSpawnEnv), не в унаследованном');
+    const iWho = out.calls.findIndex((c) => c.exec === 'whoami.exe');
+    const iDir = out.calls.findIndex((c) => c.winMakeSecureDir);
+    assert(iWho !== -1 && iDir !== -1 && iWho < iDir, 'SID читается ДО создания защищённого каталога');
+    // 2) окружение подменено, а SID прочитать не удалось: задача НЕ создаётся, каталог не заводится, идём запасным путём
+    const unreadable = {
+      'пустой вывод': { whoamiOut: '' },
+      'whoami падает': { whoamiThrows: true },
+      'вывод не SID': { whoamiOut: '"msi\\student","не-sid"\r\n' },
+      'два разных SID': { whoamiOut: who + '"a\\b","S-1-5-21-9-9-9-1002"\r\n' },
+    };
+    for (const [why, o2] of Object.entries(unreadable)) {
+      out = runLaunchSandbox(src, Object.assign({ env: hostile, osUser: 'student' }, o2));
+      assert.strictEqual(out.written.length, 0, why + ': task.xml не записан');
+      assert(!out.calls.some((c) => c.exec === 'schtasks.exe'), why + ': планировщик не вызывали');
+      assert(!out.calls.some((c) => c.winMakeSecureDir), why + ': защищённый каталог не заводили');
+      assert(out.logs.some((l) => /SID/.test(l) && /whoami/.test(l)), why + ': причина названа в журнале: ' + JSON.stringify(out.logs));
+      assert(out.calls.some((c) => c.shellToken), why + ': запасной путь (токен оболочки) предложен');
+      assert.strictEqual(out.result, 'explorer', why + ': в итоге открыта только папка');
+    }
+    // 3) КОНТРОЛЬ: прежний вывод userId (из окружения) в том же месте даёт XML с чужой учёткой — тест это видит
+    const oldStmt = FIXTURE('main-winlaunch-userid-before-u6-fix.txt');
+    assert(/process\.env\.USERDOMAIN/.test(oldStmt) && /process\.env\.USERNAME/.test(oldStmt), 'образец содержит прежние чтения окружения');
+    assert(src.includes('xmlEsc(userSid)') && src.includes('const taskXml ='), 'приёмник SID в XML на месте');
+    const mutant = src.replace('const taskXml =', () => oldStmt + '  const taskXml =').replace('xmlEsc(userSid)', () => 'xmlEsc(userId)');
+    assert.notStrictEqual(mutant, src, 'мутант построен');
+    out = runLaunchSandbox(mutant, { env: hostile, osUser: 'student', whoamiOut: who });
+    xml = xmlOf(out);
+    assert(xml.includes('<UserId>EVILPC\\victimB</UserId>'), 'прежний код отдал бы планировщику чужую учётку: ' + xml.slice(0, 300));
+    assert(!xml.includes('<UserId>' + TOKEN_SID + '</UserId>'), 'и SID токена в нём нет');
+  });
+
+  ok('main.js detectForeignUserWarning (песочница): учётка токена определяется через os.userInfo, подмена USERNAME баннер ни прячет, ни показывает', () => {
+    const vm = require('vm');
+    const src = fnSource(MAIN(), 'function detectForeignUserWarning(');
+    const run = (envUser, tokenUser, owner) => {
+      const sb = {
+        IS_WIN: true,
+        process: { env: { USERNAME: envUser } },
+        os: { userInfo: () => { if (tokenUser == null) throw new Error('нет пользователя токена'); return { username: tokenUser }; } },
+        remoteFetch: { sysBin: () => 'C:\\Windows\\System32\\tasklist.exe' },
+        execFileSync: () => Buffer.from('"explorer.exe","4242","Console","1","80 000 K","Running","' + owner + '","0:01:23","N/A"\r\n'),
+        decodeConsole: (b) => b.toString('latin1'),
+      };
+      vm.createContext(sb);
+      return vm.runInContext(src + '\ndetectForeignUserWarning();', sb);
+    };
+    // токен — админ другой учётки, интерактивный пользователь — student; USERNAME подделан под интерактивного → баннер ОБЯЗАН быть
+    const w = run('student', 'adminacct', 'MSI\\student');
+    assert(w && /adminacct/.test(w) && /MSI\\student/.test(w), 'баннер показан и называет обе учётки: ' + JSON.stringify(w));
+    // токен совпадает с интерактивным, USERNAME подделан под чужого → ложного баннера нет
+    assert.strictEqual(run('adminacct', 'student', 'MSI\\student'), '', 'подделка USERNAME не рождает ложный баннер');
+    // пользователь токена не определился → молчим (fail-open, как и было)
+    assert.strictEqual(run('student', null, 'MSI\\student'), '', 'нет пользователя токена → тихо');
+    // обычная установка: токен = интерактивный
+    assert.strictEqual(run('student', 'student', 'MSI\\student'), '', 'обычный случай → тихо');
+    assert.strictEqual(run('x', 'STUDENT', 'MSI\\student'), '', 'регистр имени не важен');
+  });
+
+  ok('main.js: ни принципал задачи запуска редактора, ни баннер о чужой учётке не читают USERNAME и USERDOMAIN из process.env; SID читается раньше защищённого каталога', () => {
+    const m = codeOnlyJs(MAIN());
+    const wl = fnSource(m, 'async function winLaunchDeElevated(');
+    const fw = fnSource(m, 'function detectForeignUserWarning(');
+    assert(!/process\.env\.(USERNAME|USERDOMAIN)/i.test(wl), 'winLaunchDeElevated: имя и домен не из окружения');
+    assert(!/process\.env\.USERNAME/i.test(fw), 'detectForeignUserWarning: имя не из окружения');
+    assert(/deelevRoute\.parseWhoamiUserSid\(/.test(wl) && /\['\/user', '\/fo', 'csv', '\/nh'\]/.test(wl), 'SID — из whoami /user /fo csv /nh');
+    assert(/env: detectSpawnEnv\(\)/.test(wl.slice(wl.indexOf('parseWhoamiUserSid'), wl.indexOf('parseWhoamiUserSid') + 300)), 'whoami — в доверенном окружении');
+    assertOrder(wl, 'parseWhoamiUserSid', 'await winMakeSecureDir()', 'SID читается раньше защищённого каталога');
+    assert(/os\.userInfo\(\)\.username/.test(fw), 'пользователь токена — os.userInfo().username');
+    // контроль: прежний образец эту проверку не проходит
+    const old = FIXTURE('main-winlaunch-userid-before-u6-fix.txt');
+    assert(/process\.env\.(USERNAME|USERDOMAIN)/i.test(old), 'контроль: прежний код читал имя и домен из окружения');
+  });
+
+  // ---- 12. nomad-key: HERMES_HOME из окружения — тоже корень, выбирающий место админской записи ------
+  // Обработчик nomad-set-key идёт в элевированном main-процессе: mkdir -p и замена config.yaml по пути из
+  // HERMES_HOME (HKCU\Environment пишет любой процесс того же пользователя) шли бы под администратором в
+  // каталог, куда пользователь писать не может, или поверх чужого config.yaml. Скрипты установки эту
+  // переменную не получают (её нет в WIN_SYS_ENV_KEYS) — значит, расхождение было только у этого писателя.
+  // Всё, что пишет на диск, идёт в ДОЧЕРНЕМ процессе с песочным профилем (test/fixtures/nomad-key-sandbox.js):
+  // однажды прогон такого теста против ещё не исправленного кода записал ключ в настоящий конфиг Hermes.
+  const NK = () => require(path.join(ROOT, 'src', 'nomad-key.js'));
+  const NK_DRIVER = path.join(ROOT, 'test', 'fixtures', 'nomad-key-sandbox.js');
+
+  ok('nomad-key: на Windows HERMES_HOME принимается только строго внутри профиля (вне профиля — отказ, писать некуда, причина названа); без переменной и на macOS — прежнее поведение', () => {
+    // чистая функция: только строки, ни одного обращения к диску
+    const HOME = 'C:\\Users\\student';
+    const LOCAL = HOME + '\\AppData\\Local';
+    const cfg = (env, platform, home) => NK().nomadConfigPath(env, platform || 'win32', home || HOME);
+    assert.strictEqual(cfg({ HERMES_HOME: HOME + '\\.hermes', LOCALAPPDATA: LOCAL }), HOME + '\\.hermes\\config.yaml', 'внутри профиля');
+    assert.strictEqual(cfg({ HERMES_HOME: 'c:/users/STUDENT/.hermes/', LOCALAPPDATA: LOCAL }), 'c:\\users\\STUDENT\\.hermes\\config.yaml', 'написание слэшей и регистр не важны, путь нормализуется');
+    assert.strictEqual(cfg({ HERMES_HOME: HOME + '\\Иван Петров\u2019s\\hermes', LOCALAPPDATA: LOCAL }), HOME + '\\Иван Петров\u2019s\\hermes\\config.yaml', 'кириллица, пробел и U+2019');
+    assert.strictEqual(cfg({ HERMES_HOME: '  ' + HOME + '\\.hermes  ', LOCALAPPDATA: LOCAL }), HOME + '\\.hermes\\config.yaml', 'пробелы по краям срезаются');
+    // не задана / пуста / только пробелы — каталог по умолчанию
+    const dflt = HOME + '\\AppData\\Local\\hermes\\config.yaml';
+    [undefined, '', '   '].forEach((v) => assert.strictEqual(cfg({ HERMES_HOME: v, LOCALAPPDATA: LOCAL }), dflt, 'по умолчанию: ' + JSON.stringify(v)));
+    assert.strictEqual(cfg({}, 'win32', HOME), dflt, 'нет и LOCALAPPDATA — <профиль>\\AppData\\Local\\hermes');
+    // вне профиля или не каталог внутри него — писать некуда
+    const outside = {
+      'другой диск': 'D:\\hermes',
+      'общий каталог машины': 'C:\\ProgramData\\hermes',
+      'профиль-сосед (student2 при профиле student)': 'C:\\Users\\student2\\.hermes',
+      'выход из профиля через ..': HOME + '\\..\\admin2\\.hermes',
+      'сетевой путь': '\\\\attacker\\share\\hermes',
+      'относительный путь': 'hermes',
+      'нераскрытая переменная': '%USERPROFILE%\\.hermes',
+      'сам профиль (не ниже него)': HOME,
+      'родитель профиля': 'C:\\Users',
+      'NUL в пути': HOME + '\\.her\u0000mes',
+      // Win32 отбрасывает хвостовые точки и пробелы компонента (рецензия r3): <профиль>\... читается как сам профиль
+      'три точки (Win32: сам профиль)': HOME + '\\...',
+      'хвостовая точка каталога': HOME + '\\.hermes.',
+      'хвостовой пробел промежуточного компонента': HOME + '\\ x \\.hermes',
+    };
+    for (const [why, v] of Object.entries(outside)) {
+      assert.strictEqual(cfg({ HERMES_HOME: v, LOCALAPPDATA: LOCAL }), null, 'HERMES_HOME — ' + why);
+    }
+    // отказ: причина человеку по-русски (без пути на экране), строка журнала — с очищенным путём
+    const bad = NK().resolveConfigPath({ HERMES_HOME: 'D:\\x\ny\u0085z', LOCALAPPDATA: LOCAL }, 'win32', HOME);
+    assert.strictEqual(bad.file, '');
+    assert(/HERMES_HOME/.test(bad.message) && /профил/.test(bad.message) && /НЕ записан/.test(bad.message), 'причина названа: ' + bad.message);
+    assert(!bad.message.includes('D:\\x'), 'путь из окружения на экран не попадает');
+    assert(bad.log.includes('D:\\x?y?z'), 'в журнале путь с замененными управляющими символами: ' + JSON.stringify(bad.log));
+    assert(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(bad.log), 'строка журнала однострочная');
+    // профиль не определён (не абсолютный) — переменная не может «лежать внутри» него: отказ, а не гадание
+    assert.strictEqual(cfg({ HERMES_HOME: 'C:\\x\\hermes', LOCALAPPDATA: LOCAL }, 'win32', 'relative'), null);
+    // macOS/Linux: установщик там не элевирован, значение переменной по-прежнему главнее
+    assert.strictEqual(cfg({ HERMES_HOME: '/opt/hermes' }, 'darwin', '/Users/student'), path.join('/opt/hermes', 'config.yaml'));
+    assert.strictEqual(cfg({}, 'darwin', '/Users/student'), path.join('/Users/student', '.hermes', 'config.yaml'));
+    // домашний каталог не определился (os.homedir() бросает) и переменной нет: относительный путь от cwd писать
+    // нельзя — отказ с причиной, а не файл рядом с процессом. Подмена только на время проверки, диска не касается.
+    const realHomedir = os.homedir;
+    os.homedir = () => { throw new Error('ERR_SYSTEM_ERROR'); };
+    try {
+      for (const plat of ['darwin', 'win32']) {
+        const r0 = NK().resolveConfigPath({}, plat);
+        assert.strictEqual(r0.file, '', plat + ': без профиля и без переменной — отказ');
+        assert(/НЕ записан/.test(r0.message) && r0.log.length > 10, plat + ': причина названа: ' + r0.message);
+        assert.strictEqual(NK().nomadConfigPath({}, plat), null, plat + ': nomadConfigPath → null');
+      }
+      // с явной переменной на не-Windows профиль не нужен
+      assert.strictEqual(NK().resolveConfigPath({ HERMES_HOME: '/opt/hermes' }, 'darwin').file, path.join('/opt/hermes', 'config.yaml'));
+    } finally { os.homedir = realHomedir; }
+  });
+
+  ok('nomad-key (Windows, настоящая ФС, дочерний процесс с песочным профилем): HERMES_HOME вне профиля — ключ не пишется, каталог не создаётся, причина названа; внутри профиля и без переменной — пишется как раньше', () => {
+    if (process.platform !== 'win32') SKIP('сценарий Windows (пути, ФС и профиль)');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-nk-'));
+    try {
+      const home = path.join(base, 'home');
+      const local = path.join(home, 'AppData', 'Local');
+      const roaming = path.join(home, 'AppData', 'Roaming');
+      const scratchTmp = path.join(base, 'tmp');
+      [home, local, roaming, scratchTmp].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+      // «вне профиля», но ВНУТРИ песочницы: даже регресс в коде не выведет запись за её пределы
+      const outsideDir = path.join(base, 'elsewhere', 'hermes');
+      const escapeDir = home + '\\..\\elsewhere2\\hermes';         // выход из профиля через ..
+      const siblingDir = home + '2\\.hermes';                       // «home2» при профиле «home»: префиксная ловушка
+      const insideDir = path.join(home, '.hermes-custom');
+      const KEY = 'nmd_live_0123456789abcdef';
+      const cfgFile = path.join(base, 'cfg.json');
+      const observe = [path.join(base, 'elsewhere'), path.join(base, 'elsewhere2'), path.join(base, 'home2'),
+        path.join(insideDir, 'config.yaml'), path.join(local, 'hermes', 'config.yaml')];
+      fs.writeFileSync(cfgFile, JSON.stringify({
+        module: path.join(ROOT, 'src', 'nomad-key.js'), sandbox: base, key: KEY,
+        nomadConfig: { nomad: { cloud: { baseUrl: 'https://cp.nomadnet.ai/v1', defaultModel: 'claude-opus-4-6' } } },
+        cases: [{ id: 'outside', hermesHome: outsideDir }, { id: 'escape', hermesHome: escapeDir },
+          { id: 'sibling', hermesHome: siblingDir }, { id: 'inside', hermesHome: insideDir }, { id: 'default', hermesHome: null }],
+        observe,
+      }), 'utf8');
+      // окружение ребёнка — ТОЛЬКО песочное, ничего от родителя: настоящий профиль недостижим
+      const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+      const childEnv = { SystemRoot: sysRoot, windir: sysRoot, USERPROFILE: home, HOME: home, APPDATA: roaming, LOCALAPPDATA: local,
+        HERMES_HOME: outsideDir, TEMP: scratchTmp, TMP: scratchTmp, ELECTRON_RUN_AS_NODE: '1' };   // последнее: ни на что не влияет под node, а под Electron даёт «как Node»
+      const r = cp.spawnSync(process.execPath, [NK_DRIVER, cfgFile], { env: childEnv, encoding: 'utf8', timeout: 60000 });
+      const m = /HMJSON:([\s\S]*)$/.exec(String(r.stdout || ''));
+      assert(m, 'песочница ответила (код ' + r.status + '): ' + String(r.stderr || r.stdout).slice(0, 500));
+      const o = JSON.parse(m[1]);
+      // ПЕРВОЕ утверждение: песочница цела — корни внутри неё, путь прежнего кода внутри неё, чужого не трогали
+      assert(!o.unsafe, 'песочница безопасна: ' + JSON.stringify(o).slice(0, 400));
+      assert.deepStrictEqual(o.violations, [], 'код не обращался к путям вне песочницы');
+      const by = {}; o.results.forEach((x) => { by[x.id] = x; });
+      const obs = (p) => o.observed.find((x) => x.path === p);
+      // вне профиля: отказ, ничего не создано
+      for (const id of ['outside', 'escape', 'sibling']) {
+        assert.strictEqual(by[id].threw, null, id + ': без исключения');
+        assert.strictEqual(by[id].res.ok, false, id + ': вне профиля — отказ: ' + JSON.stringify(by[id].res));
+        assert.strictEqual(by[id].res.reason, 'io', id);
+        assert(/HERMES_HOME/.test(by[id].res.message) && /профил/.test(by[id].res.message), id + ': причина названа по-русски: ' + by[id].res.message);
+        assert(typeof by[id].res.log === 'string' && by[id].res.log.length > 10, id + ': есть строка для install.log');
+      }
+      assert(!obs(path.join(base, 'elsewhere')).exists, 'вне профиля не создано ничего, даже каталога (outside)');
+      assert(!obs(path.join(base, 'elsewhere2')).exists, 'выход через .. не создал каталога (escape)');
+      assert(!obs(path.join(base, 'home2')).exists, 'профиль-«сосед» с общим началом имени не создан (sibling)');
+      // внутри профиля: пишется туда, куда указано
+      assert.strictEqual(by.inside.res.ok, true, 'внутри профиля пишется: ' + JSON.stringify(by.inside.res));
+      assert.strictEqual(path.resolve(by.inside.res.path), path.join(insideDir, 'config.yaml'));
+      assert(obs(path.join(insideDir, 'config.yaml')).content.includes('api_key: "' + KEY + '"'), 'ключ в файле');
+      // без переменной — LOCALAPPDATA\hermes (песочный)
+      assert.strictEqual(by.default.res.ok, true, 'по умолчанию: ' + JSON.stringify(by.default.res));
+      assert.strictEqual(path.resolve(by.default.res.path), path.join(local, 'hermes', 'config.yaml'));
+      assert(obs(path.join(local, 'hermes', 'config.yaml')).exists, 'файл в каталоге по умолчанию');
+    } finally { drop(base); }
+  });
+
+  ok('main.js: обработчик nomad-set-key пишет причину отказа в install.log (res.log), а nomad-key.js проверяет HERMES_HOME общей границей профиля', () => {
+    const m = codeOnlyJs(MAIN());
+    const at = m.indexOf("ipcMain.handle('nomad-set-key'");
+    assert(at !== -1, 'обработчик на месте');
+    const body = m.slice(at, at + 500);
+    assert(/nomadKey\.writeNomadKey\(key, \{ config: readJson\('config\.json', \{\}\) \}\)/.test(body), 'запись — через модуль, окружение не передаётся');
+    assert(/logToFile\('nomad-key', res\.log\)/.test(body), 'причина отказа уходит в журнал');
+    const nk = codeOnlyJs(fs.readFileSync(path.join(ROOT, 'src', 'nomad-key.js'), 'utf8'));
+    assert(/profileEnv\.isInside\(/.test(nk), 'граница профиля — общая функция profile-env');
+    assert(!/e\.HERMES_HOME\s*\|\|/.test(nk), 'прежнего «HERMES_HOME или умолчание» без проверки больше нет');
+    // контроль: прежний текст (HERMES_HOME без проверки) эту проверку не проходит
+    assert(/e\.HERMES_HOME\s*\|\|/.test(FIXTURE('nomad-key-config-path-before-u6-fix.txt')), 'контроль: прежний образец доверял переменной');
+  });
+})();

@@ -1,0 +1,43 @@
+# --- Python-пакеты (pydeps доехал?) ---
+# Раньше этого блока не было вовсе, и весь класс молчаливых провалов pydeps —
+# не поставившийся Playwright, недокачанные колёса, отвалившийся pip — не всплывал
+# НИГДЕ: ни в чек-листе, ни в логе. Человек видел зелёный экран и узнавал о поломке
+# позже, когда падал первый скилл, работающий с браузером.
+#
+# Проверяем ровно то, от чего зависят навыки, а не факт запуска pip: импортируется ли
+# playwright и лежит ли распакованный Chromium в кэше. Диагностика, не блокировка.
+if (-not (Test-Selected 'pydeps')) {
+    Write-Host "CHECK skip Python-пакеты"
+} else {
+    $pyExe = $null
+    foreach ($c in @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'))) {
+        if (Test-Path $c) { $pyExe = $c; break }
+    }
+    if (-not $pyExe) {
+        $cmd = Get-Command python -ErrorAction SilentlyContinue
+        # Заглушка Microsoft Store (WindowsApps) не является Python: она открывает магазин.
+        if ($cmd -and $cmd.Source -and ($cmd.Source -notlike '*\WindowsApps\*')) { $pyExe = $cmd.Source }
+    }
+    if (-not $pyExe) {
+        Write-Host "  Python не найден — библиотеки ставить было некуда"
+        Write-Host "CHECK fail Python-пакеты"
+    } else {
+        & $pyExe -c "import playwright" 2>$null
+        $impOk = ($LASTEXITCODE -eq 0)
+        $cache = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+        $browserOk = $false
+        if (Test-Path $cache) {
+            $browserOk = [bool](Get-ChildItem -LiteralPath $cache -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'chromium*' } | Select-Object -First 1)
+        }
+        if ($impOk -and $browserOk) {
+            Write-Host "CHECK ok Python-пакеты"
+        } else {
+            if (-not $impOk)     { Write-Host "  библиотека playwright не импортируется — часть навыков не заработает" }
+            if (-not $browserOk) { Write-Host "  браузер Playwright не распакован ($cache) — скриншоты, экспорт и деки не заработают" }
+            Write-Host "CHECK fail Python-пакеты"
+        }
+    }
+}

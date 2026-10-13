@@ -6,6 +6,23 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const https = require('https');
+
+// ---- корни профиля — из ТОКЕНА процесса, а не из окружения (src/profile-env.js) ----------------
+// Это ДОЛЖНО быть раньше всего, что читает os.homedir() или USERPROFILE/APPDATA/LOCALAPPDATA: uid и
+// LOG_DIR ниже, детекция, buildInstallEnv (переменные уходят в скрипты из process.env). Установщик идёт
+// под админ-токеном, а эти переменные собираются из HKCU, доступного на запись любому процессу того же
+// пользователя: подмена на каталог чужой учётки увела бы запись и удаление в чужой профиль. Источник
+// истины — os.userInfo().homedir (по токену, окружение не читает), запасной — app.getPath('home').
+// Строки об исправлениях копятся в PROFILE_LOCK.lines и пишутся в install.log, как только он объявлен.
+const profileEnv = require('./profile-env');
+const PROFILE_LOCK = profileEnv.lockProfileRoots({
+  env: process.env,
+  platform: process.platform,
+  isPackaged: app.isPackaged,
+  getTokenHome: () => os.userInfo().homedir,
+  getFallbackHome: () => app.getPath('home'),
+});
+
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
@@ -17,6 +34,7 @@ const { rmStagingTree } = require('./staging-paths'); // снос staging — т
 const nomadKey = require('./nomad-key');             // запись ключа Nomad в config.yaml
 const deelevRoute = require('./deelev-route');       // «Last Result» задачи → можно ли запасной путь
 const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
+const pyDetect = require('./py-detect');             // pydeps: пакеты по файлам, python для детекции не запускаем
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -193,6 +211,12 @@ function logToFile(id, line) {
     if (logFd !== null) { try { fs.closeSync(logFd); } catch (e2) { /* ignore */ } logFd = null; }
   }
 }
+
+// Что замок профиля (в самом начале файла) исправил или не смог проверить: на тот момент журнала ещё не
+// существовало (LOG_DIR строится от уже исправленного профиля). Чаще всего строк нет вовсе — тогда и
+// install.log не создаётся раньше времени. В холостом прогоне (HM_DRY_RUN в окружении процесса) на диск
+// не пишем ничего — как и остальной журнал (P1-8).
+if (!process.env.HM_DRY_RUN) for (const line of PROFILE_LOCK.lines) logToFile('profile-env', line);
 
 // Electron 40+ на Windows: fs.rmSync падает с EPERM на read-only файлах — снос staging,
 // карантина удаления и finalDir встал бы колом. Обход и обоснование — в src/fs-compat.js.
@@ -501,7 +525,11 @@ function detectForeignUserWarning() {
     // (оболочка запущена интерактивным входом даже когда наш процесс — под другим
     // аккаунтом) и сравниваем с пользователем нашего токена. Fail-OPEN: любая
     // ошибка/таймаут/неоднозначность → '' (НИКОГДА не пугаем ложным баннером).
-    const tokenUser = String(process.env.USERNAME || '').trim().toLowerCase();
+    // Пользователь токена — из токена (os.userInfo → GetUserNameW), а не из USERNAME: переменная лежит
+    // в HKCU\Volatile Environment, и подмена спрятала бы баннер или показала ложный.
+    let tokenName = '';
+    try { tokenName = String(os.userInfo().username || '').trim(); } catch (e) { tokenName = ''; }
+    const tokenUser = tokenName.toLowerCase();
     if (!tokenUser) return '';
     const tasklist = remoteFetch.sysBin('tasklist.exe'); // абсолютный System32 (как reg/cmd)
     if (!tasklist) return '';
@@ -538,7 +566,7 @@ function detectForeignUserWarning() {
     const distinct = Array.from(new Set(owners.map(short)));
     if (distinct.length !== 1) return '';
     const interactiveFull = owners.find((o) => short(o) === distinct[0]);
-    const tokenDisplay = process.env.USERNAME || tokenUser;
+    const tokenDisplay = tokenName || tokenUser;
     return 'Установщик запущен с правами другой учётки («' + tokenDisplay + '»), а в Windows ' +
       'вы вошли как «' + interactiveFull + '». Из-за этого всё — курс, ярлык на рабочем столе, ' +
       'настройки, Claude — установится в профиль «' + tokenDisplay + '», а не в ваш, и у вас ' +
@@ -831,7 +859,9 @@ function remoteCacheDir(remoteId) {
 
 // Системные env-переменные (реальные значения ОС), которые скрипты законно читают
 // ($env:USERPROFILE, LOCALAPPDATA, TEMP…). PATH/PSModulePath/ComSpec сюда НЕ входят —
-// их задаём авторитетно ниже.
+// их задаём авторитетно ниже. Профильные (USERPROFILE/HOMEDRIVE/HOMEPATH/APPDATA/LOCALAPPDATA)
+// к этому моменту уже выправлены по токену замком профиля в начале файла (PROFILE_LOCK), так что
+// копируются из process.env безопасно; TEMP/TMP остаются как есть (принятый остаток, THREAT-MODEL).
 const WIN_SYS_ENV_KEYS = [
   'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA', 'PUBLIC',
   'ALLUSERSPROFILE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
@@ -2191,6 +2221,20 @@ async function winLaunchDeElevated(exe, folderArg, extraArgs) {
   } catch (e) { /* fail-closed ниже */ }
   if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return viaShellOrFolder('prereq', null); }
 
+  // Принципал задачи — пользователь ЭТОГО токена, и берём его из токена (whoami /user → SID), а не из
+  // USERDOMAIN/USERNAME: обе переменные лежат в HKCU\Volatile Environment и пишутся процессом того же
+  // пользователя; подмена на учётку другого человека с интерактивным сеансом запустила бы обёртку в ЕГО
+  // сеансе. Не прочитали — задачу не создаём: запасной путь сверяет токен оболочки по тому же SID.
+  let userSid = '';
+  try {
+    userSid = deelevRoute.parseWhoamiUserSid(execFileSync(whoami, ['/user', '/fo', 'csv', '/nh'],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], env: detectSpawnEnv() }));
+  } catch (e) { userSid = ''; }
+  if (!userSid) {
+    note('не удалось прочитать SID пользователя из токена (whoami /user) — задачу планировщика не создаю');
+    return viaShellOrFolder('prereq', null);
+  }
+
   const s32 = path.join(sysRoot, 'System32');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
   const dir = await winMakeSecureDir();
@@ -2229,18 +2273,16 @@ async function winLaunchDeElevated(exe, folderArg, extraArgs) {
   const b64 = Buffer.from(wrapperBody, 'utf16le').toString('base64');
   const wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + b64;
 
-  // XML: принципал = текущий интерактивный пользователь, InteractiveToken, LeastPrivilege.
+  // XML: принципал = пользователь токена (SID из whoami выше), InteractiveToken, LeastPrivilege.
   // Тело обёртки — ЦЕЛИКОМ в <Arguments> (нет лимита 261 как у /TR command-line).
   const xmlEsc = (s) => String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-  const userId = (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') +
-    (process.env.USERNAME || (function () { try { return os.userInfo().username; } catch (e) { return ''; } })());
   const taskXml =
     '<?xml version="1.0" encoding="UTF-16"?>\r\n' +
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n' +
     '  <RegistrationInfo><Description>Hamidun launch one-shot (de-elevated)</Description></RegistrationInfo>\r\n' +
-    '  <Principals><Principal id="Author"><UserId>' + xmlEsc(userId) + '</UserId>' +
+    '  <Principals><Principal id="Author"><UserId>' + xmlEsc(userSid) + '</UserId>' +
     '<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n' +
     '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate>' +
     '<StartWhenAvailable>false</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden>' +
@@ -2378,8 +2420,15 @@ ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'Ha
 // последний. Сама запись живёт в `src/nomad-key.js`: отсюда её было не позвать тестом
 // (main.js требует electron), и фича годами оставалась без единой проверки — это
 // отдельная строка в реестре рисков (4.2).
-ipcMain.handle('nomad-set-key', (_e, key) =>
-  nomadKey.writeNomadKey(key, { config: readJson('config.json', {}) }));
+//
+// Каталог агента: HERMES_HOME принимается, только если лежит внутри профиля (иначе запись под администратором
+// пошла бы туда, куда укажет переменная из HKCU\Environment). Отказ называет причину человеку (message) и
+// одной строкой уходит в install.log (log).
+ipcMain.handle('nomad-set-key', (_e, key) => {
+  const res = nomadKey.writeNomadKey(key, { config: readJson('config.json', {}) });
+  if (res && res.log) logToFile('nomad-key', res.log);
+  return res;
+});
 
 // Explicit «open the course-simulator» — NOT auto-opened; the finish screen
 // offers it as a labelled choice. Opens the course folder in VS Code so Claude
@@ -2554,8 +2603,9 @@ function freshWindowsPathCached() {
 // юзера, а интерпретаторы/хосты исполняют код из env (PYTHONPATH/PYTHONSTARTUP →
 // import чужого .py; PSModulePath/COR_PROFILER → загрузка в powershell.exe). Здесь —
 // авторитетные системные значения (валидированный SystemRoot, не из env) + профильные
-// пути, которые НУЖНЫ для корректной детекции (python user site-packages ставится
-// `pip install --user` в %APPDATA%). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
+// пути, которые НУЖНЫ инструментам, чью версию мы спрашиваем (git/node/uv читают конфиги
+// из профиля); они уже выправлены по токену замком профиля в начале файла. python для
+// детекции не запускается вовсе (src/py-detect.js). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
 function detectSpawnEnv() {
   const root = remoteFetch.winSystemRoot() || process.env.SystemRoot || 'C:\\Windows';
   const s32 = path.join(root, 'System32');
@@ -2998,26 +3048,27 @@ function detectComponents() {
     // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
     // пакеты через framework/uv-python без окон Apple).
     const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
-    // Windows: НЕ запускаем python под elevated-токеном, если он мог быть подменён medium-
-    // юзером (тот же RCE-вектор, что probeVersion; admin-owned — можно). Ложно-негатив
-    // безвреден (pydeps.ps1 идемпотентен).
-    const pyExecSafe = py && !pyShim && winSafeToExec(py);
-    if (pyExecSafe) {
+    if (IS_WIN) {
+      // Windows: интерпретатор для детекции НЕ запускаем вовсе. Детекция идёт под elevated-токеном
+      // при открытии окна, а запуск python — это исполнение кода из мест, куда пишет любой процесс
+      // того же пользователя: usercustomize.py и import-строки *.pth из
+      // %APPDATA%\Python\Python3xx\site-packages выполняются при старте интерпретатора даже под `-E`
+      // (воспроизведено на настоящем Python; гаснут только от -s/-I, а они «не видят» пакеты,
+      // которые pydeps ставит `pip install --user`, и детекция стала бы вечно ложно-отрицательной).
+      // Поэтому смотрим ФАЙЛЫ (src/py-detect.js): каталог пакета с __init__.py или .dist-info в user
+      // site и в Lib\site-packages самого интерпретатора; пакеты те же, что в итоговом verify.ps1
+      // (PIL, requests, playwright). Гейт winSafeToExec здесь не нужен — ничего не исполняется, зато
+      // штатный per-user Python (%LOCALAPPDATA%\Programs\Python) теперь виден.
+      // APPDATA — из исправленного по токену окружения (замок профиля в начале файла).
+      if (py) {
+        found = pyDetect.detectPythonPackages({
+          pyExe: py,
+          appData: process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+        }).installed;
+      }
+    } else if (py && !pyShim) {
       try {
-        // `-E` + доверенный env: без них PYTHONPATH/PYTHONSTARTUP из HKCU\Environment
-        // (пишет medium-малварь того же юзера) заставили бы интерпретатор ИМПОРТИРОВАТЬ
-        // чужой PIL.py ПОД АДМИНОМ — авто-детекция на старте, до единого клика.
-        // `-I` НЕ используем: он выключает и user site-packages, а pydeps ставит пакеты
-        // через `pip install --user` → детекция стала бы вечно ложно-отрицательной.
-        // cwd в System32: для `-c` sys.path[0]='' = ТЕКУЩИЙ каталог, а portable-exe
-        // запускается из user-writable Downloads (подмена модуля по cwd).
-        const opts = { windowsHide: true, timeout: 6000, stdio: 'ignore' };
-        const pyArgs = IS_WIN ? ['-E', '-c', 'import PIL, requests'] : ['-c', 'import PIL, requests'];
-        if (IS_WIN) {
-          opts.env = detectSpawnEnv();
-          opts.cwd = path.join(remoteFetch.winSystemRoot() || 'C:\\Windows', 'System32');
-        }
-        execFileSync(py, pyArgs, opts);
+        execFileSync(py, ['-c', 'import PIL, requests'], { windowsHide: true, timeout: 6000, stdio: 'ignore' });
         found = true;
       } catch (e) { found = false; }
     }

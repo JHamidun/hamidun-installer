@@ -296,14 +296,85 @@ if (-not (Test-Selected 'config')) {
     }
 }
 
+# Версия интерпретатора («312») БЕЗ запуска: имя каталога PythonXYZ → python3XY.dll рядом → pyvenv.cfg.
+function Get-HmPyMinor {
+    param([string]$PyExe)
+    try {
+        $dir = [IO.Path]::GetDirectoryName($PyExe)
+        if (-not $dir) { return '' }
+        if ([IO.Path]::GetFileName($dir) -match '^python(3\d{1,2})(?:-32|-arm64)?$') { return [string]$Matches[1] }
+        foreach ($f in [IO.Directory]::GetFiles($dir, 'python3*.dll')) {
+            if ([IO.Path]::GetFileName($f) -match '^python(3\d{1,2})\.dll$') { return [string]$Matches[1] }
+        }
+        $parent = [IO.Path]::GetDirectoryName($dir)
+        $cfgs = @([IO.Path]::Combine($dir, 'pyvenv.cfg'))
+        if ($parent) { $cfgs = @([IO.Path]::Combine($parent, 'pyvenv.cfg')) + $cfgs }
+        foreach ($cfg in $cfgs) {
+            if (-not [IO.File]::Exists($cfg)) { continue }
+            foreach ($line in [IO.File]::ReadAllLines($cfg)) {
+                if ($line -match '^\s*version(?:_info)?\s*=\s*3\.(\d{1,2})') { return ('3' + $Matches[1]) }
+            }
+        }
+    } catch { }
+    return ''
+}
+
+# Пакет $Module лежит в site-packages $Site: каталог модуля с __init__.py либо <Dist>-<версия>.dist-info.
+function Test-HmPySitePackage {
+    param([string]$Site, [string]$Module, [string]$Dist)
+    try {
+        if (-not $Site -or -not [IO.Directory]::Exists($Site)) { return $false }
+        if ([IO.File]::Exists([IO.Path]::Combine($Site, $Module, '__init__.py'))) { return $true }
+        $rx = '^' + [regex]::Escape($Dist) + '-\d'
+        foreach ($d in [IO.Directory]::GetDirectories($Site, '*.dist-info')) {
+            if ([IO.Path]::GetFileName($d) -match $rx) { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+# Стоит ли пакет $Module (имя дистрибутива $Dist, по умолчанию то же) у интерпретатора $PyExe. Смотрим
+# ФАЙЛЫ: Lib\site-packages самого интерпретатора и user site %APPDATA%\Python\Python<версия>\site-packages.
+# Интерпретатор не запускается ни в каком виде.
+function Test-HmPyPackage {
+    param([Parameter(Mandatory = $true)][string]$PyExe, [Parameter(Mandatory = $true)][string]$Module, [string]$Dist)
+    if (-not $Dist) { $Dist = $Module }
+    try {
+        # Псевдоним Магазина (WindowsApps) — не Python, пакетов в нём нет.
+        if ($PyExe -like '*\WindowsApps\*') { return $false }
+        $dir = [IO.Path]::GetDirectoryName($PyExe)
+        if (-not $dir) { return $false }
+        $sites = New-Object System.Collections.Generic.List[string]
+        $sites.Add([IO.Path]::Combine($dir, 'Lib', 'site-packages'))
+        if ([IO.Path]::GetFileName($dir) -ieq 'Scripts') {
+            $parent = [IO.Path]::GetDirectoryName($dir)
+            if ($parent) { $sites.Add([IO.Path]::Combine($parent, 'Lib', 'site-packages')) }
+        }
+        $minor = Get-HmPyMinor $PyExe
+        if ($minor -and $env:APPDATA) {
+            # 32-битная и ARM64-сборки кладут user site в каталог с суффиксом платформы
+            foreach ($sfx in @('', '-32', '-arm64')) { $sites.Add([IO.Path]::Combine($env:APPDATA, 'Python', ('Python' + $minor + $sfx), 'site-packages')) }
+        }
+        foreach ($s in $sites) { if (Test-HmPySitePackage -Site $s -Module $Module -Dist $Dist) { return $true } }
+    } catch { }
+    return $false
+}
+
 # --- Python-пакеты (pydeps доехал?) ---
 # Раньше этого блока не было вовсе, и весь класс молчаливых провалов pydeps —
 # не поставившийся Playwright, недокачанные колёса, отвалившийся pip — не всплывал
 # НИГДЕ: ни в чек-листе, ни в логе. Человек видел зелёный экран и узнавал о поломке
 # позже, когда падал первый скилл, работающий с браузером.
 #
-# Проверяем ровно то, от чего зависят навыки, а не факт запуска pip: импортируется ли
+# Проверяем ровно то, от чего зависят навыки, а не факт запуска pip: стоит ли пакет
 # playwright и лежит ли распакованный Chromium в кэше. Диагностика, не блокировка.
+#
+# ИНТЕРПРЕТАТОР НЕ ЗАПУСКАЕМ. Шаг идёт под администратором, а python.exe стоит в профиле
+# (InstallAllUsers=0 → %LOCALAPPDATA%\Programs\Python) и при старте исполняет usercustomize.py и
+# import-строки *.pth из %APPDATA%\Python\Python3xx\site-packages — каталога, куда пишет любой
+# процесс того же пользователя (воспроизведено: python -c "import playwright" их выполняет).
+# Поэтому пакет определяем по файлам (Test-HmPyPackage): каталог модуля с __init__.py либо
+# playwright-<версия>.dist-info в Lib\site-packages интерпретатора или в его user site.
 if (-not (Test-Selected 'pydeps')) {
     Write-Host "CHECK skip Python-пакеты"
 } else {
@@ -322,8 +393,7 @@ if (-not (Test-Selected 'pydeps')) {
         Write-Host "  Python не найден — библиотеки ставить было некуда"
         Write-Host "CHECK fail Python-пакеты"
     } else {
-        & $pyExe -c "import playwright" 2>$null
-        $impOk = ($LASTEXITCODE -eq 0)
+        $impOk = Test-HmPyPackage -PyExe $pyExe -Module 'playwright'
         $cache = Join-Path $env:LOCALAPPDATA 'ms-playwright'
         $browserOk = $false
         if (Test-Path $cache) {
@@ -333,7 +403,7 @@ if (-not (Test-Selected 'pydeps')) {
         if ($impOk -and $browserOk) {
             Write-Host "CHECK ok Python-пакеты"
         } else {
-            if (-not $impOk)     { Write-Host "  библиотека playwright не импортируется — часть навыков не заработает" }
+            if (-not $impOk)     { Write-Host "  библиотека playwright не найдена среди установленных пакетов Python — часть навыков не заработает" }
             if (-not $browserOk) { Write-Host "  браузер Playwright не распакован ($cache) — скриншоты, экспорт и деки не заработают" }
             Write-Host "CHECK fail Python-пакеты"
         }

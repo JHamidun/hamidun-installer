@@ -116,10 +116,15 @@ function stageApp() {
   const src = path.join(ROOT, 'release', 'win-unpacked');
   // HM_E2E_SOURCE=1 — принудительно из исходников. Нужно для НЕэлевейтед-машины:
   // упакованный exe несёт requireAdministrator и без UAC просто не стартует.
-  if (process.env.HM_E2E_SOURCE === '1' || !fs.existsSync(src)) {
+  // На Windows — ВСЕГДА из исходников: упакованный установщик берёт корни профиля из токена и подмену
+  // USERPROFILE/APPDATA/LOCALAPPDATA ниже НАМЕРЕННО игнорирует (src/profile-env.js), так что изоляция
+  // профиля в упакованной сборке невозможна; пятак HM_ALLOW_PROFILE_ENV работает только в неупакованной.
+  if (process.env.HM_E2E_SOURCE === '1' || process.platform === 'win32' || !fs.existsSync(src)) {
     // CI/чистая машина: собранного пакета нет — гоняем ТОТ ЖЕ код из исходников
     // (electron <repo>). Проверяется реальный main/renderer/scripts-контур.
-    log('release/win-unpacked нет — запускаю из исходников (source mode)');
+    log('запускаю из исходников (source mode): ' + (process.platform === 'win32'
+      ? 'на Windows всегда (корни профиля упакованной сборки берутся из токена)'
+      : 'release/win-unpacked нет или задан HM_E2E_SOURCE=1'));
     return { dir: ROOT, source: true };
   }
   const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-e2e-app-'));
@@ -213,6 +218,9 @@ function makeContext() {
     APPDATA: path.join(home, 'AppData', 'Roaming'),
     LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
     HM_E2E: '1',
+    // Установщик на Windows берёт корни профиля из ТОКЕНА (src/profile-env.js) и без этого пятака вернул бы
+    // подменённый профиль обратно в настоящий. Пятак действует только в неупакованной сборке (source mode).
+    HM_ALLOW_PROFILE_ENV: '1',
   });
   // Наследованное окружение может СЛОМАТЬ запуск Electron, и падение выглядит как
   // «Process failed to launch!» без причины. ELECTRON_RUN_AS_NODE=1 (его выставляют

@@ -44,6 +44,29 @@ function shellFallbackAllowed(stage, lastResult) {
   return v.gate === 'not-started' || v.gate === 'refused';
 }
 
+// SID пользователя ТОКЕНА из вывода `whoami /user /fo csv /nh`: одна строка вида "ДОМЕН\имя","S-1-5-21-…".
+// ЗАЧЕМ. Принципал одноразовой задачи («пользователь, чьим сеансом запустить обёртку») раньше собирался
+// из USERDOMAIN и USERNAME окружения, а обе лежат в HKCU\Volatile Environment, доступном на запись
+// любому процессу того же пользователя: подмена на учётку другого человека с интерактивным сеансом
+// увела бы запуск в ЕГО сеанс. Токен подделать нельзя, и whoami.exe (абсолютный, из System32) отдаёт SID
+// именно из него; SID в <UserId> планировщик принимает наравне с именем.
+// Разбор не рассчитывает ни на заголовок, ни на его отсутствие: из каждой строки берётся второе поле
+// в кавычках, годится только настоящий SID (S-1-<центр>-<1…15 подцентров>, только цифры), остальные строки
+// (заголовок любой локали, мусор) пропускаются. Два РАЗНЫХ SID — вывод неоднозначен. Пустая строка в ответе
+// = «не определили»: вызывающий задачу не создаёт. Строгий формат ещё и закрывает внедрение в XML задачи.
+const SID_RE = /^S-1-\d{1,12}(?:-\d{1,10}){1,15}$/;
+function parseWhoamiUserSid(text) {
+  const found = new Set();
+  for (const line of String(text == null ? '' : text).split(/\r?\n/)) {
+    const fields = [];
+    const re = /"([^"]*)"/g;
+    let m;
+    while ((m = re.exec(line)) !== null) fields.push(m[1]);
+    if (fields.length === 2 && SID_RE.test(fields[1])) found.add(fields[1]);
+  }
+  return found.size === 1 ? Array.from(found)[0] : '';
+}
+
 // Литерал для `Start-Process -ArgumentList …` в обёртке запуска редактора: каждый путь —
 // ОТДЕЛЬНЫЙ элемент массива в своих двойных кавычках ('"C:\Users\John Doe\X"'), иначе пробел
 // в имени пользователя рвёт его на два аргумента. PowerShell 5.1 склеивает элементы через
@@ -101,4 +124,4 @@ function claudeTerminalOsaArgs(startDir) {
     String(startDir)];
 }
 
-module.exports = { taskVerdict, shellFallbackAllowed, psArgList, psQuoteBody, psLit, editorOpenFiles, claudeTerminalOsaArgs };
+module.exports = { taskVerdict, shellFallbackAllowed, parseWhoamiUserSid, psArgList, psQuoteBody, psLit, editorOpenFiles, claudeTerminalOsaArgs };

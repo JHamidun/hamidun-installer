@@ -50,8 +50,10 @@ function filterRendererEnv(rendererEnv) {
 // из $env:ProgramFiles/$env:SystemRoot; если установщик запущен с crafted env
 // (ProgramFiles=C:\Users\...\evil), то без этой перезаписи в elevated PATH попал бы
 // evil\Git\cmd\git.exe. Диск/корень берём из validated winSystemRoot (reparse-safe).
-// Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят — они
-// по природе user-writable (abs-path fallback в user-профиль — принятый остаток).
+// Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят: у них свой
+// источник истины — профиль учётной записи по ТОКЕНУ процесса (src/profile-env.js; замок стоит в
+// самом начале main.js и правит process.env до того, как отсюда что-либо копируется). Содержимое
+// самого профиля по природе user-writable — это принятый остаток; выбор КАКОГО профиля — уже нет.
 function authoritativeWinSystemEnv(winRoot, drive) {
   // Всегда win32-семантика (вызывается ТОЛЬКО из if(IS_WIN) в main.js, см. main.js:768) —
   // path.win32 явно, а не host-зависимый require('path'): иначе на CI-раннере macOS/Linux
