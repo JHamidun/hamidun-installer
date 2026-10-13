@@ -254,12 +254,15 @@ Result `0`. Если задача доказанно ничего не запу�
   только `New-HmSecureStagingDir` (Admins-only кэш докачки) и `Test-HmTrustedSigner`
   (`cursor.ps1:90`, `git.ps1:103`, `node.ps1:147`, `pydeps.ps1:94`); сам
   `Invoke-HmDeElevated` там не вызывается.
-- `claude-desktop.ps1` — берёт из `_deelev.ps1` **только** `New-HmSecureStagingDir`
-  (`claude-desktop.ps1:211`). `Test-HmTrustedSigner` он не вызывает ни разу: у него
-  СВОЯ локальная функция с другим именем — `Test-HmSignerTrusted`
-  (`claude-desktop.ps1:76`, вызов на `:246`), с дополнительным параметром
-  `-PinnedThumbprint`, которого у примитива (`_deelev.ps1:375-380`) нет.
-  `Invoke-HmDeElevated` здесь тоже не вызывается.
+- `claude-desktop.ps1` — берёт из `_deelev.ps1` `New-HmSecureStagingDir`
+  (`claude-desktop.ps1:159`) и, с 10.10.2026, `Test-HmTrustedSigner`
+  (`claude-desktop.ps1:206`, с `-ExpectedOrg 'Anthropic, PBC'` и необязательным
+  `-ExpectedThumbprint`). До этого у скрипта была СВОЯ локальная копия проверки под
+  именем `Test-HmSignerTrusted`; она разошлась с примитивом (цепочка «на сегодня»,
+  пин `O=` с кавычками) и убрана. `Invoke-HmDeElevated` здесь не вызывается.
+- `chatgpt-desktop.ps1` — с 10.10.2026 подключает `_deelev.ps1` (раньше не подключал)
+  ради `Test-HmTrustedSigner` для `winget.exe` (`chatgpt-desktop.ps1:117`,
+  `-ExpectedOrg 'Microsoft Corporation'`); локальная копия проверки убрана.
 
 ### Обратная сторона: vsix из admins-only кэша
 

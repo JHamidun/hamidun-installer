@@ -47,8 +47,9 @@ jobs:
     # от 07.09 начал проверять пароль в `security set-key-partition-list`, а
     # electron-builder до 26.16.0 передаёт туда пароль сертификата вместо пароля
     # своей временной связки ключей — подпись падала с «SecKeychainUnlock: The user
-    # name or passphrase you entered is not correct». Снять закрепление, когда
-    # electron-builder в lock-файле станет ≥ 26.16.1 (electron-userland/electron-builder#10172).
+    # name or passphrase you entered is not correct». В lock-файле сейчас electron-builder
+    # 25.1.8 (точный пин в package.json), то есть мы ПОД этим багом, и закрепление нужно.
+    # Снять его, когда electron-builder в lock-файле станет ≥ 26.16.1 (electron-userland/electron-builder#10172).
     runs-on: macos-15
     # Переменная стоит на джобе, а не на отдельных шагах. Прошлый заход
     # закрепил только fetch:config и release-check — и полная сборка Mac
@@ -61,21 +62,57 @@ jobs:
     permissions:
       contents: write   # коммит обновлённого remote-components.json обратно в ветку
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Токен НЕ остаётся в .git/config (S-9, ревью): ниже `npm ci` исполняет install-скрипты ~390 пакетов
+          # в этом же рабочем каталоге, и любой из них прочитал бы токен с правом contents: write. Он нужен
+          # ровно одному шагу — «Commit updated remote-components.json back to branch» — и передаётся ему
+          # окружением (HM_GIT_TOKEN).
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: 'npm'
 
+      # `npm ci`, а не `npm install` (S-9): джоб держит секреты Apple и Reg.ru/Yandex S3, а `npm install` вправе
+      # переписать lock-файл и подтянуть иную версию зависимости, чем проверенная ревью. `npm ci` ставит РОВНО
+      # то, что в package-lock.json (версии и integrity всех пакетов), и падает, если lock и package.json
+      # разошлись. Согласованность проверена сухим прогоном `npm ci --dry-run --offline --ignore-scripts`.
       - name: Install deps
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       # HM_CONFIG_REF читают И fetch-config, И гейт config-fresh в preflight, И
       # release-check — одной переменной закрепляется вся цепочка. Пусто = прежнее
       # поведение (main).
       - name: Fetch config (bundle into installer)
         run: npm run fetch:config
+
+      # Личный список паттернов экспорт-фильтра nomad-src (имена, адреса и домены владельца) в публичном
+      # репозитории не лежит, а РЕЛИЗНАЯ сборка без него не идёт: tools/fetch-vendor-mac.sh при CI=true
+      # останавливается (FATAL), если списка нет, он битый или пустой (docs/specs/obsluzhivanie-vendor.md, п. 17).
+      # Секрет HM_LEAK_PATTERNS_JSON — тот же JSON, что лежит в tools/leak-patterns.local.json на машине владельца.
+      # Шаг записывает его ФАЙЛОМ под $RUNNER_TEMP и дальше отдаёт только ПУТЬ (HM_LEAK_PATTERNS_FILE): само значение
+      # в переменной окружения унаследовали бы все дочерние процессы шага загрузки (pip, playwright, git).
+      # Секрет приходит окружением шага, а не подстановкой в текст скрипта, и нигде не печатается: GitHub маскирует
+      # структурированные секреты (JSON) в логе ненадёжно, надёжнее всего не выводить значение вовсе, поэтому и
+      # ::add-mask:: тут нечему — ни одно производное значение не вычисляется и не печатается.
+      # Секрета нет — шаг только предупреждает: решение «стоп» принимает сам fetch-vendor-mac.sh (одно место, где
+      # живёт и осознанный обход HM_ALLOW_NO_PRIVATE_LEAK_LIST), а не копия этой логики в YAML.
+      - name: Stage private leak-pattern list (секрет HM_LEAK_PATTERNS_JSON → файл)
+        env:
+          HM_LEAK_PATTERNS_JSON: ${{ secrets.HM_LEAK_PATTERNS_JSON }}
+        run: |
+          set -e
+          if [ -z "${HM_LEAK_PATTERNS_JSON:-}" ]; then
+            echo "::warning::секрет HM_LEAK_PATTERNS_JSON не задан или пуст — fetch-vendor-mac.sh остановит релизную сборку: личного списка паттернов нет."
+            exit 0
+          fi
+          umask 077
+          LP="$RUNNER_TEMP/hm-leak-patterns.json"
+          printf '%s' "$HM_LEAK_PATTERNS_JSON" > "$LP"
+          echo "HM_LEAK_PATTERNS_FILE=$LP" >> "$GITHUB_ENV"
+          echo "личный список паттернов записан файлом ($(wc -c < "$LP" | tr -d ' ') байт); значения в лог не выводятся."
 
       # Полный mac-vendor нужен ДАЖЕ для лёгкой сборки: из него публикуются darwin-архивы
       # remote-компонентов и генерится vendor/checksums.json (второй, вшитый гейт).
@@ -89,6 +126,15 @@ jobs:
           # shared-IP раннера → транзиентные 403 → FATAL. С токеном лимит на порядки выше.
           GITHUB_TOKEN: ${{ github.token }}
         run: bash tools/fetch-vendor-mac.sh
+
+      # Список нужен только загрузке vendor. Сборка ниже исполняет стороннее (electron-builder и его зависимости)
+      # в том же джобе, и читать личные паттерны владельца им незачем: файл удаляется сразу, а переменная
+      # обнуляется для всех следующих шагов. always() — чтобы он не остался и после падения загрузки.
+      - name: Drop private leak-pattern list from the runner
+        if: always()
+        run: |
+          if [ -n "${HM_LEAK_PATTERNS_FILE:-}" ]; then rm -f "$HM_LEAK_PATTERNS_FILE"; fi
+          echo "HM_LEAK_PATTERNS_FILE=" >> "$GITHUB_ENV"
 
       # tools/push-component.py читает креды ТОЛЬКО из ~/.claude/.credentials.master.env
       # (load_creds(), env-переменные он не смотрит) — в CI такого файла нет, поэтому
@@ -194,6 +240,13 @@ jobs:
       # не состоялась, коммитить нечего — шаг сам это и напечатает.
       - name: Commit updated remote-components.json back to branch
         if: always()
+        # Имя ветки приходит ОКРУЖЕНИЕМ, а не подстановкой в текст скрипта (S-9): в имени ветки допустимы
+        # $ ` ( ) ; & | и кавычки, и `${{ github.ref_name }}` внутри `run:` превратил бы такое имя в команду
+        # в джобе с секретами Apple и S3. Через env оно остаётся данными, а в скрипте стоит в кавычках.
+        env:
+          HM_REF_NAME: ${{ github.ref_name }}
+          # Токен — только этому шагу: checkout выше не оставляет его в .git/config (persist-credentials: false).
+          HM_GIT_TOKEN: ${{ github.token }}
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -203,8 +256,15 @@ jobs:
           else
             git add remote-components.json components.json
             git commit -m "chore(registry): darwin remote components + sizes (mac-lite run ${{ github.run_number }})"
-            if git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "реестр запушен в ветку ${{ github.ref_name }}."
+            # Авторизация — тем же заголовком, который кладёт actions/checkout при persist-credentials: true, но
+            # только на время этого push и через окружение git (GIT_CONFIG_*), не в .git/config и не в argv.
+            # Производное значение маскируется в логе отдельно.
+            HM_GIT_AUTH="$(printf 'x-access-token:%s' "$HM_GIT_TOKEN" | base64 | tr -d '\n')"
+            echo "::add-mask::${HM_GIT_AUTH}"
+            if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+               GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${HM_GIT_AUTH}" \
+               git push origin "HEAD:${HM_REF_NAME}"; then
+              echo "реестр запушен в ветку ${HM_REF_NAME}."
             else
               echo "=============================================================="
               echo "ВНИМАНИЕ: PUSH НЕ ПРОШЁЛ (ветка защищена / нет прав)."
@@ -219,7 +279,7 @@ jobs:
       # Реестр выкладываем всегда (несколько КБ) — страховка на случай непрошедшего push.
       - name: Upload registry as artifact (fallback to manual commit)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: remote-components-darwin
           path: remote-components.json

@@ -17,7 +17,7 @@
 #      winget.exe обязан лежать НЕПОСРЕДСТВЕННО в этом package-каталоге, без reparse-point'ов;
 #      среди версий берём НАИБОЛЬШУЮ по [version] (не лексикографически). Fallback на
 #      Get-Command УБРАН (user-writable alias — вектор подмены под elevated).
-#   2. НАДЁЖНЫЙ ГЕЙТ ПОДПИСИ winget.exe ДО ЗАПУСКА (fail-closed, Test-HmSignerTrusted):
+#   2. НАДЁЖНЫЙ ГЕЙТ ПОДПИСИ winget.exe ДО ЗАПУСКА (fail-closed, Test-HmTrustedSigner из _deelev.ps1):
 #      Status Valid + цепочка leaf-серта до корня в LocalMachine\Root (НЕ доверяем
 #      CurrentUser\Root) + ТОЧНОЕ поле Organization O='Microsoft Corporation' + Code Signing
 #      EKU. Не прошло → НЕ запускаем (exit 120 skip). Верифицируем ИМЕННО тот бинарь,
@@ -34,7 +34,7 @@
 #   Microsoft.DesktopAppInstaller_..._8wekyb3d8bbwe (PublisherId 8wekyb3d8bbwe — публичный
 #   хеш издателя Microsoft для first-party пакетов); winget.exe подписан O='Microsoft
 #   Corporation'. Если OpenAI когда-то выложит standalone-инсталлятор — можно добавить
-#   download→Test-HmSignerTrusted-ветку как в claude-desktop.ps1.
+#   download→Test-HmTrustedSigner-ветку как в claude-desktop.ps1.
 $ErrorActionPreference = 'Stop'
 
 $DRY = [bool]$env:HM_DRY_RUN
@@ -45,69 +45,14 @@ $PUBLISHER_O  = 'Microsoft Corporation'
 # PublisherId (публичный хеш издателя Microsoft) — пин в имени пакета App Installer.
 $MS_PUBLISHER_ID = '8wekyb3d8bbwe'
 
-# --- НАДЁЖНАЯ проверка Authenticode: цепочка-к-машинному-корню + точное O= + Code Signing EKU ---
-# Возвращает '' если бинарь ДОВЕРЕН, иначе строку-причину отказа (у вызывающего → fail-closed).
-# Ключевая идея: НЕ полагаемся на подстроку по Subject и НЕ доверяем CurrentUser-корням —
-# требуем проверяемую криптоцепочку до корня в МАШИННОМ сторе + точное поле Organization.
-function Test-HmSignerTrusted {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ExpectedOrg,
-        [string]$PinnedThumbprint = ''
-    )
-    # (a) Authenticode: подпись присутствует И хеш файла не подменён (иначе Status != Valid).
-    $sig = Get-AuthenticodeSignature -LiteralPath $Path
-    if (-not $sig) { return 'подпись не читается' }
-    if ($sig.Status -ne 'Valid') { return "Authenticode Status=$($sig.Status) (хеш подменён или цепочка недоверенна)" }
-    $cert = $sig.SignerCertificate
-    if (-not $cert) { return 'нет сертификата подписанта' }
-    # (b) Строим цепочку и ТРЕБУЕМ корень в LocalMachine\Root (машинный стор). CurrentUser\Root
-    #     НЕ доверяем: medium-малварь ТОГО ЖЕ юзера отравляет его без прав администратора.
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
-    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))  # требуем EKU Code Signing
-    $built = $false
-    try { $built = $chain.Build($cert) } catch { return "не удалось построить цепочку: $($_.Exception.Message)" }
-    if (-not $built) {
-        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
-        return "цепочка сертификатов не выстроилась ($st)"
-    }
-    $elems = $chain.ChainElements
-    if (-not $elems -or $elems.Count -lt 1) { return 'пустая цепочка сертификатов' }
-    $root = $elems[$elems.Count - 1].Certificate
-    if (-not $root -or -not $root.Thumbprint) { return 'не удалось определить корень цепочки' }
-    $inMachine = $false
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-    try {
-        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-        foreach ($c in $store.Certificates) { if ($c.Thumbprint -eq $root.Thumbprint) { $inMachine = $true; break } }
-    } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
-    finally { try { $store.Close() } catch { } }
-    if (-not $inMachine) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
-    # (c) Organization (O=) leaf-серта ТОЧНО равно ожидаемому (парсим RDN, не подстрока Subject).
-    $org = ''
-    try {
-        foreach ($ln in ($cert.SubjectName.Format($true) -split '\r?\n')) {
-            if ($ln -match '^\s*O=') { $org = ($ln -replace '^\s*O=', '').Trim(); break }
-        }
-    } catch { }
-    if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
-    # (d) EKU включает Code Signing (1.3.6.1.5.5.7.3.3).
-    $hasCodeSigning = $false
-    foreach ($ext in $cert.Extensions) {
-        if ($ext -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
-            foreach ($oid in $ext.EnhancedKeyUsages) { if ($oid.Value -eq '1.3.6.1.5.5.7.3.3') { $hasCodeSigning = $true; break } }
-        }
-    }
-    if (-not $hasCodeSigning) { return 'у сертификата нет EKU Code Signing' }
-    # (e) Опциональный пин отпечатка leaf-серта (усиление; по умолчанию выключено).
-    if ($PinnedThumbprint -and $PinnedThumbprint.Trim()) {
-        $want = ($PinnedThumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
-        if ($cert.Thumbprint.ToUpperInvariant() -ne $want) { return 'отпечаток leaf-серта не совпал с пиннингом' }
-    }
-    return ''
-}
+# --- Проверка Authenticode winget.exe — ЕДИНАЯ функция примитива: Test-HmTrustedSigner (_deelev.ps1) ---
+# Раньше тут жила своя копия (цепочка «на сегодня» без флагов): у App Installer, который давно не обновляли,
+# лист подписи уже истёк, хотя метка времени у подписи есть и Status='Valid', — и цепочка отказывала с
+# NotTimeValid, ChatGPT Desktop пропускался. Теперь срок звеньев решает метка времени от TSA, чей корень лежит в
+# LocalMachine\Root. Контракт прежний: '' — бинарь ДОВЕРЕН, иначе строка-причина (у вызывающего → fail-closed).
+# Проверяется: Status=Valid + цепочка к корню в LocalMachine\Root (CurrentUser\Root не доверяем) + EKU Code
+# Signing + точное O= (-ExpectedOrg).
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Test-HmTrustedSigner (единая проверка подписи)
 
 # --- Идемпотентность: приложение ChatGPT уже установлено? ---
 function Test-ChatGptDesktopInstalled {
@@ -158,7 +103,7 @@ function Resolve-Winget {
 }
 
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: резолвить winget.exe СТРОГО из Microsoft.DesktopAppInstaller_..._$MS_PUBLISHER_ID (PublisherId-пин, без Get-Command fallback), Test-HmSignerTrusted → Status Valid + цепочка к LocalMachine\Root + O='$PUBLISHER_O' + Code Signing EKU (ДО запуска, fail-closed), затем winget install --id $STORE_ID --exact --source msstore --silent --accept-package-agreements --accept-source-agreements."
+    Write-Host "  [dry-run] WOULD: резолвить winget.exe СТРОГО из Microsoft.DesktopAppInstaller_..._$MS_PUBLISHER_ID (PublisherId-пин, без Get-Command fallback), Test-HmTrustedSigner → Status Valid + цепочка к LocalMachine\Root + O='$PUBLISHER_O' + Code Signing EKU (ДО запуска, fail-closed), затем winget install --id $STORE_ID --exact --source msstore --silent --accept-package-agreements --accept-source-agreements."
     exit 0
 }
 
@@ -169,7 +114,7 @@ if (-not $winget -or -not (Test-Path -LiteralPath $winget -PathType Leaf)) {
 }
 
 # --- НАДЁЖНЫЙ ГЕЙТ ПОДПИСИ winget.exe ДО ЗАПУСКА (fail-closed) ---
-$why = Test-HmSignerTrusted -Path $winget -ExpectedOrg $PUBLISHER_O
+$why = Test-HmTrustedSigner -Path $winget -ExpectedOrg $PUBLISHER_O
 if ($why) {
     Write-Host "БЕЗОПАСНОСТЬ: winget.exe не прошёл надёжную проверку подписи ($why) — НЕ запускаю. Пропускаю ChatGPT (fail-closed)."
     exit 120

@@ -465,18 +465,24 @@ function main(argv) {
         console.log('::' + (kind || 'warning') + ' title=Связность конфиг-пака::' + msg);
       }
     };
+    // Единственный выключатель этого гейта — флаг --allow-broken-pack (осознанный, громкий): он снимает отказ и
+    // при СТОПах связности, и когда audit-pack упал, не нашёл пак (код 2) или не выдал вердикта «в порядке».
     let packBroken = 0;
+    let audit = { out: '', code: 0 };
     try {
-      const out = execFileSync(process.execPath, [path.join(__dirname, 'audit-pack.js')],
+      audit.out = execFileSync(process.execPath, [path.join(__dirname, 'audit-pack.js')],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const verdict = (out.split('\n').find((l) => l.includes('ВЕРДИКТ')) || '').trim();
-      if (verdict) console.log('[preflight] связность пака: ' + verdict);
     } catch (e) {
-      const out = (e.stdout || '') + (e.stderr || '');
-      const bad = out.split('\n').filter((l) => /СТОП|ВЕРДИКТ/.test(l)).map((l) => l.trim());
-      for (const line of bad) console.log('[preflight] ' + line);
-      const stops = bad.filter((l) => l.indexOf('СТОП') !== -1);
-      if (stops.length) {
+      audit = { out: (e.stdout || '') + (e.stderr || ''), code: typeof e.status === 'number' ? e.status : -1 };
+    }
+    const auditLines = audit.out.split('\n').map((l) => l.trim());
+    const verdict = auditLines.find((l) => l.includes('ВЕРДИКТ')) || '';
+    const stops = auditLines.filter((l) => l.indexOf('СТОП') !== -1);
+    if (audit.code === 0 && verdict) {
+      console.log('[preflight] связность пака: ' + verdict);
+    } else {
+      for (const line of auditLines.filter((l) => /СТОП|ВЕРДИКТ/.test(l))) console.log('[preflight] ' + line);
+      if (audit.code === 1 && stops.length) {
         packBroken = stops.length;
         annotate('конфиг-пак разложится, но работать будет не весь: ' + stops.length +
           ' проблем(ы). Первая: ' + stops[0].replace(/^СТОП\s*/, ''), 'error');
@@ -484,12 +490,22 @@ function main(argv) {
           'функционально мёртвым. Почини перечисленное либо запусти с --allow-broken-pack, ' +
           'если это осознанно.');
       } else {
-        // Ненулевой код без единого СТОПа — сам аудит сломался (нет пака, упал на
-        // разборе). Это не повод рушить сборку, но и молчать нельзя.
-        console.log('[preflight] audit-pack завершился с ошибкой, но СТОПов не назвал — ' +
-          'проверка связности НЕ выполнена.');
-        annotate('проверка связности пака не выполнена — audit-pack упал без вердикта');
+        // Нет вердикта «в порядке»: аудит упал, не нашёл пак (код 2) или вышел с нулём, ничего не
+        // сказав. Раньше сборка шла дальше с одной строкой в логе — и «проверка не выполнена»
+        // выглядела как «проверка прошла» (S-7: audit-pack на пустом каталоге говорил «в порядке»).
+        // Теперь это отказ ровно того же рода, что и СТОП: тем же --allow-broken-pack его можно
+        // снять осознанно, но не молча.
+        packBroken = 1;
+        console.log('[preflight] audit-pack не выдал вердикта «в порядке» (код выхода ' + audit.code +
+          (verdict ? '' : ', строки ВЕРДИКТ нет') + ') — проверка связности НЕ выполнена.');
+        console.log('[preflight] СБОРКА ОСТАНОВЛЕНА: «не проверено» не значит «в порядке». ' +
+          'Почини причину выше либо запусти с --allow-broken-pack, если это осознанно.');
+        annotate('проверка связности пака не выполнена — audit-pack упал или не выдал вердикта', 'error');
       }
+    }
+    if (packBroken && args.includes('--allow-broken-pack')) {
+      console.log('[preflight] ВНИМАНИЕ: --allow-broken-pack — сборка продолжена, хотя связность пака ' +
+        'не подтверждена (' + packBroken + ' проблем(ы)); пак может доехать до людей неработающим.');
     }
     if (packBroken && !args.includes('--allow-broken-pack')) return 1;
   }

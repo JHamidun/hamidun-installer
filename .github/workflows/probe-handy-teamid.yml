@@ -13,6 +13,10 @@ name: Probe — Team ID подписи Handy (macOS)
 on:
   workflow_dispatch:
 
+# Права токена по умолчанию — только чтение: зонд качает публичные релизы Handy и ничего не пишет.
+permissions:
+  contents: read
+
 jobs:
   probe:
     runs-on: macos-latest

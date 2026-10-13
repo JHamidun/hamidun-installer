@@ -4,12 +4,13 @@
 
 - **Раздел:** Публикация и издания
 - **Код:** `.github/workflows/unit-tests.yml`, `.github/workflows/e2e-win.yml`, `.github/workflows/build-mac.yml`, `.github/workflows/staging-primitive.yml`, `test/run-tests.js:50-68`, `tools/check-specs.js`, `tools/extract-features.js`, `tools/sync-sizes.js`, `package.json`
-- **Тесты:** «CI: build-mac-lite больше НЕ удаляет опубликованный dmg перед заливкой (404-окно)»
+- **Тесты:** «CI: build-mac-lite больше НЕ удаляет опубликованный dmg перед заливкой (404-окно)», «workflows: у unit-tests, e2e-win, staging-primitive и probe-handy-teamid права токена по умолчанию — только чтение (верхний уровень, не в джобе)», «workflows: каждый uses: закреплён на полный SHA коммита с комментарием версии (checkout, setup-node, upload-artifact)», «workflows: джобы с секретами (build-mac, build-mac-lite) ставят зависимости через npm ci; package.json и package-lock.json согласованы», «workflows: github.ref_name не подставляется в run-скрипты (только в env), секрет маяка не висит на уровне джоба, а стоит на шаге beacon:stamp», «workflows: checkout в джобах с секретами не оставляет токен в .git/config (persist-credentials: false); токен для push реестра дан ТОЛЬКО шагу коммита, окружением, а не подстановкой в текст», «workflows: личный список паттернов экспорт-фильтра — секрет HM_LEAK_PATTERNS_JSON читает один шаг, пишет файлом под RUNNER_TEMP и отдаёт путь в HM_LEAK_PATTERNS_FILE ДО загрузки vendor; значение не печатается и не попадает в окружение шага загрузки, файл удаляется после», «.gitignore: секреты и ключи (файлы .env, pfx, p12, p8, pem, key) и vendor-lite/ игнорируются, шаблоны .env.example — нет, отслеживаемые файлы не затронуты», «MAC-SIGNING.md говорит, что Windows подписан Certum (а не «не подписан»); комментарии о закреплении macos-15 называют версию electron-builder из lock-файла»
 
-  Оговорка: это ЕДИНСТВЕННЫЙ тест в `test/run-tests.js`, который вообще читает файлы
-  из `.github/workflows/` (строки 8187-8195), и проверяет он `build-mac-lite.yml` и
-  `build-mac.yml` на отсутствие `s3.delete_object` — то есть соседний по каталогу
-  сюжет, а не сам юнит-гейт. Тестов, которые проверяли бы `unit-tests.yml` (триггеры,
+  Оговорка: до S-9 (09.10) это был ЕДИНСТВЕННЫЙ тест в `test/run-tests.js`, читавший файлы из
+  `.github/workflows/`, и проверял он `build-mac-lite.yml` и `build-mac.yml` на отсутствие
+  `s3.delete_object` — соседний по каталогу сюжет, а не сам юнит-гейт. Теперь есть ещё четыре,
+  но они про ЗАЩИТУ воркфлоу (права токена, SHA-пины, `npm ci`, `ref_name` и секрет маяка в env),
+  а не про смысл юнит-гейта. Тестов, которые проверяли бы `unit-tests.yml` (триггеры,
   наличие джобы `gate`, отсутствие `continue-on-error`), в наборе НЕТ — искал по
   подстрокам `workflows`, `.yml`, `unit-tests`, `continue-on-error`, `PIPESTATUS`,
   `e2e-win`, `staging-primitive`. Инвентарь помечает фичу как покрытую («есть»),
@@ -48,8 +49,8 @@
   `outputs.code`.
 - `unit-tests-windows` (82-133, `windows-latest`, timeout 15 мин) и `unit-tests-macos`
   (134-177, `macos-latest`, timeout 15 мин) — обе под условием
-  `if: needs.changes.outputs.code == 'true'`. Шаги одинаковы: `actions/checkout@v4`,
-  `actions/setup-node@v4` (node 20, кеш npm), `npm ci --no-audit --no-fund`, затем
+  `if: needs.changes.outputs.code == 'true'`. Шаги одинаковы: `actions/checkout`,
+  `actions/setup-node` (node 22, кеш npm; оба закреплены на SHA коммита с комментарием `# v4.4.0`), `npm ci --no-audit --no-fund`, затем
   сам гейт (107-114 / 152-159):
 
   ```
@@ -63,7 +64,7 @@
   `PIPESTATUS[0]` берётся намеренно: `$?` в этом конвейере вернул бы код `tee`, и
   красное стало бы зелёным (комментарий 105-106). Предпоследняя строка (113 / 158)
   не декоративна: она дописывает код возврата В САМ `test-output.log`, поэтому
-  улика содержит не только вывод тестов, но и итог прогона. Дальше `actions/upload-artifact@v4`
+  улика содержит не только вывод тестов, но и итог прогона. Дальше `actions/upload-artifact` (v4.6.2, тоже по SHA)
   с `if: always()` (116-123 / 161-168) увозит `test-output.log` на 14 дней —
   это ответ на прогон, чьи логи пришли пустыми и причину восстановить было нечем
   (комментарий 99-103). Завершает джобу `npm run sizes:check` (132 / 177) =
@@ -104,7 +105,7 @@
 - `.github/workflows/build-mac.yml` — только `workflow_dispatch` (12-23) со входом
   `config_ref`. `concurrency` без `ref` и с `cancel-in-progress: false` (25-30):
   релизную сборку нельзя рвать на середине, она заливает объекты в S3. Третьим шагом
-  джобы (64-65), сразу после `actions/checkout@v4` (46) и `actions/setup-node@v4`
+  джобы (81-82), сразу после `actions/checkout` (58, закреплён на SHA) и `actions/setup-node`
   (48), — `npm run assert:clean`. Комментарий 53-63 называет его «первым» (слово
   стоит на строке 53) про цепочку внутри `npm run dist`, а не про порядок шагов
   джобы.
@@ -112,8 +113,42 @@
   `probe/**` и `e2e/**` с фильтром путей (`scripts/windows/_deelev.ps1`,
   `test/staging-primitive.ps1`, сам файл воркфлоу). Гоняет один примитив
   `New-HmSecureStagingDir` ДВАЖДЫ — в Windows PowerShell 5.1 (боевая оболочка, где
-  перегрузка `CreateDirectory(path, SD)` существует) и в pwsh 7, где её нет (48-54).
-  Диагностика ACL — только `if: failure()` (58-66).
+  перегрузка `CreateDirectory(path, SD)` существует) и в pwsh 7, где её нет (52-58).
+  Диагностика ACL — только `if: failure()` (62-70).
+
+**Защита воркфлоу (S-9, 09.10).** Четыре файла — `unit-tests.yml`, `e2e-win.yml`, `staging-primitive.yml`,
+`probe-handy-teamid.yml` — получили верхнеуровневое `permissions: contents: read`: ничего из них в репозиторий
+не пишется (артефакты и кэш идут через токен рантайма, а не через `GITHUB_TOKEN`), а без строки токен брал
+права по умолчанию для репозитория. `build-mac.yml` и `build-mac-lite.yml` держат `contents: write` на джобе —
+им нужен Release и коммит реестра. Каждый `uses:` во всех шести файлах закреплён на полный SHA коммита с
+комментарием версии (`actions/checkout` 4.4.0, `actions/setup-node` 4.4.0, `actions/upload-artifact` 4.6.2 — это
+ровно то, на что указывал плавающий `@v4` в день правки), так что перенос тега в чужой репозиторий не подменит код,
+который бежит с секретами Apple и S3. В джобах с этими секретами `npm install` заменён на `npm ci`
+(ставит ровно то, что в `package-lock.json`, и падает при расхождении с `package.json`); имя ветки
+`github.ref_name` идёт в `run:` через переменную окружения, а не подстановкой в текст скрипта; секрет подписи
+маяка `HM_COURSE_BEACON_SECRET` стоит только на шаге `beacon:stamp`, а не на джобе, где его видел каждый
+пакет с install-скриптом. По той же причине `actions/checkout` в обоих mac-воркфлоу стоит с `persist-credentials: false`: токен с `contents: write` не остаётся в `.git/config`, пока `npm ci` исполняет install-скрипты ~390 пакетов в том же каталоге. Единственному шагу, которому токен нужен (коммит `remote-components.json` обратно в ветку в `build-mac-lite.yml`), он передан окружением (`HM_GIT_TOKEN`) и ложится заголовком `http.https://github.com/.extraheader` только на время `git push` (через `GIT_CONFIG_*`, не в `.git/config` и не в argv; производное значение маскируется). Первый настоящий запуск `build-mac-lite` обязан показать строку «реестр запушен в ветку …»: заголовок `Authorization` локально не проверить, а при неудаче шаг честно кричит про ручной коммит и выкладывает реестр artifact'ом. Первый настоящий запуск обязан показать, что `upload-artifact` и кэш `setup-node`
+по-прежнему работают при `contents: read` — локально этого не проверить. Пины обновляются вручную
+(`git ls-remote --tags https://github.com/actions/<имя> 'v4.*'` → SHA коммита → в `uses:` вместе с комментарием версии;
+теги этих действий лёгкие, то есть указывают прямо на коммит); автоматического обновления нет.
+
+**Личный список паттернов экспорт-фильтра в mac-воркфлоу (12.10).** Релизная сборка без личного списка паттернов
+`nomad-src` останавливается в `tools/fetch-vendor-mac.sh` (`CI=true` — это релиз; спека «Обслуживание vendor», п. 17,
+юнит u7), поэтому оба mac-воркфлоу получают список так. Шаг «Stage private leak-pattern list» перед загрузкой vendor
+читает секрет `HM_LEAK_PATTERNS_JSON` (JSON целиком, формат тот же, что у `tools/leak-patterns.local.json`) окружением
+шага, пишет его файлом `$RUNNER_TEMP/hm-leak-patterns.json` через `printf '%s'` под `umask 077` (без heredoc и без
+`echo`: значение не оказывается ни в тексте скрипта, ни в логе) и кладёт в `GITHUB_ENV` только ПУТЬ —
+`HM_LEAK_PATTERNS_FILE`. Само значение в переменной окружения унаследовали бы pip, драйвер playwright и git шага
+загрузки, поэтому шагу загрузки отдан путь, а не JSON. Шаг «Drop private leak-pattern list from the runner»
+(`if: always()`) удаляет файл и обнуляет переменную: сборка ниже исполняет electron-builder и его зависимости в том же
+джобе, и читать личные паттерны владельца им незачем. Секрета нет — шаг печатает `::warning::` и ничего не пишет:
+решение «стоп» (и осознанный обход `HM_ALLOW_NO_PRIVATE_LEAK_LIST=1`) принимает один раз `fetch-vendor-mac.sh`, а не
+копия этой логики в YAML. `::add-mask::` здесь не применяется: ни одно производное от секрета значение не вычисляется
+и не печатается; GitHub маскирует структурированные (JSON) секреты в логе ненадёжно, поэтому значение не выводится
+вовсе. Секрет `HM_LEAK_PATTERNS_JSON` владелец заводит в Settings → Secrets сам (содержимое
+`tools/leak-patterns.local.json`); пока его нет, обе mac-сборки останавливаются на загрузке vendor — так и задумано.
+Первый настоящий запуск обязан показать строку «личный список паттернов записан файлом (N байт)» и отсутствие
+`FATAL` про личный список в шаге загрузки vendor.
 
 ## Инварианты
 
@@ -223,7 +258,8 @@
 
 ## Риски и открытые вопросы
 
-- **Инвентарь считает фичу покрытой тестами, а покрытия нет.** `docs/INVENTORY.md:98`
+- **Инвентарь считает фичу покрытой тестами, а покрытия смысла гейта нет.** (С S-9 воркфлоу читают тесты на права, пины
+  и `npm ci` — они сторожат защиту, а не триггеры и джобу `gate`.) `docs/INVENTORY.md:98`
   ставит «есть», `_features.json` — `"tested": "yes"`. Фактически ни один тест не
   читает `unit-tests.yml` и не проверяет ни отсутствие `continue-on-error`, ни
   наличие джобы `gate`, ни триггеры на `main`. Единственный тест, трогающий

@@ -368,6 +368,66 @@ function New-HmSecureStagingDir {
     }
 }
 
+# --- Корни доверия МАШИНЫ: отпечатки сертификатов из LocalMachine\Root. ---
+# Отдельной функцией, чтобы тест подставил свой набор: настоящий стор ему трогать нельзя.
+function Get-HmMachineRootThumbprints {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        foreach ($c in $store.Certificates) { [void]$out.Add([string]$c.Thumbprint) }
+    } finally { try { $store.Close() } catch { } }
+    return $out.ToArray()
+}
+
+# --- Цепочка сертификата подписанта БЕЗ оценки сроков годности. Возвращает объект {Root; Why; OutOfWindow}:
+#     Root — корень цепочки (X509Certificate2), Why — причина отказа (пусто = цепочка выстроилась),
+#     OutOfWindow — истина, если срок ХОТЯ БЫ ОДНОГО звена (лист, промежуточный УЦ, корень) на «сейчас» вышел
+#     или ещё не наступил.
+#     Срок годности не проверяем «на сегодня» СОЗНАТЕЛЬНО (S-11): это решает Status='Valid' из
+#     Get-AuthenticodeSignature, а он считает срок по МЕТКЕ ВРЕМЕНИ подписи (см. шапку Test-HmTrustedSigner).
+#     Всё остальное — подпись звеньев, EKU Code Signing, basic constraints — движок проверяет как раньше.
+#     IgnoreNotTimeValid снимает оценку срока у ВСЕХ звеньев сразу, а не только у листа, поэтому «есть ли
+#     звено вне срока» считаем сами (OutOfWindow): для такой цепочки вызывающий обязан потребовать метку
+#     времени от TSA, которому доверяет машина. Годный лист под просроченным промежуточным УЦ (утёкший ключ
+#     УЦ) иначе выглядел бы «в сроке» и обходил бы эту проверку.
+#     -Eku — какое назначение обязана допускать вся цепочка: по умолчанию Code Signing (лист подписи), для
+#     метки времени — Time Stamping (1.3.6.1.5.5.7.3.8).
+#     -ExtraCerts и -ExtraFlags нужны только тесту (подложить тестовую цепочку и объяснить движку, что её
+#     тестовый корень — «известный»); боевой вызов их не задаёт, и там движок доверяет только тому, чему
+#     доверяет сама Windows.
+function Get-HmSignerChainRoot {
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert,
+        [string]$Eku = '1.3.6.1.5.5.7.3.3',
+        [System.Security.Cryptography.X509Certificates.X509Certificate2[]]$ExtraCerts = @(),
+        [System.Security.Cryptography.X509Certificates.X509VerificationFlags]$ExtraFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    )
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
+    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid -bor $ExtraFlags
+    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid($Eku)))  # по умолчанию EKU Code Signing
+    foreach ($x in @($ExtraCerts)) { if ($x) { [void]$chain.ChainPolicy.ExtraStore.Add($x) } }
+    $built = $false
+    try { $built = $chain.Build($Cert) } catch { return [pscustomobject]@{ Root = $null; Why = "не удалось построить цепочку: $($_.Exception.Message)" } }
+    if (-not $built) {
+        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
+        return [pscustomobject]@{ Root = $null; Why = "цепочка сертификатов не выстроилась ($st)" }
+    }
+    $elems = $chain.ChainElements
+    if (-not $elems -or $elems.Count -lt 1) { return [pscustomobject]@{ Root = $null; Why = 'пустая цепочка сертификатов'; OutOfWindow = $true } }
+    $root = $elems[$elems.Count - 1].Certificate
+    if (-not $root -or -not $root.Thumbprint) { return [pscustomobject]@{ Root = $null; Why = 'не удалось определить корень цепочки'; OutOfWindow = $true } }
+    # Срок КАЖДОГО звена по часам «сейчас» (UTC): движку велено срок не оценивать, поэтому считаем сами.
+    $nowUtc = [DateTime]::UtcNow
+    $outOfWindow = $false
+    foreach ($el in @($elems)) {
+        $c = $el.Certificate
+        if (-not $c -or $c.NotAfter.ToUniversalTime() -lt $nowUtc -or $c.NotBefore.ToUniversalTime() -gt $nowUtc) { $outOfWindow = $true }
+    }
+    return [pscustomobject]@{ Root = $root; Why = ''; OutOfWindow = $outOfWindow }
+}
+
 # --- НАДЁЖНЫЙ гейт Authenticode для ОНЛАЙН-скачанных установщиков (git/node/cursor/python).
 #     Возвращает '' если бинарь ДОВЕРЕН, иначе строку-причину отказа (вызывающий → fail-closed).
 #
@@ -379,16 +439,35 @@ function New-HmSecureStagingDir {
 #     уважает HKCU-прокси WinINET (тоже без UAC). Итог: same-user малварь могла подсунуть
 #     свой установщик с Status='Valid' и получить исполнение под АДМИНОМ.
 #     Поэтому ТРЕБУЕМ: корень цепочки лежит в LocalMachine\Root + EKU Code Signing.
-#     Тот же принцип уже применён в claude-desktop.ps1/chatgpt-desktop.ps1 (там ещё и точное O=);
-#     здесь пин издателя ОПЦИОНАЛЕН (-ExpectedOrg/-ExpectedSubjectMatch), т.к. точные RDN
-#     сторонних издателей (Git for Windows/Node/Cursor) не подтверждены на реальных артефактах,
-#     а слепой пин ломал бы легитимную установку. Обязательная (непереборчивая) половина —
+#     Ту же функцию зовут claude-desktop.ps1 (точное O='Anthropic, PBC' + необязательный отпечаток листа) и
+#     chatgpt-desktop.ps1 (O='Microsoft Corporation' для winget.exe): раньше у каждого из них была СВОЯ копия
+#     этой логики, копии разошлись с общей, и именно они держали два дефекта (срок «на сегодня» и пин
+#     'Anthropic, PBC', не совпадавший никогда из-за кавычек). Решение одно на все скрипты.
+#     Для git/node/cursor пин издателя ОПЦИОНАЛЕН (-ExpectedOrg/-ExpectedSubjectMatch/-ExpectedThumbprint),
+#     т.к. точные RDN сторонних издателей (Git for Windows/Node/Cursor) не подтверждены на реальных
+#     артефактах, а слепой пин ломал бы легитимную установку. Обязательная (непереборчивая) половина —
 #     цепочка к МАШИННОМУ корню — закрывает описанный privesc сама по себе.
+#
+#     СРОК ГОДНОСТИ ЛИСТА здесь НЕ оценивается «на сегодня» (S-11, 09.10.2026). Издатели подписывают
+#     короткоживущими сертификатами (Microsoft Artifact Signing — 72 часа) и ставят метку времени;
+#     у Git for Windows, Node, Cursor, Handy и uv лист ко дню проверки уже истёк, у python.org — ещё
+#     в 2025. Status='Valid' срок УЖЕ учёл — по метке времени подписи. А цепочка, построенная без
+#     флагов на «сегодня», видела просроченный лист и отказывала КАЖДОМУ настоящему установщику
+#     (NotTimeValid): онлайн-фолбэки git/node/cursor/python были вечно красными. Теперь доверие
+#     держат три вещи, не зависящие от часов: Status='Valid' (по метке времени), корень цепочки в
+#     LocalMachine\Root, EKU Code Signing — и пин издателя там, где вызывающий его задал. Просроченный
+#     лист без метки времени отсекается раньше, на Status (он тогда не 'Valid'). А цепочке со звеном вне
+#     срока (просрочен лист, промежуточный УЦ или корень) метка времени нужна не просто годная для Status,
+#     а от TSA, чей корень тоже лежит в LocalMachine\Root (шаг b2): иначе малварь подписала бы украденным
+#     просроченным ключом любого издателя и «датировала» подпись своим корнем TSA из HKCU — тем самым
+#     ходом, ради которого весь этот гейт и написан. Смотреть при этом надо на ВСЕ звенья, не на лист:
+#     годный лист, выпущенный просроченным промежуточным УЦ, — тот же ход с утёкшим ключом УЦ.
 function Test-HmTrustedSigner {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [string]$ExpectedOrg = '',
-        [string]$ExpectedSubjectMatch = ''
+        [string]$ExpectedSubjectMatch = '',
+        [string]$ExpectedThumbprint = ''
     )
     if (-not (Test-Path -LiteralPath $Path)) { return 'файл не найден' }
     # (a) Authenticode: подпись есть И хеш файла не подменён.
@@ -399,28 +478,33 @@ function Test-HmTrustedSigner {
     $cert = $sig.SignerCertificate
     if (-not $cert) { return 'нет сертификата подписанта' }
     # (b) Цепочка ОБЯЗАНА выстраиваться до корня в LocalMachine\Root (CurrentUser\Root НЕ доверяем).
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
-    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))  # EKU Code Signing
-    $built = $false
-    try { $built = $chain.Build($cert) } catch { return "не удалось построить цепочку: $($_.Exception.Message)" }
-    if (-not $built) {
-        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
-        return "цепочка сертификатов не выстроилась ($st)"
+    #     Сроки годности звеньев не оцениваются (см. шапку): их уже оценил Status='Valid' по метке времени.
+    $anchor = Get-HmSignerChainRoot -Cert $cert
+    if (-not $anchor) { return 'не удалось построить цепочку' }
+    if ($anchor.Why) { return [string]$anchor.Why }
+    $root = $anchor.Root
+    $machineRoots = $null
+    try { $machineRoots = @(Get-HmMachineRootThumbprints) } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
+    if ($machineRoots -notcontains [string]$root.Thumbprint) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
+    # (b2) Звено цепочки вне срока (лист, промежуточный УЦ или корень: просрочено либо ещё не вступило в
+    #      силу) принимаем ТОЛЬКО по метке времени — а метке можно верить, лишь если её издатель (TSA)
+    #      доверен МАШИНЕ, а не пользователю. Status='Valid' проверил метку тем же пользовательским
+    #      chain-engine: medium-малварь кладёт СВОЙ корень TSA в HKCU\...\Root и «датирует» подпись
+    #      украденным просроченным ключом прошлым числом — ключом издателя ИЛИ утёкшим ключом уже
+    #      просроченного промежуточного УЦ (тогда сам лист свежий, и по его датам проверка не сработала бы).
+    #      Поэтому цепочка метки времени тоже обязана заканчиваться в LocalMachine\Root (с EKU Time Stamping).
+    #      Сам сертификат TSA вправе быть просроченным — как и лист, он оценён по времени подписи.
+    #      Цепочке, где все звенья в сроке, этой проверки не нужно: у неё поведение прежнее.
+    #      Срок всех звеньев считает помощник (OutOfWindow). «Не $false» — значит и «ответа нет»: без ответа
+    #      считаем «вне срока», то есть ошибаемся в сторону строгости, а не пропуска.
+    if ($anchor.OutOfWindow -ne $false) {
+        $tsCert = $sig.TimeStamperCertificate
+        if (-not $tsCert) { return 'сертификат подписанта или звено его цепочки вне срока годности, а метки времени нет' }
+        $tsAnchor = Get-HmSignerChainRoot -Cert $tsCert -Eku '1.3.6.1.5.5.7.3.8'
+        if (-not $tsAnchor) { return 'не удалось построить цепочку метки времени' }
+        if ($tsAnchor.Why) { return ('метка времени: ' + [string]$tsAnchor.Why) }
+        if ($machineRoots -notcontains [string]$tsAnchor.Root.Thumbprint) { return "корень метки времени НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($tsAnchor.Root.Subject)" }
     }
-    $elems = $chain.ChainElements
-    if (-not $elems -or $elems.Count -lt 1) { return 'пустая цепочка сертификатов' }
-    $root = $elems[$elems.Count - 1].Certificate
-    if (-not $root -or -not $root.Thumbprint) { return 'не удалось определить корень цепочки' }
-    $inMachine = $false
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-    try {
-        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-        foreach ($c in $store.Certificates) { if ($c.Thumbprint -eq $root.Thumbprint) { $inMachine = $true; break } }
-    } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
-    finally { try { $store.Close() } catch { } }
-    if (-not $inMachine) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
     # (c) EKU Code Signing у leaf-серта.
     $hasCodeSigning = $false
     foreach ($ext in $cert.Extensions) {
@@ -437,11 +521,24 @@ function Test-HmTrustedSigner {
                 if ($ln -match '^\s*O=') { $org = ($ln -replace '^\s*O=', '').Trim(); break }
             }
         } catch { }
+        # .NET берёт значение в кавычки, если в нём запятая, «+», «;», «=» или пробелы по краям
+        # (O="Anthropic, PBC"), а кавычку внутри самого значения удваивает. Без снятия этого обрамления пин
+        # «Anthropic, PBC» не совпал бы НИКОГДА (так и было в claude-desktop.ps1). Снимаем ровно одно обрамление и
+        # раздваиваем кавычки обратно, а не Trim('"'): значение, в котором кавычки есть на самом деле, не должно
+        # сойти за значение без них.
+        if ($org.Length -ge 2 -and $org.StartsWith('"') -and $org.EndsWith('"')) { $org = $org.Substring(1, $org.Length - 2).Replace('""', '"') }
         if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
     }
     # (e) Опциональный (более мягкий) пин по Subject — для издателей, у кого RDN не подтверждён.
     if ($ExpectedSubjectMatch -and ("$($cert.Subject)" -notmatch $ExpectedSubjectMatch)) {
         return "Subject подписи не совпал с ожидаемым издателем ($($cert.Subject))"
+    }
+    # (f) Опциональный пин отпечатка листа (SHA-1; регистр, пробелы, двоеточия не важны). Пусто — пин выключен;
+    #     без единой hex-цифры — отказ, а не «выключен». ОСТОРОЖНО: лист меняется при каждом перевыпуске (у
+    #     Artifact Signing — раз в 72 часа), пин протухнет и молча сделает установку пропуском; стабильный — O= (d).
+    if ($ExpectedThumbprint -and $ExpectedThumbprint.Trim()) {
+        $wantThumb = ($ExpectedThumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        if (([string]$cert.Thumbprint).ToUpperInvariant() -ne $wantThumb) { return 'отпечаток сертификата подписанта не совпал с пином' }
     }
     return ''
 }
