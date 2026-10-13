@@ -45,11 +45,13 @@
 # с «Last Result» 0x80070005: действие задачи (powershell) не стартовало вовсе — так режут
 # запуск из планировщика антивирусы. Когда ДОКАЗАНО, что задача ничего не запустила, то же
 # действие выполняется с ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же пользователь — проверяется
-# по самому токену до запуска). Почему не «explorer.exe <лаунчер>», как у скрепки: если
-# оболочки в этот момент нет (её может прибить малварь того же юзера), наш elevated
-# explorer.exe обрабатывает запуск САМ, под админом, и выбирает обработчик по
-# HKCU\Software\Classes (lnkfile/cmdfile/exefile — пишется без UAC) раньше любого гейта
-# внутри лаунчера. Токен оболочки проверяется ДО запуска, ассоциаций файлов не касается.
+# по самому токену до запуска). Почему не «explorer.exe <лаунчер>», как делали скрепка, трей
+# моста и «Войти в Claude» до 09.10.2026: если оболочки в этот момент нет (её может прибить
+# малварь того же юзера), наш elevated explorer.exe обрабатывает запуск САМ, под админом, и
+# выбирает обработчик по HKCU\Software\Classes (lnkfile/cmdfile/exefile — пишется без UAC)
+# раньше любого гейта внутри лаунчера. Токен оболочки проверяется ДО запуска, ассоциаций
+# файлов не касается. Теперь и эти три запуска идут через Invoke-HmAsShellUser (-NoWait;
+# «Войти в Claude» — с -CmdScript и -WorkingDirectory, то есть вообще без файла-лаунчера).
 
 # --- Integrity текущего (родительского) процесса через АБСОЛЮТНЫЙ whoami (не user-writable). ---
 function Get-HmSelfIntegrity {
@@ -879,6 +881,24 @@ function New-HmShellCmdLine {
     return (ConvertTo-HmWinArg $CmdExe) + ' /d /e:on /v:off /s /c "' + $target + '"'
 }
 
+# Командная строка cmd.exe для ГОТОВОГО текста команды (несколько команд через «&») — так
+# открывают окно терминала БЕЗ файла-лаунчера: писать файл в пользовательскую папку из-под
+# админа незачем, а значит, нечего подменять и некуда вести ссылке. В отличие от
+# New-HmShellCmdLine («%» там отвергается: это ДАННЫЕ — путь, и «%PATH%» в нём стал бы другим
+# путём), здесь текст НАШ и фиксированный, а «%USERPROFILE%» нужен именно как переменная,
+# которую раскроет cmd у ребёнка — уже под токеном пользователя, а не под нашим. Поэтому «%» и
+# кавычки внутри текста остаются как написаны, а чужих данных в текст не подставляют: путь
+# профиля сюда не попадает, рабочая папка едет отдельным параметром CreateProcessWithTokenW.
+# Ключ /s снимает ровно внешнюю пару кавычек. Перевод строки и NUL отвергаются: cmd читает
+# командную строку до первого из них, остальное молча пропало бы.
+function New-HmShellScriptLine {
+    param([string]$CmdExe, [string]$Script)
+    if (-not $CmdExe -or -not $Script) { return '' }
+    if ([string]$CmdExe -match "[`"`r`n`0]") { return '' }
+    if ([string]$Script -match "[`r`n`0]") { return '' }
+    return (ConvertTo-HmWinArg $CmdExe) + ' /d /e:on /v:off /s /c "' + $Script + '"'
+}
+
 # Короткая подготовка журнала ПЕРЕД запуском (отдельным дождавшимся процессом): каталог,
 # ротация (файл больше 512 КБ удаляется), заголовок. Код выхода 0 — журнал открывается на запись;
 # иначе перенаправление в основной строке сорвало бы запуск самой программы (cmd не исполняет
@@ -903,13 +923,19 @@ function New-HmShellLogPrepLine {
 # DirectApp/DirectLine — прямая форма (запасная, если журнал окажется недоступен). .cmd/.bat
 # CreateProcess сам не исполняет — для них «прямая» форма это cmd /c без записи вывода.
 # NoLog — журнал не предполагался (запуск окна редактора): Note пуст.
+# CmdScript — вместо Exe/Arguments готовый текст команды для cmd.exe (окно терминала без
+# файла-лаунчера, New-HmShellScriptLine): всегда прямая форма, журнала у такого запуска нет.
 function Get-HmShellLaunchPlan {
-    param([string]$CmdExe, [string]$Exe, [string[]]$Arguments = @(), [string]$LogPath = '', [string]$Label = '', [switch]$NoLog)
+    param([string]$CmdExe, [string]$Exe, [string[]]$Arguments = @(), [string]$LogPath = '', [string]$Label = '', [switch]$NoLog,
+          [string]$CmdScript = '')
     $max = 1024
     if ($script:HmMaxTokenCmdLine) { $max = [int]$script:HmMaxTokenCmdLine }
     $plan = [pscustomobject]@{ Mode = ''; App = ''; Main = ''; Prep = ''; DirectApp = ''; DirectLine = ''; Note = ''; Error = '' }
     $isBatch = ([string]$Exe -match '\.(cmd|bat)$')
-    if ($isBatch) {
+    if ($CmdScript) {
+        $plan.DirectApp  = $CmdExe
+        $plan.DirectLine = New-HmShellScriptLine -CmdExe $CmdExe -Script $CmdScript
+    } elseif ($isBatch) {
         $plan.DirectApp  = $CmdExe
         $plan.DirectLine = New-HmShellCmdLine -CmdExe $CmdExe -Exe $Exe -Arguments $Arguments
     } else {
@@ -917,8 +943,9 @@ function Get-HmShellLaunchPlan {
         $plan.DirectLine = New-HmWinCommandLine -Exe $Exe -Arguments $Arguments
     }
     if (-not $plan.DirectLine) {
-        $plan.Error = 'путь или аргумент содержит символ, который нельзя безопасно передать (кавычка' +
-            $(if ($isBatch) { ', «%»' } else { '' }) + ' или перевод строки)'
+        $plan.Error = if ($CmdScript) { 'текст команды пуст либо содержит перевод строки или нулевой знак' } else {
+            'путь или аргумент содержит символ, который нельзя безопасно передать (кавычка' +
+            $(if ($isBatch) { ', «%»' } else { '' }) + ' или перевод строки)' }
         return $plan
     }
     if ($plan.DirectLine.Length -gt $max) {
@@ -926,7 +953,7 @@ function Get-HmShellLaunchPlan {
         return $plan
     }
     $plan.Mode = 'direct'; $plan.App = $plan.DirectApp; $plan.Main = $plan.DirectLine
-    if ($NoLog) { return $plan }
+    if ($NoLog -or $CmdScript) { return $plan }
     if (-not $LogPath) { $plan.Note = 'каталог журнала не определён'; return $plan }
     $main = New-HmShellCmdLine -CmdExe $CmdExe -Exe $Exe -Arguments $Arguments -LogPath $LogPath
     $prep = New-HmShellLogPrepLine -CmdExe $CmdExe -LogPath $LogPath -Label $Label
@@ -1113,32 +1140,89 @@ function Start-HmTokenProcess {
     }
 }
 
+# Профиль пользователя — от системы (SHGetFolderPath), а не из переменной среды USERPROFILE:
+# её значение берётся из HKCU\Volatile Environment, куда пишет любая программа пользователя.
+# Отдельной функцией — чтобы тест мог подставить песочницу.
+function Get-HmUserProfileDir {
+    $p = ''
+    try { $p = [Environment]::GetFolderPath('UserProfile') } catch { $p = '' }
+    return [string]$p
+}
+
+# Проверка рабочей папки запускаемого процесса ДО передачи системе. Возвращает
+# { Path; Reason }: Reason пуст — папку можно, Path — её полный нормализованный путь.
+# Правила: путь полный (диск, не UNC и не относительный) и без знаков, которых в путях не бывает;
+# лежит ВНУТРИ профиля пользователя (или это сам профиль); каждая папка ниже корня профиля —
+# настоящий каталог, не junction/symlink (reparse point) и существует. Корень профиля берётся
+# как есть: профиль, перенесённый ссылкой на другой диск, — законная настройка. Папка пустого
+# значения не требует — тогда запуск идёт из профиля, как раньше.
+function Resolve-HmShellWorkingDirectory {
+    param([string]$Path, [string]$ProfileDir)
+    $r = [pscustomobject]@{ Path = ''; Reason = '' }
+    if (-not $Path) { return $r }
+    if (-not $ProfileDir) { $r.Reason = 'профиль пользователя не определён'; return $r }
+    if ($Path.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0 -or $Path.IndexOfAny([char[]]'*?') -ge 0) {
+        $r.Reason = 'в пути есть знак, которого в путях не бывает'; return $r
+    }
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') { $r.Reason = 'нужен полный путь на диске (не относительный и не сетевой)'; return $r }
+    $full = ''; $root = ''
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $root = [System.IO.Path]::GetFullPath($ProfileDir).TrimEnd('\')
+    } catch { $r.Reason = 'путь не разобрать: ' + $_.Exception.Message; return $r }
+    if (-not $root) { $r.Reason = 'профиль пользователя не определён'; return $r }
+    $cur = $root
+    if (-not $full.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = 'папка лежит вне профиля пользователя'; return $r
+        }
+        foreach ($part in $full.Substring($root.Length + 1).Split('\')) {
+            if (-not $part) { continue }
+            $cur = $cur + '\' + $part
+            $attr = $null
+            try { $attr = [System.IO.File]::GetAttributes($cur) } catch { $r.Reason = 'папка не найдена: ' + $cur; return $r }
+            if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $r.Reason = 'на пути есть ссылка (junction или symlink): ' + $cur; return $r
+            }
+            if (($attr -band [System.IO.FileAttributes]::Directory) -eq 0) { $r.Reason = 'это не папка: ' + $cur; return $r }
+        }
+    } elseif (-not [System.IO.Directory]::Exists($root)) { $r.Reason = 'папка не найдена: ' + $root; return $r }
+    $r.Path = $full
+    return $r
+}
+
 # Запуск с токеном оболочки Explorer (CreateProcessWithTokenW). Возвращает
 # { Route='shell-token'; Gate; Code; Reason; ProcessId; Logged; LogNote }:
 #   Gate 'medium'      — процесс запущен с ПРОВЕРЕННЫМ medium-токеном; Code — его код выхода
 #                        (для -NoWait: 0, если за 3 с не упал);
 #   Gate 'refused'     — токен оболочки не medium или чужой учётной записи: НЕ запускаем;
 #   Gate 'unavailable' — запустить не удалось (нет оболочки, нет службы «Вторичный вход»,
-#                        нет прав, строка длиннее предела) — ничего не запущено;
+#                        нет прав, строка длиннее предела, рабочая папка не прошла проверку) —
+#                        ничего не запущено;
 #   Gate 'unknown'     — процесс запущен, но не завершился за TimeoutSec (может ещё идти).
 #   Logged             — вывод программы дописан в её журнал (Get-HmShellLaunchPlan: 'logged');
 #                        иначе LogNote объясняет, почему вывода нет (журнал недоступен, строка
 #                        с журналом длиннее 1024 знаков).
+# Что запускать — ЛИБО Exe (+ Arguments), ЛИБО CmdScript: готовый текст команды для cmd.exe
+# (окно терминала без файла-лаунчера, New-HmShellScriptLine). WorkingDirectory — рабочая папка
+# процесса (по умолчанию профиль); проверяется Resolve-HmShellWorkingDirectory.
 # Требует SeImpersonatePrivilege (есть у elevated-администратора) и службу seclogon.
 function Invoke-HmAsShellUser {
-    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @(), [string]$Label = '',
-          [switch]$NoWait, [int]$TimeoutSec = 600)
+    param([string]$Exe = '', [string[]]$Arguments = @(), [string]$Label = '',
+          [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = '', [string]$WorkingDirectory = '')
     $res = [pscustomobject]@{ Route = 'shell-token'; Gate = 'unavailable'; Code = -1; Reason = ''; ProcessId = 0; Logged = $false; LogNote = '' }
     $sysRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
     $cmdExe  = [System.IO.Path]::Combine($sysRoot, 'System32', 'cmd.exe')
-    if (-not $Label) { $Label = [System.IO.Path]::GetFileNameWithoutExtension($Exe) }
+    if ($CmdScript -and $Exe) { $res.Reason = 'передан и файл, и текст команды — какой из них запускать, неясно'; return $res }
+    if (-not $CmdScript -and -not $Exe) { $res.Reason = 'не указано, что запускать'; return $res }
+    if (-not $Label) { $Label = if ($CmdScript) { 'script' } else { [System.IO.Path]::GetFileNameWithoutExtension($Exe) } }
     $Label = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
-    $logPath = if ($NoWait) { '' } else { Get-HmDeElevLogPath -Label $Label }
-    $plan = Get-HmShellLaunchPlan -CmdExe $cmdExe -Exe $Exe -Arguments $Arguments -LogPath $logPath -Label $Label -NoLog:$NoWait
+    $logPath = if ($NoWait -or $CmdScript) { '' } else { Get-HmDeElevLogPath -Label $Label }
+    $plan = Get-HmShellLaunchPlan -CmdExe $cmdExe -Exe $Exe -Arguments $Arguments -CmdScript $CmdScript -LogPath $logPath -Label $Label -NoLog:($NoWait -or [bool]$CmdScript)
     if ($plan.Error) { $res.Reason = $plan.Error; return $res }
     if (-not (Test-Path -LiteralPath $plan.App)) { $res.Reason = 'не найден ' + $plan.App; return $res }
-    $cwd = ''
-    try { $cwd = [Environment]::GetFolderPath('UserProfile') } catch { $cwd = '' }
+    $profDir = Get-HmUserProfileDir
+    $cwd = $profDir
     if (-not $cwd -or -not (Test-Path -LiteralPath $cwd)) { $cwd = $sysRoot }
 
     $Marshal = [System.Runtime.InteropServices.Marshal]
@@ -1162,6 +1246,14 @@ function Invoke-HmAsShellUser {
         # Уровень проверяем на ТОМ токене, с которым запускаем, а не только на исходном.
         $dupIl = Get-HmTokenSid -Token $hDup -Class 25
         if ($dupIl -ne 'S-1-16-8192') { $res.Gate = 'refused'; $res.Reason = 'копия токена оболочки не на обычном уровне (' + $dupIl + ')'; return $res }
+
+        # Рабочая папка проверяется ПОСЛЕ токена и непосредственно ПЕРЕД запуском: окно между
+        # «проверили» и «используем» — один системный вызов. Не прошла — ничего не запущено.
+        if ($WorkingDirectory) {
+            $wd = Resolve-HmShellWorkingDirectory -Path $WorkingDirectory -ProfileDir $profDir
+            if ($wd.Reason) { $res.Reason = 'рабочая папка не прошла проверку: ' + $wd.Reason; return $res }
+            $cwd = $wd.Path
+        }
 
         # Журнал: короткий дождавшийся шаг (каталог, ротация, заголовок). Не открылся на запись —
         # программа запускается напрямую, без журнала: запись вывода — диагностика, не условие.
@@ -1318,10 +1410,15 @@ function Invoke-HmDeElevatedSafe {
 # состоянием/возрастом внутри Test-HmTaskIsOrphan. Best-effort: любой сбой не мешает
 # установке. ВАЖНО: вызов стоит ПОСЛЕДНИМ в файле — все функции уже объявлены (в этом
 # файле уже был баг «функция вызвана до объявления», порядок здесь не случаен).
-try {
-    $hmOrphanTags = @(Remove-HmOrphanTasks)
-    if ($hmOrphanTags.Count -gt 0) {
-        Write-Host ("Планировщик: убраны осиротевшие задачи прерванных установок (" +
-            $hmOrphanTags.Count + "): " + ($hmOrphanTags -join ', '))
-    }
-} catch { }
+# Вызывающий, которому уборка ни к чему (mascot.ps1 берёт из файла один запуск токеном оболочки и с
+# задачами не работает), ставит $script:HmSkipOrphanSweep = $true ДО подключения файла: COM планировщика
+# тогда не открывается вовсе. Флага нет — уборка идёт, как и шла.
+if (-not $script:HmSkipOrphanSweep) {
+    try {
+        $hmOrphanTags = @(Remove-HmOrphanTasks)
+        if ($hmOrphanTags.Count -gt 0) {
+            Write-Host ("Планировщик: убраны осиротевшие задачи прерванных установок (" +
+                $hmOrphanTags.Count + "): " + ($hmOrphanTags -join ', '))
+        }
+    } catch { }
+}

@@ -178,24 +178,35 @@ $agentPath = Join-Path $dst 'bridge_agent.py'
 # Здесь код выхода и ЕСТЬ проверяемый факт: самопроверка — функциональная проба агента,
 # следа на диске у неё нет; ошибка в ней стоит лишь автозапуска, а не прав.
 $agentOk = $false
+$trayStarted = $false   # трей запущен ЭТИМ прогоном (токен оболочки принят, процесс не упал за 3 с) — от него итоговая строка
 $stRes = Invoke-HmDeElevatedSafe $py @($agentPath, '--selftest') -Label 'bridge-selftest'
 if ($null -ne $stRes -and $stRes.Gate -eq 'medium' -and $stRes.Code -eq 0) { $agentOk = $true }
 if ($agentOk) {
     New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HamidunBridge' -Value ("`"$run`" `"$agentPath`"") -PropertyType String -Force | Out-Null
     # SECURITY (#6): запуск трея сейчас — НЕ Start-Process под ELEVATED (это стартовало бы
-    # user-writable pythonw/python под АДМИНОМ; medium-малварь юзера подменит бинарь -> RCE).
-    # Запускаем ДЕ-ЭЛЕВИРОВАННО через explorer.exe (паттерн mascot.ps1): explorer стартует .cmd-
-    # лаунчер токеном ОБОЛОЧКИ (medium integrity), не под админом. Трей — long-running процесс,
-    # поэтому НЕ Invoke-HmDeElevated (он блокирует и удаляет одноразовую задачу -> убил бы трей).
-    # Лаунчер задаёт фиксированный cwd; UTF-8 + `chcp 65001` — на случай не-ASCII пути профиля.
-    # Если запуск сейчас не удастся — трей поднимется при следующем входе в Windows через HKCU\Run.
-    $launchCmd = Join-Path $dst 'launch-bridge.cmd'
-    $cmdBody = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$dst`"`r`nstart `"`" `"$run`" `"$agentPath`"`r`n"
-    try {
-        [System.IO.File]::WriteAllText($launchCmd, $cmdBody, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
-        Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$launchCmd`"" -ErrorAction Stop
-    } catch {
-        Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."
+    # user-writable pythonw/python под АДМИНОМ; medium-малварь юзера подменит бинарь -> RCE) и НЕ
+    # explorer.exe <лаунчер>: без живой оболочки (её может прибить малварь того же юзера) наш
+    # elevated explorer исполнил бы файл САМ, под админом, по обработчику из HKCU\Software\Classes.
+    # Запускаем ТОКЕНОМ ОБОЛОЧКИ (Invoke-HmAsShellUser: ровно medium и тот же пользователь,
+    # проверяется ДО запуска) и БЕЗ файла-лаунчера: писать .cmd в пользовательскую папку из-под
+    # админа незачем, а агент берёт свой каталог из LOCALAPPDATA и от рабочей папки не зависит
+    # (из HKCU\Run он стартует точно так же). Трей — long-running процесс, поэтому -NoWait, а не
+    # Invoke-HmDeElevated (он блокирует и удаляет одноразовую задачу -> убил бы трей); процесс
+    # ждём лишь 3 с, чтобы поймать мгновенное падение. Нет оболочки / она не обычного уровня /
+    # отключена служба «Вторичный вход» — НЕ запускаем ничего (ни explorer, ни под админом):
+    # трей поднимется при следующем входе в Windows через HKCU\Run. Исход шага от этого не меняется.
+    $trayRes = $null
+    $trayWhy = ''
+    try { $trayRes = Invoke-HmAsShellUser -Exe $run -Arguments @($agentPath) -NoWait -Label 'bridge-tray' }
+    catch { $trayWhy = $_.Exception.Message }
+    if ($null -ne $trayRes -and $trayRes.Gate -eq 'medium') {
+        if ($trayRes.Code -ne 0) {
+            Write-Host "  ВНИМАНИЕ: мост запустился и сразу закрылся (код $($trayRes.Code)) — он стартует при следующем входе в Windows (автозапуск)."
+        } else { $trayStarted = $true }
+    } else {
+        if ($null -ne $trayRes) { $trayWhy = [string]$trayRes.Reason }
+        if (-not $trayWhy) { $trayWhy = 'причина не определена' }
+        Write-Host "  ВНИМАНИЕ: мост сейчас запустить не удалось: $trayWhy. Под правами администратора я его не запускаю — он стартует при следующем входе в Windows (автозапуск)."
     }
 } elseif ($null -eq $stRes -or $stRes.Gate -ne 'medium') {
     # Не «агент сломан», а «проверить нечем»: разные беды, разные советы человеку.
@@ -212,7 +223,11 @@ if ($agentOk) {
 Write-Host "HM-RECEIPT path $dst"
 if ($agentOk) { Write-Host "HM-RECEIPT reg HKCU|Software\Microsoft\Windows\CurrentVersion\Run|HamidunBridge" }
 
-$trayMsg = if ($trayOk) { 'значок в трее' } else { 'фоновый режим без значка (pystray/pillow не встали)' }
+# Значок обещаем «сейчас» только если трей реально запущен: при отказе токена оболочки (UAC выключен,
+# нет Проводника…) он появится при следующем входе в Windows — так и пишем, а не «значок в трее».
+$trayMsg = if (-not $trayOk) { 'фоновый режим без значка (pystray/pillow не встали)' }
+           elseif ($trayStarted) { 'значок в трее' }
+           else { 'значок в трее появится после следующего входа в Windows' }
 if (-not $agentOk) {
     # Автозапуска нет — «мост установлен» был бы неправдой. Распакован — честно (парити bridge.sh).
     Write-Host "OK: AI-мост распакован, автозапуск не ставился (агент не прошёл самопроверку)"

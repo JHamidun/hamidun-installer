@@ -130,13 +130,41 @@ Write-Host "HM-RECEIPT path $(Join-Path $env:USERPROFILE '.claude-mascot')"
 if ($lnkPath) { Write-Host "HM-RECEIPT path $lnkPath" }
 
 # Запуск сейчас
-# Запуск сейчас — ДЕ-ЭЛЕВАЦИЯ через explorer.exe (medium integrity): под elevated-токеном
-# был бы copy→run TOCTOU (medium-малварь юзера подменит $dest в user-writable каталоге
-# между Copy-Item и запуском → elevated-запуск чужого exe). explorer стартует цель токеном
-# shell (medium), не под админом; дочернего хендла не даёт → живость проверяем HTTP-probe.
+# Запуск сейчас — ДЕ-ЭЛЕВАЦИЯ ТОКЕНОМ ОБОЛОЧКИ (Invoke-HmAsShellUser из _deelev.ps1): под
+# elevated-токеном был бы copy→run TOCTOU (medium-малварь юзера подменит $dest в user-writable
+# каталоге между Copy-Item и запуском → elevated-запуск чужого exe). Раньше запуск отдавали
+# explorer.exe в расчёте, что он перешлёт его оболочке обычного уровня, — но без живой оболочки
+# (её может прибить малварь того же юзера) наш elevated explorer исполнил бы файл САМ, под админом,
+# по обработчику из HKCU\Software\Classes. Токен оболочки проверяется ДО запуска: ровно medium и тот
+# же пользователь. Нет оболочки / она не обычного уровня / отключена служба «Вторичный вход» —
+# не запускаем НИЧЕГО (ни explorer, ни Start-Process под админом) и говорим человеку, как открыть
+# скрепку самому; это не критично, файлы на месте. -NoWait: окно живёт дальше, процесс ждём лишь 3 с,
+# чтобы поймать мгновенное падение; живость остального проверяем HTTP-probe ниже.
+# _deelev.ps1 подключаем ЗДЕСЬ, а не в шапке: холостому прогону и шагам до запуска он ни к чему.
+# Его загрузка по умолчанию ещё и подметает осиротевшие задачи планировщика (COM Schedule.Service) —
+# шагу скрепки это тоже ни к чему (эту уборку делают шаги, которым примитив нужен для задач), поэтому
+# $script:HmSkipOrphanSweep = $true ДО подключения: планировщик здесь не открывается вовсе.
 $launched = $false
-try { Start-Process -FilePath "$env:WINDIR\explorer.exe" -ArgumentList "`"$dest`"" -ErrorAction Stop; $launched = $true }
-catch { Write-Host "  ВНИМАНИЕ: скрепка не запустилась ($($_.Exception.Message))." }
+$shRes = $null
+$shWhy = ''
+$script:HmSkipOrphanSweep = $true
+try {
+    . (Join-Path $PSScriptRoot '_deelev.ps1')
+    $shRes = Invoke-HmAsShellUser -Exe $dest -NoWait -Label 'mascot'
+} catch { $shWhy = $_.Exception.Message }
+if ($null -ne $shRes -and $shRes.Gate -eq 'medium' -and $shRes.Code -eq 0) { $launched = $true }
+elseif ($null -ne $shRes -and $shRes.Gate -eq 'medium') {
+    Write-Host "  ВНИМАНИЕ: скрепка запустилась и сразу закрылась (код $($shRes.Code))."
+}
+else {
+    if ($null -ne $shRes) { $shWhy = [string]$shRes.Reason }
+    if (-not $shWhy) { $shWhy = 'причина не определена' }
+    Write-Host "  ВНИМАНИЕ: скрепку сейчас запустить не удалось: $shWhy. Под правами администратора я её не запускаю."
+}
+# Машинный маркер исхода запуска: main убирает строку из журнала на экране и отдаёт признак экрану финиша,
+# чтобы тот не писал «установщик запустил её», когда запуск не принят (шаг при этом зелёный: не критично).
+# 1 — запуск принят (токен оболочки обычного уровня, процесс не упал за 3 с), 0 — иначе. Печатается один раз.
+Write-Host "HM-MASCOT launched=$(if ($launched) { 1 } else { 0 })"
 
 # 6. Health-check (НЕ критичный: скрепка поднимает http://127.0.0.1:45832/health, но может не успеть за 10 с)
 $healthy = $false
@@ -155,10 +183,15 @@ if ($healthy) {
     Write-Host "  Сама при входе в Windows скрепка не запускается — открыть её снова: $reopen."
     Write-Host "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude."
 }
-elseif (-not $wvOk) {
+elseif (-not $wvOk -and $launched) {
     # ДВА факта вместе, а не по отдельности: WebView2 в реестре нет И скрепка не
     # ответила на проверку. Это не «не успела» — окно рисовать нечем, Tauri без
     # WebView2 не поднимается вовсе.
+    #
+    # «Не ответила» — только если её запустили ($launched): когда запуск не принят
+    # (нет оболочки обычного уровня, UAC выключен), проверки не было вовсе, и красный
+    # диагноз вставал бы на одном факте, на реестре. Тогда — общий исход ниже: файлы
+    # на месте, открой сама; предупреждение про WebView2 уже напечатано выше.
     #
     # Раньше здесь печаталось «не успела ответить на проверку — это не ошибка» и
     # возвращался 0. Человек видел на финальном экране ЗЕЛЁНУЮ галочку и пустой
