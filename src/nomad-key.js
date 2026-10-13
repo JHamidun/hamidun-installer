@@ -17,20 +17,72 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const profileEnv = require('./profile-env');
 
 // Управляемый блок и «голый» model: — те же выражения, что в nomad.ps1:275.
 const MANAGED_BLOCK = /^# >>> nomad-cloud[\s\S]*?# <<< nomad-cloud <<<\r?\n?/m;
 const BARE_MODEL = /^model:[ \t]*\r?\n(?:(?:[ \t].*\r?\n)|(?:[ \t]*\r?\n))*/m;
 
-/** Путь к config.yaml агента: HERMES_HOME, иначе платформенный дефолт. */
-function nomadConfigPath(env, platform) {
+// Каталог агента и путь к config.yaml: { file, message, log }. file === '' — писать НЕЛЬЗЯ: причина для человека
+// в message, для install.log в log. Путь из окружения идёт только в log (там он очищен от управляющих
+// символов); на экран он не попадает.
+//
+// HERMES_HOME — переменная окружения, а на Windows её читает ЭЛЕВИРОВАННЫЙ main-процесс (обработчик
+// nomad-set-key): mkdir -p и замена файла идут под администратором. Переменную же пишет любой процесс
+// того же пользователя (HKCU\Environment), так что без проверки она выбирала бы корень админской записи —
+// каталог, куда пользователь писать не может, или чужой config.yaml (тот же класс, что USERPROFILE в
+// src/profile-env.js; для Codex в этом репозитории CODEX_HOME не читается вовсе). Поэтому на Windows
+// HERMES_HOME принимается, только если лежит СТРОГО ВНУТРИ профиля (profile-env.isInside: граница по
+// разделителю, `..` свёрнуты, чужой диск/UNC/относительный путь не проходят). Вне профиля — ОТКАЗ, а не
+// молчаливая подмена каталогом по умолчанию: человек с настоящим HERMES_HOME вне профиля получил бы
+// «готово», а агент читал бы другой файл. «Внутри профиля» — по тексту пути: связи (junction) внутри
+// профиля этим не закрываются, это отдельный слой защиты. Скрипты установки переменную не получают (её
+// нет в WIN_SYS_ENV_KEYS), так что расхождения с ними нет. На macOS/Linux установщик не элевирован,
+// граница привилегий отсутствует — значение переменной по-прежнему главнее.
+// home — профиль (в проде os.homedir() ПОСЛЕ замка профиля = профиль токена); подменяется в тестах.
+function resolveConfigPath(env, platform, home) {
   const e = env || process.env;
   const p = platform || process.platform;
-  const hh = e.HERMES_HOME ||
-    (p === 'win32'
-      ? path.join(e.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
-      : path.join(os.homedir(), '.hermes'));
-  return path.join(hh, 'config.yaml');
+  const requested = e.HERMES_HOME == null ? '' : String(e.HERMES_HOME).trim();
+  let h = home || '';
+  if (!h) { try { h = os.homedir(); } catch (err) { h = ''; } }
+  if (p !== 'win32') {
+    const hh = requested || (h ? path.join(h, '.hermes') : '');
+    if (!hh) {
+      // домашний каталог не определился: относительный .hermes (от cwd) писать нельзя
+      return {
+        file: '',
+        message: 'Не удалось определить домашний каталог, куда писать config.yaml агента. Ключ НЕ записан.',
+        log: 'Nomad: домашний каталог определить не удалось — ключ не записан.',
+      };
+    }
+    return { file: path.join(hh, 'config.yaml'), message: '', log: '' };
+  }
+  const W = path.win32;
+  if (requested) {
+    if (h && profileEnv.isInside(h, requested)) return { file: W.join(requested, 'config.yaml'), message: '', log: '' };
+    return {
+      file: '',
+      message: 'Переменная HERMES_HOME указывает вне твоего профиля, а в каталоги за его пределами установщик ' +
+        'не пишет. Ключ НЕ записан. Убери переменную HERMES_HOME (или перенеси каталог агента внутрь профиля) и повтори.',
+      log: 'Nomad: HERMES_HOME («' + profileEnv.cleanForLog(requested) + '») указывает вне профиля («' +
+        profileEnv.cleanForLog(h) + '») — ключ не записан.',
+    };
+  }
+  const local = e.LOCALAPPDATA || (h ? W.join(h, 'AppData', 'Local') : '');
+  if (!local || !W.isAbsolute(local)) {
+    return {
+      file: '',
+      message: 'Не удалось определить каталог профиля, куда писать config.yaml агента. Ключ НЕ записан.',
+      log: 'Nomad: профиль и LOCALAPPDATA определить не удалось — ключ не записан.',
+    };
+  }
+  return { file: W.join(local, 'hermes', 'config.yaml'), message: '', log: '' };
+}
+
+/** Путь к config.yaml агента или null, когда писать нельзя (см. resolveConfigPath). */
+function nomadConfigPath(env, platform, home) {
+  return resolveConfigPath(env, platform, home).file || null;
 }
 
 /**
@@ -63,8 +115,13 @@ function buildBlock(keySan, url, model, nl) {
  * @param {string} key            ключ из кабинета
  * @param {object} opts
  * @param {object} opts.config    разобранный config.json (для nomad.cloud.*)
- * @param {string} [opts.file]    путь к config.yaml (по умолчанию nomadConfigPath())
+ * @param {string} [opts.file]    путь к config.yaml (по умолчанию resolveConfigPath())
  * @param {string} [opts.newline] перевод строки ('\r\n' на win32)
+ * @param {object} [opts.env]     окружение для разрешения каталога (по умолчанию process.env)
+ * @param {string} [opts.platform] платформа для разрешения каталога (по умолчанию process.platform)
+ * @param {string} [opts.home]    профиль, внутри которого обязан лежать HERMES_HOME на Windows (по умолчанию os.homedir())
+ * @returns при отказе выбрать каталог (HERMES_HOME вне профиля) ответ {ok:false, reason:'io', message, log}:
+ *          message — человеку, log — строка для install.log (её пишет вызывающий)
  */
 // Переименование временного файла поверх config.yaml на Windows спорадически падает с EPERM/EBUSY/EACCES:
 // антивирус или индексатор на миг держит только что записанный файл. Замер: 23 отказа из 800 записей
@@ -99,7 +156,13 @@ function writeNomadKey(key, opts) {
   // В config.json поле называется defaultModel (не model) — зеркалит nomad.ps1:284.
   const model = String(cloud.defaultModel || 'claude-opus-4-6').replace(/["\r\n]/g, '');
 
-  const cfgY = o.file || nomadConfigPath();
+  let cfgY = o.file;
+  if (!cfgY) {
+    // Каталог выбирает окружение (HERMES_HOME) — до mkdir и записи проверяем его; отказ не создаёт ничего.
+    const r = resolveConfigPath(o.env, o.platform, o.home);
+    if (!r.file) return { ok: false, reason: 'io', message: r.message, log: r.log };
+    cfgY = r.file;
+  }
   const nl = o.newline || (process.platform === 'win32' ? '\r\n' : '\n');
   try {
     fs.mkdirSync(path.dirname(cfgY), { recursive: true });
@@ -146,5 +209,5 @@ function writeNomadKey(key, opts) {
 
 module.exports = {
   MANAGED_BLOCK, BARE_MODEL,
-  nomadConfigPath, sanitizeKey, buildBlock, renameWithRetry, writeNomadKey,
+  nomadConfigPath, resolveConfigPath, sanitizeKey, buildBlock, renameWithRetry, writeNomadKey,
 };
