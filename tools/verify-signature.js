@@ -59,7 +59,8 @@ function evaluate(results, expectedThumbprint) {
       failures.push(name + ': подписан НЕ нашим сертификатом (отпечаток ' + got + ', ожидался ' + want + ')');
       continue;
     }
-    if (r.timestamped === false) {
+    // Не «=== false»: потеря или переименование поля в PowerShell-части не должны читаться как «метка есть».
+    if (r.timestamped !== true) {
       failures.push(name + ': подпись без метки времени — умрёт вместе с сертификатом');
       continue;
     }

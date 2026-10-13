@@ -14080,7 +14080,7 @@ ok('config.json в репозитории без сборочных маркер
 
   // --- shellTokenInline: значения доходят до примитива неискажёнными через границу командной строки ---
   if (havePs) {
-    ok('U5 (прогон PS 5.1 + Node): shellTokenInline — текст команды, рабочая папка, программа и аргументы со всеми видами кавычек, % и кириллицей доходят до Invoke-HmAsShellUser без искажений (граница -Command, настоящий парсер); для редакторов строка побайтно прежняя; значение без литерала ломает разбор', () => {
+    ok('U5 (прогон PS 5.1 + Node): shellTokenInline — текст команды, рабочая папка, программа и аргументы со всеми видами кавычек, % и кириллицей доходят до Invoke-HmAsShellUser без искажений (граница -Command, настоящий парсер); для редакторов строка прежняя, кроме флага без подметания задач; значение без литерала ломает разбор', () => {
       const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-inl-'));
       try {
@@ -14117,11 +14117,12 @@ ok('config.json в репозитории без сборочных маркер
             assert.strictEqual(f.EXE, sp.exe); assert.strictEqual(f.ARGS, sp.args.join('\u0002'), 'аргументы — отдельными, без искажений'); assert.strictEqual(f.SCRIPT, ''); assert.strictEqual(f.CWD, '');
           }
         });
-        // Для редакторов строка ПОБАЙТНО прежняя (так её собирал winShellTokenLaunch до правки).
+        // Для редакторов строка прежняя, кроме одного флага без подметания задач (так её собирал winShellTokenLaunch до правки).
         const oldInline = (ps, deelev, exe, folderArg, extraArgs) => {
           const lit = DR.psLit; const s32 = path.dirname(path.dirname(path.dirname(ps)));
           return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
             '$env:PSModulePath=' + lit(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')) + ';' +
+            '$script:HmSkipOrphanSweep=$true;' +
             '. ' + lit(deelev) + ';' +
             '$r=Invoke-HmAsShellUser -Exe ' + lit(exe) + ' -Arguments @(' + [folderArg].concat(extraArgs || []).map(lit).join(',') +
             ") -NoWait -Label 'launch-editor';" +
@@ -14131,7 +14132,7 @@ ok('config.json в репозитории без сборочных маркер
         const ex = 'C:\\Users\\O\u2019Brien\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe';
         assert.strictEqual(
           DR.shellTokenInline({ psModulePath: path.join(SYS, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'), deelev: stub, exe: ex, args: ['C:\\dir', 'C:\\dir\\PROMPTS.md'], label: 'launch-editor' }),
-          oldInline(ps, stub, ex, 'C:\\dir', ['C:\\dir\\PROMPTS.md']), 'строка запуска редактора не изменилась');
+          oldInline(ps, stub, ex, 'C:\\dir', ['C:\\dir\\PROMPTS.md']), 'строка запуска редактора не изменилась, кроме флага HmSkipOrphanSweep');
         // Контроль: значение, подставленное без литерала (удвоения кавычек), ломает разбор — тест это видит.
         const broken = DR.shellTokenInline({ psModulePath: modules, deelev: stub, script: nasty, label: 'x' }).replace(DR.psLit(nasty), "'" + nasty + "'");
         const rb = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', broken], { encoding: 'utf8', timeout: 120000, windowsHide: true });
@@ -24870,6 +24871,8 @@ ok('config.json в репозитории без сборочных маркер
     fail({ thumbprint: 'D8FB0CC66A08061B42D46D03546F0D42CBC49B7C' }, /НЕ нашим сертификатом/);
     fail({ thumbprint: '' }, /сертификата подписанта нет/);
     fail({ timestamped: false }, /без метки времени/);
+    fail({ timestamped: undefined }, /без метки времени/);   // поле пропало — это не «метка есть»
+    fail({ timestamped: null }, /без метки времени/);
     fail({ error: 'доступ запрещён' }, /не прочиталась/);
     assert.strictEqual(vs.evaluate([good, Object.assign({}, good, { status: 'NotSigned' })], OURS).ok, false, 'один неподписанный файл из двух краснит всё');
     assert.strictEqual(vs.evaluate([], OURS).ok, false, 'ноль файлов — не успех');
@@ -29207,6 +29210,18 @@ ok('config.json в репозитории без сборочных маркер
     'done;',
     'printf relaunch-not-seen > "$ST"; exit 1',
   ].join(' ');
+
+  ok('u9/M-6: pgrep помощника не находит сам помощника — шаблон со скобкой у первой буквы', () => {
+    const H = SH.buildHelperScript();
+    const m = /pgrep -f "([^"]+)"/.exec(H);
+    assert(m, 'в помощнике есть pgrep -f');
+    const re = new RegExp(m[1]);
+    assert(!re.test(H), 'шаблон не совпадает с текстом самого помощника (он запущен как sh -c <текст>): ' + m[1]);
+    assert(re.test('/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/MacOS/Hamidun Setup'), 'настоящая командная строка установщика подходит');
+    assert(!re.test('/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/Resources/x'), 'чужие процессы того же бандла не подходят');
+    // КОНТРОЛЬ: прежний буквальный шаблон совпадал с текстом помощника, поэтому `ok` писалось безусловно
+    assert(new RegExp('Hamidun Setup.app/Contents/MacOS').test(OLD_HELPER), 'КОНТРОЛЬ: буквальный шаблон находит сам прежний помощник');
+  });
 
   ok('u9/M-6: помощник (sh) отцепляет только переданные тома образа, посторонний том остаётся', () => {
     needBash();

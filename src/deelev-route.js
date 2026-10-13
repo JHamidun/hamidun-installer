@@ -110,6 +110,10 @@ function shellTokenInline(o) {
     : '-Exe ' + lit(o.exe) + ' -Arguments @(' + (o.args || []).map(lit).join(',') + ')';
   return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
     '$env:PSModulePath=' + lit(o.psModulePath) + ';' +
+    // Запуск токеном оболочки планировщика не использует, а подметание осиротевших задач при подключении
+    // _deelev.ps1 открывает COM «Schedule.Service» через HKCR — в повышенном powershell.exe, где ветка
+    // HKCU\Software\Classes того же пользователя может подменить класс. Флаг гасит это до дот-сорса.
+    '$script:HmSkipOrphanSweep=$true;' +
     '. ' + lit(o.deelev) + ';' +
     '$r=Invoke-HmAsShellUser ' + target + (o.cwd ? ' -WorkingDirectory ' + lit(o.cwd) : '') +
     ' -NoWait -Label ' + lit(o.label || 'launch-editor') + ';' +

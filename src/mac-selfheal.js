@@ -374,6 +374,11 @@ async function preflight(d) {
 //   • `open` вернул 0 — это лишь «команда принята»: ждём, пока процесс РЕАЛЬНО появится.
 function buildHelperScript() {
   const app = APP_NAME;
+  // Помощник запущен как `sh -p -c '<этот текст>'`, а `pgrep -f` ищет по ПОЛНОЙ командной строке и исключает только
+  // себя — поэтому буквальный шаблон нашёл бы сам помощник на первой же итерации и записал бы `ok`, даже когда
+  // установщик не поднялся. Первая буква в квадратных скобках: настоящий процесс
+  // `…/Hamidun Setup.app/Contents/MacOS/…` подходит, а строка `[H]amidun…` в нашем аргументе — нет.
+  const seen = '[' + app.charAt(0) + ']' + app.slice(1) + '/Contents/MacOS';
   return [
     'DMG="$1"; PID="$2"; ST="$3"; REQ="$4"; shift 4;',
     'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
@@ -389,7 +394,7 @@ function buildHelperScript() {
     'fi;',
     'if ! /usr/bin/open -n -a "$MP/' + app + '"; then printf relaunch-failed > "$ST"; exit 1; fi;',
     'i=0; while [ $i -lt 20 ]; do',
-    '  if /usr/bin/pgrep -f "' + app + '/Contents/MacOS" >/dev/null 2>&1; then',
+    '  if /usr/bin/pgrep -f "' + seen + '" >/dev/null 2>&1; then',
     '    printf ok > "$ST"; exit 0;',
     '  fi;',
     '  sleep 1; i=$((i+1));',
