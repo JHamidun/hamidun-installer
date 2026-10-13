@@ -95,7 +95,7 @@ function resolveCourseTarget(raw, home, platform) {
 // ctx: {
 //   platform: 'win32'|'darwin',
 //   home: абсолютный homedir,
-//   desktop: абсолютный путь рабочего стола (Electron app.getPath('desktop')),
+//   desktop: рабочий стол, УЖЕ проверенный (main.js safeDesktopDir: внутри профиля из токена, без ссылок); пусто → <профиль>/Desktop,
 //   courseTargetRaw: config.json course.targetDirDefault (вшитый ресурс),
 //   courseShortcut: config.json course.shortcutName (вшитый ресурс),
 //   nomadTool: config.json nomad.packageName (вшитый ресурс; после гигиены,

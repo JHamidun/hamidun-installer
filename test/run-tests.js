@@ -31775,3 +31775,1631 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     } finally { drop(dir); }
   });
 })();
+
+// ===========================================================================
+// u4 (рецензия безопасности, находка F5): ярлыки и памятку установщик пишет ИЗ-ПОД АДМИНИСТРАТОРА
+// в «Рабочий стол» и «меню Пуск», а адрес этих папок оболочка берёт из
+// HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders — ветки, которую без
+// UAC правит любая программа пользователя. Раньше ответ оболочки принимался как есть: перенаправив
+// «Desktop» в каталог, куда пользователь писать не может, а администратор может (автозагрузка всех
+// пользователей, чужой профиль), программа того же пользователя получала файл, созданный
+// администратором, вне собственных прав. Теперь папка принимается, только если она лежит ВНУТРИ
+// профиля (список профилей Windows, а не переменная окружения), существует и на пути от профиля
+// нет ссылок (облачные папки OneDrive — не ссылки, их отличает тег точки повторной обработки).
+// Сам ярлык пишется через временный файл и Move: Save() по пути идёт сквозь symlink и жёсткую
+// ссылку, заранее положенные на имя ярлыка.
+// Всё исполняется: настоящий Windows PowerShell 5.1 и Node на настоящих junction, symlink и
+// жёстких ссылках; у каждой защиты — отрицательный контроль (старое поведение на тех же входах).
+// ===========================================================================
+(function () {
+  console.log('\n== u4: папки ярлыков и памятки — из профиля, а не из реестра пользователя ==');
+  const { spawnSync } = require('child_process');
+  const IS_WIN = process.platform === 'win32';
+  const WINDIR = path.join(ROOT, 'scripts', 'windows');
+  const USERPATH = path.join(WINDIR, '_userpath.ps1');
+  const VSET = path.join(WINDIR, 'vscode-settings.ps1');
+  const COURSE = path.join(WINDIR, 'course.ps1');
+  const SYS32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  const PS51 = path.join(SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const ICACLS = path.join(SYS32, 'icacls.exe');
+  const WHOAMI = path.join(SYS32, 'whoami.exe');
+  const MAINJS = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const lines = (s) => String(s || '').split(/\r?\n/);
+  const q = (p) => "'" + String(p).replace(/'/g, "''") + "'";
+
+  let _psOk = null;
+  const needWinPs = () => {
+    if (!IS_WIN) SKIP('нужен Windows (настоящие пути диска и junction)');
+    if (_psOk === null) {
+      const p = spawnSync(PS51, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', timeout: 30000 });
+      _psOk = !(p.error || p.status !== 0);
+    }
+    if (!_psOk) SKIP('нет Windows PowerShell 5.1');
+  };
+  // Скрипт — файлом с BOM: кириллица в литералах и аргументах доходит без перекодировки командной строки.
+  function runPsFile(text, env) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u4-run-'));
+    const f = path.join(dir, 'run.ps1');
+    fs.writeFileSync(f, '\uFEFF' + text.replace(/\r?\n/g, '\r\n'), 'utf8');
+    try {
+      const e = Object.assign({}, process.env);
+      delete e.HM_DRY_RUN; delete e.HM_FIRSTRUN_ROOT;
+      Object.assign(e, env || {});
+      return spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: 240000, env: e });
+    } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  }
+
+  // SID текущего пользователя — для запрета чтения на САМОЙ ссылке (приём, которым прячут junction от Get-Item.LinkType).
+  let _sid = null;
+  function mySid() {
+    if (_sid === null) {
+      const r = spawnSync(WHOAMI, ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', timeout: 30000 });
+      const m = /"(S-1-[0-9-]+)"\s*$/.exec(String(r.stdout || '').trim());
+      _sid = m ? m[1] : '';
+    }
+    return _sid;
+  }
+  // Песочница. Ссылки убираются ПЕРВЫМИ и по одной (rmdir на самой ссылке), чтобы рекурсивное удаление
+  // никогда не пошло сквозь junction в чужую папку.
+  function sandbox(prefix) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    const t = { base, links: [] };
+    t.mk = (...p) => { const d = path.join(...p); fs.mkdirSync(d, { recursive: true }); return d; };
+    t.link = (target, at) => { fs.symlinkSync(target, at, 'junction'); t.links.push(at); return at; };
+    t.denyRead = (at) => {
+      const r = spawnSync(ICACLS, [at, '/L', '/deny', '*' + mySid() + ':(RA,REA,RD,RC)'], { encoding: 'utf8', timeout: 30000 });
+      if (r.status !== 0) SKIP('здесь нельзя запретить чтение на ссылке (icacls /deny): ' + String(r.stdout || '').trim() + String(r.stderr || '').trim());
+    };
+    t.cleanup = () => {
+      for (const l of t.links.slice().reverse()) {
+        try { spawnSync(ICACLS, [l, '/L', '/remove:d', '*' + mySid()], { timeout: 30000 }); } catch (e) { /* ignore */ }
+        try { fs.rmdirSync(l); } catch (e) { /* ignore */ }
+      }
+      try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    };
+    return t;
+  }
+  function mkTree() {
+    const t = sandbox('hm-u4-');
+    t.P = path.join(t.base, 'Users', 'Иван О’Брайен Тест');          // кириллица, пробелы и U+2019 в имени профиля
+    t.mk(t.P);
+    return t;
+  }
+  // «Старая логика»: ответ оболочки принимался как есть, лишь бы такая папка существовала.
+  const oldAccepts = (shell) => { try { return fs.statSync(shell).isDirectory(); } catch (e) { return false; } };
+  const listAll = (d) => { const out = []; const walk = (x) => { for (const e of fs.readdirSync(x, { withFileTypes: true })) { const f = path.join(x, e.name); out.push(f); if (e.isDirectory() && !e.isSymbolicLink()) walk(f); } }; walk(d); return out; };
+
+  // =========================================================================
+  // 1. Node: src/desktop-path.js (save-start-here, open-path, цели удаления)
+  // =========================================================================
+  const DP = () => require(path.join(ROOT, 'src', 'desktop-path.js'));
+  const resolve = (profile, shell, extra) => DP().resolveSafeDesktop(Object.assign({ profile, shellDesktop: shell, platform: 'win32' }, extra || {}));
+
+  ok('u4 desktop-path: законный рабочий стол принимается во всех видах — обычный, OneDrive (en/ru/Company), кириллица+пробелы+U+2019 в имени профиля, слэш на конце, регистр, прямые слэши, точки внутри профиля', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const od1 = t.mk(t.P, 'OneDrive', 'Desktop');
+      const od2 = t.mk(t.P, 'OneDrive', 'Рабочий стол');
+      const od3 = t.mk(t.P, 'OneDrive - Company Name', 'Desktop');
+      const custom = t.mk(t.P, 'Documents', 'MyDesktop');
+      const good = (label, shell) => { const r = resolve(t.P, shell); assert(r.ok === true, label + ': ' + JSON.stringify(r)); return r; };
+      assert.strictEqual(good('обычный', desk).dir, desk, 'dir — нормализованный путь');
+      for (const d of [od1, od2, od3, custom]) good(d, d);
+      assert.strictEqual(good('слэш на конце', desk + '\\').dir, desk, 'слэш на конце отрезан');
+      good('регистр', desk.toUpperCase());
+      good('прямые слэши', desk.replace(/\\/g, '/'));
+      assert.strictEqual(good('точки внутри профиля', path.join(t.P, 'Documents', '..', 'Desktop')).dir, desk);
+      assert(resolve(t.P.toUpperCase() + '\\', desk).ok, 'профиль в верхнем регистре со слэшем на конце');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 desktop-path: чужие места отклоняются — автозагрузка всех пользователей, чужой профиль, двойник профиля по префиксу, сам профиль, побег через точки, UNC, префикс ?, относительные пути, джокеры, потоки данных; старая логика на тех же входах отвечала да', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'StartUp');
+      const other = t.mk(t.base, 'Users', 'Другой', 'Desktop');
+      const twin = t.mk(t.base, 'Users', 'Иван О’Брайен Тест2', 'Desktop');   // имя профиля + «2»: ловушка для проверки по префиксу строки
+      fs.writeFileSync(path.join(t.P, 'afile'), 'x');
+      const bad = {
+        'каталог автозагрузки всех пользователей': startup,
+        'чужой профиль': other,
+        'двойник профиля по префиксу': twin,
+        'сам профиль': t.P,
+        'побег через ..': path.join(t.P, '..', 'Другой', 'Desktop'),
+        'UNC': '\\\\localhost\\c$\\Users\\x\\Desktop',
+        'префикс ?': '\\\\?\\' + desk,
+        'относительный путь': 'Desktop',
+        'диск без слэша': 'C:Desktop',
+        'пусто': '',
+        'джокер *': path.join(t.P, '*'),
+        'джокер ?': path.join(t.P, 'Deskto?'),
+        'поток данных': desk + ':evil',
+        'управляющий знак': desk + '\u0001',
+        'файл вместо папки': path.join(t.P, 'afile'),
+        'нет такой папки': path.join(t.P, 'Нет'),
+        // Windows отбрасывает точки и пробелы на конце имени при проверке, но не в середине пути: такое имя — отказ.
+        'пробел на конце имени': desk + ' ',
+        'точка на конце имени': desk + '.',
+        'имя из одних точек': path.join(t.P, '...'),
+        // .NET на стороне PowerShell срезает на конце пути ещё табы, U+0085 и неразрывный пробел — правило одно на обе стороны.
+        // Папки настоящие: без правила они были бы приняты как обычные папки внутри профиля.
+        'неразрывный пробел на конце имени': t.mk(t.P, 'Desktop\u00a0'),
+        'U+0085 на конце имени': t.mk(t.P, 'Desktop\u0085'),
+        'имя из одного неразрывного пробела': t.mk(t.P, '\u00a0'),
+        // Управляющие знаки C1 и разделитель строк посреди имени: в журнал (одна строка) они не должны попасть.
+        'U+0085 посреди имени': t.mk(t.P, 'De\u0085sktop'),
+        'U+2028 посреди имени': t.mk(t.P, 'De\u2028sktop'),
+      };
+      for (const label of Object.keys(bad)) {
+        const r = resolve(t.P, bad[label]);
+        assert(r.ok === false && r.reason && r.dir === '', label + ': должен быть отказ с причиной: ' + JSON.stringify(r));
+      }
+      assert(/точкой или пробелом/.test(resolve(t.P, bad['пробел на конце имени']).reason), 'причина названа словами');
+      for (const label of ['неразрывный пробел на конце имени', 'U+0085 на конце имени', 'имя из одного неразрывного пробела']) {
+        // U+0085 — управляющий знак C1: его отсекает фильтр знаков раньше правила про конец имени; остальные — правило про конец имени.
+        const want = label.indexOf('U+0085') === 0 ? /недопустимые знаки/ : /точкой или пробелом/;
+        assert(want.test(resolve(t.P, bad[label]).reason), label + ': отказ с причиной словами: ' + resolve(t.P, bad[label]).reason);
+        assert.strictEqual(oldAccepts(bad[label]), true, 'контроль: старая логика принимала существующую папку «' + label + '»');
+      }
+      for (const label of ['U+0085 посреди имени', 'U+2028 посреди имени']) {
+        assert(/недопустимые знаки/.test(resolve(t.P, bad[label]).reason), label + ': отказ по знакам: ' + resolve(t.P, bad[label]).reason);
+        assert.strictEqual(oldAccepts(bad[label]), true, 'контроль: старая логика принимала существующую папку «' + label + '»');
+      }
+      // Отрицательный контроль: старое «как сказала оболочка» принимало все существующие чужие места.
+      for (const label of ['каталог автозагрузки всех пользователей', 'чужой профиль', 'двойник профиля по префиксу', 'сам профиль']) {
+        assert.strictEqual(oldAccepts(bad[label]), true, 'контроль: старая логика принимала «' + label + '» — тест различает');
+      }
+      // Относительные пути разбираются по рабочей папке процесса: если она внутри профиля, «Desktop» и «C:Desktop» без проверки формы
+      // стали бы настоящим столом.
+      const cwd0 = process.cwd();
+      try {
+        process.chdir(t.P);
+        assert.strictEqual(resolve(t.P, 'Desktop').ok, false, 'относительный путь при рабочей папке в профиле');
+        assert.strictEqual(resolve(t.P, t.P.slice(0, 2) + 'Desktop').ok, false, 'диск без слэша при рабочей папке в профиле');
+      } finally { process.chdir(cwd0); }
+      // Профиль не задан / задан мусором — отказ, а не «сойдёт».
+      assert.strictEqual(resolve('', desk).ok, false, 'пустой профиль');
+      assert.strictEqual(resolve('\\\\srv\\share\\x', desk).ok, false, 'UNC-профиль');
+      assert.strictEqual(resolve('C:\\', 'C:\\Windows').ok, false, 'профиль — корень диска: «внутри» стало бы «где угодно на диске»');
+      assert.strictEqual(resolve(t.P, desk).ok, true, 'и обычный случай по-прежнему проходит');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 desktop-path: junction в пути — отказ (сама папка, звено посередине, оборванная, с запретом чтения на ссылке), профиль за junction принимается; старая логика пропускала всё это', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const other = t.mk(t.base, 'Users', 'Другой');
+      t.mk(other, 'Desktop');
+      // Сама папка стола — junction на каталог автозагрузки.
+      const jDesk = t.link(startup, path.join(t.P, 'Desktop'));
+      const r1 = resolve(t.P, jDesk);
+      assert(r1.ok === false && /ссылк/.test(r1.reason), 'junction вместо стола: ' + JSON.stringify(r1));
+      assert.strictEqual(oldAccepts(jDesk), true, 'контроль: старая логика принимала junction');
+      // Обычная папка ЗА junction в середине пути.
+      const jDocs = t.link(other, path.join(t.P, 'Docs'));
+      const r2 = resolve(t.P, path.join(jDocs, 'Desktop'));
+      assert(r2.ok === false && /ссылк/.test(r2.reason), 'звено-junction посередине: ' + JSON.stringify(r2));
+      assert.strictEqual(oldAccepts(path.join(jDocs, 'Desktop')), true, 'контроль: за junction лежит обычная папка, и старая логика её принимала');
+      // Оборванная junction.
+      const gone = t.mk(t.base, 'gone');
+      const jGone = t.link(gone, path.join(t.P, 'Gone'));
+      fs.rmdirSync(gone);
+      assert.strictEqual(resolve(t.P, jGone).ok, false, 'оборванная junction');
+      // Junction, у которой владелец запретил чтение на САМОЙ ссылке: Get-Item.LinkType у неё пустеет, lstat Node — нет.
+      const jDeny = t.link(startup, path.join(t.P, 'Hidden'));
+      t.denyRead(jDeny);
+      const r3 = resolve(t.P, jDeny);
+      assert(r3.ok === false, 'junction с запретом чтения: ' + JSON.stringify(r3));
+      // Профиль, лежащий за junction (перенесён на другой диск): его папки законны.
+      const realHome = t.mk(t.base, 'D-drive', 'home');
+      t.mk(realHome, 'Desktop');
+      const homeLink = t.link(realHome, path.join(t.base, 'Users', 'moved'));
+      const r4 = resolve(homeLink, path.join(homeLink, 'Desktop'));
+      assert(r4.ok === true, 'профиль за junction: ' + JSON.stringify(r4));
+      // Junction, чьё ИМЯ кончается пробелом (создаётся только через \\?\): для Win32 это «Spaced», для записи — другая папка.
+      const spaced = '\\\\?\\' + t.P + '\\Spaced ';
+      let spacedOk = true;
+      try { fs.symlinkSync(startup, spaced, 'junction'); t.links.push(spaced); } catch (e) { spacedOk = false; }
+      if (spacedOk) {
+        const r5 = resolve(t.P, path.join(t.P, 'Spaced '));
+        assert(r5.ok === false && /точкой или пробелом|ссылк/.test(r5.reason), 'junction с пробелом на конце имени: ' + JSON.stringify(r5));
+      }
+      // Junction, чьё имя — один неразрывный пробел: создаётся обычным вызовом (\\?\ не нужен), .NET на конце пути его срезает.
+      const nbspLink = t.link(startup, path.join(t.P, '\u00a0'));
+      const r6 = resolve(t.P, nbspLink + '\\');
+      assert(r6.ok === false, 'junction с неразрывным пробелом вместо имени: ' + JSON.stringify(r6));
+      assert.strictEqual(oldAccepts(nbspLink), true, 'контроль: старая логика принимала и её');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 desktop-path: сбой чтения и расхождение канонического пути — отказ (fail-closed); на не-Windows проверка не нужна', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const real = fs.realpathSync.native;
+      // lstat отвечает отказом в доступе: не смогли убедиться, что ссылки нет, — значит есть.
+      const eacces = Object.assign({}, fs, { lstatSync: (p, o) => { if (String(p).toLowerCase() === desk.toLowerCase()) { const e = new Error('EACCES'); e.code = 'EACCES'; throw e; } return fs.lstatSync(p, o); } });
+      const r1 = resolve(t.P, desk, { fsx: eacces });
+      assert(r1.ok === false && /EACCES/.test(r1.reason), 'lstat EACCES: ' + JSON.stringify(r1));
+      // Всё, что lstat ссылкой не назвал, ловит каноническая форма: путь на диске ≠ путь, который назвали.
+      const liar = Object.assign({}, fs, { realpathSync: Object.assign((p) => fs.realpathSync(p), { native: (p) => (String(p).toLowerCase() === desk.toLowerCase() ? path.join(t.base, 'ProgramData') : real(p)) }) });
+      const r2 = resolve(t.P, desk, { fsx: liar });
+      assert(r2.ok === false && /канонич/.test(r2.reason), 'расхождение канонического пути: ' + JSON.stringify(r2));
+      // Не Windows: процесс не повышен, проверка не нужна — ответ оболочки возвращается как есть (но пустой ответ — отказ).
+      assert.deepStrictEqual(DP().resolveSafeDesktop({ profile: '/home/u', shellDesktop: '/home/u/Desktop', platform: 'darwin' }),
+        { ok: true, dir: '/home/u/Desktop', reason: '', unchecked: true });
+      assert.strictEqual(DP().resolveSafeDesktop({ profile: '/home/u', shellDesktop: '', platform: 'linux' }).ok, false);
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 desktop-path: под настоящим Electron-рантаймом os.userInfo().homedir не следует за USERPROFILE (os.homedir() следует), а проверка стола ведёт себя так же, как под системным Node', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    // Бинарник Electron: node_modules проекта либо NODE_PATH (в рабочем дереве без npm install он указывает на сборочный каталог).
+    const exe = (() => {
+      const roots = [path.join(ROOT, 'node_modules')].concat(String(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean));
+      for (const nm of roots) {
+        try {
+          const rel = fs.readFileSync(path.join(nm, 'electron', 'path.txt'), 'utf8').trim();
+          const p = path.join(nm, 'electron', 'dist', rel);
+          if (fs.existsSync(p)) return p;
+        } catch (e) { /* следующий каталог */ }
+      }
+      return '';
+    })();
+    if (!exe) SKIP('нет бинарника Electron (node_modules/electron или NODE_PATH) — рантайм не проверить');
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const jDesk = t.link(startup, path.join(t.P, 'Desktop2'));
+      const child = path.join(t.base, 'child.js');
+      fs.writeFileSync(child, [
+        "const os = require('os');",
+        "const dp = require(process.env.HM_DP);",
+        "const P = process.env.HM_P;",
+        "const r = (s) => { const v = dp.resolveSafeDesktop({ profile: P, shellDesktop: s, platform: 'win32' }); return { ok: v.ok, reason: v.reason }; };",
+        "process.stdout.write(JSON.stringify({ electron: process.versions.electron || '', home: os.homedir(), userInfoHome: os.userInfo().homedir,",
+        "  good: r(process.env.HM_GOOD), startup: r(process.env.HM_STARTUP), junction: r(process.env.HM_JUNC) }));",
+      ].join('\n'));
+      const r = spawnSync(exe, [child], {
+        encoding: 'utf8', timeout: 90000,
+        env: Object.assign({}, process.env, { ELECTRON_RUN_AS_NODE: '1', USERPROFILE: 'C:\\hm-u4-evil-profile',
+          HM_DP: path.join(ROOT, 'src', 'desktop-path.js'), HM_P: t.P, HM_GOOD: desk, HM_STARTUP: startup, HM_JUNC: jDesk }),
+      });
+      assert.strictEqual(r.status, 0, 'Electron-как-Node отработал: ' + r.stderr + (r.error || ''));
+      const o = JSON.parse(r.stdout);
+      assert(o.electron, 'это действительно Electron: ' + r.stdout);
+      assert.strictEqual(o.home, 'C:\\hm-u4-evil-profile', 'os.homedir() следует за переменной USERPROFILE — поэтому профиль для проверки берётся не из него');
+      assert.strictEqual(o.userInfoHome, os.userInfo().homedir, 'os.userInfo().homedir — профиль из токена, переменная окружения его не меняет (Electron ' + o.electron + ')');
+      assert(o.good.ok === true && o.startup.ok === false && o.junction.ok === false, 'проверка стола под Electron: ' + JSON.stringify(o));
+    } finally { t.cleanup(); }
+  });
+
+  // =========================================================================
+  // 2. main.js: save-start-here / open-path / цели удаления берут рабочий стол только отсюда
+  // =========================================================================
+  const handlerSlice = (src) => {
+    const a = src.indexOf("ipcMain.handle('save-start-here'");
+    const b = src.indexOf("ipcMain.handle('read-start-here'");
+    assert(a > 0 && b > a, 'обработчик save-start-here найден');
+    return src.slice(a, b);
+  };
+  const fnSlice = (src, header) => {
+    const i = src.indexOf(header);
+    assert(i !== -1, 'в main.js пропало: ' + header);
+    const open = src.indexOf('{', i);
+    let depth = 0;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+    }
+    throw new Error('нет конца блока: ' + header);
+  };
+  // Настоящие safeDesktopDir и save-start-here из main.js — в обвязке с поддельным electron.
+  function loadHandler(src, env) {
+    const handlers = {};
+    const logs = [];
+    const body = (src.indexOf('function safeDesktopDir') !== -1 ? fnSlice(src, 'function safeDesktopDir') : '') + '\n' + handlerSlice(src);
+    new Function('ipcMain', 'app', 'os', 'fs', 'path', 'process', 'readJson', 'resourceRoot', 'startHereHtml', 'desktopPath', 'logToFile',
+      body + '\n; return true;')(
+      { handle: (n, fn) => { handlers[n] = fn; } },
+      { getPath: (n) => { assert.strictEqual(n, 'desktop'); return env.shellDesktop; } },
+      { userInfo: () => ({ homedir: env.profile }), homedir: () => env.envHome || env.profile },
+      fs, path, { platform: 'win32' },
+      () => ({ finish: { startHtmlRelPath: 'assets/START-HERE.html' } }),
+      () => env.root,
+      (s) => fs.readFileSync(s, 'utf8'),
+      env.desktopPath || (() => { try { return DP(); } catch (e) { return null; } })(),
+      (id, line) => logs.push(id + ': ' + line));
+    return { run: () => handlers['save-start-here'](), logs };
+  }
+  const MEMO_NAME = 'Что дальше — Hamidun.html';
+
+  ok('u4 main.js save-start-here: стол вне профиля или за junction — ok:false и desktop-outside-profile без записи, законный — памятка на месте; без проверки тот же стенд пишет в чужую папку (контроль)', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      t.mk(t.P);
+      const root = t.mk(t.base, 'res'); t.mk(root, 'assets');
+      fs.writeFileSync(path.join(root, 'assets', 'START-HERE.html'), '<html>memo</html>');
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const jDesk = t.link(startup, path.join(t.P, 'Desktop2'));
+      const src = MAINJS();
+      const h = (shell, text) => loadHandler(text || src, { profile: t.P, shellDesktop: shell, root });
+      // Законный.
+      const g = h(desk);
+      const good = g.run();
+      assert(good.ok === true && good.dest === path.join(desk, MEMO_NAME), 'законный стол: ' + JSON.stringify(good));
+      assert.strictEqual(fs.readFileSync(good.dest, 'utf8'), '<html>memo</html>');
+      assert.deepStrictEqual(g.logs, [], 'на законном столе журнал молчит');
+      // Вне профиля.
+      const b = h(startup);
+      const bad = b.run();
+      assert.strictEqual(bad.ok, false);
+      assert.strictEqual(bad.error, 'desktop-outside-profile', JSON.stringify(bad));
+      assert.strictEqual(bad.dest, '', 'dest пуст — renderer откроет вшитую копию');
+      assert(bad.src && bad.src.endsWith('START-HERE.html'), 'src отдан для запасного пути renderer');
+      assert.deepStrictEqual(fs.readdirSync(startup), [], 'в каталог автозагрузки ничего не записано');
+      assert(b.logs.length === 1 && /вне профиля/.test(b.logs[0]), 'в журнале одна строка с причиной: ' + b.logs.join(' | '));
+      // За junction.
+      const viaLink = h(jDesk).run();
+      assert(viaLink.ok === false && viaLink.error === 'desktop-outside-profile', 'junction: ' + JSON.stringify(viaLink));
+      assert.deepStrictEqual(fs.readdirSync(startup), [], 'и за junction ничего нет');
+      // Ответ оболочки с переводом строки и NEL: в журнале всё равно ОДНА строка (значение из реестра не подделывает соседние).
+      const nl = h(startup + '\nfake line\u0085more');
+      assert.strictEqual(nl.run().error, 'desktop-outside-profile');
+      assert(nl.logs.length === 1 && !/[\r\n\u0085\u2028]/.test(nl.logs[0]), 'одна строка журнала без разрывов: ' + JSON.stringify(nl.logs));
+      // Сама проверка упала (исключение) — отказ с причиной в журнале, а не «пишем куда сказала оболочка».
+      const boom = loadHandler(src, { profile: t.P, shellDesktop: startup, root, desktopPath: { resolveSafeDesktop: () => { throw Object.assign(new Error('boom'), { code: 'EBOOM' }); } } });
+      const br = boom.run();
+      assert(br.ok === false && br.error === 'desktop-outside-profile', 'сбой проверки — отказ: ' + JSON.stringify(br));
+      assert.deepStrictEqual(fs.readdirSync(startup), [], 'и в каталог автозагрузки ничего не записано');
+      assert(boom.logs.length === 1 && /проверка не выполнилась \(EBOOM\)/.test(boom.logs[0]), 'причина в журнале: ' + boom.logs.join(' | '));
+      // Отрицательный контроль: тот же обработчик с прежним «берём app.getPath(desktop) как есть».
+      const mutated = src.replace(/const desk = safeDesktopDir\(\);\s*if \(!desk\) return \{[^}]*\};\s*const dest = path\.join\(desk,/, "const dest = path.join(app.getPath('desktop'),");
+      assert(mutated !== src, 'контроль: проверку удалось вырезать');
+      const old = h(startup, mutated).run();
+      assert(old.ok === true && fs.existsSync(path.join(startup, MEMO_NAME)), 'контроль: без проверки память ложится в каталог автозагрузки — стенд различает: ' + JSON.stringify(old));
+    } finally { t.cleanup(); }
+  });
+
+  // Настоящие safeDesktopDir и open-path из main.js — в дочернем процессе Node с поддельным electron: обработчик
+  // асинхронный, и сквозь синхронный ok() его ответ не прочитать, а переписывать его текст под тест незачем.
+  // Каждый путь из paths — отдельный вызов обработчика; в ответе: что он вернул и сколько раз позвали shell.openPath.
+  function runOpenPath(body, env, paths) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u4-op-'));
+    try {
+      const bodyFile = path.join(dir, 'body.js');
+      const childFile = path.join(dir, 'child.js');
+      fs.writeFileSync(bodyFile, body + '\n; return true;', 'utf8');
+      fs.writeFileSync(childFile, [
+        "'use strict';",
+        "const fs = require('fs'), path = require('path');",
+        "const E = JSON.parse(process.env.HM_OP_ENV);",
+        "const handlers = {}, logs = [], opened = [];",
+        // Модуля проверки нет (прежнее дерево) — обработчик всё равно гоняется, и тест падает по делу: памятка открылась в чужой папке.
+        "let dp = null; try { dp = require(E.dp); } catch (e) { dp = null; }",
+        "new Function('ipcMain', 'app', 'os', 'path', 'process', 'resourceRoot', 'LOG_PATH', 'shell', 'desktopPath', 'logToFile', fs.readFileSync(E.body, 'utf8'))(",
+        "  { handle: (n, fn) => { handlers[n] = fn; } },",
+        "  { getPath: () => E.shellDesktop },",
+        "  { userInfo: () => ({ homedir: E.profile }), homedir: () => E.profile },",
+        "  path, { platform: 'win32' }, () => E.root, E.logPath,",
+        "  { openPath: async (p) => { opened.push(p); return ''; } },",
+        "  dp, (id, line) => logs.push(id + ': ' + line));",
+        "(async () => {",
+        "  const out = [];",
+        "  for (const p of E.paths) { const before = opened.length; const r = await handlers['open-path'](null, p); out.push({ r, calls: opened.length - before }); }",
+        "  process.stdout.write(JSON.stringify({ out, logs }));",
+        "})();",
+      ].join('\n'), 'utf8');
+      const r = spawnSync(process.execPath, [childFile], {
+        encoding: 'utf8', timeout: 60000,
+        env: Object.assign({}, process.env, { HM_OP_ENV: JSON.stringify(Object.assign({}, env, { body: bodyFile, dp: path.join(ROOT, 'src', 'desktop-path.js'), paths })) }),
+      });
+      assert.strictEqual(r.status, 0, 'дочерний Node отработал: ' + r.stderr + (r.error || ''));
+      return JSON.parse(r.stdout);
+    } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  }
+
+  ok('u4 main.js open-path: памятка на столе открывается только из проверенной папки — стол вне профиля или за junction даёт bad-path, оболочка не зовётся; журнал и ресурсы открываются как раньше; без проверки (контроль) открылось бы в чужой папке', () => {
+    if (!IS_WIN) SKIP('нужен Windows');
+    const t = mkTree();
+    try {
+      const root = t.mk(t.base, 'res'); t.mk(root, 'assets');
+      const resFile = path.join(root, 'assets', 'START-HERE.html'); fs.writeFileSync(resFile, '<html>memo</html>');
+      const logPath = path.join(t.mk(t.P, '.hamidun-setup'), 'install.log'); fs.writeFileSync(logPath, 'x');
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const jDesk = t.link(startup, path.join(t.P, 'Desktop2'));
+      const memoDesk = path.join(desk, MEMO_NAME);
+      const memoStartup = path.join(startup, MEMO_NAME);
+      const memoViaLink = path.join(jDesk, MEMO_NAME);
+      const other = path.join(desk, 'другой файл.html');
+      const msrc = MAINJS();
+      // Нет функции проверки (прежний main.js) — обработчик берётся как есть и проваливает проверки ниже по делу, а не «не нашёл функцию».
+      const sdSrc = msrc.indexOf('function safeDesktopDir') !== -1 ? fnSlice(msrc, 'function safeDesktopDir') : '';
+      const body = sdSrc + '\n' + fnSlice(msrc, "ipcMain.handle('open-path'") + ');';
+      const run = (shell, text, paths) => runOpenPath(text || body, { shellDesktop: shell, profile: t.P, root, logPath }, paths);
+      const same = [memoDesk, logPath, resFile, other, memoStartup, memoViaLink];
+
+      // Законный стол: памятка, журнал и ресурс открываются; чужое имя на столе и памятка в чужой папке — нет.
+      const g = run(desk, null, same);
+      const shape = (o) => o.out.map((x) => (x.r.ok ? 'ok' : x.r.error) + '/' + x.calls);
+      assert.deepStrictEqual(shape(g), ['ok/1', 'ok/1', 'ok/1', 'bad-path/0', 'bad-path/0', 'bad-path/0'], 'законный стол: ' + JSON.stringify(g));
+      assert.deepStrictEqual(g.logs, [], 'на законном столе журнал молчит');
+
+      // Стол вне профиля (автозагрузка всех пользователей): памятка не открывается нигде, остальное — как раньше.
+      const b = run(startup, null, [memoStartup, memoDesk, logPath, resFile]);
+      assert.deepStrictEqual(shape(b), ['bad-path/0', 'bad-path/0', 'ok/1', 'ok/1'], 'стол вне профиля: ' + JSON.stringify(b));
+      assert.strictEqual(b.logs.length, 2, 'каждый запрос памятки — одна строка причины, журнал и ресурс строк не добавляют: ' + b.logs.join(' | '));
+      assert(b.logs.every((l) => /вне профиля/.test(l) && !/[\r\n]/.test(l)), 'причина названа: ' + b.logs.join(' | '));
+
+      // Стол за junction: тоже отказ, хотя имя файла верное.
+      const j = run(jDesk, null, [memoViaLink, memoStartup]);
+      assert.deepStrictEqual(shape(j), ['bad-path/0', 'bad-path/0'], 'стол за junction: ' + JSON.stringify(j));
+
+      // Отрицательный контроль: прежний аллоулист — путь памятки строился от ответа оболочки без проверки.
+      const mutated = body.replace(/const deskDir = path\.basename\(rp\) === MEMO_FILE \? safeDesktopDir\(\) : '';/, "const deskDir = app.getPath('desktop');");
+      assert(mutated !== body, 'контроль: проверку удалось вырезать');
+      const old = run(startup, mutated, [memoStartup]);
+      assert.deepStrictEqual(shape(old), ['ok/1'], 'контроль: без проверки оболочка получила бы приказ открыть файл из каталога автозагрузки — стенд различает: ' + JSON.stringify(old));
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 main.js: стол проверяется ДО записи памятки, open-path и цели удаления берут его из той же проверки, профиль — из токена (os.userInfo), а не из os.homedir()', () => {
+    const code = (s) => s.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    const m = code(MAINJS());
+    const h = code(handlerSlice(MAINJS()));
+    assertOrder(h, 'safeDesktopDir()', 'fs.writeFileSync(dest', 'проверка стола раньше записи памятки');
+    assertOrder(h, 'safeDesktopDir()', 'fs.copyFileSync(src, dest)', 'и раньше запасной копии');
+    assert(!/app\.getPath\('desktop'\)/.test(h), 'в обработчике нет прямого ответа оболочки');
+    const sd = code(fnSlice(MAINJS(), 'function safeDesktopDir'));
+    assert(/os\.userInfo\(\)\.homedir/.test(sd) && !/os\.homedir\(\)/.test(sd), 'профиль — os.userInfo().homedir (токен), а не os.homedir() (переменная окружения)');
+    assert(/app\.getPath\('desktop'\)/.test(sd) && /resolveSafeDesktop\(/.test(sd), 'safeDesktopDir сверяет ответ оболочки с профилем');
+    const op = code(fnSlice(MAINJS(), "ipcMain.handle('open-path'"));
+    assert(/safeDesktopDir\(\)/.test(op) && !/app\.getPath\('desktop'\)/.test(op), 'open-path: памятка на столе — только по проверенной папке');
+    const bu = code(fnSlice(MAINJS(), 'function buildUninstallCtx'));
+    assert(/safeDesktopDir\(\)/.test(bu) && !/app\.getPath\('desktop'\)/.test(bu), 'цели удаления: стол — из проверки');
+    // Больше нигде в main.js ответ оболочки про рабочий стол напрямую не используется.
+    const direct = m.split('\n').filter((l) => /getPath\(\s*'desktop'\s*\)/.test(l));
+    assert.strictEqual(direct.length, 1, 'ровно одно место читает app.getPath(desktop) — safeDesktopDir: ' + direct.join(' | '));
+  });
+
+  // =========================================================================
+  // 3. PowerShell 5.1: Test-HmShellFolder / Get-HmSafeShellFolder / Get-HmReparseTag (scripts/windows/_userpath.ps1)
+  // =========================================================================
+  const MATRIX_PS = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    '. $env:HM_T_LIB',
+    // Без конвейера: в PS 5.1 `... | ConvertFrom-Json` отдаёт массив ОДНИМ объектом, и цикл шёл бы один раз по всему массиву.
+    '$cases = ConvertFrom-Json -InputObject (Get-Content -LiteralPath $env:HM_T_CASES -Raw -Encoding UTF8)',
+    '$cloud = @(); if ($env:HM_T_CLOUD) { $cloud = @($env:HM_T_CLOUD -split ";" | Where-Object { $_ }) }',
+    '$origTag = ${function:Get-HmReparseTag}',
+    'function Get-HmReparseTag([string]$Path) {',
+    '    foreach ($c in $cloud) { if ($Path -ieq $c) { return [long]0x9000701AL } }',
+    '    return (& $origTag $Path)',
+    '}',
+    'foreach ($c in $cases) {',
+    // Относительные пути .NET разбирает по рабочей папке ПРОЦЕССА (Set-Location её не меняет).
+    '    $saveCwd = [Environment]::CurrentDirectory',
+    '    if ($c.cwd) { [Environment]::CurrentDirectory = $c.cwd }',
+    '    try {',
+    '        $v = Test-HmShellFolder -ProfileDir $c.profile -Candidate $c.candidate',
+    '        $old = $false; if ($c.candidate) { $old = Test-Path -LiteralPath $c.candidate -PathType Container }',
+    '    } finally { [Environment]::CurrentDirectory = $saveCwd }',
+    "    Write-Output ('CASE|' + $c.label + '|' + $v.Ok + '|' + $v.Dir + '|' + $v.Reason + '|OLD=' + $old)",
+    '}',
+  ].join('\n');
+  function runMatrix(cases, cloud) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u4-mx-'));
+    const cf = path.join(dir, 'cases.json');
+    fs.writeFileSync(cf, JSON.stringify(cases), 'utf8');
+    try {
+      const r = runPsFile(MATRIX_PS, { HM_T_LIB: USERPATH, HM_T_CASES: cf, HM_T_CLOUD: (cloud || []).join(';') });
+      assert.strictEqual(r.status, 0, 'матрица: ' + r.stdout + r.stderr);
+      const out = {};
+      for (const l of lines(r.stdout)) {
+        const m = /^CASE\|([^|]*)\|(True|False)\|([^|]*)\|([^|]*)\|OLD=(True|False)$/.exec(l);
+        if (m) out[m[1]] = { ok: m[2] === 'True', dir: m[3], reason: m[4], old: m[5] === 'True' };
+      }
+      return out;
+    } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  }
+
+  ok('u4 Test-HmShellFolder (PS 5.1): законные папки принимаются — обычный стол, OneDrive (en/ru/Company), кириллица+пробелы+U+2019, слэш на конце, регистр, прямые слэши, точки внутри профиля', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const od1 = t.mk(t.P, 'OneDrive', 'Desktop');
+      const od2 = t.mk(t.P, 'OneDrive', 'Рабочий стол');
+      const od3 = t.mk(t.P, 'OneDrive - Company Name', 'Desktop');
+      const custom = t.mk(t.P, 'Documents', 'MyDesktop');
+      const progs = t.mk(t.P, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+      const cases = [
+        ['обычный', desk], ['onedrive-en', od1], ['onedrive-ru', od2], ['onedrive-company', od3], ['своя папка', custom], ['меню Пуск', progs],
+        ['слэш на конце', desk + '\\'], ['регистр', desk.toUpperCase()], ['прямые слэши', desk.replace(/\\/g, '/')],
+        ['точки внутри профиля', path.join(t.P, 'Documents', '..', 'Desktop')],
+      ].map(([label, candidate]) => ({ label, profile: t.P, candidate }));
+      cases.push({ label: 'профиль строчными со слэшем', profile: t.P.toLowerCase() + '\\', candidate: desk });
+      const out = runMatrix(cases);
+      for (const c of cases) assert(out[c.label] && out[c.label].ok === true, c.label + ': ' + JSON.stringify(out[c.label]));
+      assert.strictEqual(out['обычный'].dir, desk, 'Dir — нормализованный путь без слэша на конце');
+      assert.strictEqual(out['слэш на конце'].dir, desk);
+      assert.strictEqual(out['точки внутри профиля'].dir, desk, 'точки схлопнуты');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Test-HmShellFolder (PS 5.1): чужие места, junction (в том числе с запретом чтения на ссылке), UNC, префикс ?, джокеры, потоки — отказ с причиной; старая логика принимала те же входы', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'StartUp');
+      const other = t.mk(t.base, 'Users', 'Другой', 'Desktop');
+      const twin = t.mk(t.base, 'Users', 'Иван О’Брайен Тест2', 'Desktop');
+      fs.writeFileSync(path.join(t.P, 'afile'), 'x');
+      const jDesk = t.link(startup, path.join(t.P, 'Desk-link'));
+      const jDocs = t.link(path.dirname(other), path.join(t.P, 'Docs'));
+      const jHide = t.link(startup, path.join(t.P, 'Hidden'));
+      t.denyRead(jHide);
+      const gone = t.mk(t.base, 'gone'); const jGone = t.link(gone, path.join(t.P, 'Gone')); fs.rmdirSync(gone);
+      const bad = {
+        'автозагрузка всех': startup, 'чужой профиль': other, 'двойник по префиксу': twin, 'сам профиль': t.P,
+        'побег через ..': path.join(t.P, '..', 'Другой', 'Desktop'), 'UNC': '\\\\localhost\\c$\\Users\\x\\Desktop',
+        'префикс ?': '\\\\?\\' + desk, 'относительный': 'Desktop', 'диск без слэша': 'C:Desktop', 'пусто': '',
+        'джокер': path.join(t.P, '*'), 'поток': desk + ':evil', 'файл': path.join(t.P, 'afile'), 'нет папки': path.join(t.P, 'Нет'),
+        'junction вместо стола': jDesk, 'звено junction посередине': path.join(jDocs, 'Desktop'),
+        'junction с запретом чтения': jHide, 'оборванная junction': jGone,
+      };
+      // Имена-ловушки: .NET и Win32 отбрасывают пробел, точки, табы, U+0085 и неразрывный пробел на КОНЦЕ пути, но не в середине.
+      // Папки настоящие: без них прежняя логика «папка существует?» ничего бы не принимала, и контроль не различал бы. Имена с
+      // пробелом и точками на конце создаются только через пространство путей с обходным префиксом.
+      const lit = (name) => { try { fs.mkdirSync('\\\\?\\' + t.P + '\\' + name, { recursive: true }); return true; } catch (e) { return false; } };
+      const traps = {
+        'пробел на конце имени и слэш': ['Desktop ', desk + ' \\'],
+        'две точки на конце имени и слэш': ['Desktop..', desk + '..\\'],
+        'имя из трёх точек и слэш': ['...', path.join(t.P, '...') + '\\'],
+        'неразрывный пробел на конце имени и слэш': ['Desktop\u00a0', desk + '\u00a0\\'],
+        'U+0085 на конце имени и слэш': ['Desktop\u0085', desk + '\u0085\\'],
+      };
+      const trapRows = Object.keys(traps).filter((label) => lit(traps[label][0]));
+      assert(trapRows.length >= 2, 'не создались даже папки с неразрывным пробелом и U+0085: ' + trapRows.length);
+      for (const label of trapRows) bad[label] = traps[label][1];
+      // Управляющие знаки C1 и разделитель строк ПОСРЕДИ имени: законная папка так не называется, а в журнал (одна строка) они не должны попасть.
+      const ctrl = { 'U+0085 посреди имени': t.mk(t.P, 'De\u0085sktop'), 'U+2028 посреди имени': t.mk(t.P, 'De\u2028sktop') };
+      for (const label of Object.keys(ctrl)) bad[label] = ctrl[label];
+      const ONE_DOT = 'одна точка на конце имени и слэш';
+      const cases = Object.keys(bad).map((label) => ({ label, profile: t.P, candidate: bad[label] }));
+      cases.push({ label: ONE_DOT, profile: t.P, candidate: desk + '.\\' });
+      // Относительные пути разбираются по рабочей папке процесса: если она внутри профиля, «Desktop» и «C:Desktop» без проверки формы
+      // стали бы настоящим столом.
+      const REL1 = 'относительный путь при рабочей папке в профиле';
+      const REL2 = 'диск без слэша при рабочей папке в профиле';
+      cases.push({ label: REL1, profile: t.P, candidate: 'Desktop', cwd: t.P });
+      cases.push({ label: REL2, profile: t.P, candidate: t.P.slice(0, 2) + 'Desktop', cwd: t.P });
+      cases.push({ label: 'профиль не задан', profile: '', candidate: desk });
+      cases.push({ label: 'профиль — корень диска', profile: 'C:\\', candidate: 'C:\\Windows' });
+      const out = runMatrix(cases);
+      for (const c of cases) {
+        if (c.label === ONE_DOT) continue;
+        const r = out[c.label];
+        assert(r && r.ok === false && r.dir === '' && r.reason, c.label + ': ждали отказ с причиной: ' + JSON.stringify(r));
+      }
+      assert(/ссылк/.test(out['junction вместо стола'].reason) && /ссылк/.test(out['звено junction посередине'].reason)
+        && /ссылк/.test(out['junction с запретом чтения'].reason), 'причина названа словами: ' + out['junction с запретом чтения'].reason);
+      assert(/вне профиля/.test(out['автозагрузка всех'].reason) && /вне профиля/.test(out['двойник по префиксу'].reason), 'вне профиля: ' + out['автозагрузка всех'].reason);
+      // Отрицательный контроль в ТОМ ЖЕ прогоне: старая логика принимала существующие чужие папки и ссылки.
+      for (const label of ['автозагрузка всех', 'чужой профиль', 'двойник по префиксу', 'junction вместо стола', 'звено junction посередине', 'junction с запретом чтения'].concat(trapRows)) {
+        assert.strictEqual(out[label].old, true, 'контроль: старая логика принимала «' + label + '»');
+      }
+      for (const label of trapRows) {
+        const want = label.indexOf('U+0085') === 0 ? /недопустимые знаки/ : /точкой или пробелом/;   // U+0085 отсекает фильтр знаков C1 раньше правила про конец имени
+        assert(want.test(out[label].reason), label + ': причина названа словами: ' + out[label].reason);
+      }
+      for (const label of Object.keys(ctrl)) {
+        assert(/недопустимые знаки/.test(out[label].reason), label + ': отказ по знакам: ' + out[label].reason);
+        assert.strictEqual(out[label].old, true, 'контроль: старая логика принимала существующую папку «' + label + '»');
+      }
+      // Одну точку на конце имени Windows убирает и в середине пути: запись пойдёт в ту же папку, что проверена, — это не ловушка.
+      assert(out[ONE_DOT].ok === true && out[ONE_DOT].dir === desk, 'одна точка на конце имени схлопывается в настоящий стол: ' + JSON.stringify(out[ONE_DOT]));
+      assert(/не локальный/.test(out[REL1].reason) && /не локальный/.test(out[REL2].reason), 'относительные пути названы словами: ' + out[REL1].reason + ' | ' + out[REL2].reason);
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Test-HmShellFolder (PS 5.1): папка с пробелом на конце имени — при проверке Windows отбрасывает пробел, а при записи читает имя буквально, и junction Desktop с пробелом на конце уводила запись за пределы профиля; теперь отказ, прежняя логика принимала', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      // Имя с пробелом на конце создаётся только через пространство \\?\ (Win32-пути пробел отбрасывают).
+      const literal = '\\\\?\\' + t.P + '\\Desktop ';
+      try { fs.symlinkSync(hostile, literal, 'junction'); t.links.push(literal); } catch (e) { SKIP('здесь нельзя создать junction с пробелом на конце имени: ' + e.code); }
+      const cand = desk + ' \\';                 // «…\Desktop \» — для Win32 это «…\Desktop», для записи — буквальная junction
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+        '$v = Test-HmShellFolder -ProfileDir $env:HM_T_P -Candidate $env:HM_T_CAND',
+        "'CHECK=' + $v.Ok + ' ' + $v.Reason",
+        "$fill = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\cmd.exe' }",
+        "try { [void](New-HmShortcutFile -Dir $env:HM_T_CAND -Name 'a.lnk' -Fill $fill -ProfileDir $env:HM_T_P); 'WRITER=ok' } catch { 'WRITER=' + $_.Exception.GetType().Name + ' ' + $_.Exception.Message }",
+        // Контроль — прежний способ: смотрим то, что показывает Win32 (Test-Path отбрасывает пробел), и пишем по тому же пути.
+        "if (Test-Path -LiteralPath $env:HM_T_CAND -PathType Container) { [IO.File]::WriteAllText((Join-Path $env:HM_T_CAND 'control.txt'), 'x'); 'CONTROL=wrote' }",
+      ].join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_CAND: cand });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^CHECK=False .*точкой или пробелом/m.test(r.stdout), 'проверка отказала по имени: ' + r.stdout);
+      assert(/^WRITER=InvalidOperationException папка стала недопустимой/m.test(r.stdout), 'запись отказала: ' + r.stdout);
+      assert(/^CONTROL=wrote$/m.test(r.stdout) && fs.existsSync(path.join(hostile, 'control.txt')), 'контроль: прежний способ писал в чужую папку через «Desktop » — стенд различает: ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(hostile), ['control.txt'], 'запись New-HmShortcutFile за ссылку не попала');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Test-HmShellFolder (PS 5.1): junction с именем-ловушкой (неразрывный пробел, U+0085, две точки на конце) — .NET срезает знак на конце пути, проверка смотрела на другую папку, а запись шла сквозь junction; теперь отказ, прежний способ писал в чужую папку', () => {
+    needWinPs();
+    let tested = 0;
+    // [подпись, имя junction, нужен ли обходной префикс пути]: неразрывный пробел и U+0085 создаются обычным вызовом, точки на конце — нет.
+    for (const [label, name, viaNs] of [['неразрывный пробел', '\u00a0', false], ['U+0085', '\u0085', false], ['две точки на конце', 'Desktop..', true]]) {
+      const t = mkTree();
+      try {
+        t.mk(t.P, 'Desktop');
+        const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+        const at = (viaNs ? '\\\\?\\' : '') + t.P + '\\' + name;
+        try { fs.symlinkSync(hostile, at, 'junction'); t.links.push(at); } catch (e) { continue; }
+        tested++;
+        const cand = t.P + '\\' + name + '\\';       // «…\<имя>\»: в середине пути знак остаётся, в конце GetAttributes его срезает
+        const r = runPsFile([
+          '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+          '. $env:HM_T_LIB',
+          '$v = Test-HmShellFolder -ProfileDir $env:HM_T_P -Candidate $env:HM_T_CAND',
+          "'CHECK=' + $v.Ok + ' ' + $v.Reason",
+          "$fill = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\cmd.exe' }",
+          "try { [void](New-HmShortcutFile -Dir $env:HM_T_CAND -Name 'a.lnk' -Fill $fill -ProfileDir $env:HM_T_P); 'WRITER=ok' } catch { 'WRITER=' + $_.Exception.GetType().Name + ' ' + $_.Exception.Message }",
+          // Контроль — прежний способ: GetAttributes по строке без слэша на конце (знак срезан, видна другая папка — обычный каталог без ссылки) и запись по тому же пути.
+          "$a = [IO.File]::GetAttributes(($env:HM_T_CAND).TrimEnd('\\')); 'OLDWALK=' + $a",
+          "[IO.File]::WriteAllText((Join-Path $env:HM_T_CAND 'control.txt'), 'x'); 'CONTROL=wrote'",
+        ].join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_CAND: cand });
+        assert.strictEqual(r.status, 0, label + ': ' + r.stdout + r.stderr);
+        assert(/^CHECK=False .*(точкой или пробелом|недопустимые знаки)/m.test(r.stdout), label + ': проверка отказала по имени: ' + r.stdout);
+        assert(/^WRITER=InvalidOperationException папка стала недопустимой/m.test(r.stdout), label + ': запись отказала: ' + r.stdout);
+        assert(/^OLDWALK=Directory$/m.test(r.stdout), label + ': контроль: прежняя проверка видела обычный каталог без ссылки: ' + r.stdout);
+        assert(/^CONTROL=wrote$/m.test(r.stdout) && fs.existsSync(path.join(hostile, 'control.txt')), label + ': контроль: прежний способ писал в чужую папку сквозь junction — стенд различает: ' + r.stdout);
+        assert.deepStrictEqual(fs.readdirSync(hostile), ['control.txt'], label + ': запись New-HmShortcutFile за ссылку не попала');
+      } finally { t.cleanup(); }
+    }
+    if (!tested) SKIP('здесь нельзя создать junction с такими именами');
+  });
+
+  ok('u4 Test-HmShellFolder (PS 5.1): облачная заглушка OneDrive (тег 0x9000?01A) — не ссылка и проходит, junction с тем же атрибутом — отказ; тег читается без Add-Type; профиль за junction принимается', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      t.mk(t.P);
+      const real = t.mk(t.base, 'cloud-real'); t.mk(real, 'Desktop');
+      const cloudRoot = t.link(real, path.join(t.P, 'OneDrive'));          // junction, которую харнесс ВЫДАЁТ за облачную заглушку
+      const hostile = t.mk(t.base, 'ProgramData', 'StartUp');
+      const evilRoot = t.link(hostile, path.join(t.P, 'Evil'));
+      const realHome = t.mk(t.base, 'D-drive', 'home'); t.mk(realHome, 'Desktop');
+      const homeLink = t.link(realHome, path.join(t.base, 'Users', 'moved'));
+      const cases = [
+        { label: 'облачный корень', profile: t.P, candidate: path.join(cloudRoot, 'Desktop') },
+        { label: 'junction без облачного тега', profile: t.P, candidate: evilRoot },
+        { label: 'профиль за junction', profile: homeLink, candidate: path.join(homeLink, 'Desktop') },
+      ];
+      const asCloud = runMatrix(cases, [cloudRoot]);
+      assert(asCloud['облачный корень'].ok === true, 'облачная заглушка пропущена по тегу: ' + JSON.stringify(asCloud['облачный корень']));
+      assert(asCloud['junction без облачного тега'].ok === false, 'настоящая junction (тег mount point) не прошла: ' + JSON.stringify(asCloud['junction без облачного тега']));
+      assert(asCloud['профиль за junction'].ok === true, 'профиль за junction: ' + JSON.stringify(asCloud['профиль за junction']));
+      // Без подмены тега (настоящее чтение) та же «облачная» junction — отказ: решает тег, а не атрибут.
+      const real2 = runMatrix(cases);
+      assert(real2['облачный корень'].ok === false, 'без подмены тега junction не проходит: ' + JSON.stringify(real2['облачный корень']));
+      // Чтение тега и предикат — напрямую.
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+        "'MOUNT=' + ('0x{0:X8}' -f (Get-HmReparseTag $env:HM_T_JUNC))",
+        "'PLAIN=' + (Get-HmReparseTag $env:HM_T_PLAIN)",
+        "'MISSING=' + (Get-HmReparseTag ($env:HM_T_PLAIN + '\\нет-такого'))",
+        "foreach ($v in 0x9000001AL, 0x9000701AL, 0x9000F01AL, 0xA0000003L, 0xA000000CL, 0x8000001BL, 0x9000001CL, 0x90000019L, -1L) { 'PRED ' + $v + '=' + (Test-HmCloudReparseTag $v) }",
+        "'NOADDTYPE=' + (-not ((Get-Command Get-HmReparseTag).ScriptBlock.ToString() -match 'Add-Type'))",
+      ].join('\n'), { HM_T_LIB: USERPATH, HM_T_JUNC: cloudRoot, HM_T_PLAIN: real });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^MOUNT=0xA0000003$/m.test(r.stdout), 'у настоящей junction тег IO_REPARSE_TAG_MOUNT_POINT: ' + r.stdout);
+      assert(/^PLAIN=-1$/m.test(r.stdout) && /^MISSING=-1$/m.test(r.stdout), 'у обычной папки и у несуществующей тега нет (-1): ' + r.stdout);
+      const pred = {}; for (const l of lines(r.stdout)) { const m = /^PRED (-?\d+)=(True|False)$/.exec(l); if (m) pred[m[1]] = m[2] === 'True'; }
+      for (const v of [0x9000001A, 0x9000701A, 0x9000F01A]) assert.strictEqual(pred[String(v)], true, 'облачный тег ' + v.toString(16));
+      for (const v of [0xA0000003, 0xA000000C, 0x8000001B, 0x9000001C, 0x90000019]) assert.strictEqual(pred[String(v)], false, 'не облачный тег ' + v.toString(16));
+      assert.strictEqual(pred['-1'], false, '«не прочитали» — не облако');
+      assert(/^NOADDTYPE=True$/m.test(r.stdout), 'Get-HmReparseTag без Add-Type');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Test-HmShellFolder: на машине с настоящим OneDrive облачные папки читаются как облачные и проходят', () => {
+    needWinPs();
+    const od = process.env.OneDrive || process.env.OneDriveConsumer || process.env.OneDriveCommercial || '';
+    if (!od || !fs.existsSync(od)) SKIP('на этой машине нет OneDrive');
+    const r = runPsFile([
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      '. $env:HM_T_LIB',
+      '$a = [IO.File]::GetAttributes($env:HM_T_OD)',
+      "if (-not ([int]$a -band [int][IO.FileAttributes]::ReparsePoint)) { 'NOREPARSE'; exit 0 }",
+      "'TAG=' + ('0x{0:X8}' -f (Get-HmReparseTag $env:HM_T_OD)) + ' CLOUD=' + (Test-HmCloudReparseTag (Get-HmReparseTag $env:HM_T_OD))",
+    ].join('\n'), { HM_T_LIB: USERPATH, HM_T_OD: od });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    if (/NOREPARSE/.test(r.stdout)) SKIP('корень OneDrive на этой машине — обычная папка (облачных заглушек нет)');
+    assert(/CLOUD=True/.test(r.stdout), 'корень OneDrive помечен точкой повторной обработки, и это облачный тег: ' + r.stdout);
+  });
+
+  ok('u4 Get-HmSafeShellFolder (PS 5.1): годная папка — путь без строки в журнале, негодная — $null и ровно одна строка с причиной (в -Log, если он задан)', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+        '$sink = New-Object System.Collections.Generic.List[string]',
+        "$a = Get-HmSafeShellFolder -Kind Desktop -ProfileDir $env:HM_T_P -Candidate $env:HM_T_DESK",
+        "'GOOD=' + $a",
+        "$b = Get-HmSafeShellFolder -Kind Desktop -Profile $env:HM_T_P -Candidate $env:HM_T_BAD -Log { param($t) $sink.Add($t) }",
+        "'BAD-IS-NULL=' + ($null -eq $b)",
+        "'LOGGED=' + $sink.Count",
+        "'LINE=' + $sink[0]",
+        "$c = Get-HmSafeShellFolder -Kind Programs -ProfileDir $env:HM_T_P -Candidate $env:HM_T_BAD",
+        "'PROGRAMS-IS-NULL=' + ($null -eq $c)",
+        "try { Get-HmSafeShellFolder -Kind Startup -ProfileDir $env:HM_T_P -Candidate $env:HM_T_DESK; 'KIND=accepted' } catch { 'KIND=rejected' }",
+        // Ответ оболочки — чужой текст из реестра: с переводом строки в нём в журнале всё равно ОДНА строка.
+        "$sink2 = New-Object System.Collections.Generic.List[string]",
+        "$d = Get-HmSafeShellFolder -Kind Desktop -ProfileDir $env:HM_T_P -Candidate $env:HM_T_NL -Log { param($t) $sink2.Add($t) }",
+        "'NL-IS-NULL=' + ($null -eq $d)",
+        "'NL-LOGGED=' + $sink2.Count",
+        "'NL-HAS-BREAK=' + ($sink2[0] -match '[\\r\\n\\u0085\\u2028]')",
+      ].join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_DESK: desk, HM_T_BAD: startup, HM_T_NL: startup + '\r\nHM-RECEIPT path C:\\x\u0085more' });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(r.stdout.includes('GOOD=' + desk), 'годная папка возвращена: ' + r.stdout);
+      assert(/^BAD-IS-NULL=True$/m.test(r.stdout) && /^LOGGED=1$/m.test(r.stdout), 'негодная — $null и одна строка в -Log: ' + r.stdout);
+      const line = (/^LINE=(.*)$/m.exec(r.stdout) || [])[1] || '';
+      assert(/Рабочий стол/.test(line) && /вне профиля/.test(line) && line.includes(startup), 'строка называет папку, ответ оболочки и причину: ' + line);
+      assert(!/не найден|не удалось|БЕЗОПАСНОСТЬ:|отказано в доступе/i.test(line), 'строка не путается с сигнатурами разбора провала (failure-explain): ' + line);
+      assert(/^PROGRAMS-IS-NULL=True$/m.test(r.stdout), 'Programs проверяется так же');
+      assert(/^KIND=rejected$/m.test(r.stdout), 'только Desktop и Programs (ValidateSet)');
+      assert(/^NL-IS-NULL=True$/m.test(r.stdout) && /^NL-LOGGED=1$/m.test(r.stdout) && /^NL-HAS-BREAK=False$/m.test(r.stdout),
+        'ответ оболочки с переводом строки — всё равно одна строка журнала без разрывов: ' + r.stdout);
+      // Без -Log строка идёт в вывод шага.
+      const w = runPsFile(['[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', '. $env:HM_T_LIB',
+        "$null = Get-HmSafeShellFolder -Kind Desktop -ProfileDir $env:HM_T_P -Candidate $env:HM_T_BAD"].join('\n'),
+      { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_BAD: startup });
+      assert(/вне профиля/.test(w.stdout), 'без -Log строка в журнале шага: ' + w.stdout);
+    } finally { t.cleanup(); }
+  });
+
+  // =========================================================================
+  // 3б. New-HmShortcutFile: ярлык через временный файл и Move
+  // =========================================================================
+  const SHORT_FILL = [
+    "$fill = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\cmd.exe'; $sc.Description = 'первый' }",
+    "$fill2 = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\notepad.exe'; $sc.Description = 'второй' }",
+  ];
+  const tryNew = (label, args) => "try { $x = New-HmShortcutFile " + args + "; '" + label + "=ok ' + $x } catch { '" + label + "=' + $_.Exception.GetType().Name + ' ' + $_.Exception.Message }";
+  const headOf = (f) => { const b = fs.readFileSync(f); return Array.from(b.slice(0, 4)).join(','); };
+
+  ok('u4 New-HmShortcutFile (PS 5.1): ярлык ложится через временный файл и Move — без -Replace занятое имя это отказ, с -Replace обычный файл заменяется, временных файлов не остаётся', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const tmp = t.mk(t.base, 'private-temp');       // свой TEMP: всё, что оставит функция, видно
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, [
+        tryNew('CREATED', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        tryNew('TAKEN', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill2 -ProfileDir $env:HM_T_P'),
+        "'DESC1=' + (New-Object -ComObject WScript.Shell).CreateShortcut($env:HM_T_DIR + '\\a.lnk').Description",
+        tryNew('REPLACED', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill2 -ProfileDir $env:HM_T_P -Replace'),
+        "'DESC2=' + (New-Object -ComObject WScript.Shell).CreateShortcut($env:HM_T_DIR + '\\a.lnk').Description",
+        // Имя — просто имя файла: с разделителем пути ярлык ушёл бы из проверенной папки (в профиле, но не на стол).
+        tryNew('BADNAME', '-Dir $env:HM_T_DIR -Name "..\\esc.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        tryNew('BADNAME2', '-Dir $env:HM_T_DIR -Name "sub/esc.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        // Move, который молча ничего не сделал, — не успех: итог проверяется по файловой системе.
+        'function Move-HmShortcutFile([string]$From, [string]$To) { }',
+        tryNew('SILENT', '-Dir $env:HM_T_DIR -Name "silent.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(r.stdout.includes('CREATED=ok ' + path.join(desk, 'a.lnk')), 'создан: ' + r.stdout);
+      assert(/^TAKEN=InvalidOperationException имя ярлыка уже занято/m.test(r.stdout), 'занятое имя без -Replace — отказ: ' + r.stdout);
+      assert(/^DESC1=первый$/m.test(r.stdout), 'отказ ярлык не тронул: ' + r.stdout);
+      assert(/^REPLACED=ok /m.test(r.stdout) && /^DESC2=второй$/m.test(r.stdout), 'с -Replace обычный файл заменён: ' + r.stdout);
+      assert(/^BADNAME=InvalidOperationException в имени ярлыка недопустимые знаки/m.test(r.stdout) && /^BADNAME2=InvalidOperationException в имени ярлыка недопустимые знаки/m.test(r.stdout),
+        'имя с разделителем пути — отказ: ' + r.stdout);
+      assert(!fs.existsSync(path.join(t.P, 'esc.lnk')) && !fs.existsSync(path.join(desk, 'sub')), 'имя с разделителем никуда не ушло');
+      assert(/^SILENT=InvalidOperationException ярлык не появился/m.test(r.stdout), 'Move без следа — не успех: ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+      assert.strictEqual(headOf(path.join(desk, 'a.lnk')), '76,0,0,0', 'на месте — настоящий ShellLink');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): подложенные жёсткая ссылка и symlink на имени ярлыка — чужой файл цел, папка или junction на этом месте — отказ; обычный Save() по тому же имени затирает чужой файл (контроль)', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      const victimH = path.join(hostile, 'victim-hard.txt'); fs.writeFileSync(victimH, 'VICTIM-HARD');
+      const victimS = path.join(hostile, 'victim-sym.txt'); fs.writeFileSync(victimS, 'VICTIM-SYM');
+      fs.linkSync(victimH, path.join(desk, 'hard.lnk'));
+      let symlinks = true;
+      try { fs.symlinkSync(victimS, path.join(desk, 'sym.lnk'), 'file'); } catch (e) { symlinks = false; }
+      // Для контроля — те же ссылки под другими именами, их перепишет обычный Save().
+      const ctlH = path.join(hostile, 'ctl-hard.txt'); fs.writeFileSync(ctlH, 'CTL-HARD'); fs.linkSync(ctlH, path.join(desk, 'ctl-hard.lnk'));
+      const ctlS = path.join(hostile, 'ctl-sym.txt'); fs.writeFileSync(ctlS, 'CTL-SYM');
+      if (symlinks) fs.symlinkSync(ctlS, path.join(desk, 'ctl-sym.lnk'), 'file');
+      fs.mkdirSync(path.join(desk, 'dir.lnk'));
+      t.link(hostile, path.join(desk, 'junc.lnk'));
+      const run = (name, flag) => tryNew((flag ? 'R:' : 'N:') + name, '-Dir $env:HM_T_DIR -Name "' + name + '" -Fill $fill -ProfileDir $env:HM_T_P' + (flag ? ' -Replace' : ''));
+      const names = ['hard.lnk', 'dir.lnk', 'junc.lnk'].concat(symlinks ? ['sym.lnk'] : []);
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, names.map((n) => run(n, false)), names.map((n) => run(n, true)), [
+        // Контроль: прежний способ — Save() прямо по имени.
+        "foreach ($n in 'ctl-hard.lnk', 'ctl-sym.lnk') { $p = Join-Path $env:HM_T_DIR $n; if (Test-Path -LiteralPath $p) { $s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); $s.TargetPath = 'C:\\Windows\\System32\\cmd.exe'; $s.Save() } }",
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      // Без -Replace любое занятое имя — отказ (прогон шёл первым, пока ссылки ещё на месте).
+      for (const n of names) assert(new RegExp('^N:' + n.replace('.', '\\.') + '=InvalidOperationException имя ярлыка уже занято', 'm').test(r.stdout), 'без -Replace занятое имя ' + n + ' — отказ: ' + r.stdout);
+      // Жёсткая ссылка с -Replace: имя снято и заменено обычным файлом, цель цела.
+      assert(/^R:hard\.lnk=ok /m.test(r.stdout), 'с -Replace имя жёсткой ссылки заменено: ' + r.stdout);
+      assert.strictEqual(fs.readFileSync(victimH, 'utf8'), 'VICTIM-HARD', 'цель жёсткой ссылки цела');
+      assert.strictEqual(headOf(path.join(desk, 'hard.lnk')), '76,0,0,0', 'на месте имени — новый ShellLink');
+      assert(fs.statSync(path.join(desk, 'hard.lnk')).nlink === 1, 'и это уже не ссылка на чужой файл');
+      // Папка и junction на месте ярлыка — отказ, за junction ничего.
+      assert(/^R:dir\.lnk=InvalidOperationException на месте ярлыка лежит папка или ссылка/m.test(r.stdout), 'папка на месте ярлыка: ' + r.stdout);
+      assert(/^R:junc\.lnk=InvalidOperationException на месте ярлыка лежит папка или ссылка/m.test(r.stdout), 'junction на месте ярлыка: ' + r.stdout);
+      assert(!fs.readdirSync(hostile).some((n) => /\.lnk$/i.test(n)), 'за junction ярлыка нет: ' + fs.readdirSync(hostile).join(','));
+      if (symlinks) {
+        assert(/^R:sym\.lnk=InvalidOperationException на месте ярлыка лежит папка или ссылка/m.test(r.stdout), 'symlink на месте ярлыка: ' + r.stdout);
+        assert.strictEqual(fs.readFileSync(victimS, 'utf8'), 'VICTIM-SYM', 'цель symlink цела');
+      }
+      // Контроль: обычный Save() по имени ссылки пишет сквозь неё — защита не лишняя.
+      assert.strictEqual(headOf(ctlH), '76,0,0,0', 'контроль: Save() по жёсткой ссылке затёр чужой файл');
+      if (symlinks) assert.strictEqual(headOf(ctlS), '76,0,0,0', 'контроль: Save() по symlink затёр чужой файл');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): занятый файл переживается тремя попытками, повторная подмена имени и папка, ставшая ссылкой после начала, — отказ без записи в чужое', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      const victim = path.join(hostile, 'victim.txt'); fs.writeFileSync(victim, 'VICTIM');
+      const tmp = t.mk(t.base, 'private-temp');
+      const deskSwap = t.mk(t.P, 'DesktopSwap');
+      t.links.push(deskSwap);                        // в одном из прогонов эта папка подменяется junction: уберёт cleanup
+      const common = ['[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', '. $env:HM_T_LIB'].concat(SHORT_FILL);
+      const env = { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P, HM_T_VICTIM: victim, TEMP: tmp, TMP: tmp };
+      // 1. Антивирус держит свежий файл: два отказа Move, третья попытка проходит.
+      const lock = runPsFile(common.concat([
+        '$script:n = 0',
+        'function Move-HmShortcutFile([string]$From, [string]$To) { $script:n++; if ($script:n -le 2) { throw (New-Object System.IO.IOException("занят")) }; [IO.File]::Move($From, $To) }',
+        tryNew('LOCK2', '-Dir $env:HM_T_DIR -Name "lock.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        "'MOVES=' + $script:n",
+        // 2. Занят всегда: ровно три попытки и честная причина.
+        '$script:n = 0',
+        'function Move-HmShortcutFile([string]$From, [string]$To) { $script:n++; throw (New-Object System.IO.IOException("занят всегда")) }',
+        tryNew('LOCKALWAYS', '-Dir $env:HM_T_DIR -Name "always.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        "'MOVES2=' + $script:n",
+      ]).join('\n'), env);
+      assert.strictEqual(lock.status, 0, lock.stdout + lock.stderr);
+      assert(/^LOCK2=ok /m.test(lock.stdout) && /^MOVES=3$/m.test(lock.stdout), 'два отказа пережиты, третья попытка прошла: ' + lock.stdout);
+      assert(/^LOCKALWAYS=InvalidOperationException ярлык не лёг на место за 3 попытки/m.test(lock.stdout) && /^MOVES2=3$/m.test(lock.stdout), 'три попытки и причина: ' + lock.stdout);
+      assert(!fs.existsSync(path.join(desk, 'always.lnk')), 'при отказе ярлыка нет');
+      // 3. Имя занимают ЗАНОВО перед каждым Move жёсткой ссылкой на чужой файл: Move не пишет сквозь неё.
+      const replant = runPsFile(common.concat([
+        'function Move-HmShortcutFile([string]$From, [string]$To) { New-Item -ItemType HardLink -Path $To -Value $env:HM_T_VICTIM | Out-Null; [IO.File]::Move($From, $To) }',
+        tryNew('REPLANT-REPLACE', '-Dir $env:HM_T_DIR -Name "re.lnk" -Fill $fill -ProfileDir $env:HM_T_P -Replace'),
+        tryNew('REPLANT-NEW', '-Dir $env:HM_T_DIR -Name "re2.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+      ]).join('\n'), env);
+      assert.strictEqual(replant.status, 0, replant.stdout + replant.stderr);
+      assert(/^REPLANT-REPLACE=InvalidOperationException ярлык не лёг на место за 3 попытки/m.test(replant.stdout), 'подмена имени при -Replace: ' + replant.stdout);
+      assert(/^REPLANT-NEW=InvalidOperationException (имя ярлыка уже занято|ярлык не лёг)/m.test(replant.stdout), 'подмена имени без -Replace: ' + replant.stdout);
+      assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'VICTIM', 'чужой файл за жёсткой ссылкой не тронут');
+      // 4. Папка стала ссылкой уже после начала (между проверкой в начале и записью): повторная проверка отказывает.
+      const swap = runPsFile(common.concat([
+        '$fillSwap = { param($sc) $sc.TargetPath = "C:\\Windows\\System32\\cmd.exe"; Remove-Item -LiteralPath $env:HM_T_SWAP -Recurse -Force; New-Item -ItemType Junction -Path $env:HM_T_SWAP -Value $env:HM_T_HOSTILE | Out-Null }',
+        tryNew('SWAPPED', '-Dir $env:HM_T_SWAP -Name "swap.lnk" -Fill $fillSwap -ProfileDir $env:HM_T_P'),
+      ]).join('\n'), Object.assign({ HM_T_HOSTILE: hostile, HM_T_SWAP: deskSwap }, env));
+      assert.strictEqual(swap.status, 0, swap.stdout + swap.stderr);
+      assert(/^SWAPPED=InvalidOperationException папка стала недопустимой: .*ссылк/m.test(swap.stdout), 'папка-ссылка: ' + swap.stdout);
+      assert(!fs.readdirSync(hostile).some((n) => /\.lnk$/i.test(n)), 'за ссылкой ярлыка нет: ' + fs.readdirSync(hostile).join(','));
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось ни в одном из случаев');
+    } finally { t.cleanup(); }
+  });
+
+  // =========================================================================
+  // 3в. New-HmShortcutFile: проверенную папку держит открытый дескриптор до конца переноса
+  // =========================================================================
+  // «Подмена» — то, что сделала бы программа того же пользователя: переименовать проверенную папку и поставить
+  // на её имя junction в каталог, куда сама она писать не может. У подмены две точки: уже ПОСЛЕ закрепления папки —
+  // шов Move-HmShortcutFile (туда прежние тесты кладут сбои) — и МЕЖДУ проверкой и открытием — обёртка над
+  // Test-HmShellFolder. Контроль каждого теста — прежний код (дескриптора нет): подмена там удавалась.
+  const SWAP_PS = [
+    // Подмена папки $d: переименовать и поставить на её имя junction в $env:HM_T_HOSTILE. Итог — в $script:ev.
+    // Чужой сканер (индексатор, антивирус) может подержать свежую папку мгновение, а до закрепления подмена обязана
+    // удаваться, — поэтому несколько попыток; под дескриптором все они упрутся в него (так и видно, что он держит).
+    'function Invoke-HmSwap([string]$d, [string]$label) {',
+    '    $last = ""',
+    '    for ($k = 0; $k -lt 5; $k++) {',
+    '        try {',
+    '            [IO.Directory]::Move($d, $d + ".orig")',
+    '            $null = New-Item -ItemType Junction -Path $d -Value $env:HM_T_HOSTILE',
+    '            $script:ev.Add($label + "=done")',
+    '            return',
+    '        } catch { $last = $_.Exception.GetType().Name; Start-Sleep -Milliseconds 100 }',
+    '    }',
+    '    $script:ev.Add($label + "=blocked " + $last)',
+    '}',
+    '$script:ev = New-Object System.Collections.Generic.List[string]',
+  ];
+  const WRAP_CHECK_PS = [
+    // Подмена сразу после успешной проверки папки — раньше, чем вызывающий успеет её открыть.
+    '$script:armed = $true',
+    '$script:origCheck = ${function:Test-HmShellFolder}',
+    'function Test-HmShellFolder {',
+    '    param([string]$ProfileDir, [string]$Candidate)',
+    '    $r = & $script:origCheck -ProfileDir $ProfileDir -Candidate $Candidate',
+    '    if ($script:armed -and $r.Ok) { $script:armed = $false; Invoke-HmSwap $Candidate "SWAP" }',
+    '    return $r',
+    '}',
+  ];
+  const onlyControl = (d) => fs.readdirSync(d).filter((n) => n !== 'control.txt');
+
+  ok('u4 New-HmShortcutFile (PS 5.1): проверенную папку нельзя подменить между проверкой и переносом — переименование папки упирается в дескриптор, ярлык ложится в проверенную папку; без дескриптора подмена удавалась и ярлык уходил за junction', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      fs.writeFileSync(path.join(hostile, 'control.txt'), 'x');
+      const tmp = t.mk(t.base, 'private-temp');
+      t.links.push(desk);          // если подмена удастся, на месте стола окажется junction: cleanup уберёт её раньше рекурсивного удаления
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, SWAP_PS, [
+        // Подмена прямо перед системным Move — то самое окно между последней проверкой и переносом.
+        'function Move-HmShortcutFile([string]$From, [string]$To) { Invoke-HmSwap ([IO.Path]::GetDirectoryName($To)) "SWAP"; [IO.File]::Move($From, $To) }',
+        tryNew('R', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert.deepStrictEqual(onlyControl(hostile), [], 'ярлык не ушёл за junction в чужой каталог (прежний код: подмена удавалась, ярлык ложился туда): ' + r.stdout);
+      assert(/^SWAP=blocked /m.test(r.stdout), 'переименование проверенной папки упёрлось в дескриптор: ' + r.stdout);
+      assert(/^R=ok /m.test(r.stdout) && fs.existsSync(path.join(desk, 'a.lnk')), 'ярлык лёг в проверенную папку: ' + r.stdout);
+      assert.strictEqual(headOf(path.join(desk, 'a.lnk')), '76,0,0,0', 'на месте — настоящий ShellLink');
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): папка, подменённая между проверкой и открытием, — отказ по настоящему пути дескриптора; в чужой каталог ничего не записано и чужой файл с тем же именем не удалён (прежний код делал и то и другое)', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const desk2 = t.mk(t.P, 'Desktop2');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      fs.writeFileSync(path.join(hostile, 'control.txt'), 'x');
+      const victim = path.join(hostile, 'v.lnk'); fs.writeFileSync(victim, 'VICTIM');
+      const tmp = t.mk(t.base, 'private-temp');
+      t.links.push(desk, desk2);
+      const env = { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp };
+      // 1. Без -Replace: в чужой папке не должно появиться ярлыка.
+      const r1 = runPsFile(['[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', '. $env:HM_T_LIB'].concat(SHORT_FILL, SWAP_PS, WRAP_CHECK_PS, [
+        tryNew('R1', '-Dir $env:HM_T_DIR -Name "b.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), Object.assign({ HM_T_DIR: desk }, env));
+      assert.strictEqual(r1.status, 0, r1.stdout + r1.stderr);
+      assert(/^SWAP=done$/m.test(r1.stdout), 'подмена между проверкой и открытием удалась (дескриптора ещё нет): ' + r1.stdout);
+      assert.deepStrictEqual(onlyControl(hostile).filter((n) => n !== 'v.lnk'), [], 'ярлык не ушёл в чужой каталог: ' + r1.stdout);
+      assert(/^R1=InvalidOperationException .*не совпал/m.test(r1.stdout), 'отказ с причиной по-русски: ' + r1.stdout);
+      // 2. С -Replace: чужой файл с тем же именем нельзя ни удалить, ни заместить.
+      const r2 = runPsFile(['[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', '. $env:HM_T_LIB'].concat(SHORT_FILL, SWAP_PS, WRAP_CHECK_PS, [
+        tryNew('R2', '-Dir $env:HM_T_DIR -Name "v.lnk" -Fill $fill -ProfileDir $env:HM_T_P -Replace'),
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), Object.assign({ HM_T_DIR: desk2 }, env));
+      assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
+      assert(/^SWAP=done$/m.test(r2.stdout), 'подмена удалась и во втором прогоне: ' + r2.stdout);
+      assert(fs.existsSync(victim) && fs.readFileSync(victim, 'utf8') === 'VICTIM', 'чужой файл с тем же именем цел (прежний код удалял его и клал на его место ярлык): ' + r2.stdout);
+      assert(/^R2=InvalidOperationException .*не совпал/m.test(r2.stdout), 'отказ с причиной: ' + r2.stdout);
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): под дескриптором нельзя переименовать ни папку, ни три верхних каталога и удалить пустую; чужой дескриптор с правом удаления — закрепить не вышло, отказ после трёх попыток без записи', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const outer = t.mk(t.P, 'Outer');
+      const desk = t.mk(outer, 'Desktop');
+      const emptyDir = t.mk(outer, 'Empty');
+      const busy = t.mk(outer, 'Busy');
+      const tmp = t.mk(t.base, 'private-temp');
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, [
+        '$script:ev = New-Object System.Collections.Generic.List[string]',
+        // Что держит дескриптор. Операции, которые удались, возвращаются на место, чтобы не ломать ход.
+        'function Move-HmShortcutFile([string]$From, [string]$To) {',
+        '    $d = [IO.Path]::GetDirectoryName($To)',
+        '    $up1 = [IO.Path]::GetDirectoryName($d); $up2 = [IO.Path]::GetDirectoryName($up1); $up3 = [IO.Path]::GetDirectoryName($up2)',
+        '    foreach ($o in @(@("RENAME-DIR", $d), @("RENAME-UP1", $up1), @("RENAME-UP2", $up2), @("RENAME-UP3", $up3))) {',
+        '        try { [IO.Directory]::Move($o[1], $o[1] + ".x"); $script:ev.Add($o[0] + "=ALLOWED"); [IO.Directory]::Move($o[1] + ".x", $o[1]) }',
+        '        catch { $script:ev.Add($o[0] + "=blocked") }',
+        '    }',
+        '    if ($d -like "*Empty") {',
+        '        try { [IO.Directory]::Delete($d); $script:ev.Add("DELETE-EMPTY=ALLOWED"); [void][IO.Directory]::CreateDirectory($d) }',
+        '        catch { $script:ev.Add("DELETE-EMPTY=blocked") }',
+        '    }',
+        '    [IO.File]::Move($From, $To)',
+        '}',
+        tryNew('FULL', '-Dir $env:HM_T_DESK -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        tryNew('EMPTY', '-Dir $env:HM_T_EMPTY -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        // Чужой дескриптор на папке с правом удаления и общим доступом «всё»: наше закрепление (без общего доступа на
+        // удаление) в такой папке невозможно — отказ после трёх попыток, ничего не записано.
+        'function Move-HmShortcutFile([string]$From, [string]$To) { [IO.File]::Move($From, $To) }',
+        '$N = Get-HmFsNative',
+        '$blocker = $N::CreateFileW($env:HM_T_BUSY, [uint32]0x00110000, [uint32]7, [IntPtr]::Zero, [uint32]3, [uint32]0x02000000, [IntPtr]::Zero)',
+        "'BLOCKER-OPENED=' + ($blocker -ne [IntPtr](-1))",
+        '$sw = [Diagnostics.Stopwatch]::StartNew()',
+        tryNew('BUSY', '-Dir $env:HM_T_BUSY -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        "'BUSY-ELAPSED-MS=' + [int]$sw.ElapsedMilliseconds",
+        "'BUSY-FILES=' + @(Get-ChildItem -LiteralPath $env:HM_T_BUSY -Force).Count",
+        '$null = $N::CloseHandle($blocker)',
+        tryNew('FREED', '-Dir $env:HM_T_BUSY -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_DESK: desk, HM_T_EMPTY: emptyDir, HM_T_BUSY: busy, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      for (const op of ['RENAME-DIR', 'RENAME-UP1', 'RENAME-UP2', 'RENAME-UP3', 'DELETE-EMPTY']) {
+        assert(new RegExp('^' + op + '=blocked$', 'm').test(r.stdout), op + ' упирается в дескриптор (прежний код: операция удавалась): ' + r.stdout);
+        assert(!new RegExp('^' + op + '=ALLOWED$', 'm').test(r.stdout), op + ' не должна удаваться: ' + r.stdout);
+      }
+      assert(/^FULL=ok /m.test(r.stdout) && /^EMPTY=ok /m.test(r.stdout), 'ярлык при этом ложится (наш Move в закреплённую папку проходит): ' + r.stdout);
+      assert(/^BLOCKER-OPENED=True$/m.test(r.stdout), 'контроль теста: чужой дескриптор открылся: ' + r.stdout);
+      assert(/^BUSY=InvalidOperationException ярлык не лёг на место за 3 попытки: .*закреп/m.test(r.stdout), 'папку закрепить не вышло — отказ с причиной: ' + r.stdout);
+      assert(/^BUSY-FILES=0$/m.test(r.stdout), 'в занятую папку ничего не записано: ' + r.stdout);
+      const ms = Number((/^BUSY-ELAPSED-MS=(\d+)$/m.exec(r.stdout) || [])[1]);
+      assert(ms >= 500, 'три попытки с паузами 200 и 400 мс, а не один выстрел: ' + ms + ' мс');
+      assert(/^FREED=ok /m.test(r.stdout), 'после освобождения папки ярлык ложится: ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): дескриптор закрывается на любом выходе — успех, занятое имя, папка на месте ярлыка, сбои Move, отказ по пути; сразу после вызова папку можно переименовать', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const d = {};
+      for (const k of ['ok', 'taken', 'dirname', 'ioerr', 'silent']) d[k] = t.mk(t.P, 'D-' + k);
+      fs.writeFileSync(path.join(d.taken, 'a.lnk'), 'old');
+      fs.mkdirSync(path.join(d.dirname, 'a.lnk'));
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      const swapDir = t.mk(t.P, 'D-swap');
+      t.links.push(swapDir);
+      const tmp = t.mk(t.base, 'private-temp');
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, SWAP_PS, [
+        // Закрыт ли дескриптор: открытая без общего доступа на удаление папка не переименовывается. Чужой сканер
+        // (индексатор, антивирус) может подержать свежую папку считанные миллисекунды, поэтому проверка повторяется:
+        // утёкший дескриптор не исчезает никогда, чужой — через мгновение.
+        'function Test-Released([string]$d, [string]$label) {',
+        '    $why = ""',
+        '    for ($k = 0; $k -lt 15; $k++) {',
+        '        try {',
+        '            if (-not (Test-Path -LiteralPath $d)) { [IO.Directory]::Move($d + ".chk", $d) }   # прошлый круг ушёл наполовину',
+        '            [IO.Directory]::Move($d, $d + ".chk"); [IO.Directory]::Move($d + ".chk", $d); return "REL-$label=True"',
+        '        }',
+        '        catch { $why = $_.Exception.Message; Start-Sleep -Milliseconds 200 }',
+        '    }',
+        '    return "REL-$label=False $why"',
+        '}',
+        // Закрытие зовётся из finally: на $null и нулевом дескрипторе оно не должно бросать (типизированный [IntPtr] на $null падает).
+        'Close-HmDirHandle $null; Close-HmDirHandle ([IntPtr]::Zero); "CLOSE-NULL-OK"',
+        tryNew('OK', '-Dir $env:HM_T_OK -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        'Test-Released $env:HM_T_OK "ok"',
+        // Над профилем тоже ничего не висит: короткое открытие профиля (по нему сверяется настоящий путь) закрыто — иначе
+        // каталог Users над ним не переименовать (открытый дескриптор внутри держит и всех предков).
+        "Test-Released $env:HM_T_USERS 'users'",
+        tryNew('TAKEN', '-Dir $env:HM_T_TAKEN -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        'Test-Released $env:HM_T_TAKEN "taken"',
+        tryNew('DIRNAME', '-Dir $env:HM_T_DIRNAME -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P -Replace'),
+        'Test-Released $env:HM_T_DIRNAME "dirname"',
+        'function Move-HmShortcutFile([string]$From, [string]$To) { throw (New-Object System.IO.IOException("занят всегда")) }',
+        tryNew('IOERR', '-Dir $env:HM_T_IOERR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        'Test-Released $env:HM_T_IOERR "ioerr"',
+        'function Move-HmShortcutFile([string]$From, [string]$To) { }',
+        tryNew('SILENT', '-Dir $env:HM_T_SILENT -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        'Test-Released $env:HM_T_SILENT "silent"',
+        // Отказ по пути дескриптора: дескриптор встал на ЧУЖОЙ каталог — он тоже обязан закрыться.
+        'function Move-HmShortcutFile([string]$From, [string]$To) { [IO.File]::Move($From, $To) }',
+      ], WRAP_CHECK_PS, [
+        tryNew('REFUSED', '-Dir $env:HM_T_SWAP -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        'Test-Released $env:HM_T_HOSTILE "hostile"',
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_OK: d.ok, HM_T_TAKEN: d.taken, HM_T_DIRNAME: d.dirname, HM_T_IOERR: d.ioerr,
+        HM_T_SILENT: d.silent, HM_T_SWAP: swapDir, HM_T_HOSTILE: hostile, HM_T_USERS: path.dirname(t.P), TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^CLOSE-NULL-OK$/m.test(r.stdout), 'закрытие нулевого и пустого дескриптора не бросает: ' + r.stdout + r.stderr);
+      assert(/^OK=ok /m.test(r.stdout), 'успех: ' + r.stdout);
+      assert(/^TAKEN=InvalidOperationException имя ярлыка уже занято/m.test(r.stdout), 'занятое имя: ' + r.stdout);
+      assert(/^DIRNAME=InvalidOperationException на месте ярлыка лежит папка или ссылка/m.test(r.stdout), 'папка на месте ярлыка: ' + r.stdout);
+      assert(/^IOERR=InvalidOperationException ярлык не лёг на место за 3 попытки/m.test(r.stdout), 'сбои Move: ' + r.stdout);
+      assert(/^SILENT=InvalidOperationException ярлык не появился/m.test(r.stdout), 'Move без следа: ' + r.stdout);
+      assert(/^REFUSED=InvalidOperationException .*не совпал/m.test(r.stdout), 'отказ по пути дескриптора: ' + r.stdout);
+      for (const k of ['ok', 'users', 'taken', 'dirname', 'ioerr', 'silent', 'hostile']) {
+        assert(new RegExp('^REL-' + k + '=True$', 'm').test(r.stdout), 'дескриптор закрыт после сценария «' + k + '»: ' + r.stdout);
+      }
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): законные раскладки проходят закрепление — профиль за junction, регистр, прямые слэши, слэш на конце; профиль на другом диске (перенос через копию)', () => {
+    needWinPs();
+    const t = mkTree();
+    let xroot = '';
+    try {
+      const realHome = t.mk(t.base, 'D-drive', 'home'); t.mk(realHome, 'Desktop');
+      const homeLink = t.link(realHome, path.join(t.base, 'Users', 'moved'));
+      const desk = t.mk(t.P, 'Desktop');
+      const od = t.mk(t.P, 'OneDrive - Company Name', 'Рабочий стол');
+      const tmp = t.mk(t.base, 'private-temp');
+      const common = ['[Console]::OutputEncoding = [System.Text.Encoding]::UTF8', '. $env:HM_T_LIB'].concat(SHORT_FILL);
+      // В PowerShell типографские одинарные кавычки (U+2018–U+201B, в том числе ’ из имени профиля) — тоже кавычки:
+      // внутри '…' их, как и обычную, надо удваивать.
+      const psq = (p) => "'" + String(p).replace(/['‘’‚‛]/g, (ch) => ch + ch) + "'";
+      const case1 = (label, dir, profile, name) => tryNew(label, '-Dir ' + psq(dir) + ' -Name ' + psq(name) + ' -Fill $fill -ProfileDir ' + psq(profile));
+      const r = runPsFile(common.concat([
+        // Профиль — сам junction (профиль перенесён на другой диск): «настоящий» путь папки лежит по ту сторону ссылки.
+        case1('PROFILE-LINK', path.join(homeLink, 'Desktop'), homeLink, 'pl.lnk'),
+        case1('UPPER', desk.toUpperCase(), t.P, 'up.lnk'),
+        case1('SLASH', desk.replace(/\\/g, '/'), t.P, 'sl.lnk'),
+        case1('TRAILING', desk + '\\', t.P, 'tr.lnk'),
+        case1('CYRILLIC', od, t.P.toUpperCase(), 'cy.lnk'),
+      ]).join('\n'), { HM_T_LIB: USERPATH, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      for (const k of ['PROFILE-LINK', 'UPPER', 'SLASH', 'TRAILING', 'CYRILLIC']) assert(new RegExp('^' + k + '=ok ', 'm').test(r.stdout), k + ': ' + r.stdout);
+      assert(fs.existsSync(path.join(realHome, 'Desktop', 'pl.lnk')), 'ярлык за junction профиля лёг в настоящий стол');
+      assert(fs.existsSync(path.join(desk, 'up.lnk')) && fs.existsSync(path.join(desk, 'sl.lnk')) && fs.existsSync(path.join(desk, 'tr.lnk')), 'регистр, слэши, слэш на конце');
+      assert(fs.existsSync(path.join(od, 'cy.lnk')), 'кириллица и пробелы в пути');
+      // Профиль на другом диске (не junction, а другой том): временный файл на одном томе, папка стола — на другом.
+      const cur = path.parse(os.tmpdir()).root.toUpperCase();
+      for (const letter of ['D:\\', 'E:\\', 'F:\\', 'C:\\']) {
+        if (letter === cur) continue;
+        try { xroot = fs.mkdtempSync(path.join(letter, 'hm-u4-xvol-')); break; } catch (e) { xroot = ''; }
+      }
+      if (xroot) {
+        const xp = path.join(xroot, 'Users', 'Иван Пётр'); const xd = path.join(xp, 'Desktop');
+        fs.mkdirSync(xd, { recursive: true });
+        const x = runPsFile(common.concat([case1('XVOL', xd, xp, 'xv.lnk')]).join('\n'), { HM_T_LIB: USERPATH, TEMP: tmp, TMP: tmp });
+        assert.strictEqual(x.status, 0, x.stdout + x.stderr);
+        assert(/^XVOL=ok /m.test(x.stdout) && fs.existsSync(path.join(xd, 'xv.lnk')), 'ярлык на другом томе: ' + x.stdout);
+        assert.strictEqual(headOf(path.join(xd, 'xv.lnk')), '76,0,0,0', 'на другом томе — настоящий ShellLink');
+        assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+      }
+    } finally {
+      if (xroot) { try { fs.rmSync(xroot, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+      t.cleanup();
+    }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): ярлык ложится по нормализованному пути проверенной и закреплённой папки, а не по строке вызывающего — Desktop с пробелом на конце не уводит запись в junction с таким именем; прежний способ писал за ссылку', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      // Имя с пробелом на конце создаётся только через пространство \\?\ (Win32-пути пробел отбрасывают).
+      const literal = '\\\\?\\' + t.P + '\\Desktop ';
+      try { fs.symlinkSync(hostile, literal, 'junction'); t.links.push(literal); } catch (e) { SKIP('здесь нельзя создать junction с пробелом на конце имени: ' + e.code); }
+      const tmp = t.mk(t.base, 'private-temp');
+      // Без слэша на конце: проверка срезает пробел и принимает настоящий стол, а путь, собранный из ЭТОЙ строки,
+      // читает «Desktop » буквально — то есть junction. Закрепляется проверенная папка, значит и писать надо в неё.
+      const cand = desk + ' ';
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, [
+        '$v = Test-HmShellFolder -ProfileDir $env:HM_T_P -Candidate $env:HM_T_CAND',
+        "'CHECK=' + $v.Ok + ' ' + $v.Dir",
+        tryNew('W', '-Dir $env:HM_T_CAND -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        // Контроль — прежний способ: путь, собранный из строки вызывающего, уходит в «Desktop » и пишет за ссылку.
+        "[IO.File]::WriteAllText((Join-Path $env:HM_T_CAND 'control.txt'), 'x'); 'CONTROL=wrote'",
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_P: t.P, HM_T_CAND: cand, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(r.stdout.includes('CHECK=True ' + desk), 'проверка приняла настоящий стол и вернула его нормализованный путь: ' + r.stdout);
+      assert(/^W=ok /m.test(r.stdout) && r.stdout.includes('W=ok ' + path.join(desk, 'a.lnk')), 'ярлык назван по проверенной папке: ' + r.stdout);
+      assert.strictEqual(headOf(path.join(desk, 'a.lnk')), '76,0,0,0', 'в настоящем столе — настоящий ShellLink');
+      assert.deepStrictEqual(fs.readdirSync(hostile).filter((n) => n !== 'control.txt'), [], 'за junction «Desktop » ярлыка нет: ' + r.stdout);
+      assert(/^CONTROL=wrote$/m.test(r.stdout) && fs.existsSync(path.join(hostile, 'control.txt')), 'контроль: прежний способ писал в чужую папку через «Desktop » — стенд различает: ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  // =========================================================================
+  // 4. vscode-settings.ps1 (A2): ярлыки «Claude Code — мои проекты»
+  // =========================================================================
+  const LNK = 'Claude Code — мои проекты.lnk';
+  function mkSandbox(tag) {
+    const sb = sandbox('hm-u4-' + tag + '-');
+    sb.home = path.join(sb.base, 'home');
+    for (const d of ['home\\AppData\\Roaming\\Code\\User', 'home\\.vscode\\extensions', 'home\\AppData\\Local\\Programs\\Microsoft VS Code',
+      'home\\Desktop', 'home\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs']) fs.mkdirSync(path.join(sb.base, ...d.split('\\')), { recursive: true });
+    fs.writeFileSync(path.join(sb.base, 'home', 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'), '');
+    sb.desk = path.join(sb.home, 'Desktop');
+    sb.progs = path.join(sb.home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+    return sb;
+  }
+  function psVs(body, env) {
+    return runPsFile('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n. ' + q(VSET) + '\n' + body, env);
+  }
+
+  ok('u4 A2 ярлыки: папка стола и меню Пуск вне профиля не получает файл, причина в журнале и в итоге шага; прежний код клал туда ярлык', () => {
+    needWinPs();
+    const sb = mkSandbox('hostile');
+    try {
+      const hostDesk = path.join(sb.base, 'ProgramData', 'AllUsers', 'Startup');
+      const hostProgs = path.join(sb.base, 'Users', 'Другой', 'Start Menu', 'Programs');
+      fs.mkdirSync(hostDesk, { recursive: true }); fs.mkdirSync(hostProgs, { recursive: true });
+      const r = psVs([
+        '$p = Get-HmPaths',
+        '$p.Desktop = $env:HM_T_HD; $p.Programs = $env:HM_T_HP',
+        '$r = Invoke-HmVsCodeSetup -Paths $p',
+        "'SHORTCUTS=' + $r.Shortcuts.Count",
+        "'PROBLEMS=' + ($r.Problems -join ' ## ')",
+      ].join('\n'), { HM_FIRSTRUN_ROOT: sb.base, HM_T_HD: hostDesk, HM_T_HP: hostProgs });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert.deepStrictEqual(listAll(hostDesk), [], 'в каталог вне профиля (стол) ничего не записано: ' + r.stdout);
+      assert.deepStrictEqual(listAll(hostProgs), [], 'в каталог вне профиля (Пуск) ничего не записано');
+      assert(/^SHORTCUTS=0$/m.test(r.stdout), 'ярлыков создано 0: ' + r.stdout);
+      assert(/Ярлык \(Рабочий стол\) пропущен: [^\r\n]*вне профиля/.test(r.stdout) && /Ярлык \(меню Пуск\) пропущен: [^\r\n]*вне профиля/.test(r.stdout), 'в журнале названа причина для обоих: ' + r.stdout);
+      assert(/^PROBLEMS=.*ярлык \(Рабочий стол\) — .*вне профиля.*ярлык \(меню Пуск\) — .*вне профиля/m.test(r.stdout), 'и она в итоге шага (итог не рапортует успех): ' + r.stdout);
+      // Те же входы, нормальные папки профиля, — ярлыки создаются (проверка не выключила функцию).
+      const ok2 = psVs(["$p = Get-HmPaths", "$r = Invoke-HmVsCodeSetup -Paths $p", "'SHORTCUTS=' + $r.Shortcuts.Count"].join('\n'), { HM_FIRSTRUN_ROOT: sb.base });
+      assert(/^SHORTCUTS=2$/m.test(ok2.stdout) && fs.existsSync(path.join(sb.desk, LNK)) && fs.existsSync(path.join(sb.progs, LNK)), 'законные папки профиля: ' + ok2.stdout + ok2.stderr);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u4 A2 ярлыки: junction с запретом чтения на самой ссылке вместо Рабочего стола (LinkType у неё пуст, прежняя проверка её не видела) — в каталог за ней ничего не пишется', () => {
+    needWinPs();
+    const sb = mkSandbox('hidden');
+    try {
+      const hostile = path.join(sb.base, 'ProgramData', 'AllUsers', 'Startup');
+      fs.mkdirSync(hostile, { recursive: true });
+      fs.rmdirSync(sb.desk);
+      sb.link(hostile, sb.desk);
+      sb.denyRead(sb.desk);
+      const r = psVs('Invoke-HmVsCodeFirstRun', { HM_FIRSTRUN_ROOT: sb.base });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert.deepStrictEqual(listAll(hostile), [], 'за скрытой junction ничего не записано: ' + r.stdout);
+      assert(/Ярлык \(Рабочий стол\) пропущен: [^\r\n]*ссылк/.test(r.stdout), 'причина — ссылка: ' + r.stdout);
+      assert(fs.existsSync(path.join(sb.progs, LNK)), 'ярлык в меню Пуск (обычная папка профиля) при этом создан: ' + r.stdout);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u4 A2 записи: junction с запретом чтения на самой ссылке вместо папки Code (LinkType у неё пуст) — settings.json и отметка не пишутся за неё; прежняя проверка её не видела', () => {
+    needWinPs();
+    const sb = mkSandbox('hidden-code');
+    try {
+      const hostile = path.join(sb.base, 'ProgramData', 'AllUsers', 'Settings');
+      fs.mkdirSync(path.join(hostile, 'User'), { recursive: true });         // как будто там уже лежит чужой Code\User
+      const code = path.join(sb.home, 'AppData', 'Roaming', 'Code');
+      fs.rmSync(code, { recursive: true, force: true });                     // в песочнице Code\User пуст: заменяем папку целиком
+      sb.link(hostile, code);
+      sb.denyRead(code);
+      const r = psVs('Invoke-HmVsCodeFirstRun', { HM_FIRSTRUN_ROOT: sb.base });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      const files = listAll(hostile).filter((f) => fs.statSync(f).isFile());
+      assert.deepStrictEqual(files, [], 'за скрытой junction (Code) ни одного файла: ' + files.join(', ') + '\n' + r.stdout);
+      assert(/по ссылке/.test(r.stdout) && /применены не полностью/.test(r.stdout), 'причина названа, итог не рапортует успех: ' + r.stdout);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u4 A2 ярлыки: стол в OneDrive (облачная заглушка по тегу) получает ярлык, обычная junction на его месте — нет', () => {
+    needWinPs();
+    const sb = mkSandbox('onedrive');
+    try {
+      const realOd = path.join(sb.base, 'cloud-real');
+      fs.mkdirSync(path.join(realOd, 'Desktop'), { recursive: true });
+      fs.rmdirSync(sb.desk);
+      const odLink = sb.link(realOd, path.join(sb.home, 'OneDrive'));
+      const body = [
+        '$p = Get-HmPaths',
+        "$p.Desktop = Join-Path $env:HM_T_OD 'Desktop'",
+        '$r = Invoke-HmVsCodeSetup -Paths $p',
+        "'SHORTCUTS=' + $r.Shortcuts.Count",
+      ];
+      // Настоящий тег junction (mount point) — отказ, как у любой ссылки.
+      const noCloud = psVs(body.join('\n'), { HM_FIRSTRUN_ROOT: sb.base, HM_T_OD: odLink });
+      assert(!fs.existsSync(path.join(realOd, 'Desktop', LNK)), 'junction без облачного тега: ярлыка за ней нет: ' + noCloud.stdout);
+      // Тот же путь, но тег читается как облачный, а LinkType пуст — так выглядит настоящая облачная папка (проверено на живом OneDrive).
+      const cloudStubs = ['function Get-HmReparseTag([string]$Path) { if ($Path -ieq $env:HM_T_OD) { return [long]0x9000701AL } return [long]0xA0000003L }',
+        'function Test-HmLinkItem { param([string]$Path) return $false }'];
+      // Тег, выданный за облачный, junction не спасает: настоящий путь дескриптора закрепления уводит за ссылку
+      // и не совпадает с проверенным — отказ, за ссылку ничего не пишется (вторая линия после проверки тега).
+      const costume = psVs(cloudStubs.concat(body).join('\n'), { HM_FIRSTRUN_ROOT: sb.base, HM_T_OD: odLink });
+      assert.strictEqual(costume.status, 0, costume.stdout + costume.stderr);
+      assert(!fs.existsSync(path.join(realOd, 'Desktop', LNK)), 'junction в облачной «одежде»: ярлыка за ней нет: ' + costume.stdout);
+      assert(/Ярлык \(Рабочий стол\) пропущен: путь по дескриптору не совпал/.test(costume.stdout), 'отказ назван: ' + costume.stdout);
+      // Настоящая облачная папка стоит на месте: её путь по дескриптору равен проверенному (это проверяет отдельный
+      // тест на живом OneDrive). Здесь «облачная» папка — junction, у неё путь другой, поэтому закрепление подменено
+      // заглушкой: предмет этого сценария — признание облачного тега, а не сверка пути.
+      const cloud = psVs(cloudStubs.concat([
+        '$script:pinCalls = 0',
+        'function Open-HmPinnedShellFolder { param([string]$ProfileDir, [string]$Dir) $script:pinCalls++; return [IntPtr]::Zero }',
+      ], body, ["'PINCALLS=' + $script:pinCalls"]).join('\n'), { HM_FIRSTRUN_ROOT: sb.base, HM_T_OD: odLink });
+      assert.strictEqual(cloud.status, 0, cloud.stdout + cloud.stderr);
+      assert(fs.existsSync(path.join(realOd, 'Desktop', LNK)), 'стол в облачной папке получил ярлык: ' + cloud.stdout + cloud.stderr);
+      assert(/^PINCALLS=[1-9]/m.test(cloud.stdout), 'запись шла через закрепление папки: ' + cloud.stdout);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u4 A2 ярлыки: без _userpath.ps1 рядом шаг не падает, настройки применяются, ярлыки не пишутся и причина названа', () => {
+    needWinPs();
+    const sb = mkSandbox('nolib');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u4-nolib-'));
+    try {
+      fs.copyFileSync(VSET, path.join(dir, 'vscode-settings.ps1'));
+      const r = runPsFile('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n. ' + q(path.join(dir, 'vscode-settings.ps1')) + '\nInvoke-HmVsCodeFirstRun', { HM_FIRSTRUN_ROOT: sb.base });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(fs.existsSync(path.join(sb.home, 'AppData', 'Roaming', 'Code', 'User', 'settings.json')), 'настройки применены без помощника: ' + r.stdout);
+      assert.deepStrictEqual([fs.readdirSync(sb.desk), fs.readdirSync(sb.progs)], [[], []], 'ярлыков нет');
+      assert(/Ярлык \(Рабочий стол\) пропущен: [^\r\n]*_userpath\.ps1/.test(r.stdout), 'причина названа: ' + r.stdout);
+    } finally { sb.cleanup(); try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('u4 Get-HmPaths: на настоящей машине стол и меню Пуск — либо $null с причиной, либо внутри профиля из списка профилей; профиль не берётся из $env:USERPROFILE', () => {
+    needWinPs();
+    const r = runPsFile([
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      '. ' + q(VSET),
+      '$env:USERPROFILE = "C:\\hm-u4-evil-profile"',
+      '$p = Get-HmPaths',
+      "'SHELLPROFILE=' + $p.ShellProfile",
+      "'REALPROFILE=' + [Environment]::GetFolderPath('UserProfile')",
+      "foreach ($k in 'Desktop', 'Programs') {",
+      "  $d = $p[$k]; $why = $p[$k + 'Why']",
+      "  if ($d) { 'INSIDE ' + $k + '=' + $d.StartsWith($p.ShellProfile + '\\', [StringComparison]::OrdinalIgnoreCase) } else { 'NULL ' + $k + ' why=' + $why }",
+      '}',
+    ].join('\n'));
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    const real = (/^REALPROFILE=(.*)$/m.exec(r.stdout) || [])[1];
+    assert.strictEqual((/^SHELLPROFILE=(.*)$/m.exec(r.stdout) || [])[1], real, 'профиль проверки — из списка профилей, а не из подменённой переменной окружения: ' + r.stdout);
+    for (const k of ['Desktop', 'Programs']) {
+      assert(new RegExp('^(INSIDE ' + k + '=True|NULL ' + k + ' why=.+)$', 'm').test(r.stdout), k + ': ' + r.stdout);
+    }
+  });
+
+  ok('u4 vscode-settings.ps1: папки ярлыков берутся только через Test-HmShellFolder, ярлык пишет New-HmShortcutFile, прямого Save() по пути нет (статически)', () => {
+    const c = codeOnly(fs.readFileSync(VSET, 'utf8'));
+    assert(/_userpath\.ps1/.test(c), 'файл подключает общий помощник');
+    assert(!/GetFolderPath\(\s*'(Desktop|Programs)'\s*\)/.test(c), 'в vscode-settings.ps1 нет прямого ответа оболочки про стол и Пуск');
+    assert(/Get-HmShellAnswer/.test(c) && /Test-HmShellFolder/.test(c), 'ответ оболочки идёт через проверку');
+    const fn = c.slice(c.indexOf('function Set-HmClaudeShortcut'), c.indexOf('function Test-HmVsCodeInstalled'));
+    assertOrder(fn, 'Test-HmShellFolder', 'Test-Path -LiteralPath $lnk', 'проверка папки — до любых действий с файлом ярлыка');
+    assertOrder(fn, 'Get-HmLinkOnPath $lnk', 'New-HmShortcutFile -Dir $Dir -Name $script:HmLnkName', 'прежняя перепроверка — до записи');
+    assert(!/\$sc\.Save\(\)/.test(fn) && !/CreateShortcut\(/.test(fn), 'ярлык не сохраняется прямо по пути в папке стола');
+    const lib = codeOnly(fs.readFileSync(USERPATH, 'utf8'));
+    const nfFrom = lib.indexOf('function New-HmShortcutFile');
+    assert(nfFrom !== -1, 'New-HmShortcutFile на месте');
+    const nfNext = lib.indexOf('\nfunction ', nfFrom + 10);    // тело одной функции: до следующей на нулевом отступе
+    const nf = lib.slice(nfFrom, nfNext === -1 ? undefined : nfNext);
+    assert(nf.length > 800, 'тело New-HmShortcutFile не пусто (иначе проверки порядка ниже были бы пустыми)');
+    assertOrder(nf, 'Test-HmShellFolder', 'Move-HmShortcutFile $tmp $lnk', 'проверка папки — прямо перед Move');
+    assertOrder(nf, '$sc.Save()', 'Test-HmShellFolder', 'ярлык сначала во временном файле');
+    assert(/CreateShortcut\(\$tmp\)/.test(nf) && !/CreateShortcut\(\$lnk\)/.test(nf), 'COM-ярлык создаётся на временном пути, не на финальном');
+    assert(!/Move-Item|Copy-Item/.test(nf) && /\[IO\.File\]::Move\(/.test(lib), 'перенос — File.Move (не перезаписывает занятое имя), а не Move-Item -Force');
+  });
+
+  // =========================================================================
+  // 5. course.ps1: ярлык курса на столе
+  // =========================================================================
+  const cutPs = (src, name) => {
+    const i = src.indexOf('function ' + name);
+    assert(i !== -1, 'в course.ps1 пропала функция ' + name);
+    const open = src.indexOf('{', i);
+    let depth = 0;
+    for (let k = open; k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+    }
+    throw new Error('нет конца функции ' + name);
+  };
+  const COURSE_HARNESS = (fnText, noVerify) => [
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    '$ErrorActionPreference = "Continue"',
+    '. ' + q(USERPATH),
+    // Подмена «ответа оболочки» и «корня профиля» — швы, ради которых они вынесены в функции.
+    'function Get-HmShellAnswer([string]$Kind) { return $env:HM_T_ANSWER }',
+    'function Get-HmProfileRoot { return $env:HM_T_PROFILE }',
+    // Контроль «как было до правки»: проверки профиля нет вовсе, любая существующая папка годится.
+    noVerify ? 'function Test-HmShellFolder { param([string]$ProfileDir, [string]$Candidate) return @{ Ok = $true; Dir = $Candidate; Reason = "" } }' : '',
+    // …и закрепления папки по пути дескриптора тоже нет: «как было» — запись туда, куда сказали, без единой сверки с профилем.
+    noVerify ? 'function Open-HmPinnedShellFolder { param([string]$ProfileDir, [string]$Dir) return [IntPtr]::Zero }' : '',
+    fnText,
+    "$r = New-HmCourseShortcut -Name 'Курс вайбкодинг (Claude Code)' -CourseDir $env:HM_T_COURSE",
+    "'RESULT=' + $r",
+  ].join('\n');
+
+  ok('u4 course.ps1: ярлык курса идёт в папку стола, прошедшую проверку профиля; стол вне профиля — ярлыка нет, лаунчер и причина остаются; без проверки (контроль) ярлык лёг бы в чужую папку', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const src = fs.readFileSync(COURSE, 'utf8');
+      const fnText = cutPs(src, 'New-HmCourseShortcut');
+      const desk = t.mk(t.P, 'Desktop');
+      const course = t.mk(t.P, 'HamidunCourse', 'vibecoding-course');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const env = (answer) => ({ HM_T_ANSWER: answer, HM_T_PROFILE: t.P, HM_T_COURSE: course });
+      // Законный стол.
+      const good = runPsFile(COURSE_HARNESS(fnText), env(desk));
+      assert.strictEqual(good.status, 0, good.stdout + good.stderr);
+      const lnk = path.join(desk, 'Курс вайбкодинг (Claude Code).lnk');
+      assert(fs.existsSync(lnk), 'ярлык на столе: ' + good.stdout + good.stderr);
+      assert(good.stdout.includes('HM-RECEIPT path ' + lnk), 'квитанция владения называет ярлык: ' + good.stdout);
+      assert(fs.existsSync(path.join(course, 'Запустить курс.cmd')), 'лаунчер рядом с курсом записан');
+      const tgt = runPsFile(["[Console]::OutputEncoding = [System.Text.Encoding]::UTF8", "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:HM_T_LNK); $s.TargetPath; $s.WorkingDirectory"].join('\n'), { HM_T_LNK: lnk });
+      const [target, wd] = tgt.stdout.trim().split(/\r?\n/).map((s) => s.trim());
+      assert.strictEqual(target.toLowerCase(), path.join(course, 'Запустить курс.cmd').toLowerCase(), 'цель — лаунчер');
+      assert.strictEqual(wd.toLowerCase(), course.toLowerCase(), 'рабочая папка — папка курса');
+      // Повторная установка заменяет прежний ярлык (с -Replace), а не падает на занятом имени.
+      const again = runPsFile(COURSE_HARNESS(fnText), env(desk));
+      assert(again.stdout.includes('Ярлык создан: ' + lnk) && fs.existsSync(lnk), 'повтор заменил ярлык: ' + again.stdout + again.stderr);
+      // Стол вне профиля.
+      fs.rmSync(path.join(course, 'Запустить курс.cmd'));
+      const bad = runPsFile(COURSE_HARNESS(fnText), env(startup));
+      assert.strictEqual(bad.status, 0, bad.stdout + bad.stderr);
+      assert.deepStrictEqual(fs.readdirSync(startup), [], 'в каталог вне профиля ничего не записано: ' + bad.stdout);
+      assert(/вне профиля/.test(bad.stdout) && /RESULT=\s*$/m.test(bad.stdout), 'причина в журнале, результат пуст: ' + bad.stdout);
+      assert(fs.existsSync(path.join(course, 'Запустить курс.cmd')), 'лаунчер записан и без ярлыка — курс запускается из папки');
+      // Отрицательный контроль: прежнее «стол — как сказала оболочка» и ни одной проверки профиля.
+      const mutated = fnText.replace(/Get-HmSafeShellFolder -Kind Desktop[^\r\n]*/, 'Get-HmShellAnswer "Desktop"');
+      assert(mutated !== fnText, 'контроль: вызов проверки удалось заменить');
+      const old = runPsFile(COURSE_HARNESS(mutated, true), env(startup));
+      assert(listAll(startup).some((f) => /Курс вайбкодинг/.test(f)), 'контроль: без проверки ярлык лёг в каталог вне профиля — тест различает: ' + old.stdout + old.stderr);
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 course.ps1: нет прямого GetFolderPath для стола; ярлык пишет New-HmShortcutFile с -Replace; имя ярлыка не может увести за папку стола', () => {
+    const src = fs.readFileSync(COURSE, 'utf8');
+    const c = codeOnly(src);
+    assert(!/GetFolderPath\(\s*'Desktop'\s*\)/.test(c), 'прямого ответа оболочки про стол в course.ps1 нет');
+    assert(/_userpath\.ps1/.test(c), 'course.ps1 подключает общий помощник');
+    const fn = cutPs(c, 'New-HmCourseShortcut');
+    assertOrder(fn, 'Get-HmSafeShellFolder -Kind Desktop', 'New-HmShortcutFile -Dir $desktop', 'папка стола проверена до записи ярлыка');
+    assert(/New-HmShortcutFile -Dir \$desktop -Name \(\$Name \+ '\.lnk'\) -Fill \$fill -ProfileDir \(Get-HmProfileRoot\) -Replace/.test(fn), 'ярлык пишет общая функция, с профилем из списка профилей');
+    assert(!/\$sc\.Save\(\)/.test(fn) && !/CreateShortcut\(/.test(fn), 'прямого Save() по пути в course.ps1 больше нет');
+    assertOrder(fn, "-match '[\\\\/:*?\"<>|]'", 'New-HmShortcutFile -Dir $desktop', 'имя ярлыка проверено на разделители пути до записи');
+    assert(/New-HmCourseShortcut -Name/.test(c), 'функция вызывается из основного хода');
+  });
+
+  // =========================================================================
+  // 6. Сторож: новые прямые чтения ответа оболочки про стол и «Пуск» запрещены
+  // =========================================================================
+  ok('u4 сторож: в scripts/windows ответ оболочки про стол и меню Пуск читают только Get-HmShellAnswer и параметр по умолчанию Get-HmMascotProgramsDir', () => {
+    const hits = [];
+    for (const f of fs.readdirSync(WINDIR).filter((n) => n.endsWith('.ps1'))) {
+      const c = codeOnly(fs.readFileSync(path.join(WINDIR, f), 'utf8'));
+      c.split(/\r?\n/).forEach((l, i) => {
+        if (/GetFolderPath\(\s*(\$[A-Za-z]+|'(Desktop|DesktopDirectory|Programs|CommonDesktopDirectory|CommonPrograms|StartMenu|Startup)')\s*\)|SpecialFolders|\$env:USERPROFILE\\Desktop/i.test(l)) hits.push(f + ':' + (i + 1) + ' ' + l.trim());
+      });
+    }
+    const allowed = hits.filter((h) => /^_userpath\.ps1:\d+ try \{ return \[Environment\]::GetFolderPath\(\$Kind\) \}/.test(h)
+      || /^_mascot\.ps1:\d+ \[string\]\$ShellDir = \[Environment\]::GetFolderPath\('Programs'\)\)/.test(h));
+    assert.deepStrictEqual(hits.filter((h) => !allowed.includes(h)), [], 'новые прямые чтения ответа оболочки (стол/Пуск) — через Test-HmShellFolder');
+    assert.strictEqual(allowed.length, 2, 'оба разрешённых места на месте: ' + hits.join(' | '));
+  });
+
+  ok('u4 _userpath.ps1: новые функции без Add-Type (сборка в памяти), UTF-8 с BOM и CRLF', () => {
+    const b = fs.readFileSync(USERPATH);
+    assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'BOM');
+    const crlf = (b.toString('latin1').match(/\r\n/g) || []).length;
+    const lf = (b.toString('latin1').match(/\n/g) || []).length;
+    assert.strictEqual(crlf, lf, 'все переводы строк — CRLF');
+    const src = b.toString('utf8');
+    for (const name of ['Get-HmFsNative', 'Get-HmReparseTag', 'Test-HmCloudReparseTag', 'Test-HmShellFolder', 'Get-HmSafeShellFolder', 'New-HmShortcutFile']) {
+      assert(src.includes('function ' + name), 'есть функция ' + name);
+    }
+    const native = codeOnly(src.slice(src.indexOf('function Get-HmFsNative'), src.indexOf('function Get-HmReparseTag')));
+    assert(!/\bAdd-Type\b/.test(native) && /DefineDynamicAssembly\(/.test(native) && /AssemblyBuilderAccess\]::Run/.test(native), 'P/Invoke — сборкой в памяти, не компилятором в %TEMP%');
+    assert(/FindFirstFileW/.test(native), 'тег читается из записи каталога, а не открытием самой ссылки');
+    // Новый код не добавил ни одного Add-Type в библиотеку (прежний Add-Type в Send-HmEnvBroadcast — чужая находка).
+    // Блок про стол и ярлыки стоит в КОНЦЕ файла (в середине рядом с Test-HmIsReparse свои вставки делают другие правки):
+    // берём от его первой функции до конца файла и следим, что срез не пуст.
+    const mineFrom = src.indexOf('function Get-HmShellAnswer');
+    assert(mineFrom !== -1 && src.length - mineFrom > 3000, 'блок про стол и ярлыки найден и не пуст');
+    const mine = codeOnly(src.slice(mineFrom));
+    assert(!/\bAdd-Type\b/.test(mine), 'в блоке про стол и ярлыки нет Add-Type');
+  });
+
+  ok('u4 _userpath.ps1: закрепление папки — право на чтение каталога и общий доступ без удаления, закрепление после проверки и до любых действий с именем ярлыка, закрытие в finally и перед паузой повтора (статически)', () => {
+    const c = codeOnly(fs.readFileSync(USERPATH, 'utf8'));
+    for (const sym of ['CreateFileW', 'CloseHandle', 'GetFinalPathNameByHandleW']) {
+      const native = c.slice(c.indexOf('function Get-HmFsNative'), c.indexOf('function Get-HmReparseTag'));
+      assert(native.includes("'" + sym + "'"), 'в сборке в памяти есть ' + sym);
+    }
+    // Права открытия при закреплении: чтение каталога (бит 0x1) — иначе открытие «за атрибутами» ничего не держит;
+    // общий доступ без бита DELETE (0x4) — иначе папку можно переименовать и заменить, пока мы её держим.
+    const open = cutPs(c, 'Open-HmDirHandle');
+    const hold = /if \(\$Hold\) \{ \$access = \[uint32\](0x[0-9A-Fa-f]+); \$share = \[uint32\](\d+);/.exec(open);
+    assert(hold, 'ветка закрепления в Open-HmDirHandle на месте: ' + open.slice(0, 400));
+    assert((parseInt(hold[1], 16) & 0x1) === 0x1, 'в праве доступа есть FILE_LIST_DIRECTORY (0x1): ' + hold[1]);
+    assert((parseInt(hold[2], 10) & 0x4) === 0, 'в общем доступе закрепления нет FILE_SHARE_DELETE (0x4): ' + hold[2]);
+    assert((parseInt(hold[2], 10) & 0x3) === 0x3, 'чтение и запись другим не запрещены (0x3): ' + hold[2]);
+    assert(/0x02000000/.test(open), 'FILE_FLAG_BACKUP_SEMANTICS: каталог без него не открыть');
+    // Порядок в New-HmShortcutFile: проверка папки → закрепление → снятие старого имени → Move; закрытие в finally.
+    const nf = cutPs(c, 'New-HmShortcutFile');
+    assert(nf.length > 1500, 'тело New-HmShortcutFile не пусто');
+    assertOrder(nf, 'Test-HmShellFolder', 'Open-HmPinnedShellFolder', 'закрепление — после проверки папки');
+    assertOrder(nf, 'Open-HmPinnedShellFolder', '[IO.File]::GetAttributes($lnk)', 'закрепление — до чтения имени ярлыка');
+    assertOrder(nf, 'Open-HmPinnedShellFolder', '[IO.File]::Delete($lnk)', 'закрепление — до снятия старого имени');
+    assertOrder(nf, '[IO.File]::Delete($lnk)', 'Move-HmShortcutFile $tmp $lnk', 'снятие имени — до Move, оба под дескриптором');
+    assert(/\}\s*finally\s*\{\s*Close-HmDirHandle \$pin\s*\}/.test(nf), 'дескриптор закрывается в finally');
+    assertOrder(nf, 'Close-HmDirHandle $pin', 'Start-Sleep', 'перед паузой повтора папку отпускаем');
+    // Сверка пути: настоящий путь дескриптора сравнивается с «настоящим путём профиля + хвост»; регистр не важен.
+    const pin = cutPs(c, 'Open-HmPinnedShellFolder');
+    assert(/Get-HmHandlePath \$h/.test(pin) && /Get-HmHandlePath \$hp/.test(pin), 'путь берётся по дескриптору и у папки, и у профиля');
+    assert(/OrdinalIgnoreCase/.test(pin), 'сравнение без учёта регистра');
+    assertOrder(pin, 'Get-HmHandlePath $h', 'путь по дескриптору не совпал', 'сверка пути — до возврата дескриптора');
+    assert(/finally \{\s*if \(-not \$ok\) \{ Close-HmDirHandle \$h \}/.test(pin), 'при отказе дескриптор закрывается самой функцией');
+  });
+
+  ok('u4 закрепление папки: на машине с настоящим OneDrive и настоящим столом дескриптор открывается, а его путь совпадает с проверенным (только чтение — ничего не создаётся)', () => {
+    needWinPs();
+    const od = process.env.OneDrive || process.env.OneDriveConsumer || process.env.OneDriveCommercial || '';
+    // Только чтение: открыть каталог за чтением и закрыть. Пишущих вызовов здесь нет, а проверка нужна на живых облачных
+    // папках: их точка повторной обработки не должна ломать сверку пути дескриптора.
+    const r = runPsFile([
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+      '. $env:HM_T_LIB',
+      '$prof = Get-HmProfileRoot',
+      "foreach ($p in @($env:HM_T_OD, (Get-HmShellAnswer 'Desktop'))) {",
+      '    if (-not $p) { continue }',
+      '    $vf = Test-HmShellFolder -ProfileDir $prof -Candidate $p',
+      "    if (-not $vf.Ok) { 'OUTSIDE=' + $p; continue }",
+      '    try {',
+      '        $h = Open-HmPinnedShellFolder -ProfileDir $prof -Dir ([string]$vf.Dir)',
+      '        $final = Get-HmHandlePath $h',
+      '        Close-HmDirHandle $h',
+      "        'PINNED=' + $final + ' | ' + $vf.Dir",
+      '    } catch {',
+      "        'FAILED=' + $_.Exception.GetType().Name + ' ' + $_.Exception.Message",
+      '    }',
+      '}',
+    ].join('\n'), { HM_T_LIB: USERPATH, HM_T_OD: od });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    const pinned = lines(r.stdout).filter((l) => l.startsWith('PINNED='));
+    for (const l of pinned) {
+      const [fin, lex] = l.slice('PINNED='.length).split(' | ');
+      assert.strictEqual(String(fin).toLowerCase(), String(lex).toLowerCase(), 'настоящий путь дескриптора совпал с проверенным: ' + l);
+    }
+    // Сорвалось открытие (чужой дескриптор с правом удаления на столе в этот миг) — не ошибка кода, но и не «прошло»:
+    const failed = lines(r.stdout).filter((l) => /^FAILED=.*(IOException|закрепить|открыть)/.test(l));
+    if (!pinned.length && failed.length) SKIP('папку на этой машине держит чужой дескриптор с правом удаления: ' + failed[0]);
+    if (!pinned.length && !od && !lines(r.stdout).some((l) => l.startsWith('OUTSIDE='))) SKIP('на этой машине нет ни OneDrive, ни проверяемого стола');
+    assert(pinned.length > 0 || lines(r.stdout).some((l) => l.startsWith('OUTSIDE=')), 'хотя бы одна настоящая папка закреплена (или честно вне профиля): ' + r.stdout);
+    assert(!lines(r.stdout).some((l) => /^FAILED=InvalidOperationException/.test(l)), 'ни одна законная папка не отвергнута как «подменённая»: ' + r.stdout);
+  });
+})();

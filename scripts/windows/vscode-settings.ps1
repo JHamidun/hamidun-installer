@@ -21,6 +21,10 @@
 #   - перед записью — копия рядом, запись через временный файл и подмену целиком;
 #   - сквозь ссылки (symlink, junction, hardlink) не пишем: проверяем ВЕСЬ путь от якоря
 #     (%APPDATA% и ниже) и перепроверяем сразу перед каждой записью, а не один раз в начале;
+#   - ярлыки кладём только в папки «Рабочий стол» и «меню Пуск», ПРОВЕРЕННЫЕ по профилю
+#     (Test-HmShellFolder, _userpath.ps1): ответ оболочки лежит в ветке реестра, которую без UAC
+#     правит любая программа пользователя, и перенаправленный в чужую папку (автозагрузка всех
+#     пользователей, чужой профиль) стол получил бы файл, созданный администратором;
 #   - владельца файла возвращаем пользователю через ДЕРЖИМЫЙ нами дескриптор своего же
 #     свежего файла, а не по пути: по пути привилегированная смена владельца пошла бы за
 #     подложенной ссылкой и отдала бы пользователю чужой файл;
@@ -39,6 +43,12 @@
 # машине разработчика писал бы в его настоящий профиль и на настоящий рабочий стол. Вне
 # %TEMP% переменная игнорируется. Любой прогон vscode.ps1 целиком в песочнице обязан её задать.
 $ErrorActionPreference = 'Continue'
+
+# Общий помощник: проверка папок стола и «Пуска» по профилю (Test-HmShellFolder), запись ярлыка
+# без Save() по пути (New-HmShortcutFile), чтение тега точки повторной обработки без Add-Type.
+# Нет файла рядом — ярлыки не пишем (см. Set-HmShellDirs), остальной шаг работает как раньше.
+$hmUserPathLib = Join-Path $PSScriptRoot '_userpath.ps1'
+if (Test-Path -LiteralPath $hmUserPathLib) { . $hmUserPathLib }
 
 # ---------------------------------------------------------------------------
 # Журнал шага
@@ -339,6 +349,29 @@ function Test-HmKeyCovered {
 # Пути и безопасная работа с файлами профиля из-под администратора
 # ---------------------------------------------------------------------------
 
+# Папки ярлыков — не «как сказала оболочка», а после проверки по профилю (Test-HmShellFolder):
+# ответ оболочки лежит в ветке реестра, которую без UAC правит любая программа пользователя, и
+# перенаправленный в чужую папку стол получил бы ярлык, созданный администратором. Не прошла —
+# Desktop/Programs = $null, а причина в DesktopWhy/ProgramsWhy: её увидит человек в журнале.
+# ShellProfile — профиль, по которому проверяли (список профилей Windows, не $env:USERPROFILE; в
+# песочнице — её home); им же проверка повторяется на месте использования (Set-HmClaudeShortcut).
+function Set-HmShellDirs {
+    param($Paths, [string]$ProfileDir, [string]$DesktopAnswer, [string]$ProgramsAnswer)
+    $Paths.ShellProfile = $ProfileDir
+    $Paths.Desktop = $null; $Paths.DesktopWhy = ''
+    $Paths.Programs = $null; $Paths.ProgramsWhy = ''
+    if (-not (Get-Command Test-HmShellFolder -ErrorAction SilentlyContinue)) {
+        # Общий помощник не подключился (_userpath.ps1 не рядом): без проверки ярлыки не пишем.
+        $Paths.DesktopWhy = 'рядом нет _userpath.ps1, папку проверить нечем'
+        $Paths.ProgramsWhy = $Paths.DesktopWhy
+        return
+    }
+    $d = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $DesktopAnswer
+    if ($d.Ok) { $Paths.Desktop = $d.Dir } else { $Paths.DesktopWhy = $d.Reason }
+    $p = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $ProgramsAnswer
+    if ($p.Ok) { $Paths.Programs = $p.Dir } else { $Paths.ProgramsWhy = $p.Reason }
+}
+
 # Все пути шага в одном месте. HM_FIRSTRUN_ROOT работает только внутри %TEMP% (см. шапку).
 function Get-HmPaths {
     $root = $env:HM_FIRSTRUN_ROOT
@@ -348,30 +381,45 @@ function Get-HmPaths {
             $tmp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\')
             if ($full.StartsWith($tmp + '\', [StringComparison]::OrdinalIgnoreCase)) {
                 $prof = Join-Path $full 'home'
-                return @{
+                $sp = @{
                     Profile = $prof; AppData = (Join-Path $prof 'AppData\Roaming'); LocalAppData = (Join-Path $prof 'AppData\Local')
-                    Desktop = (Join-Path $prof 'Desktop'); Programs = (Join-Path $prof 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs')
                     ProgramFiles = (Join-Path $full 'pf'); Sandbox = $true
                 }
+                # «Ответ оболочки» песочницы — её же папки; суд над ними — тот же, что и в бою.
+                Set-HmShellDirs $sp $prof (Join-Path $prof 'Desktop') (Join-Path $prof 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs')
+                return $sp
             }
         } catch { }
     }
-    return @{
+    $rp = @{
         Profile = $env:USERPROFILE; AppData = $env:APPDATA; LocalAppData = $env:LOCALAPPDATA
-        Desktop = [Environment]::GetFolderPath('Desktop'); Programs = [Environment]::GetFolderPath('Programs')
         ProgramFiles = $env:ProgramFiles; Sandbox = $false
     }
+    if (Get-Command Get-HmShellAnswer -ErrorAction SilentlyContinue) {
+        Set-HmShellDirs $rp (Get-HmProfileRoot) (Get-HmShellAnswer 'Desktop') (Get-HmShellAnswer 'Programs')
+    } else {
+        Set-HmShellDirs $rp '' '' ''
+    }
+    return $rp
 }
 
 # $true — путь существует и это ссылка (symlink, junction, hardlink) либо прочитать его не
-# удалось. Облачные заглушки OneDrive ссылками не считаются: LinkType у них пуст (а вот
-# сырой атрибут ReparsePoint у них стоит, поэтому смотрим именно тип ссылки).
+# удалось. Облачные заглушки OneDrive ссылками не считаются: LinkType у них пуст, хотя сырой
+# атрибут ReparsePoint стоит. Но LinkType пуст и у настоящей junction/symlink, у которой владелец
+# запретил чтение на САМОЙ ссылке (icacls /deny — прав для этого не нужно): Get-Item тогда не
+# читает данные ссылки (проверено на PS 5.1). Поэтому при пустом LinkType и атрибуте ReparsePoint
+# решает тег из записи каталога (Get-HmReparseTag из _userpath.ps1 читает его без прав на саму
+# ссылку): облачный тег — не ссылка, любой другой и нечитаемый — ссылка.
 function Test-HmLinkItem {
     param([string]$Path)
     $fi = New-Object System.IO.FileInfo($Path)
     if ([int]$fi.Attributes -eq -1) { return $false }   # пути нет
     try { $it = Get-Item -LiteralPath $Path -Force -ErrorAction Stop } catch { return $true }
-    return [bool]$it.LinkType
+    if ([bool]$it.LinkType) { return $true }
+    if (([int]$fi.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -and (Get-Command Get-HmReparseTag -ErrorAction SilentlyContinue)) {
+        return (-not (Test-HmCloudReparseTag (Get-HmReparseTag $Path)))
+    }
+    return $false
 }
 
 # Идёт по ВСЕМУ пути от якоря вниз до самого файла и возвращает первую ссылку ('' — чисто).
@@ -938,27 +986,48 @@ function Install-HmClaudeLauncher {
 # администратора» WScript.Shell не ставит, и мы его не трогаем. State: created | exists |
 # removed (убран человеком) | skipped (Error — почему).
 function Set-HmClaudeShortcut {
-    param([string]$Id, [string]$Dir, [string]$Launcher, [string]$WorkDir, $Marker, [string]$Anchor, [bool]$IncludeAnchor)
-    if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return @{ State = 'skipped'; Path = ''; Error = "папки $Dir нет" } }
+    param([string]$Id, [string]$Dir, [string]$Launcher, [string]$WorkDir, $Marker, [string]$Anchor, [bool]$IncludeAnchor,
+          [string]$ProfileDir = '', [string]$Why = '')
+    # Папка не прошла проверку профиля уже при сборке путей (Get-HmPaths) — причина пришла в $Why.
+    if (-not $Dir) {
+        $e = 'папка не определена'
+        if ($Why) { $e = $Why }
+        return @{ State = 'skipped'; Path = ''; Error = $e }
+    }
+    # Проверка на месте использования: пути могли собрать где и когда угодно, а папка за это время
+    # могла стать ссылкой. Сверяем с профилем (список профилей Windows), а не с переменной окружения.
+    $vf = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $Dir
+    if (-not $vf.Ok) { return @{ State = 'skipped'; Path = ''; Error = $vf.Reason } }
+    if (-not (Test-Path -LiteralPath $Dir)) { return @{ State = 'skipped'; Path = ''; Error = "папки $Dir нет" } }
     $lnk = Join-Path $Dir $script:HmLnkName
     $hit = Get-HmLinkOnPath $lnk $Anchor $IncludeAnchor
     if ($hit) { return @{ State = 'skipped'; Path = $lnk; Error = "путь ведёт по ссылке ($hit), под правами администратора туда не пишу" } }
     if (Test-Path -LiteralPath $lnk) { return @{ State = 'exists'; Path = $lnk; Error = '' } }
     if ($Marker.Contains('shortcut:' + $Id)) { return @{ State = 'removed'; Path = $lnk; Error = '' } }
     try {
-        $ws = New-Object -ComObject WScript.Shell
-        $sc = $ws.CreateShortcut($lnk)
-        $sc.TargetPath = $Launcher
-        $sc.Arguments = '--projects'
-        $sc.WorkingDirectory = $WorkDir
-        $sc.IconLocation = (Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe') + ',0'
-        $sc.Description = 'Открыть Claude Code в папке HamidunStart'
-        # Перепроверка сразу перед записью: Save() идёт по пути и пошёл бы за подложенной ссылкой.
+        # Поля ярлыка — блоком: сам ярлык New-HmShortcutFile сохраняет под случайным именем во временной
+        # папке и переносит на место одним Move. Save() прямо по этому пути писал бы сквозь ссылку,
+        # подложенную на имя ярлыка; перед Move там же повторяется проверка папки (Test-HmShellFolder).
+        $fill = {
+            param($sc)
+            $sc.TargetPath = $Launcher
+            $sc.Arguments = '--projects'
+            $sc.WorkingDirectory = $WorkDir
+            $sc.IconLocation = (Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe') + ',0'
+            $sc.Description = 'Открыть Claude Code в папке HamidunStart'
+        }.GetNewClosure()
+        # Перепроверка перед записью, как и раньше (LinkType); она не видит junction, у которой владелец
+        # запретил чтение на самой ссылке, — её видит проверка по атрибуту и тегу внутри New-HmShortcutFile.
         $hit = Get-HmLinkOnPath $lnk $Anchor $IncludeAnchor
         if ($hit) { return @{ State = 'skipped'; Path = $lnk; Error = "путь стал ссылкой ($hit)" } }
-        $sc.Save()
+        [void](New-HmShortcutFile -Dir $Dir -Name $script:HmLnkName -Fill $fill -ProfileDir $ProfileDir)
         return @{ State = 'created'; Path = $lnk; Error = '' }
-    } catch { return @{ State = 'skipped'; Path = $lnk; Error = (Get-HmReason $_.Exception) } }
+    } catch {
+        $ex = $_.Exception
+        $why = Get-HmReason $ex
+        if ($ex -is [System.InvalidOperationException]) { $why = $ex.Message }   # наша причина, уже по-русски
+        return @{ State = 'skipped'; Path = $lnk; Error = $why }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1034,11 +1103,11 @@ function Invoke-HmVsCodeSetup {
     # 4) Ярлыки (только при исправном лаунчере)
     if (-not $timeUp -and $lr.Ok) {
         $targets = @(
-            @{ Id = 'desktop'; Title = 'Рабочий стол'; Dir = $Paths.Desktop; Anchor = $Paths.Profile; Inc = $false },
-            @{ Id = 'programs'; Title = 'меню Пуск'; Dir = $Paths.Programs; Anchor = $Paths.AppData; Inc = $true }
+            @{ Id = 'desktop'; Title = 'Рабочий стол'; Dir = $Paths.Desktop; Why = $Paths.DesktopWhy; Anchor = $Paths.Profile; Inc = $false },
+            @{ Id = 'programs'; Title = 'меню Пуск'; Dir = $Paths.Programs; Why = $Paths.ProgramsWhy; Anchor = $Paths.AppData; Inc = $true }
         )
         foreach ($tg in $targets) {
-            $sc = Set-HmClaudeShortcut -Id $tg.Id -Dir $tg.Dir -Launcher $launcher -WorkDir $Paths.Profile -Marker $marker -Anchor $tg.Anchor -IncludeAnchor $tg.Inc
+            $sc = Set-HmClaudeShortcut -Id $tg.Id -Dir $tg.Dir -Why $tg.Why -ProfileDir $Paths.ShellProfile -Launcher $launcher -WorkDir $Paths.Profile -Marker $marker -Anchor $tg.Anchor -IncludeAnchor $tg.Inc
             switch ($sc.State) {
                 'created' { $touched.Add('shortcut:' + $tg.Id); $r.Changed = $true; $r.Shortcuts.Add($tg.Title); Write-HmLog "  Ярлык: $($sc.Path)"; Write-HmReceipt $sc.Path }
                 'exists'  { $touched.Add('shortcut:' + $tg.Id) }
