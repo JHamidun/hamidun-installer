@@ -1,6 +1,6 @@
 'use strict';
 const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
-const { spawn, execFileSync, spawnSync } = require('child_process');
+const { spawn, execFile, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -935,10 +935,16 @@ function buildInstallEnv(rendererEnv) {
     Object.assign(out, NONINTERACTIVE_ENV);
     return out;
   }
-  // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
-  // но из renderer-env берём тот же allowlist (только HM_*, кроме HM_REMOTE_CACHE) —
-  // никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
-  const out = Object.assign({}, process.env);
+  // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем (скрипты
+  // ищут brew/node/python по PATH пользователя, прокси и локаль обязаны дойти), НО без запрещённых
+  // записей: BASH_ENV/ENV/SHELLOPTS+PS4/BASH_FUNC_*/DYLD_*/NODE_OPTIONS/PYTHON*/GIT_*/npm_config_*
+  // и чужих HM_* (installEnv.sanitizePosixEnv). Это именно окружение, а не первая строка скрипта:
+  // `unset BASH_ENV` внутри скрипта опоздал бы — bash выполняет BASH_ENV ДО неё. Опасность тут не
+  // в самих скриптах, а в том, что НЕпривилегированный bash собирает команду для admin_run и тексты
+  // HM_*_INSTALL_SH, после чего человек вводит пароль в настоящее системное окно (env -i в admin_run
+  // защищает только уже запущенный root-шелл). Из renderer-env берём тот же allowlist (только HM_*,
+  // кроме HM_REMOTE_CACHE) — никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
+  const out = installEnv.sanitizePosixEnv(process.env);
   Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
   Object.assign(out, NONINTERACTIVE_ENV);
   return out;
@@ -1196,10 +1202,10 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
   // подменяемых command-resolution переменных). rendererEnv уже без HM_REMOTE_CACHE.
   const childEnv = buildInstallEnv(rendererEnv);
-  // P1-A: POSIX buildInstallEnv наследует process.env целиком → HM_REMOTE_CACHE из
-  // окружения самого установщика мог бы протечь в компонент и запустить НЕпроверенный
-  // бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из sha-проверенного
-  // remoteCache (для оставшихся/будущих remote-компонентов).
+  // P1-A: POSIX buildInstallEnv наследует process.env (за вычетом запрещённого, чужие HM_* в том
+  // числе), и HM_REMOTE_CACHE из окружения самого установщика мог бы протечь в компонент и
+  // запустить НЕпроверенный бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из
+  // sha-проверенного remoteCache (для оставшихся/будущих remote-компонентов).
   delete childEnv.HM_REMOTE_CACHE;
   // Paths to assets baked into the installer at build time (offline sources).
   // Для remote-компонента (докачан в staging) HM_VENDOR указывает на sha-проверенный
@@ -1330,8 +1336,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     cmd = ps;
     args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
+    // -p (привилегированный режим): bash не читает $BASH_ENV/$ENV, не принимает экспортированные
+    // функции и игнорирует SHELLOPTS — второй рубеж на случай, если в окружение просочится то,
+    // чего нет в списке sanitizePosixEnv. Эффективный uid при этом не сбрасывается (он и так равен
+    // реальному), поведение скрипта не меняется.
     cmd = '/bin/bash';
-    args = [script];
+    args = ['-p', script];
   }
 
   // send/sendChannel уже объявлены выше (используются и для докачки, и для лога).
@@ -3857,33 +3867,35 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
 //
 // Установщик знает про себя больше, чем человек: где смонтирован образ, из какого файла
 // он смонтирован (hdiutil info) и что сам он запущен из карантинной копии. Значит может
-// починить сам: снять карантин с ОБРАЗА, отцепить ВСЕ его тома, открыть заново и
+// починить сам: снять карантин с ОБРАЗА, отцепить его тома, открыть заново и
 // запуститься из свежего — уже без карантина, а значит без транслокации.
+//
+// ИМЯ ФАЙЛА НИЧЕГО НЕ ДОКАЗЫВАЕТ. Файл «Hamidun-Setup-Mac*.dmg» мог прийти из сети или
+// быть подложен кем угодно под тем же пользователем; снять с него карантин и запустить
+// приложение — значит обойти Gatekeeper для чужого кода. Поэтому имя лишь номинирует
+// кандидата, а решает проверка подписи приложения внутри образа против подписи ЗАПУЩЕННОГО
+// установщика (src/mac-selfheal.js: preflight) — до снятия карантина и до отцепления
+// чего-либо — и вторая такая же проверка в помощнике перед `open`.
 //
 // Привилегии не нужны: на macOS установщик работает НЕ от администратора, а образ —
 // файл самого пользователя. Все вызовы идут execFile с массивом аргументов (без shell),
-// пути проверяются: только абсолютные, только под /Volumes или домашним каталогом,
-// только имя вида Hamidun-Setup-Mac*.dmg.
-function macFindOurDmg() {
+// пути проверяются: только абсолютные, только имя вида Hamidun-Setup-Mac*.dmg.
+const macSelfheal = require('./mac-selfheal');   // plist, личность подписи, проверка образа, текст помощника
+
+// Образы на диске в обычных местах, от свежего к старому (список, а не «самый свежий»: проверка
+// подписи решает, какой из них наш, и проверять приходится по очереди).
+function macFindOurDmgFiles() {
   const okDmg = (p) => {
     try {
       if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
-      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(path.basename(p))) return false;
+      if (!macSelfheal.DMG_NAME_RE.test(path.basename(p))) return false;
       return fs.statSync(p).isFile();
     } catch (e) { return false; }
   };
-  // 1) Самый точный источник: смонтированный образ знает свой файл.
-  try {
-    const out = execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8', timeout: 15000 });
-    for (const line of String(out).split(/\r?\n/)) {
-      const m = /^image-path\s*:\s*(.+)$/.exec(line.trim());
-      if (m && okDmg(m[1].trim())) return m[1].trim();
-    }
-  } catch (e) { /* образ мог быть уже отцеплен — идём дальше */ }
-  // 2) Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
-  //    Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
-  //    и плоский обход находил образ только если тот лежал ровно в корне. Глубину
-  //    ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
+  // Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
+  // Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
+  // и плоский обход находил образ только если тот лежал ровно в корне. Глубину
+  // ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
   const home = os.homedir();
   const SKIP = /^(Library|Applications|\.Trash|node_modules|\.git|Pictures|Music|Movies)$/i;
   const found = [];
@@ -3896,27 +3908,73 @@ function macFindOurDmg() {
       if (e.isDirectory()) {
         if (e.name.startsWith('.') || SKIP.test(e.name)) continue;
         walk(p, depth - 1);
-      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(e.name) && okDmg(p)) {
+      } else if (macSelfheal.DMG_NAME_RE.test(e.name) && okDmg(p)) {
         found.push(p);
       }
     }
   };
   for (const dir of ['Downloads', 'Desktop', 'Documents']) walk(path.join(home, dir), 2);
   if (!found.length) walk(home, 1);          // корень профиля — без углубления
-  if (!found.length) return '';
-  // Самый свежий: человек мог скачать заново, и чинить надо именно новый образ.
+  // Самые свежие первыми: человек мог скачать заново, и чинить надо именно новый образ.
   found.sort((a, b) => {
     try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch (e) { return 0; }
   });
-  return found[0];
+  return found;
 }
+
+// Асинхронный запуск системной утилиты для проверки образа: код 0 — успех, остальное — отказ; не бросает.
+// stdin закрыт сразу: утилита, задавшая вопрос (лицензия образа), получает EOF, а не висит вечно.
+function macSelfhealExec(file, args, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+        (err, stdout, stderr) => {
+          resolve({
+            code: err ? (typeof err.code === 'number' ? err.code : -1) : 0,
+            stdout: String(stdout || ''), stderr: String(stderr || '')
+          });
+        });
+      if (child && child.stdin) { child.stdin.on('error', () => {}); child.stdin.end(); }
+    } catch (e) { resolve({ code: -1, stdout: '', stderr: String((e && e.message) || e) }); }
+  });
+}
+
+// Проверка образа теперь не мгновенная (монтирование и codesign по всему бандлу — секунды), поэтому
+// параллельный второй вызов (перезагрузка окна сбрасывает защёлку в renderer, а проверка в main
+// продолжается) получает отказ, а не вторую проверку со своими монтированиями.
+let _macSelfhealBusy = false;
 
 ipcMain.handle('mac-selfheal', async () => {
   if (process.platform !== 'darwin') return { ok: false, error: 'not-darwin' };
-  const dmg = macFindOurDmg();
-  if (!dmg) return { ok: false, error: 'dmg-not-found' };
-  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» —
-  //    и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
+  if (_macSelfhealBusy) return { ok: false, error: 'busy' };
+  // 0) ПРОВЕРКА ДО ЛЮБЫХ ИЗМЕНЕНИЙ. Образ-кандидат принимается, только если приложение внутри него
+  //    подписано тем же издателем и с тем же bundle id, что и запущенный установщик (у ad-hoc
+  //    тестовой сборки — тот же bundle id + проходящая проверка подписи). До этой точки не снят
+  //    ни один карантин и не отцеплен ни один том; отказ — fail-closed, причина идёт в install.log
+  //    (из pre-проверки) и в окно (код ошибки).
+  let pre;
+  _macSelfhealBusy = true;
+  try {
+    pre = await macSelfheal.preflight({
+      exec: macSelfhealExec,
+      runningBundle: macSelfheal.bundlePathFromExecPath(process.execPath),
+      fileCandidates: macFindOurDmgFiles,
+      isFile: (p) => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
+      isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } },
+      mkPrivateDir: () => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-selfheal-')),
+      rmPrivateDir: (d) => { try { fs.rmdirSync(d); } catch (e) { /* ещё занят или уже убран */ } },
+      log: (l) => logToFile('selfheal', l)
+    });
+  } catch (e) {
+    logToFile('selfheal', 'Самолечение: проверка образа упала (' + String((e && e.message) || e) + ') — ничего не меняю (fail-closed).');
+    return { ok: false, error: 'preflight-failed' };
+  } finally {
+    _macSelfhealBusy = false;
+  }
+  if (!pre.ok) return pre.dmg ? { ok: false, error: pre.error, dmg: pre.dmg } : { ok: false, error: pre.error };
+  const dmg = pre.dmg;
+  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» — но только с
+  //    ПРОВЕРЕННОГО (pre.ok), и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
   //    «Готово», закрывали окно, и он получал ровно тот же заблокированный
   //    установщик. Отсутствие исключения — не доказательство.
   try {
@@ -3938,40 +3996,12 @@ ipcMain.handle('mac-selfheal', async () => {
   //    `hdiutil detach -force` выдёргивает backing store у собственного
   //    исполняемого файла, и установщик умирает посреди «починки» — окно просто
   //    исчезает, без свежего образа и без объяснений.
-  //    Помощник: ждёт нашего выхода → отцепляет ВСЕ тома Hamidun → открывает
-  //    образ → дожидается ПОЯВЛЕНИЯ тома → запускает приложение оттуда.
-  //    `open -n` обязателен: без него macOS просто активировала бы уже
-  //    запущенный экземпляр того же bundle id вместо запуска с нового тома.
-  const helper = [
-    'DMG="$1"; PID="$2"; ST="$3";',
-    // Ждём выхода установщика. Дождаться ОБЯЗАТЕЛЬНО: пока мы живы, наш замок
-    // единственного экземпляра не отпущен, и запущенный помощником свежий
-    // установщик просто закроется сам. Потолок щедрый — 120 с.
-    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
-    'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
-    // Монтируем САМИ и берём точку монтирования ИЗ ВЫВОДА. Раньше том искали
-    // перебором /Volumes/Hamidun*, полагаясь на то, что старые уже отцеплены.
-    // Но том держит Finder (человек как раз из окна образа и запускался), detach
-    // не проходит, macOS монтирует «Hamidun Setup 1» рядом — а перебор брал
-    // первый по алфавиту, то есть СТАРЫЙ, всё ещё карантинный том. Человек
-    // получал тот же экран блокировки и надпись «Готово». Свой mount-point
-    // такой ошибки не допускает: он заведомо от ЭТОГО монтирования.
-    'MP=$(/usr/bin/hdiutil attach -nobrowse "$DMG" 2>/dev/null | /usr/bin/sed -n "s|.*\\(/Volumes/.*\\)$|\\1|p" | /usr/bin/tail -1);',
-    'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
-    // open -n обязателен: без него macOS активировала бы уже запущенный
-    // экземпляр того же bundle id вместо запуска с нового тома.
-    'if ! /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf relaunch-failed > "$ST"; exit 1; fi;',
-    // `open` вернул 0 — это лишь «команда принята». Ждём, пока процесс РЕАЛЬНО
-    // появится: раньше в крошку писали «ok» по коду open, и самый вероятный тихий
-    // провал (свежий экземпляр закрылся сам из-за занятого замка) выглядел успехом.
-    'i=0; while [ $i -lt 20 ]; do',
-    '  if /usr/bin/pgrep -f "Hamidun Setup.app/Contents/MacOS" >/dev/null 2>&1; then',
-    '    printf ok > "$ST"; exit 0;',
-    '  fi;',
-    '  sleep 1; i=$((i+1));',
-    'done;',
-    'printf relaunch-not-seen > "$ST"; exit 1',
-  ].join(' ');
+  //    Помощник: ждёт нашего выхода → отцепляет ТОЛЬКО тома этого образа (точки монтирования
+  //    из `hdiutil info -plist`, их считает preflight; не маска /Volumes/Hamidun*) → монтирует
+  //    образ → ПРОВЕРЯЕТ приложение (подпись + издатель, тот же рубеж, что в preflight) →
+  //    запускает его оттуда. Текст помощника собирает src/mac-selfheal.js (buildHelperScript):
+  //    там же объяснено, почему `open -n` и точка монтирования берётся из вывода attach.
+  const helper = macSelfheal.buildHelperScript();
   // Хлебная крошка: помощник работает уже после нашего выхода, и без неё любой
   // его отказ был бы невидим — окно просто исчезало бы навсегда. Свежий
   // экземпляр читает этот файл при старте и показывает, что пошло не так.
@@ -3985,10 +4015,16 @@ ipcMain.handle('mac-selfheal', async () => {
     fs.writeFileSync(statusFile, JSON.stringify({ result: 'started', at: Date.now(), dmg }));
   } catch (e) { /* без крошки починка всё равно поедет */ }
   try {
-    // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
-    // в имени файла бывают пробелы и скобки («… (1).dmg»).
-    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile],
-      { detached: true, stdio: 'ignore' });
+    // Всё внешнее уходит аргументами, а не подстановкой в текст скрипта: в имени файла бывают
+    // пробелы и скобки («… (1).dmg»), а требование подписи и точки монтирования — данные.
+    // $5… — точки монтирования ЭТОГО образа, которые помощник отцепит после нашего выхода.
+    // Окружение чистим так же, как у скриптов компонентов (M-1): /bin/sh на macOS — bash в POSIX-режиме, он
+    // исполняет PS4 при SHELLOPTS=xtrace и принимает экспортированные функции BASH_FUNC_* из окружения
+    // (BASH_ENV/ENV неинтерактивный sh не читает), а помощник — последний рубеж проверки подписи перед `open`.
+    // `-p` — второй рубеж, независимый от списка запретов: в привилегированном режиме SHELLOPTS и функции игнорируются.
+    const child = spawn('/bin/sh',
+      ['-p', '-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile, pre.requirement].concat(pre.mountPoints),
+      { detached: true, stdio: 'ignore', env: installEnv.sanitizePosixEnv(process.env) });
     child.unref();
   } catch (e) {
     return { ok: false, error: 'helper-failed', dmg };
@@ -4027,6 +4063,10 @@ ipcMain.handle('mac-selfheal-status', () => {
     if (raw.charAt(0) === '{') {
       try { status = String((JSON.parse(raw) || {}).result || '').slice(0, 40); } catch (e) { /* оставим сырое */ }
     }
+    // Помощник работает после нашего выхода и в журнал не пишет — его исход заносим сюда, на следующем
+    // запуске, чтобы причина (в том числе «приложение в образе не прошло проверку») осталась в install.log.
+    const note = macSelfheal.statusMessageRu(status);
+    if (note) logToFile('selfheal', note);
     return { status };
   } catch (e) { return { status: '' }; }
 });

@@ -58,6 +58,34 @@ const HM_NOTES = {
 // Файл больше этого не разбираем: разбор идёт токен за токеном, а шаг обязан уложиться в
 // несколько секунд. Тот же потолок, что у Windows-версии.
 const HM_MAX_CHARS = 262144;
+// Потолок в БАЙТАХ до чтения файла в память (находка M-10/N2): символ UTF-8 занимает до 4 байт, так что
+// файл в HM_MAX_CHARS символов не больше 4×HM_MAX_CHARS байт. Всё крупнее не читаем вообще — прежний код
+// сначала загружал файл целиком (NSData) и только потом сверял длину текста.
+const HM_MAX_BYTES = 4 * HM_MAX_CHARS;
+
+// Годится ли путь для чтения: ТОЛЬКО обычный файл разумного размера. info — { type, size } из атрибутов
+// файла или null, если атрибуты не прочитались. Канал FIFO (NSFileTypeUnknown), устройство, сокет, папка:
+// NSData.dataWithContentsOfFile на канале без писателя не возвращается НИКОГДА, и шаг VS Code встал бы
+// навсегда. Чистая функция — тест гоняет её в Node. Тексты — без слов «не найден/не удалось/ошибка» (см. шапку).
+function readVerdict(info) {
+  if (!info || typeof info.type !== 'string') return { ok: false, error: 'тип файла не определён' };
+  if (info.type !== 'NSFileTypeRegular') return { ok: false, error: 'это не обычный файл (папка, канал, устройство или ссылка)' };
+  const size = Number(info.size);
+  if (!(size >= 0)) return { ok: false, error: 'размер файла не определён' };
+  if (size > HM_MAX_BYTES) return { ok: false, error: 'файл слишком большой (' + Math.floor(size / 1024) + ' КБ)' };
+  return { ok: true };
+}
+
+// Является ли путь символической ссылкой — с отказом «закрытым» (находка M-10/N2). Прежний isSymlink()
+// при недоступных атрибутах отвечал «нет», то есть ссылку, чьи атрибуты не прочитались, считал обычным
+// файлом. type — NSFileType из атрибутов или null, если атрибуты не прочитались; listed — стоит ли имя в
+// списке родительского каталога. Нет атрибутов и нет имени в каталоге — пути просто нет (не ссылка:
+// на свежем Mac ~/Library/Application Support/Code/User ещё не создан). Нет атрибутов, но имя в каталоге
+// есть — путь существует, а проверить его не вышло: считаем ссылкой, файл не трогаем.
+function symlinkVerdict(type, listed) {
+  if (typeof type === 'string') return type === 'NSFileTypeSymbolicLink';
+  return !!listed;
+}
 
 // Токены JSONC — тот же набор, что в PowerShell-версии ($script:HmJsoncRx): пробел любой,
 // включая неразрывный и BOM; в строке — сырой TAB и «\» с любым символом после (путь
@@ -315,7 +343,8 @@ function ruPackInstalled(io, extDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Ввод-вывод osascript (ObjC). В Node не исполняется.
+// Ввод-вывод osascript (ObjC). В Node не исполняется — кроме теста, который подставляет вместо ObjC/$ заглушки
+// (test/run-tests.js, «vscode-settings.js (macOS): чтение и проверка ссылок …»).
 // ---------------------------------------------------------------------------
 function macIo() {
   ObjC.import('Foundation');
@@ -324,11 +353,23 @@ function macIo() {
     exists: (p) => !!fm.fileExistsAtPath(p),
     isSymlink: (p) => {
       const attrs = fm.attributesOfItemAtPathError(p, null);
-      if (!attrs || attrs.isNil()) return false;
-      return ObjC.unwrap(attrs.objectForKey($.NSFileType)) === 'NSFileTypeSymbolicLink';
+      if (attrs && !attrs.isNil()) return symlinkVerdict(ObjC.unwrap(attrs.objectForKey($.NSFileType)), true);
+      // Атрибуты не прочитались: пути нет вовсе или он есть, но недоступен. Различаем по списку родителя.
+      const cut = p.lastIndexOf('/');
+      const parent = cut > 0 ? p.slice(0, cut) : '/';
+      const listing = fm.contentsOfDirectoryAtPathError(parent, null);
+      const names = (!listing || listing.isNil()) ? [] : ObjC.deepUnwrap(listing);
+      return symlinkVerdict(null, names.indexOf(p.slice(cut + 1)) !== -1);
     },
     readText: (p) => {
       if (!fm.fileExistsAtPath(p)) return null;
+      // Тип и размер — ДО чтения: канал/устройство не читаем вовсе, гигабайтный файл не грузим в память.
+      const attrs = fm.attributesOfItemAtPathError(p, null);
+      const verdict = readVerdict((!attrs || attrs.isNil()) ? null : {
+        type: ObjC.unwrap(attrs.objectForKey($.NSFileType)),
+        size: ObjC.unwrap(attrs.objectForKey($.NSFileSize)),
+      });
+      if (!verdict.ok) return verdict;
       const data = $.NSData.dataWithContentsOfFile(p);
       if (!data || data.isNil()) return { ok: false, error: 'файл не читается' };
       const s = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
@@ -483,5 +524,5 @@ function run(argv) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { HM_SETTINGS, HM_MAX_CHARS, jsoncShape, addKeys, keyCovered, decodeKey, jsonLiteral, jsonString, planFile, ruPackInstalled, linkOnPath, applyFile, hmMain, run };
+  module.exports = { HM_SETTINGS, HM_MAX_CHARS, HM_MAX_BYTES, jsoncShape, addKeys, keyCovered, decodeKey, jsonLiteral, jsonString, planFile, ruPackInstalled, linkOnPath, applyFile, hmMain, run, readVerdict, symlinkVerdict, macIo };
 }

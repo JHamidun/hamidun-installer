@@ -26,7 +26,9 @@
 //   launchagent — точный label + точный plist-путь (macOS)
 //   appbundle   — точный .app-бандл; удаляется ТОЛЬКО при подтверждённой
 //                 идентичности (CFBundleIdentifier из ДОВЕРЕННОГО vendor + пин TeamID)
-//   killproc    — best-effort остановка НАШЕГО процесса перед удалением
+//   killproc    — best-effort остановка НАШЕГО процесса перед удалением (Windows: image
+//                 точного имени .exe; macOS: pattern — ERE для `pkill -f`, привязанный к
+//                 исполняемому файлу установленного бандла, а не подстрока имени)
 // (типа uvtool больше НЕТ — P0-2: деинсталлятор не запускает user-writable
 //  uv.exe; инвентарь uv-тула удаляется напрямую file/dirtree-целями)
 //
@@ -69,6 +71,10 @@ const BRIDGE_RC_LINE = '[ -f "$HOME/Library/Application Support/HamidunBridge/cl
 // вне зависимости от того, на каком хосте выполняется тест/сборка.
 function winLocalAppData(home) { return path.win32.join(home, 'AppData', 'Local'); }
 function winRoamingAppData(home) { return path.win32.join(home, 'AppData', 'Roaming'); }
+
+// Экранирование строки для POSIX ERE: `pkill -f` принимает расширенное регулярное выражение, а
+// путь к бандлу — это `.`, пробелы, а у людей с необычным именем учётки и `+`, `(`, `[`.
+function escapeEre(s) { return String(s).replace(/[\\^$.|?*+()[\]{}]/g, '\\$&'); }
 
 // Целевая папка курса: значение из ВШИТОГО config.json (course.targetDirDefault),
 // НЕ из renderer-env. Зеркало логики course.ps1/course.sh (expand %USERPROFILE%,
@@ -249,7 +255,14 @@ function uninstallTargets(id, ctx) {
           plist: P.join(home, 'Library', 'LaunchAgents', 'com.hamidun.claude-mascot.plist')
         });
         if (ctx.mascotMac && ctx.mascotMac.appName && /\.app$/i.test(ctx.mascotMac.appName)) {
-          targets.push({ type: 'killproc', pattern: 'claude-mascot' });
+          // Шаблон для `pkill -f` — по полной командной строке. Прежнее голое «claude-mascot» убивало
+          // ЛЮБОЙ процесс того же пользователя, где эта подстрока просто встречается (редактор,
+          // открытый на ~/.claude-mascot, tail по журналу, терминал в папке проекта). Теперь
+          // это исполняемый файл ИМЕННО установленного бандла: в форме `/Contents/MacOS/…`, как
+          // mascot.sh при установке, и привязанный к началу командной строки (argv[0] — путь к
+          // бинарю; редактор, получивший этот путь аргументом, под шаблон не попадает).
+          const mascotBundle = P.join(home, 'Applications', ctx.mascotMac.appName);
+          targets.push({ type: 'killproc', pattern: '^' + escapeEre(mascotBundle + '/Contents/MacOS/') });
           targets.push({
             type: 'appbundle',
             path: P.join(home, 'Applications', ctx.mascotMac.appName),

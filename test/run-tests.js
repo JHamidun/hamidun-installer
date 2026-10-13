@@ -1767,7 +1767,8 @@ ok('scripts/macos/*.sh: НЕТ строковой формы admin_run "..." и 
       const calls = s.split('\n').filter((l) => !/^\s*#/.test(l) && /osascript/.test(l)).map((l) => l.trim());
       assert.deepStrictEqual(calls, [
         '/usr/bin/osascript -e "do shell script \\"$c\\" with administrator privileges"',
-        'hm_jxa() { /usr/bin/osascript -l JavaScript "$@"; }',
+        // u9/M-10: тот же вызов, но под сторожем времени (hm_run_with_timeout), чтобы зависший JXA не держал шаг вечно
+        'hm_jxa() { hm_run_with_timeout "${HM_JXA_TIMEOUT:-20}" /usr/bin/osascript -l JavaScript "$@"; }',
       ], '_lib.sh: osascript только в admin_run и в hm_jxa (без подстановок в текст скрипта): ' + JSON.stringify(calls));
     }
   });
@@ -1812,12 +1813,13 @@ ok('_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0
   assert(iCp > 0 && iChk > iCp && iInst > iChk, 'pkg: staging→pkgutil(staged)→installer(staged); нет окна между verify и install');
   assert(/1\\\. Developer ID Installer: \.\* \\\(\$2\\\)\[\[:space:\]\]\*\$/.test(s), 'pkg leaf: Team ID ($2) заякорен в конце CN');
   assert(/Status: signed by a developer certificate issued by Apple/.test(s), 'pkg: требуется Developer ID статус');
-  // app: cp в staging -> codesign(staged) -> spctl(staged) -> cp в /Applications.
+  // app: cp в staging -> codesign(staged) -> spctl(staged) -> переименование staged в /Applications
+  // (u9/M-3: вместо второго cp -R поверх назначения; подробности и поведение — раздел «macOS hardening (u9)»).
   const aCp = s.indexOf('/bin/cp -R "$1" "$d/app.app"');
   const aCs = s.indexOf('/usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \\"$2\\"" "$d/app.app"');
   const aSp = s.indexOf('/usr/sbin/spctl --assess --type execute "$d/app.app"');
-  const aFin = s.indexOf('/bin/cp -R "$d/app.app" "/Applications/$3"');
-  assert(aCp > 0 && aCs > aCp && aSp > aCs && aFin > aSp, 'app: staging→codesign(staged)→spctl(staged)→cp в /Applications');
+  const aFin = s.indexOf('/bin/mv -n "$d/app.app" "$dest"');
+  assert(aCp > 0 && aCs > aCp && aSp > aCs && aFin > aSp, 'app: staging→codesign(staged)→spctl(staged)→mv staged в /Applications');
   assert(/\[ -x \/usr\/sbin\/pkgutil \] \|\| exit 1/.test(s) && /\[ -x \/usr\/sbin\/installer \] \|\| exit 1/.test(s), 'pkg: абсолютные инструменты, нет → fail-closed');
   assert(/\[ -x \/usr\/bin\/codesign \] \|\| exit 1/.test(s) && /\[ -x \/usr\/sbin\/spctl \] \|\| exit 1/.test(s), 'app: абсолютные инструменты, нет → fail-closed');
   // vscode: cp zip в staging -> ditto распаковка в staging -> codesign(staged) -> spctl(staged) -> cp .app -> xattr.
@@ -1828,10 +1830,11 @@ ok('_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0
   const vFind = s.indexOf('app="$(/usr/bin/find "$d/unz"');
   const vCs = s.indexOf('/usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \\"$2\\"" "$app"');
   const vSp = s.indexOf('/usr/sbin/spctl --assess --type execute "$app"');
-  const vFin = s.indexOf('/bin/cp -R "$app" "$3"');
-  const vXattr = s.indexOf('/usr/bin/xattr -dr com.apple.quarantine "$3"');
-  assert(vCp > 0 && vDitto > vCp && vFind > vDitto && vCs > vFind && vSp > vCs && vFin > vSp && vXattr > vFin,
-    'vscode: staging(zip)→ditto(staged)→find(staged)→codesign(staged)→spctl(staged)→cp→xattr — verify и install на STAGED, окна нет');
+  // u9/M-3: карантин снимается на STAGED копии ДО переименования (по конечному пути больше ни xattr, ни chown).
+  const vXattr = s.indexOf('/usr/bin/xattr -dr com.apple.quarantine "$app"');
+  const vFin = s.indexOf('/bin/mv -n "$app" "$3"');
+  assert(vCp > 0 && vDitto > vCp && vFind > vDitto && vCs > vFind && vSp > vCs && vXattr > vSp && vFin > vXattr,
+    'vscode: staging(zip)→ditto(staged)→find(staged)→codesign(staged)→spctl(staged)→xattr(staged)→mv — verify и install на STAGED, окна нет');
   assert(/\[ -x \/usr\/bin\/ditto \] \|\| exit 1/.test(s) && /\[ -x \/usr\/bin\/xattr \] \|\| exit 1/.test(s), 'vscode: абсолютные ditto/xattr, нет → fail-closed');
 });
 
@@ -1841,14 +1844,15 @@ ok('_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0
 ok('_lib.sh: все три root sh -c скрипта фиксируют PATH=/usr/bin:/bin:/usr/sbin:/sbin ПЕРВОЙ строкой (до mktemp/head/rm/grep/find) — PATH-hijack закрыт', () => {
   const s = MACLIB_SH();
   ['HM_PKG_INSTALL_SH', 'HM_APP_INSTALL_SH', 'HM_VSCODE_INSTALL_SH'].forEach((v) => {
-    // Первая строка тела (сразу после открывающей кавычки) — фиксированный PATH, затем set -e.
-    const re = new RegExp(v + "='PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH\\nset -e");
-    assert(re.test(s), v + ": ПЕРВАЯ строка — PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH");
+    // Тело начинается с HOME=/var/root (u9/M-8: присваивание без внешних команд), сразу за ним — фиксированный
+    // PATH, затем set -e. Между ними и до PATH нет ни одной команды, которая бы резолвилась через PATH.
+    const re = new RegExp(v + "='HOME=/var/root; export HOME\\nPATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH\\nset -e");
+    assert(re.test(s), v + ": первые строки — HOME=/var/root; export HOME, затем PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH");
     // Извлекаем тело скрипта (нет одинарных кавычек внутри) и проверяем: PATH раньше любой bare-команды.
     const start = s.indexOf(v + "='") + (v + "='").length;
     const script = s.slice(start, s.indexOf("'", start));
     const iPath = script.indexOf('PATH=/usr/bin:/bin:/usr/sbin:/sbin');
-    assert(iPath === 0, v + ': фиксированный PATH — в самом начале тела (offset 0)');
+    assert(iPath === 'HOME=/var/root; export HOME\n'.length, v + ': фиксированный PATH — сразу за присваиванием HOME (offset ' + iPath + ')');
     ['mktemp', 'trap', 'grep', 'head', 'find', 'cp'].forEach((cmd) => {
       const i = script.indexOf(cmd);
       if (i >= 0) assert(iPath < i, v + ': PATH стоит РАНЬШЕ первого использования `' + cmd + '`');
@@ -2029,7 +2033,9 @@ if (bashAvailable()) {
       const stage = u(path.join(work, 'stage')); fs.mkdirSync(stage);
       const apps = u(path.join(work, 'Apps')); fs.mkdirSync(apps);
       const log = u(path.join(work, 'log'));
-      const srcApp = u(path.join(work, 'src.app')); fs.mkdirSync(srcApp); fs.writeFileSync(srcApp + '/Info', 'x');
+      // Contents/ нужен настоящему бандлу: после переименования root-скрипт проверяет, что на месте назначения
+      // именно бандл (u9/M-3), а не каталог, в который переименование угодило по гонке.
+      const srcApp = u(path.join(work, 'src.app')); fs.mkdirSync(srcApp + '/Contents', { recursive: true }); fs.writeFileSync(srcApp + '/Contents/Info.plist', 'x');
       const fcs = u(path.join(work, 'codesign'));
       const fsp = u(path.join(work, 'spctl'));
       fs.writeFileSync(fcs, [
@@ -2122,7 +2128,9 @@ if (bashAvailable()) {
         .split('/usr/bin/codesign').join(fcs)
         .split('/usr/sbin/spctl').join(fsp)
         .split('/usr/bin/xattr').join(fxa)
-        .split('/var/root/hm_vsc.XXXXXX').join(stage + '/hm_vsc.XXXXXX');
+        .split('/var/root/hm_vsc.XXXXXX').join(stage + '/hm_vsc.XXXXXX')
+        // u9/M-3: скрипт принимает назначение только ровно под /Applications/ — корень подменяем песочницей
+        .split('/Applications/').join(apps + '/');
       // /usr/bin/find оставляем реальным (есть в git-bash) — проверяем реальный поиск .app.
       const run = (expect, notar, pin) => {
         try { fs.rmSync(dest, { recursive: true, force: true }); fs.rmSync(log, { force: true }); } catch (e) { /* */ }
@@ -6238,16 +6246,17 @@ ok('macOS: курс распаковывается ditto — unzip не пони
   }
 });
 
-// Текст sh-помощника самолечения — СОБРАННЫЙ ровно как в проде: eval массива
-// строк `const helper = [ … ].join(' ')` из main.js. JS-комментарии между
-// элементами исчезают при eval, поэтому «hdiutil detach» в комментарии текст
-// не засоряет, а результат байт в байт равен тому, что запускает spawn.
-function cutMacSelfhealHelper(m, from) {
-  const hi = m.indexOf('const helper = [', from || 0);
-  assert(hi !== -1, 'текст помощника (const helper = [) найден');
-  const hj = m.indexOf("].join(' ')", hi);
-  assert(hj > hi, 'конец текста помощника найден');
-  return new Function('return ' + m.slice(m.indexOf('[', hi), hj + "].join(' ')".length))();
+// Текст sh-помощника самолечения — тот самый, что запускает spawn: его строит чистая функция
+// buildHelperScript() из src/mac-selfheal.js (раньше массив строк жил в main.js и вырезался eval'ом;
+// u9 вынес его в модуль, чтобы текст тестировался без Electron). JS-комментарии между элементами в
+// текст не попадают.
+// Если модуля нет (проверка этих тестов на старом коде), файл всё равно загружается, а тесты краснеют по одному.
+const macSelfhealMod = (() => {
+  try { return require(path.join(ROOT, 'src', 'mac-selfheal.js')); }
+  catch (e) { return new Proxy({}, { get() { throw new Error('нет src/mac-selfheal.js'); } }); }
+})();
+function cutMacSelfhealHelper() {
+  return macSelfhealMod.buildHelperScript();
 }
 
 ok('macOS: установщик чинит карантин САМ — кнопка, а не команда в Терминал', () => {
@@ -6279,29 +6288,39 @@ ok('macOS: установщик чинит карантин САМ — кноп�
     'хвост операции выполняет ОТЦЕПЛЁННЫЙ помощник, переживающий наш выход');
   assert(!/execFileSync\([^)]*hdiutil[^)]*detach/.test(hc),
     'сам процесс НЕ отцепляет том, с которого работает');
+  // u9/M-6: ничего не снимается и не отцепляется, пока образ не проверен — `xattr -dr` стоит ПОСЛЕ preflight.
+  assertOrder(hc, 'macSelfheal.preflight(', "'/usr/bin/xattr'", 'карантин снимается только после проверки образа');
+  assert(/if \(!pre\.ok\) return /.test(hc), 'непрошедший проверку образ — отказ ДО снятия карантина');
 
-  // Поведение помощника — на тексте, СОБРАННОМ ровно как в проде (eval массива:
-  // JS-комментарии исчезают сами, «токен в комментарии» стеречь нечего не может).
+  // Поведение помощника — на тексте, который строит buildHelperScript() и запускает spawn.
   // Порядок — ТОЛЬКО через assertOrder: голый indexOf(a) < indexOf(b) при
   // исчезнувшем «a» даёт -1 < x и молча зеленеет — ровно так этот тест пережил
   // удаление ожидания выхода установщика (kill -0), то есть ядра правки.
-  const helper = cutMacSelfhealHelper(m, i);
+  const helper = cutMacSelfhealHelper();
   assertOrder(helper, 'kill -0 "$PID"', 'hdiutil detach',
     'помощник ЖДЁТ выхода установщика ДО отцепления тома (иначе наш замок единственного экземпляра закрывает свежий установщик)');
   assertOrder(helper, 'hdiutil detach', 'hdiutil attach',
     'старые тома отцепляются ДО монтирования образа');
   assertOrder(helper, 'hdiutil attach', 'open -n -a',
     'запуск идёт после монтирования — с заведомо свежего тома');
+  assertOrder(helper, 'hdiutil attach', 'codesign --verify',
+    'приложение проверяется на ТОЛЬКО ЧТО смонтированном томе (u9/M-6)');
+  assertOrder(helper, 'codesign --verify', 'open -n -a',
+    'проверка подписи — ДО open (u9/M-6)');
   assert(/open -n -a "\$MP\//.test(helper),
     'open -n и точка монтирования ИЗ ВЫВОДА attach: без -n macOS активировала бы старый экземпляр, а перебор /Volumes брал бы старый том');
+  assert(!/\/Volumes\/Hamidun\*/.test(helper),
+    'помощник больше не отцепляет тома по маске /Volumes/Hamidun* (u9/M-6)');
 
-  const fi = m.indexOf('function macFindOurDmg');
-  const fh = m.slice(fi, fi + 1800);
-  assert(/hdiutil['"\],\s]+.*info/.test(fh), 'путь к образу берётся у самого смонтированного образа');
-  const nameRe = fh.match(/\^Hamidun-Setup-Mac\[([^\]]*)\]\*\\\.dmg\$/);
-  assert(nameRe, 'имя образа проверяется по шаблону');
+  // Поиск образа на диске: имя по шаблону, обычные места (список от свежего к старому). Подключённые
+  // образы берёт preflight из `hdiutil info -plist` (чистый модуль, проверяется в разделе macOS hardening).
+  const fi = m.indexOf('function macFindOurDmgFiles');
+  assert(fi !== -1, 'поиск образов на диске на месте');
+  const fh = m.slice(fi, fi + 2000);
+  const nameRe = macSelfhealMod.DMG_NAME_RE.source.match(/^\^Hamidun-Setup-Mac\[[^\]]*\]\*\\\.dmg\$$/);
+  assert(nameRe && /DMG_NAME_RE\.test/.test(fh), 'имя образа проверяется по общему шаблону');
   {
-    const re = new RegExp(nameRe[0], 'i');
+    const re = macSelfhealMod.DMG_NAME_RE;
     assert(re.test('Hamidun-Setup-Mac.dmg'), 'обычное имя принимается');
     // Браузер дописывает « (1)» при повторном скачивании — именно тот, кто перекачал
     // образ после блокировки, и жмёт «Исправить автоматически».
@@ -6310,6 +6329,8 @@ ok('macOS: установщик чинит карантин САМ — кноп�
   }
   assert(/Downloads['",\s]+.*Desktop/.test(fh),
     'ищем не только в «Загрузках» — живой случай: образ лежал на Рабочем столе');
+  assert(/\/usr\/bin\/hdiutil['"],\s*\[\s*'info',\s*'-plist'\s*\]|\['info', '-plist'\]/.test(fs.readFileSync(path.join(ROOT, 'src', 'mac-selfheal.js'), 'utf8')),
+    'путь к подключённому образу берётся у самого образа: hdiutil info -plist');
 
   assert(/macSelfHeal: \(\) => ipcRenderer\.invoke\('mac-selfheal'\)/.test(p), 'проброшено в renderer');
   assert(/id="mac-selfheal"/.test(a) && /id="mac-selfheal-banner"/.test(a),
@@ -6336,7 +6357,7 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
   })();
   if (!bash) SKIP('bash недоступен — поведенческий прогон sh-помощника невозможен');
 
-  const helper = cutMacSelfhealHelper(EG_MAIN(), 0);
+  const helper = cutMacSelfhealHelper();
   assert(helper.includes('/usr/bin/hdiutil') && helper.includes('/Volumes/'),
     'ожидаемые якоря в тексте помощника (иначе механическая подстановка стала бы враньём)');
 
@@ -6345,9 +6366,12 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
     const posix = (p) => String(p).replace(/\\/g, '/').replace(/^([A-Za-z]):\//, (q, d) => '/' + d.toLowerCase() + '/');
     const SB = posix(sb);
     fs.mkdirSync(path.join(sb, 'bin'), { recursive: true });
-    // Два «уже смонтированных» тома — помощник обязан отцепить ОБА до attach.
+    // Два «уже смонтированных» тома ЭТОГО образа — помощник обязан отцепить ОБА до attach (их точки
+    // монтирования приходят аргументами $5…: u9/M-6 — не маской /Volumes/Hamidun*). Третий том —
+    // посторонний, с похожим началом имени: его трогать нельзя.
     fs.mkdirSync(path.join(sb, 'Volumes', 'HamidunOld'), { recursive: true });
     fs.mkdirSync(path.join(sb, 'Volumes', 'Hamidun Setup', 'Hamidun Setup.app'), { recursive: true });
+    fs.mkdirSync(path.join(sb, 'Volumes', 'HamidunForeign'), { recursive: true });
     fs.writeFileSync(path.join(sb, 'fake.dmg'), 'x');
 
     // Стабы: пишут вызов в лог; attach отвечает как настоящий hdiutil —
@@ -6365,7 +6389,11 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
     // иначе тест проверял бы не то, что делает прод.
     fs.writeFileSync(path.join(sb, 'bin', 'pgrep'),
       '#!/bin/sh\n[ -f "$HM_LAUNCHED" ] && exit 0\nexit 1\n');
-    for (const f of ['hdiutil', 'open', 'pgrep']) {
+    // codesign (u9/M-6): помощник проверяет приложение на ТОЛЬКО ЧТО смонтированном томе. Стаб пишет
+    // вызов в общий лог и отвечает «подпись совпала» (0) — отказ проверен отдельным тестом ниже.
+    fs.writeFileSync(path.join(sb, 'bin', 'codesign'),
+      '#!/bin/sh\necho "codesign $*" >> "$HM_LOG"\nexit 0\n');
+    for (const f of ['hdiutil', 'open', 'pgrep', 'codesign']) {
       try { fs.chmodSync(path.join(sb, 'bin', f), 0o755); } catch (e) { /* win */ }
     }
 
@@ -6380,7 +6408,9 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
       // «Установщик»: живёт ~0.9 c, перед смертью оставляет маркер в общем логе.
       '( sleep 0.9; echo "INSTALLER-EXITED" >> "$HM_LOG" ) &\n' +
       'INST=$!\n' +
-      'sh "' + SB + '/helper.sh" "' + SB + '/fake.dmg" "$INST" "' + SB + '/status.txt"\n' +
+      // $4 — требование подписи, $5… — точки монтирования ЭТОГО образа (в проде их считает preflight)
+      'sh "' + SB + '/helper.sh" "' + SB + '/fake.dmg" "$INST" "' + SB + '/status.txt" \'identifier "com.hamidun.setup"\' ' +
+      '"' + SB + '/Volumes/HamidunOld" "' + SB + '/Volumes/Hamidun Setup"\n' +
       'echo "HELPER_RC=$?"\n');
     const r = spawnSync(bash, [path.join(sb, 'run.sh')], { encoding: 'utf8', timeout: 120000 });
     const out = (r.stdout || '') + (r.stderr || '');
@@ -6390,13 +6420,19 @@ ok('macOS selfheal (поведение, sh): помощник ЖДЁТ выхо�
     const iExit = lines.indexOf('INSTALLER-EXITED');
     const detaches = lines.map((l, n) => (/^hdiutil detach /.test(l) ? n : -1)).filter((n) => n >= 0);
     const iAttach = lines.findIndex((l) => /^hdiutil attach /.test(l));
+    const iSign = lines.findIndex((l) => /^codesign /.test(l));
     const iOpen = lines.findIndex((l) => /^open /.test(l));
     assert(iExit !== -1, 'маркер выхода установщика есть в логе: ' + JSON.stringify(lines));
-    assert(detaches.length >= 2, 'отцеплены ОБА старых тома: ' + JSON.stringify(lines));
+    assert(detaches.length === 2, 'отцеплены ровно ДВА тома этого образа: ' + JSON.stringify(lines));
+    assert(!lines.some((l) => /HamidunForeign/.test(l)),
+      'посторонний том с похожим началом имени НЕ тронут (u9/M-6: не маска /Volumes/Hamidun*): ' + JSON.stringify(lines));
     assert(detaches[0] > iExit,
       'ЯДРО ПРАВКИ: detach только ПОСЛЕ выхода установщика (иначе замок единственного экземпляра закрывает свежий): ' + JSON.stringify(lines));
     assert(iAttach > detaches[detaches.length - 1], 'attach после отцепления всех томов: ' + JSON.stringify(lines));
-    assert(iOpen > iAttach, 'open после attach: ' + JSON.stringify(lines));
+    assert(iSign > iAttach && iOpen > iSign, 'после attach — проверка подписи, и только потом open: ' + JSON.stringify(lines));
+    assert(/--verify --deep --strict -R =identifier "com\.hamidun\.setup" /.test(lines[iSign]) &&
+      lines[iSign].includes('/Volumes/Hamidun Setup/Hamidun Setup.app'),
+      'codesign проверяет приложение на точке монтирования ИЗ ВЫВОДА attach по требованию из $4: ' + lines[iSign]);
     assert(/-n -a/.test(lines[iOpen]) && lines[iOpen].includes('/Volumes/Hamidun Setup/Hamidun Setup.app'),
       'open -n -a с приложением на точке монтирования ИЗ ВЫВОДА attach: ' + lines[iOpen]);
     assert.strictEqual(fs.readFileSync(path.join(sb, 'status.txt'), 'utf8').trim(), 'ok',
@@ -20192,8 +20228,12 @@ ok('config.json в репозитории без сборочных маркер
       SCRIPT = ext.status === 0 ? (ext.stdout || '') : '';
     }
     assert(/mktemp -d \/var\/root\/hm_vsc/.test(SCRIPT), 'HM_VSCODE_INSTALL_SH извлечён');
-    assertOrder(SCRIPT, '/usr/bin/xattr -dr com.apple.quarantine "$3"', '/usr/sbin/chown -R -h "$4":staff "$3"',
-      'владелец меняется ПОСЛЕ проверки подписи и копирования');
+    // u9/M-3: и карантин, и владелец — на STAGED копии (root-private каталог), ДО переименования на место;
+    // по конечному пути /Applications не выполняется ни xattr, ни chown.
+    assertOrder(SCRIPT, '/usr/bin/xattr -dr com.apple.quarantine "$app"', '/usr/sbin/chown -R -h "$own":staff "$app"',
+      'владелец меняется ПОСЛЕ проверки подписи и снятия карантина');
+    assertOrder(SCRIPT, '/usr/sbin/chown -R -h "$own":staff "$app"', '/bin/mv -n "$app" "$3"',
+      'владелец отдаётся staged-копии ДО переименования на место');
     const work = mkTmp('hm-vsc-own-');
     try {
       const stage = work + '/stage'; fs.mkdirSync(stage);
@@ -20214,7 +20254,8 @@ ok('config.json в репозитории без сборочных маркер
         .split('/usr/bin/xattr').join(work + '/xattr')
         .split('/usr/bin/id').join(work + '/id')
         .split('/usr/sbin/chown').join(work + '/chown')
-        .split('/var/root/hm_vsc.XXXXXX').join(stage + '/hm_vsc.XXXXXX');
+        .split('/var/root/hm_vsc.XXXXXX').join(stage + '/hm_vsc.XXXXXX')
+        .split('/Applications/').join(apps + '/');   // u9/M-3: назначение принимается только под /Applications/
       const run = (owner, env) => {
         try { fs.rmSync(dest, { recursive: true, force: true }); fs.rmSync(log, { force: true }); } catch (e) { /* */ }
         const r = spawnSync('bash', ['-c', T, 'hm_vscode_install', zip, 'UBF8T346G9', dest, owner],
@@ -20224,7 +20265,10 @@ ok('config.json в репозитории без сборочных маркер
       };
       let o = run('alice');
       assert.strictEqual(o.r.status, 0, 'установка прошла: ' + (o.r.stderr || ''));
-      assert(o.lg.indexOf('chown -R -h alice:staff ' + dest) !== -1, 'приложение отдано человеку: ' + o.lg);
+      // владелец передаётся STAGED копии (внутри root-private staging), а не конечному пути: бандл переезжает
+      // на место переименованием уже с этим владельцем
+      assert(o.lg.indexOf('chown -R -h alice:staff ' + stage + '/hm_vsc.') !== -1, 'приложение отдано человеку (staged-копия): ' + o.lg);
+      assert(o.lg.indexOf('chown -R -h alice:staff ' + dest) === -1, 'по конечному пути chown не вызывается: ' + o.lg);
       ['', 'root', '-R', 'bad name', 'ghost'].forEach((owner) => {
         o = run(owner);
         assert.strictEqual(o.r.status, 0, 'без годного владельца установка всё равно успешна (' + JSON.stringify(owner) + ')');
@@ -27957,4 +28001,1668 @@ ok('config.json в репозитории без сборочных маркер
     // контроль: прежний текст (HERMES_HOME без проверки) эту проверку не проходит
     assert(/e\.HERMES_HOME\s*\|\|/.test(FIXTURE('nomad-key-config-path-before-u6-fix.txt')), 'контроль: прежний образец доверял переменной');
   });
+})();
+
+// ===========================================================================
+// macOS hardening (u9, security-fix wave 1). Закрывает находки ревью M-1, M-3, M-4, M-5, M-6, M-8 и
+// мелочи M-10 (N2). Ни одно из этого нельзя прогнать на настоящем Mac из этой среды: root-скрипты
+// (HM_*_INSTALL_SH) — это ТЕКСТ в переменных _lib.sh, поэтому они извлекаются и исполняются настоящим
+// bash с заглушками codesign/spctl/ditto/xattr/chown и песочницей вместо /var/root и /Applications
+// (приём соседних тестов раздела «macOS install-security»). Каждому защитному условию — негативный
+// контроль: вариант прежнего поведения, который тест обязан отвергнуть.
+// ===========================================================================
+(function macHardeningU9() {
+  console.log('\n== macOS hardening (u9): окружение скриптов, root-скрипты, touch-up\'ы, pkill, самолечение ==');
+  const { spawnSync } = require('child_process');
+  const U = (p) => String(p).split('\\').join('/');
+  const mkTmp = (pfx) => U(fs.mkdtempSync(path.join(os.tmpdir(), pfx)));
+  const dropDir = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const exe = (file, text) => { fs.writeFileSync(file, text); fs.chmodSync(file, 0o755); };
+  const bashProbe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+  const HAVE_BASH = !(bashProbe.error || bashProbe.status !== 0);
+  const needBash = () => { if (!HAVE_BASH) SKIP('нет bash'); };
+  const MAIN = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const MACDIR = path.join(ROOT, 'scripts', 'macos');
+  const readMac = (f) => fs.readFileSync(path.join(MACDIR, f), 'utf8');
+  const LIB = U(path.join(MACDIR, '_lib.sh'));
+  const mp = (p) => String(p).split('\\').join('/').replace(/^([A-Za-z]):\//, (m, d) => '/' + d.toLowerCase() + '/');   // C:/x -> /c/x для bash
+  const APPJS = () => fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  // Комментарии JS (// и /* */) в сторону: сторож не должен краснеть/зеленеть от упоминания в пояснении.
+  const jsCode = (t) => String(t).replace(/(^|[^:])\/\/[^\n]*/g, '$1').replace(/\/\*[\s\S]*?\*\//g, '');
+  // async-тесты: в полном прогоне файла идут через okAsync/trackAsync (их ждёт ИТОГ); раннер одного раздела
+  // (run_section.js) их не знает — тогда они честно помечены пропущенными, а не молча исчезают.
+  const asyncOk = (typeof okAsync === 'function' && typeof trackAsync === 'function')
+    ? (name, fn) => trackAsync(okAsync(name, fn))
+    : (name) => console.log('  ⏭  ' + name + '  -> async-тест: исполняется только полным прогоном файла');
+  // Переменная _lib.sh как текст (тем же способом, что соседние тесты: source и printf).
+  const libVar = (name) => {
+    for (let attempt = 0; attempt < 3; attempt++) {   // пустой вывод = сбой запуска под нагрузкой
+      const r = spawnSync('bash', ['-c', '. "$1"; printf "%s" "$' + name + '"', 'x', LIB], { encoding: 'utf8', timeout: 30000 });
+      if (r.status === 0 && r.stdout) return r.stdout;
+    }
+    return '';
+  };
+
+  // -------------------------------------------------------------------------
+  // M-1: окружение дочерних скриптов компонентов на macOS
+  // -------------------------------------------------------------------------
+  const IE = require(path.join(ROOT, 'src', 'install-env.js'));
+  // buildInstallEnv из НАСТОЯЩЕГО main.js (Electron-точку входа не поднять): текст функции и набора
+  // NONINTERACTIVE_ENV вырезается по балансу скобок и исполняется с подставным process.env, IS_WIN=false.
+  const loadBuildInstallEnv = (procEnv) => {
+    const m = MAIN();
+    const i = m.indexOf('function buildInstallEnv(rendererEnv) {');
+    assert(i !== -1, 'buildInstallEnv найдена в main.js');
+    let depth = 0; let end = -1;
+    for (let k = m.indexOf('{', i); k < m.length; k++) {
+      if (m[k] === '{') depth++;
+      else if (m[k] === '}') { depth--; if (depth === 0) { end = k + 1; break; } }
+    }
+    assert(end > i, 'тело buildInstallEnv вырезано по балансу скобок');
+    const ni = m.indexOf('const NONINTERACTIVE_ENV = {');
+    assert(ni !== -1, 'NONINTERACTIVE_ENV найден');
+    const nEnd = m.indexOf('\n};', ni) + 3;
+    const factory = new Function('installEnv', 'process', 'path', 'remoteFetch', 'IS_WIN', 'WIN_SYS_ENV_KEYS',
+      m.slice(ni, nEnd) + '\n' + m.slice(i, end) + '\nreturn buildInstallEnv;');
+    return factory(IE, { env: procEnv }, path, {}, false, []);
+  };
+
+  // Что враждебный код того же пользователя может положить в окружение установщика
+  // (launchctl setenv, LaunchAgent с EnvironmentVariables, ~/.zshenv при запуске из терминала).
+  const HOSTILE = {
+    BASH_ENV: '/tmp/evil-bash-env', ENV: '/tmp/evil-env', SHELLOPTS: 'xtrace', BASHOPTS: 'extdebug',
+    PS4: '$(touch /tmp/pwn)', PROMPT_COMMAND: 'touch /tmp/pwn', CDPATH: '/tmp', GLOBIGNORE: '*', IFS: 'x',
+    'BASH_FUNC_mktemp%%': '() { touch /tmp/pwn; }', BASH_XTRACEFD: '9',
+    DYLD_INSERT_LIBRARIES: '/tmp/evil.dylib', DYLD_LIBRARY_PATH: '/tmp', LD_PRELOAD: '/tmp/evil.so',
+    NODE_OPTIONS: '--require /tmp/evil.js', NODE_PATH: '/tmp',
+    PYTHONSTARTUP: '/tmp/evil.py', PYTHONPATH: '/tmp', PYTHONHOME: '/tmp', PYTHONINSPECT: '1', PYTHONUSERBASE: '/tmp',
+    RUBYOPT: '-r/tmp/evil', RUBYLIB: '/tmp', PERL5OPT: '-Mevil', PERL5LIB: '/tmp',
+    GIT_EXEC_PATH: '/tmp/git', GIT_CONFIG_GLOBAL: '/tmp/gc', GIT_CONFIG_COUNT: '1', GIT_SSH_COMMAND: 'evil', GIT_TEMPLATE_DIR: '/tmp/t',
+    npm_config_registry: 'http://evil.invalid', NPM_CONFIG_PREFIX: '/tmp',
+    OPENSSL_CONF: '/tmp/evil.cnf', POSIXLY_CORRECT: '1',
+    // xcode-select(1)/xcrun(1): за шимами /usr/bin/git, python3, clang лежит `$DEVELOPER_DIR/usr/bin/<tool>`
+    DEVELOPER_DIR: '/tmp/evil-developer', SDKROOT: '/tmp/evil-sdk', TOOLCHAINS: 'com.evil.toolchain',
+    JAVA_TOOL_OPTIONS: '-javaagent:/tmp/evil.jar', _JAVA_OPTIONS: '-javaagent:/tmp/evil.jar', JDK_JAVA_OPTIONS: '-javaagent:/tmp/evil.jar',
+    HM_NOMAD_CLOUD_BASEURL: 'http://evil.invalid', HM_NOMAD_CLOUD_KEY: 'k', HM_BRIDGE_TOKEN: 'tok', HM_BRIDGE_ENDPOINT: 'http://evil.invalid',
+    HM_COURSE_TARGET: '/tmp/x', HM_VENDOR: '/tmp/evil-vendor', HM_REMOTE_CACHE: '/tmp/rc', HM_FRESH_SHELL_TIMEOUT: '1',
+    EVILFN: '() { touch /tmp/pwn; }'
+  };
+  // Что обязано дойти до скриптов: tool discovery по PATH пользователя, прокси, локаль, трасты TLS.
+  const BENIGN = {
+    PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', HOME: '/Users/alice', USER: 'alice', LANG: 'ru_RU.UTF-8',
+    LC_ALL: 'ru_RU.UTF-8', TMPDIR: '/var/folders/x/T/', SHELL: '/bin/zsh', TERM: 'xterm-256color',
+    https_proxy: 'http://proxy.invalid:3128', HTTPS_PROXY: 'http://proxy.invalid:3128', no_proxy: 'localhost',
+    SSH_AUTH_SOCK: '/tmp/ssh-agent', __CF_USER_TEXT_ENCODING: '0x1F5:0x0:0x0', HOMEBREW_PREFIX: '/opt/homebrew',
+    NODE_EXTRA_CA_CERTS: '/etc/corp-ca.pem', SSL_CERT_FILE: '/etc/ssl/cert.pem', PIP_INDEX_URL: 'https://mirror.invalid/simple'
+  };
+
+  ok('u9/M-1: sanitizePosixEnv убирает BASH_ENV/ENV/SHELLOPTS/PS4/BASH_FUNC_*/DYLD_*/NODE_OPTIONS/PYTHON*/GIT_*/npm_config_*/чужие HM_*, оставляет PATH, прокси, локаль и TLS-траст', () => {
+    assert.strictEqual(typeof IE.sanitizePosixEnv, 'function', 'sanitizePosixEnv экспортируется (чистая функция, не вшитая в main.js)');
+    const input = Object.assign({}, BENIGN, HOSTILE);
+    const frozen = JSON.stringify(input);
+    const out = IE.sanitizePosixEnv(input);
+    assert.strictEqual(JSON.stringify(input), frozen, 'исходный объект не мутируется');
+    assert.notStrictEqual(out, input, 'возвращается НОВЫЙ объект');
+    Object.keys(HOSTILE).forEach((k) => assert(!(k in out), 'должна быть удалена переменная ' + k));
+    Object.keys(BENIGN).forEach((k) => assert.strictEqual(out[k], BENIGN[k], 'должна уцелеть переменная ' + k));
+    assert.deepStrictEqual(IE.sanitizePosixEnv(undefined), {}, 'пустой вход -> пустой объект');
+    assert.deepStrictEqual(IE.sanitizePosixEnv(null), {}, 'null -> пустой объект');
+  });
+
+  ok('u9/M-1: sanitizePosixEnv — имена без учёта регистра, семейства режутся по префиксу, похожие имена целы', () => {
+    const out = IE.sanitizePosixEnv({
+      bash_env: '/x', Dyld_Insert_Libraries: '/x', hm_vendor: '/x', Hm_Selected: 'git', ld_preload: '/x', Node_Options: '-r x',
+      Developer_Dir: '/x', sdkroot: '/x', Toolchains: 'x',
+      BASH_FUNC_foo_bar_baz: 'x', PYTHONDONTWRITEBYTECODE: '1', GIT_ASKPASS: 'evil', NPM_CONFIG_YES: 'false',
+      // не относятся к запрещённым семействам: имя лишь НАЧИНАЕТСЯ похоже
+      HOMEBREW_NO_AUTO_UPDATE: '1', LDFLAGS: '-L/x', NODEBREW_ROOT: '/x', BASHISM_NOT_A_THING: '1', GITHUB_TOKEN: 'ghp_x'
+    });
+    ['bash_env', 'Dyld_Insert_Libraries', 'hm_vendor', 'Hm_Selected', 'ld_preload', 'Node_Options', 'BASH_FUNC_foo_bar_baz',
+      'Developer_Dir', 'sdkroot', 'Toolchains',
+      'PYTHONDONTWRITEBYTECODE', 'GIT_ASKPASS', 'NPM_CONFIG_YES'].forEach((k) => assert(!(k in out), k + ' должна быть удалена'));
+    assert.deepStrictEqual(Object.keys(out).sort(),
+      ['BASHISM_NOT_A_THING', 'GITHUB_TOKEN', 'HOMEBREW_NO_AUTO_UPDATE', 'LDFLAGS', 'NODEBREW_ROOT'],
+      'остальное цело: список режет семейства по префиксу с подчёркиванием (BASH_, LD_, GIT_ …), а не по голой букве');
+  });
+
+  ok('u9/M-1: sanitizePosixEnv — значение в форме функции bash под любым именем отбрасывается', () => {
+    const out = IE.sanitizePosixEnv({ ANYNAME: '() { touch /tmp/pwn; }', SPACED: '  () {  :; }', FINE: 'a () { b }', PAREN: '(subshell)' });
+    assert(!('ANYNAME' in out) && !('SPACED' in out), 'функция под произвольным именем отброшена');
+    assert.strictEqual(out.FINE, 'a () { b }', 'скобки не в начале значения — это обычная строка');
+    assert.strictEqual(out.PAREN, '(subshell)');
+  });
+
+  ok('u9/M-1: buildInstallEnv (POSIX, настоящий main.js) не пускает опасные переменные установщика в скрипты компонентов', () => {
+    const build = loadBuildInstallEnv(Object.assign({}, BENIGN, HOSTILE));
+    const env = build({ HM_SELECTED: 'git,node', HM_COURSE_TARGET: '/renderer/evil', BASH_ENV: '/renderer/evil', HM_REPAIR: 'config' });
+    Object.keys(HOSTILE).forEach((k) => assert(!(k in env), 'до скриптов дошла ' + k + ' = ' + env[k]));
+    Object.keys(BENIGN).forEach((k) => assert.strictEqual(env[k], BENIGN[k], 'пользовательская ' + k + ' обязана дойти (поиск инструментов, прокси, локаль)'));
+    // renderer: только allowlist установщика, и ровно как раньше
+    assert.strictEqual(env.HM_SELECTED, 'git,node', 'ключ установщика от renderer проходит');
+    assert.strictEqual(env.HM_REPAIR, 'config');
+    assert(!('HM_COURSE_TARGET' in env) && !('BASH_ENV' in env), 'не-allowlist ключи renderer отброшены');
+    // то, что main задаёт сам поверх, остаётся — и после чистки
+    assert.strictEqual(env.GIT_TERMINAL_PROMPT, '0', 'NONINTERACTIVE_ENV применён ПОСЛЕ чистки (GIT_* режутся, эти — наши)');
+    assert.strictEqual(env.GIT_ASKPASS, 'echo');
+    assert.strictEqual(env.npm_config_yes, 'true');
+    assert.strictEqual(env.CI, '1');
+  });
+
+  ok('u9/M-1: main.js — POSIX-ветка через sanitizePosixEnv, затем renderer-allowlist, затем NONINTERACTIVE_ENV; bash запускается с -p', () => {
+    const m = MAIN();
+    const i = m.indexOf('function buildInstallEnv(rendererEnv) {');
+    const body = m.slice(i, m.indexOf('\n}\n', i));
+    const posix = body.slice(body.lastIndexOf('\n  }\n') + 1);
+    assert(/installEnv\.sanitizePosixEnv\(process\.env\)/.test(posix), 'POSIX-ветка чистит process.env deny-списком');
+    assert(!/Object\.assign\(\{\}, process\.env\)/.test(jsCode(body)), 'копии process.env целиком больше нет');
+    assertOrder(posix, 'installEnv.sanitizePosixEnv(process.env)', 'installEnv.filterRendererEnv(rendererEnv)', 'чистка — раньше renderer-allowlist');
+    assertOrder(posix, 'installEnv.filterRendererEnv(rendererEnv)', 'Object.assign(out, NONINTERACTIVE_ENV)', 'NONINTERACTIVE_ENV — последним (GIT_ASKPASS/npm_config_yes наши)');
+    // dry-run больше не едет через унаследованный HM_DRY_RUN — main возвращает его сам, авторитетно
+    assert(/if \(isDryRun\) childEnv\.HM_DRY_RUN = '1';/.test(m), 'HM_DRY_RUN возвращается main\'ом после чистки');
+    // второй рубеж: сам bash не читает BASH_ENV/ENV/SHELLOPTS и не принимает экспортированные функции
+    assert(/cmd = '\/bin\/bash';\s*\n\s*args = \['-p', script\];/.test(m), 'скрипт запускается как /bin/bash -p <script>');
+  });
+
+  ok('u9/M-1: поведение — BASH_ENV из окружения установщика не исполняется скриптом компонента (контроль: сырое окружение его исполняет)', () => {
+    needBash();
+    const work = mkTmp('hm-m1-');
+    try {
+      const marker = work + '/PWNED';
+      const evil = work + '/evil-bash-env';
+      fs.writeFileSync(evil, ': > "' + marker + '"\n');
+      const script = work + '/component.sh';
+      fs.writeFileSync(script, '#!/bin/bash\necho component-ran\n');
+      const base = Object.assign({}, process.env, { BASH_ENV: evil, ENV: evil });
+      const run = (env, args) => {
+        try { fs.rmSync(marker, { force: true }); } catch (e) { /* */ }
+        const r = spawnSync('bash', (args || []).concat([script]), { encoding: 'utf8', timeout: 30000, env });
+        assert.strictEqual(r.status, 0, 'скрипт отработал: ' + (r.stderr || '') + (r.error || ''));
+        assert(/component-ran/.test(r.stdout || ''), 'позитивный контроль: тело скрипта выполнилось');
+        return fs.existsSync(marker);
+      };
+      // контроль метода: сырое окружение + обычный bash — вектор настоящий (иначе тест ничего не доказывает)
+      assert.strictEqual(run(base), true, 'КОНТРОЛЬ: с сырым окружением BASH_ENV исполняется (вектор реален)');
+      // окружение из настоящего buildInstallEnv (прежний код копировал process.env целиком)
+      const childEnv = loadBuildInstallEnv(base)({});
+      assert(!('BASH_ENV' in childEnv) && !('ENV' in childEnv), 'в окружении ребёнка нет BASH_ENV/ENV');
+      assert.strictEqual(run(childEnv), false, 'с окружением из buildInstallEnv BASH_ENV не исполняется');
+      // второй рубеж, независимый от списка: привилегированный режим bash игнорирует BASH_ENV/ENV
+      assert.strictEqual(run(base, ['-p']), false, 'bash -p игнорирует BASH_ENV даже при сыром окружении');
+    } finally { dropDir(work); }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-3 + M-8: root-скрипты установки приложений (HM_APP_INSTALL_SH, HM_VSCODE_INSTALL_SH, HM_PKG_INSTALL_SH)
+  // -------------------------------------------------------------------------
+  // Прежние тексты (до u9), дословно: негативный контроль. Тест обязан увидеть на них ровно ту
+  // уязвимость, которую закрывает новая редакция, иначе он ничего не доказывает.
+  const OLD_APP_SH = [
+    'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH', 'set -e',
+    '[ -x /usr/bin/codesign ] || exit 1', '[ -x /usr/sbin/spctl ] || exit 1',
+    'd="$(mktemp -d /var/root/hm_app.XXXXXX)" || exit 1', 'trap "rm -rf \\"$d\\"" EXIT',
+    '/bin/cp -R "$1" "$d/app.app" || exit 1',
+    '/usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \\"$2\\"" "$d/app.app" >/dev/null 2>&1 || exit 1',
+    '/usr/sbin/spctl --assess --type execute "$d/app.app" >/dev/null 2>&1 || exit 1',
+    '/bin/cp -R "$d/app.app" "/Applications/$3" || exit 1'
+  ].join('\n');
+  const OLD_VSCODE_SH = [
+    'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH', 'set -e',
+    '[ -x /usr/bin/ditto ] || exit 1', '[ -x /usr/bin/find ] || exit 1', '[ -x /usr/bin/codesign ] || exit 1',
+    '[ -x /usr/sbin/spctl ] || exit 1', '[ -x /usr/bin/xattr ] || exit 1',
+    'd="$(mktemp -d /var/root/hm_vsc.XXXXXX)" || exit 1', 'trap "rm -rf \\"$d\\"" EXIT',
+    '/bin/cp "$1" "$d/vscode.zip" || exit 1', '/usr/bin/ditto -x -k "$d/vscode.zip" "$d/unz" || exit 1',
+    'app="$(/usr/bin/find "$d/unz" -maxdepth 2 -type d -name "*.app" | head -n1)"', '[ -n "$app" ] || exit 1',
+    '/usr/bin/codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \\"$2\\"" "$app" >/dev/null 2>&1 || exit 1',
+    '/usr/sbin/spctl --assess --type execute "$app" >/dev/null 2>&1 || exit 1',
+    '/bin/cp -R "$app" "$3" || exit 1', '/usr/bin/xattr -dr com.apple.quarantine "$3" || exit 1',
+    'case "$4" in ""|root|-*|*[!A-Za-z0-9._-]*) exit 0 ;; esac', '/usr/bin/id -u "$4" >/dev/null 2>&1 || exit 0',
+    '/usr/sbin/chown -R -h "$4":staff "$3" || :'
+  ].join('\n');
+
+  // Пакетный прогон shell-текстов (root-скрипты и помощник самолечения). Каждый случай — свой песочный каталог со
+  // своим состоянием (подложенные ссылки, каталоги, файлы); ВСЕ случаи исполняет ОДИН bash: запуск bash из Node на
+  // Windows стоит секунды, а случаев десятки. Скрипт случая исполняется в подоболочке через `.` (source): `exit` внутри
+  // него завершает только её, ловушка EXIT срабатывает на выходе подоболочки, `set -e` действует. Аргументы лежат в
+  // файле как `set -- '…'` с одинарными кавычками — так до скрипта доезжают и перевод строки, и кавычки (командная
+  // строка Windows обрезала бы аргумент на переводе строки, а именно такие имена надо подавать).
+  const shq = (s) => "'" + String(s).split("'").join("'\\''") + "'";
+  const BATCH_DRIVER = [
+    '#!/bin/bash',
+    'for cdir in "$@"; do',
+    '  (',
+    '    export HOME=/attacker/home HM_LOG="$cdir/log"',
+    '    : > "$HM_LOG"',
+    '    . "$cdir/env.sh"',
+    '    . "$cdir/args.sh"',
+    '    . "$cdir/script.sh"',
+    '  ) > "$cdir/out" 2>&1',
+    '  echo $? > "$cdir/rc"',
+    'done', ''
+  ].join('\n');
+  // tools: имя -> тело заглушки (sh). Заглушки общие, пишут в $HM_LOG конкретного случая.
+  // patch(текст, случай) -> текст для песочницы; make(c) -> { script, args | argsRaw, env?, prelude? } (там же — подкладка состояния).
+  const shBatch = (pfx, tools, patch) => {
+    const work = mkTmp(pfx);
+    const stubDir = work + '/stubs'; fs.mkdirSync(stubDir);
+    const T = {};
+    Object.keys(tools).forEach((n) => { exe(stubDir + '/' + n, '#!/bin/sh\n' + tools[n] + '\n'); T[n] = stubDir + '/' + n; });
+    const cases = [];
+    const batch = {
+      work, cases, T, stubDir,
+      add(make) {
+        const dir = work + '/c' + cases.length;
+        const c = { dir, work: dir, stage: dir + '/stage', apps: dir + '/Apps', victim: dir + '/victim', src: dir + '/src.app',
+          zip: dir + '/vscode.zip', pkg: dir + '/p.pkg', elsewhere: dir + '/Elsewhere' };
+        [c.stage, c.apps, c.victim, c.src + '/Contents', c.elsewhere].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+        fs.writeFileSync(c.src + '/Contents/Info.plist', 'plist');
+        fs.writeFileSync(c.zip, 'ZIP'); fs.writeFileSync(c.pkg, 'PKG');
+        const sp = make(c);
+        fs.writeFileSync(dir + '/script.sh', (patch ? patch(sp.script, c, T) : sp.script) + '\n');
+        fs.writeFileSync(dir + '/args.sh', (sp.argsRaw || ('set -- ' + sp.args.map(shq).join(' '))) + '\n');
+        fs.writeFileSync(dir + '/env.sh', Object.entries(Object.assign({ KNOWN: 'alice', TEAM: 'HX7739G8FX' }, sp.env || {}))
+          .map(([k, v]) => 'export ' + k + '=' + shq(v)).join('\n') + '\n' + (sp.prelude || '') + '\n');
+        cases.push(c);
+        return c;
+      },
+      run(timeoutMs) {
+        fs.writeFileSync(work + '/driver.sh', BATCH_DRIVER);
+        const r = spawnSync('bash', [mp(work + '/driver.sh')].concat(cases.map((c) => mp(c.dir))), { encoding: 'utf8', timeout: timeoutMs || 280000 });
+        assert(!r.error && r.status === 0, 'пакетный bash отработал: ' + String(r.error || '') + (r.stderr || ''));
+        cases.forEach((c) => {
+          c.rc = Number(fs.readFileSync(c.dir + '/rc', 'utf8').trim());
+          c.out = fs.readFileSync(c.dir + '/out', 'utf8');
+          c.logText = () => { try { return fs.readFileSync(c.dir + '/log', 'utf8'); } catch (e) { return ''; } };
+        });
+      },
+      done() {
+        // ссылки снимаем сами, до рекурсивного удаления песочницы
+        cases.forEach((c) => {
+          [c.apps, c.victim].forEach((d) => {
+            let names = []; try { names = fs.readdirSync(d); } catch (e) { /* */ }
+            names.forEach((n) => { const p = d + '/' + n; try { if (fs.lstatSync(p).isSymbolicLink()) { try { fs.unlinkSync(p); } catch (e) { fs.rmdirSync(p); } } } catch (e) { /* */ } });
+          });
+        });
+        dropDir(work);
+      },
+    };
+    return batch;
+  };
+  // Заглушки root-инструментов: пишут вызов (и HOME, который видят) в $HM_LOG случая.
+  const ROOT_TOOLS = {
+    codesign: 'for a in "$@"; do last="$a"; done\necho "codesign HOME=$HOME target=$last" >> "$HM_LOG"\n[ "$CS" = bad ] && exit 1\nexit 0',
+    spctl: 'for a in "$@"; do last="$a"; done\necho "spctl HOME=$HOME target=$last" >> "$HM_LOG"\n[ "$NOTAR" = no ] && exit 1\nexit 0',
+    xattr: 'for a in "$@"; do last="$a"; done\necho "xattr HOME=$HOME target=$last" >> "$HM_LOG"\nexit 0',
+    chown: 'echo "chown $*" >> "$HM_LOG"\n[ "$CHOWN_FAIL" = 1 ] && exit 1\nexit 0',
+    id: '[ "$2" = "$KNOWN" ] && { echo 501; exit 0; }\nexit 1',
+    ditto: 'for a in "$@"; do dst="$a"; done\nmkdir -p "$dst/Visual Studio Code.app/Contents" || exit 1\necho x > "$dst/Visual Studio Code.app/Contents/Info.plist"\nexit 0',
+    pkgutil: 'echo "pkgutil HOME=$HOME" >> "$HM_LOG"\nprintf "  Status: signed by a developer certificate issued by Apple\\n    1. Developer ID Installer: X (%s)\\n" "$TEAM"\nexit 0',
+    installer: 'echo "installer HOME=$HOME" >> "$HM_LOG"\nexit 0',
+  };
+  // Текст root-скрипта -> исполняемый в песочнице: только подмена путей инструментов и корней.
+  const rootPatch = (S, c, T) => S
+    .split('/usr/bin/codesign').join(T.codesign).split('/usr/sbin/spctl').join(T.spctl)
+    .split('/usr/bin/xattr').join(T.xattr).split('/usr/sbin/chown').join(T.chown)
+    .split('/usr/bin/id').join(T.id).split('/usr/bin/ditto').join(T.ditto)
+    .split('/usr/sbin/pkgutil').join(T.pkgutil).split('/usr/sbin/installer').join(T.installer)
+    .split('/var/root/hm_app.XXXXXX').join(c.stage + '/hm_app.XXXXXX')
+    .split('/var/root/hm_vsc.XXXXXX').join(c.stage + '/hm_vsc.XXXXXX')
+    .split('/var/root/hm_pkg.XXXXXX').join(c.stage + '/hm_pkg.XXXXXX')
+    .split('/Applications/').join(c.apps + '/');
+  const rootBatch = (pfx) => shBatch(pfx, ROOT_TOOLS, rootPatch);
+  const tree = (d) => { try { return fs.readdirSync(d).sort(); } catch (e) { return null; } };
+  const reEsc = (x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Тексты root-скриптов из _lib.sh: каждый извлекается один раз (запуск bash дорог)
+  const libTextCache = {};
+  const libText = (name) => libTextCache[name] || (libTextCache[name] = libVar(name));
+
+  const GOOD_APP_NAMES = ['Cursor.app', 'Handy.app', 'My Tool (beta).app', 'a-b_c+d.1.app', 'Upper.APP'];
+  const BAD_NAMES = [
+    '../x.app', 'a/b.app', 'x.app/..', '..', '.', '', '.app', '.hidden.app', 'x', 'x.apps', 'x.app ', 'x.app\n', 'x\n.app',
+    'a"b.app', 'a\'b.app', 'a$b.app', 'a`b.app', 'a;b.app', 'a\\b.app', 'a\tb.app', 'a*b.app', 'a?b.app', 'a|b.app',
+    'a&b.app', 'a<b.app', 'a!b.app', 'a~b.app', 'a\u0001b.app', '/abs.app', 'a\u007fb.app'
+  ];
+
+  ok('u9/M-3: HM_APP_INSTALL_SH принимает только одно имя *.app из безопасных символов и проверяет его до любых действий', () => {
+    needBash();
+    const S = libText('HM_APP_INSTALL_SH');
+    assert(/mktemp -d \/var\/root\/hm_app/.test(S), 'HM_APP_INSTALL_SH извлечён');
+    const b = rootBatch('hm-m3n-');
+    try {
+      // ПОЗИТИВНЫЙ КОНТРОЛЬ самой подачи аргументов: имя с переводом строки доезжает до скрипта целиком
+      // (иначе «отвергнуто» означало бы «пришла пустая строка», а не «сработала проверка имени»).
+      const probe = b.add(() => ({ script: 'printf "%s" "$1" | wc -c', args: ['x.app\n'] }));
+      const good = GOOD_APP_NAMES.map((name) => ({ name, c: b.add((c) => ({ script: S, args: [c.src, 'VDXQ22DGB9', name] })) }));
+      const bad = BAD_NAMES.map((name) => ({ name, c: b.add((c) => ({ script: S, args: [c.src, 'VDXQ22DGB9', name] })) }));
+      // НЕГАТИВНЫЕ КОНТРОЛИ на прежнем тексте
+      const oldUp = b.add((c) => ({ script: OLD_APP_SH, args: [c.src, 'VDXQ22DGB9', '../x.app'] }));
+      const oldEmpty = b.add((c) => ({ script: OLD_APP_SH, args: [c.src, 'VDXQ22DGB9', ''] }));
+      b.run();
+      assert.strictEqual(probe.out.trim(), '6', 'harness сохраняет перевод строки в аргументе: ' + JSON.stringify(probe.out));
+      good.forEach(({ name, c }) => {
+        assert.strictEqual(c.rc, 0, 'нормальное имя ' + JSON.stringify(name) + ' принято: ' + c.out);
+        assert.deepStrictEqual(tree(c.apps), [name], 'ровно один бандл ' + JSON.stringify(name) + ', вложенной копии нет');
+        assert(fs.existsSync(c.apps + '/' + name + '/Contents/Info.plist'), 'на месте целый бандл (переименован готовый staged, не cp внутрь)');
+        assert.deepStrictEqual(tree(c.stage), [], 'staging убран');
+      });
+      bad.forEach(({ name, c }) => {
+        assert(c.rc !== 0, 'имя ' + JSON.stringify(name) + ' отвергнуто (код ' + c.rc + ')');
+        assert.deepStrictEqual(tree(c.apps), [], 'в /Applications ничего не появилось для ' + JSON.stringify(name));
+        assert(!fs.existsSync(c.work + '/x.app') && !fs.existsSync(c.work + '/abs.app'), 'за пределы /Applications ничего не вышло для ' + JSON.stringify(name));
+        assert.deepStrictEqual(tree(c.stage), [], 'проверка имени — до staging: каталог не создавался (' + JSON.stringify(name) + ')');
+        assert(!/codesign|spctl/.test(c.logText()), 'ни один инструмент не вызван для ' + JSON.stringify(name) + ': ' + c.logText());
+      });
+      assert(oldUp.rc === 0 && fs.existsSync(oldUp.work + '/x.app'), 'КОНТРОЛЬ: прежний скрипт пишет за пределы /Applications (код ' + oldUp.rc + ')');
+      assert(tree(oldEmpty.apps).includes('app.app'), 'КОНТРОЛЬ: прежний скрипт с пустым именем ставит бандл под чужим именем app.app: ' + JSON.stringify(tree(oldEmpty.apps)));
+    } finally { b.done(); }
+  });
+
+  ok('u9/M-3: HM_APP_INSTALL_SH отвергает подложенную ссылку, каталог или файл на месте назначения', () => {
+    needBash();
+    const S = libText('HM_APP_INSTALL_SH');
+    const b = rootBatch('hm-m3p-');
+    try {
+      const args = (c) => [c.src, 'VDXQ22DGB9', 'Cursor.app'];
+      // 1) ссылка на каталог ЖЕРТВЫ — главный сценарий: ждали окна пароля и подменили назначение
+      const plant = (c) => { fs.writeFileSync(c.victim + '/keep.txt', 'k'); fs.symlinkSync(c.victim, c.apps + '/Cursor.app', 'junction'); };
+      const link = b.add((c) => { plant(c); return { script: S, args: args(c) }; });
+      const linkOld = b.add((c) => { plant(c); return { script: OLD_APP_SH, args: args(c) }; });
+      // 2) висячая ссылка
+      const dangling = b.add((c) => { fs.symlinkSync(c.work + '/nonexistent-target', c.apps + '/Cursor.app', 'junction'); return { script: S, args: args(c) }; });
+      // 3) каталог, уже стоящий на месте (в т.ч. настоящий старый бандл): решение — НЕ заменять, отказать.
+      //    Прежний cp -R клал новый бандл ВНУТРЬ старого (…/Cursor.app/app.app), портя установленное.
+      const oldBundle = (c) => { fs.mkdirSync(c.apps + '/Cursor.app/Contents', { recursive: true }); fs.writeFileSync(c.apps + '/Cursor.app/Contents/Info.plist', 'OLD'); };
+      const dir = b.add((c) => { oldBundle(c); return { script: S, args: args(c) }; });
+      const dirOld = b.add((c) => { oldBundle(c); return { script: OLD_APP_SH, args: args(c) }; });
+      // 4) обычный файл на месте
+      const file = b.add((c) => { fs.writeFileSync(c.apps + '/Cursor.app', 'FILE'); return { script: S, args: args(c) }; });
+      // 5) проверка подписи не пропускается
+      const badSig = b.add((c) => ({ script: S, args: [c.src, 'WRONGTEAM99', 'Cursor.app'], env: { CS: 'bad' } }));
+      const noNotar = b.add((c) => ({ script: S, args: args(c), env: { NOTAR: 'no' } }));
+      b.run();
+      assert(link.rc !== 0, 'ссылка на каталог отвергнута (код ' + link.rc + ')');
+      assert.deepStrictEqual(tree(link.victim), ['keep.txt'], 'в каталог жертвы НИЧЕГО не записано сквозь ссылку');
+      assert(fs.lstatSync(link.apps + '/Cursor.app').isSymbolicLink(), 'ссылка не тронута');
+      assert(!/codesign|spctl/.test(link.logText()), 'root-работа не начиналась: ' + link.logText());
+      assert(tree(linkOld.victim).length > 1, 'КОНТРОЛЬ: прежний скрипт пишет в каталог жертвы сквозь ссылку: ' + JSON.stringify(tree(linkOld.victim)));
+      assert(dangling.rc !== 0, 'висячая ссылка отвергнута (код ' + dangling.rc + ')');
+      assert(!fs.existsSync(dangling.work + '/nonexistent-target'), 'через висячую ссылку ничего не создано');
+      assert(dir.rc !== 0, 'существующий каталог отвергнут (код ' + dir.rc + ')');
+      assert.deepStrictEqual(tree(dir.apps + '/Cursor.app'), ['Contents'], 'старый бандл не тронут, вложенной копии нет');
+      assert.strictEqual(fs.readFileSync(dir.apps + '/Cursor.app/Contents/Info.plist', 'utf8'), 'OLD', 'содержимое старого бандла цело');
+      assert(fs.existsSync(dirOld.apps + '/Cursor.app/app.app'), 'КОНТРОЛЬ: прежний скрипт вкладывает копию внутрь существующего бандла');
+      assert(file.rc !== 0 && fs.readFileSync(file.apps + '/Cursor.app', 'utf8') === 'FILE', 'файл на месте назначения отвергнут и не тронут');
+      assert(badSig.rc !== 0 && tree(badSig.apps).length === 0, 'неподтверждённая подпись — fail-closed, назначение пусто');
+      assert(noNotar.rc !== 0 && tree(noNotar.apps).length === 0, 'нет нотаризации — fail-closed, назначение пусто');
+    } finally { b.done(); }
+  });
+
+  ok('u9/M-3: HM_APP_INSTALL_SH ставит проверенную staged-копию одним переименованием (mv -n)', () => {
+    needBash();
+    const S = libText('HM_APP_INSTALL_SH');
+    const code = codeOnly(S);
+    assert(!/\/bin\/cp -R "\$d\/app\.app" "\/Applications\/\$3"/.test(S), 'cp -R поверх назначения убран');
+    assert(/\/bin\/mv -n "\$d\/app\.app" "\$dest"/.test(code), 'готовый staged-бандл переименовывается на место');
+    assertOrder(S, '/usr/sbin/spctl --assess --type execute "$d/app.app"', '/bin/mv -n "$d/app.app" "$dest"', 'переименование — после проверки подписи и нотаризации staged-копии');
+    assertOrder(S, 'case "$3" in', 'mktemp -d /var/root/hm_app', 'проверка имени — до создания staging');
+    assertOrder(S, '[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 1', 'mktemp -d /var/root/hm_app', 'назначение проверено до работы');
+    // Прежняя форма (`lastIndexOf` + порядок «проверка → mv» внутри хвоста) при удалённой ВТОРОЙ проверке откатывалась на
+    // первую и оставалась зелёной (ревью r3, п. 1): теперь проверок ровно две, и вторая стоит между spctl и mv.
+    const CHECK = '[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 1';
+    assert.strictEqual(S.split(CHECK).length - 1, 2, 'проверка назначения стоит дважды: до staging и перед переименованием');
+    assertOrder(S.slice(S.indexOf('/usr/sbin/spctl --assess --type execute "$d/app.app"')), CHECK, '/bin/mv -n "$d/app.app" "$dest"',
+      'назначение проверено ЕЩЁ РАЗ — после долгой проверки подписи и непосредственно перед переименованием');
+    assertOrder(S, '/bin/mv -n "$d/app.app" "$dest"', '[ ! -e "$d/app.app" ] && [ ! -L "$dest" ] && [ -d "$dest/Contents" ] || exit 1',
+      'итог переименования проверяется ПОСЛЕ него (ушёл staged, не ссылка, внутри Contents)');
+    const b = rootBatch('hm-m3h-');
+    try {
+      const c = b.add((cc) => ({ script: S, args: [cc.src, 'VDXQ22DGB9', 'Cursor.app'] }));
+      b.run();
+      assert.strictEqual(c.rc, 0, 'установка прошла: ' + c.out);
+      const lg = c.logText();
+      const reStage = new RegExp('target=' + reEsc(c.stage) + '/hm_app\\.[^/]+/app\\.app');
+      assert(reStage.test(lg.split('\n').filter((l) => /^codesign/.test(l))[0] || ''), 'codesign проверил STAGED копию: ' + lg);
+      assert(reStage.test(lg.split('\n').filter((l) => /^spctl/.test(l))[0] || ''), 'spctl проверил STAGED копию');
+      assert(!/src\.app/.test(lg), 'источник (mount) напрямую не проверялся');
+      assert.deepStrictEqual(tree(c.apps), ['Cursor.app']);
+      assert.deepStrictEqual(tree(c.src), ['Contents'], 'источник не тронут (cp, а не mv из mount)');
+    } finally { b.done(); }
+  });
+
+  ok('u9/M-3: HM_VSCODE_INSTALL_SH — назначение строго /Applications/<имя>.app, занятое отвергается, xattr и chown на staged-копии до переименования', () => {
+    needBash();
+    const S = libText('HM_VSCODE_INSTALL_SH');
+    assert(/mktemp -d \/var\/root\/hm_vsc/.test(S), 'HM_VSCODE_INSTALL_SH извлечён');
+    assertOrder(S, '/usr/bin/xattr -dr com.apple.quarantine "$app"', '/bin/mv -n "$app" "$3"', 'xattr — на staged, до переименования');
+    assertOrder(S, '/usr/sbin/chown -R -h "$own":staff "$app"', '/bin/mv -n "$app" "$3"', 'chown — на staged, до переименования');
+    assertOrder(S, '/usr/sbin/spctl --assess --type execute "$app"', '/usr/bin/xattr -dr com.apple.quarantine "$app"', 'проверка подписи — до любых изменений');
+    assert(!/xattr -dr com\.apple\.quarantine "\$3"/.test(S) && !/chown -R -h "\$4":staff "\$3"/.test(S), 'действий над конечным путём в тексте больше нет');
+    // повторная проверка назначения и проверка итога (по ним раньше не было ни одного утверждения — ревью r3, п. 1)
+    const CHECK3 = '[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1';
+    assert.strictEqual(S.split(CHECK3).length - 1, 2, 'проверка назначения стоит дважды: до staging и перед переименованием');
+    assertOrder(S.slice(S.indexOf('/usr/sbin/spctl --assess --type execute "$app"')), CHECK3, '/bin/mv -n "$app" "$3"',
+      'назначение проверено ЕЩЁ РАЗ — после проверки подписи, xattr/chown и непосредственно перед переименованием');
+    assertOrder(S, '/bin/mv -n "$app" "$3"', '[ ! -e "$app" ] && [ ! -L "$3" ] && [ -d "$3/Contents" ] || exit 1',
+      'итог переименования проверяется ПОСЛЕ него (ушёл staged, не ссылка, внутри Contents)');
+    const b = rootBatch('hm-m3v-');
+    try {
+      const dest = (c) => c.apps + '/Visual Studio Code.app';
+      const args = (c, d, owner) => [c.zip, 'UBF8T346G9', d === undefined ? dest(c) : d, owner === undefined ? 'alice' : owner];
+      const happy = b.add((c) => ({ script: S, args: args(c) }));
+      // отказы по назначению
+      const badDests = [
+        ['вне /Applications', (c) => c.elsewhere + '/Visual Studio Code.app'], ['лишний «/»', (c) => c.apps + '/sub/Code.app'],
+        ['выход вверх', (c) => c.apps + '/../x.app'], ['скрытое имя', (c) => c.apps + '/.Code.app'], ['без .app', (c) => c.apps + '/Code'],
+        ['голый /Applications/', (c) => c.apps + '/'], ['хвост /..', (c) => c.apps + '/Code.app/..'], ['перевод строки', (c) => c.apps + '/Co\nde.app'],
+        ['кавычка', (c) => c.apps + '/Co"de.app'], ['пустое', () => ''],
+      ].map(([why, f]) => ({ why, c: b.add((c) => ({ script: S, args: args(c, f(c)) })) }));
+      // подложенное на месте назначения
+      const plant = (c) => { fs.writeFileSync(c.victim + '/keep.txt', 'k'); fs.symlinkSync(c.victim, dest(c), 'junction'); };
+      const link = b.add((c) => { plant(c); return { script: S, args: args(c) }; });
+      const linkOld = b.add((c) => { plant(c); return { script: OLD_VSCODE_SH, args: args(c) }; });
+      const oldBundle = (c) => { fs.mkdirSync(dest(c) + '/Contents', { recursive: true }); fs.writeFileSync(dest(c) + '/Contents/Info.plist', 'OLD'); };
+      const dir = b.add((c) => { oldBundle(c); return { script: S, args: args(c) }; });
+      const dirOld = b.add((c) => { oldBundle(c); return { script: OLD_VSCODE_SH, args: args(c) }; });
+      const file = b.add((c) => { fs.writeFileSync(dest(c), 'FILE'); return { script: S, args: args(c) }; });
+      // владелец: годное имя — chown, негодное — нет, провал chown установку не валит, плохая подпись — ничего
+      const owners = ['', 'root', '-R', 'bad name', 'ghost'].map((owner) => ({ owner, c: b.add((c) => ({ script: S, args: args(c, undefined, owner) })) }));
+      const chownFail = b.add((c) => ({ script: S, args: args(c), env: { CHOWN_FAIL: '1' } }));
+      const badSig = b.add((c) => ({ script: S, args: args(c), env: { CS: 'bad' } }));
+      b.run();
+      // happy path + порядок действий по журналу
+      assert.strictEqual(happy.rc, 0, 'установка прошла: ' + happy.out);
+      assert(fs.existsSync(dest(happy) + '/Contents/Info.plist') && tree(happy.apps).length === 1, 'готовый бандл на месте, ровно один');
+      const lg = happy.logText();
+      const stagedRe = (cmd) => new RegExp(cmd + '[^\\n]*' + reEsc(happy.stage) + '/hm_vsc\\.[^\\n]*unz/Visual Studio Code\\.app');
+      assert(stagedRe('xattr').test(lg), 'карантин снят со STAGED копии: ' + lg);
+      assert(stagedRe('chown -R -h alice:staff').test(lg), 'владелец передан STAGED копии: ' + lg);
+      assert(!lg.split('\n').filter((l) => /^(xattr|chown)/.test(l)).some((l) => l.endsWith(happy.apps + '/Visual Studio Code.app')),
+        'по конечному пути /Applications не вызывается ни xattr, ни chown (ссылка в конце пути не разыменуется): ' + lg);
+      badDests.forEach(({ why, c }) => {
+        assert(c.rc !== 0, why + ': отвергнуто (код ' + c.rc + ')');
+        assert.deepStrictEqual(tree(c.apps), [], why + ': в /Applications пусто');
+        assert.deepStrictEqual(tree(c.elsewhere), [], why + ': и за его пределами ничего');
+        assert(!fs.existsSync(c.work + '/x.app'), why + ': нет выхода вверх');
+        assert(!/codesign|spctl|xattr|chown/.test(c.logText()), why + ': до проверок дело не дошло: ' + c.logText());
+      });
+      assert(link.rc !== 0 && tree(link.victim).join() === 'keep.txt' && fs.lstatSync(dest(link)).isSymbolicLink(), 'ссылка на месте назначения отвергнута, жертва цела');
+      assert(tree(linkOld.victim).length > 1, 'КОНТРОЛЬ: прежний скрипт пишет сквозь ссылку в каталог жертвы: ' + JSON.stringify(tree(linkOld.victim)));
+      assert(dir.rc !== 0 && fs.readFileSync(dest(dir) + '/Contents/Info.plist', 'utf8') === 'OLD' && tree(dest(dir)).join() === 'Contents', 'существующий каталог: отказ, содержимое цело, вложений нет');
+      assert(fs.existsSync(dest(dirOld) + '/Visual Studio Code.app'), 'КОНТРОЛЬ: прежний скрипт вкладывал копию внутрь существующего каталога');
+      assert(file.rc !== 0 && fs.readFileSync(dest(file), 'utf8') === 'FILE', 'файл на месте назначения: отказ');
+      owners.forEach(({ owner, c }) => {
+        assert.strictEqual(c.rc, 0, 'без годного владельца (' + JSON.stringify(owner) + ') установка всё равно успешна: ' + c.out);
+        assert(!/^chown/m.test(c.logText()), 'chown не зовётся для ' + JSON.stringify(owner));
+        assert(fs.existsSync(dest(c) + '/Contents/Info.plist'), 'бандл на месте для ' + JSON.stringify(owner));
+      });
+      assert(chownFail.rc === 0 && fs.existsSync(dest(chownFail) + '/Contents/Info.plist'), 'провал chown не превращает установленный VS Code в «не установлен»');
+      assert(badSig.rc !== 0 && tree(badSig.apps).length === 0 && !/^(xattr|chown)/m.test(badSig.logText()), 'подпись не прошла — ни установки, ни смены владельца (fail-closed)');
+    } finally { b.done(); }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-3, гонка: повторная проверка назначения перед переименованием и проверка результата после него
+  // -------------------------------------------------------------------------
+  // Случаи выше подкладывали ссылку/каталог ДО запуска скрипта. Здесь место занимают, пока root-скрипт работает: в заглушке
+  // spctl (в настоящем скрипте это долгий шаг — cp -R сотен МБ, codesign --deep, spctl; окно в минуты) или в заглушке mv
+  // (последняя микросекунда перед rename). Без повторной проверки и без проверки результата все прежние случаи оставались
+  // зелёными: мутации «убрать строку» выживали (ревью r3, п. 1). Каждый сценарий исполняется на настоящем тексте скрипта
+  // и на МУТАНТЕ, собранном из него вычитанием ровно одной защиты, — мутант обязан пропустить то, что скрипт отвергает.
+  const NODE_BIN = U(process.execPath);
+  // plant: занять $PLANT_AT так, как это делает код того же пользователя (junction работает без привилегий, как symlink на Mac)
+  const PLANT_FN = [
+    'plant() {',
+    '  case "$1" in',
+    '    link) "$PLANT_NODE" -e \'require("fs").symlinkSync(process.argv[1], process.argv[2], "junction")\' "$PLANT_TARGET" "$PLANT_AT" ;;',
+    '    dir) mkdir -p "$PLANT_AT/Contents" ;;',     // настоящий каталог, похожий на бандл
+    '    dirx) mkdir -p "$PLANT_AT" ;;',             // настоящий каталог без содержимого
+    '  esac',
+    '}',
+  ].join('\n');
+  const RACE_TOOLS = Object.assign({}, ROOT_TOOLS, {
+    // spctl — «долгий шаг проверки»: именно здесь враждебный код занимает место назначения
+    spctl: PLANT_FN + '\nfor a in "$@"; do last="$a"; done\necho "spctl HOME=$HOME target=$last" >> "$HM_LOG"\n' +
+      '[ -n "$PLANT_DURING_VERIFY" ] && plant "$PLANT_DURING_VERIFY"\n[ "$NOTAR" = no ] && exit 1\nexit 0',
+    // mv — по умолчанию настоящий mv; режимы воспроизводят поведение BSD mv -n на занятом месте и «последнюю микросекунду»
+    mv: PLANT_FN + '\necho "mv $*" >> "$HM_LOG"\n' + [
+      'case "$MV_MODE" in',
+      '  noop) exit 0 ;;',                 // цель есть -> BSD mv -n ничего не двигает и выходит с кодом 0
+      '  skip-dir) plant dir; exit 0 ;;',  // место вдруг заняла «бандл-подобная» папка, mv -n её не тронул, код 0
+      '  nest-link) plant link ;;',        // ссылка на каталог встала на место за микросекунду до rename
+      '  nest-dir) plant dirx ;;',         // то же — настоящий каталог
+      'esac',
+      'exec /bin/mv "$@"',
+    ].join('\n'),
+  });
+  const racePatch = (S, c, T) => rootPatch(S, c, T).split('/bin/mv').join(T.mv);
+
+  // spec: { S, check, post, args(c), dest(c), nested }. nested — имя, под которым проверенный бандл окажется ВНУТРИ чужого каталога.
+  const runRaceCases = (pfx, spec) => {
+    const S = spec.S;
+    const at = (needle) => { const i = S.indexOf(needle); assert(i !== -1, 'в тексте root-скрипта нет: ' + needle); return i; };
+    const checkCount = S.split(spec.check).length - 1;
+    assert.strictEqual(checkCount, 2, 'проверка назначения стоит дважды: до staging и перед переименованием');
+    assert.strictEqual(S.split(spec.post).length - 1, 1, 'проверка результата переименования на месте и одна');
+    const iLast = S.lastIndexOf(spec.check);
+    const without = (needle, repl) => S.split(needle).join(repl);   // split/join: «$3» и «$&» в замене не трактуются
+    const conj = spec.post.replace(' || exit 1', '').split(' && ');
+    assert.strictEqual(conj.length, 3, 'проверка результата — три условия (ушёл staged, не ссылка, внутри Contents): ' + spec.post);
+    const dropConj = (k) => without(spec.post, conj.filter((_, j) => j !== k).join(' && ') + ' || exit 1');
+    const mutants = {
+      noRecheck: S.slice(0, iLast) + ':' + S.slice(iLast + spec.check.length),   // убрана ВТОРАЯ проверка (перед mv)
+      noPost: without(spec.post, ':'),
+      postNoMoved: dropConj(0), postNoLink: dropConj(1), postNoBundle: dropConj(2),
+    };
+    Object.keys(mutants).forEach((k) => assert.notStrictEqual(mutants[k], S, 'мутант ' + k + ' получился'));
+    assert(iLast > at('/usr/sbin/spctl --assess --type execute'), 'повторная проверка стоит ПОСЛЕ долгого шага проверки подписи');
+
+    const view = (c) => ({ c, dest: spec.dest(c), rc: c.rc, out: c.out, log: c.logText() });
+    const SC = [
+      { id: 'ссылка на каталог жертвы встала во время проверки подписи', env: { PLANT_DURING_VERIFY: 'link' }, mutant: 'noRecheck',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ (код ' + r.rc + '): ' + r.out);
+          assert.deepStrictEqual(tree(r.c.victim), [], 'каталог жертвы пуст — сквозь ссылку ничего не записано');
+          assert(fs.lstatSync(r.dest).isSymbolicLink(), 'подложенная ссылка на месте, не тронута');
+          assert(!/^mv /m.test(r.log), 'до переименования дело не дошло — повторная проверка отказала раньше: ' + r.log);
+        },
+        mut: (r) => assert.deepStrictEqual(tree(r.c.victim), [spec.nested],
+          'КОНТРОЛЬ: без повторной проверки проверенный бандл ложится ВНУТРЬ каталога жертвы (код ' + r.rc + ')') },
+      { id: 'настоящий каталог с Contents встал во время проверки подписи', env: { PLANT_DURING_VERIFY: 'dir' }, mutant: 'noRecheck',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ (код ' + r.rc + '): ' + r.out);
+          assert.deepStrictEqual(tree(r.dest), ['Contents'], 'подложенный каталог не тронут, вложенной копии нет');
+          assert(!/^mv /m.test(r.log), 'до переименования дело не дошло: ' + r.log);
+        },
+        mut: (r) => {
+          assert.strictEqual(r.rc, 0, 'КОНТРОЛЬ: без повторной проверки Contents подложенного каталога обманывает проверку результата — тихий «успех»: ' + r.out);
+          assert.deepStrictEqual(tree(r.dest), ['Contents', spec.nested].sort(), 'КОНТРОЛЬ: проверенный бандл вложен в чужой каталог');
+        } },
+      { id: 'mv -n ничего не сдвинул и вышел с кодом 0 (цель занята)', env: { MV_MODE: 'noop' }, mutant: 'noPost',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ по проверке результата (код ' + r.rc + '): ' + r.out);
+          assert.deepStrictEqual(tree(r.c.apps), [], 'в /Applications ничего нет, и скрипт честно сообщил это кодом');
+          assert(/^mv -n /m.test(r.log), 'до переименования дошли, отказ именно после него: ' + r.log);
+        },
+        mut: (r) => assert.strictEqual(r.rc, 0, 'КОНТРОЛЬ: без проверки результата «ничего не сдвинулось» рапортуется как успех') },
+      { id: 'место занято похожей на бандл папкой, mv -n её не тронул и вышел с кодом 0', env: { MV_MODE: 'skip-dir' }, mutant: 'postNoMoved',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ — проверенная копия осталась в staging (код ' + r.rc + '): ' + r.out);
+          assert.deepStrictEqual(tree(r.dest), ['Contents'], 'чужая папка не тронута');
+        },
+        mut: (r) => assert.strictEqual(r.rc, 0, 'КОНТРОЛЬ: без условия «staged ушёл» чужая папка с Contents принимается за свой бандл') },
+      { id: 'ссылка на каталог с чужим бандлом встала за микросекунду до rename — проверенный бандл ушёл внутрь', env: { MV_MODE: 'nest-link' },
+        prep: (c) => fs.mkdirSync(c.victim + '/Contents', { recursive: true }), mutant: 'postNoLink',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ по условию «не ссылка» (код ' + r.rc + '): ' + r.out);
+          assert(fs.lstatSync(r.dest).isSymbolicLink(), 'ссылка на месте');
+          // остаток, названный в _lib.sh: подлинный проверенный бандл под фиксированным именем; ничего не перезаписано и не исполнено
+          assert.deepStrictEqual(tree(r.c.victim), ['Contents', spec.nested].sort(), 'внутри каталога жертвы — только чужое Contents и наш проверенный бандл');
+        },
+        mut: (r) => assert.strictEqual(r.rc, 0, 'КОНТРОЛЬ: без условия «не ссылка» ссылка на каталог с Contents выдаётся за установку') },
+      { id: 'настоящий каталог без Contents встал за микросекунду до rename — проверенный бандл ушёл внутрь', env: { MV_MODE: 'nest-dir' }, mutant: 'postNoBundle',
+        prod: (r) => {
+          assert(r.rc !== 0, 'отказ по условию «внутри Contents» (код ' + r.rc + '): ' + r.out);
+          assert.deepStrictEqual(tree(r.dest), [spec.nested], 'внутри чужого каталога только наш проверенный бандл');
+        },
+        mut: (r) => assert.strictEqual(r.rc, 0, 'КОНТРОЛЬ: без условия «внутри Contents» вложенная копия выдаётся за установку') },
+    ];
+
+    const b = shBatch(pfx, RACE_TOOLS, racePatch);
+    try {
+      const envOf = (c, extra) => Object.assign({ PLANT_AT: spec.dest(c), PLANT_TARGET: c.victim, PLANT_NODE: NODE_BIN }, extra || {});
+      const happy = b.add((c) => ({ script: S, args: spec.args(c), env: envOf(c) }));
+      const rows = SC.map((sc) => {
+        const mk = (text) => b.add((c) => { if (sc.prep) sc.prep(c); return { script: text, args: spec.args(c), env: envOf(c, sc.env) }; });
+        return { sc, prod: mk(S), mut: mk(mutants[sc.mutant]) };
+      });
+      b.run(590000);   // 13 случаев, каждый — десятки запусков процессов: на занятой машине это минуты
+      // контроль самого стенда: без подмен заглушки пропускают обычную установку и mv действительно переименовывает
+      assert.strictEqual(happy.rc, 0, 'без гонки установка проходит через те же заглушки: ' + happy.out);
+      assert.deepStrictEqual(tree(happy.apps), [path.basename(spec.dest(happy))], 'бандл на месте');
+      assert(/^mv -n /m.test(happy.logText()), 'переименование прошло через заглушку mv');
+      // Сначала утверждения о НАСТОЯЩЕМ скрипте — по ним краснеет регрессия, и сообщение называет её сценарий (у каждого
+      // условия проверки результата свой сценарий). Контроли «мутант пропускает» — после всех: они объясняют стенд и
+      // не должны заслонять сценарий, который сторожит именно сломанную строку.
+      rows.forEach(({ sc, prod }) => {
+        try { sc.prod(view(prod)); } catch (e) { e.message = '[' + sc.id + '] ' + e.message; throw e; }
+        assert.deepStrictEqual(tree(prod.stage), [], '[' + sc.id + '] staging убран');
+      });
+      rows.forEach(({ sc, mut }) => {
+        try { sc.mut(view(mut)); } catch (e) { e.message = '[' + sc.id + ' / мутант ' + sc.mutant + '] ' + e.message; throw e; }
+      });
+    } finally { b.done(); }
+  };
+
+  ok('u9/M-3: HM_APP_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)', () => {
+    needBash();
+    runRaceCases('hm-m3r-', {
+      S: libText('HM_APP_INSTALL_SH'),
+      check: '[ ! -e "$dest" ] && [ ! -L "$dest" ] || exit 1',
+      post: '[ ! -e "$d/app.app" ] && [ ! -L "$dest" ] && [ -d "$dest/Contents" ] || exit 1',
+      args: (c) => [c.src, 'VDXQ22DGB9', 'Cursor.app'],
+      dest: (c) => c.apps + '/Cursor.app',
+      nested: 'app.app',
+    });
+  });
+
+  ok('u9/M-3: HM_VSCODE_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)', () => {
+    needBash();
+    runRaceCases('hm-m3q-', {
+      S: libText('HM_VSCODE_INSTALL_SH'),
+      check: '[ ! -e "$3" ] && [ ! -L "$3" ] || exit 1',
+      post: '[ ! -e "$app" ] && [ ! -L "$3" ] && [ -d "$3/Contents" ] || exit 1',
+      args: (c) => [c.zip, 'UBF8T346G9', c.apps + '/Visual Studio Code.app', 'alice'],
+      dest: (c) => c.apps + '/Visual Studio Code.app',
+      nested: 'Visual Studio Code.app',
+    });
+  });
+
+  ok('u9/M-8: первая строка каждого HM_*_INSTALL_SH — HOME=/var/root, root-инструменты не видят HOME пользователя', () => {
+    needBash();
+    const b = rootBatch('hm-m8-');
+    try {
+      const specs = [
+        ['HM_PKG_INSTALL_SH', (c) => [c.pkg, 'HX7739G8FX'], 'installer'],
+        ['HM_APP_INSTALL_SH', (c) => [c.src, 'VDXQ22DGB9', 'Cursor.app'], 'codesign'],
+        ['HM_VSCODE_INSTALL_SH', (c) => [c.zip, 'UBF8T346G9', c.apps + '/Visual Studio Code.app', 'alice'], 'codesign'],
+      ].map(([name, args, tool]) => {
+        const S = libText(name);
+        assert(S.length > 200, name + ' извлечён');
+        assert(S.startsWith('HOME=/var/root; export HOME\nPATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH\nset -e\n'),
+          name + ': HOME=/var/root — первая строка, PATH — вторая, затем set -e');
+        assert(/^[\x00-\x7F]*$/.test(S), name + ': текст root-скрипта — только ASCII');
+        assert(S.indexOf("'") === -1, name + ': нет одинарных кавычек (переменная задана в \'…\')');
+        return { name, tool, c: b.add((c) => ({ script: S, args: args(c) })) };
+      });
+      // контроль: без этой строки заглушки видят HOME пользователя, то есть проверка способна покраснеть
+      const App = libText('HM_APP_INSTALL_SH');
+      const noHomeText = App.replace('HOME=/var/root; export HOME\n', '');
+      assert(noHomeText !== App, 'мутация применилась');
+      const noHome = b.add((c) => ({ script: noHomeText, args: [c.src, 'VDXQ22DGB9', 'Cursor.app'] }));
+      b.run();
+      specs.forEach(({ name, tool, c }) => {
+        assert.strictEqual(c.rc, 0, name + ' отработал: ' + c.out);
+        const seen = c.logText().split('\n').filter((l) => l.indexOf(tool) === 0 && /HOME=/.test(l));
+        assert(seen.length >= 1, name + ': заглушка ' + tool + ' вызвана: ' + c.logText());
+        seen.forEach((l) => assert(/HOME=\/var\/root(\s|$)/.test(l), name + ': инструмент видит HOME=/var/root, а не домашний каталог пользователя: ' + l));
+      });
+      assert(/HOME=\/attacker\/home/.test(noHome.logText()), 'КОНТРОЛЬ: без строки HOME root-инструменты видят HOME пользователя (код ' + noHome.rc + ')');
+    } finally { b.done(); }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-4: verify.sh зовёт диспетчер touch-up'ов (на macOS он нигде не вызывался)
+  // -------------------------------------------------------------------------
+  ok('u9/M-4: verify.sh подключает диспетчер touch-up-ов до чеклиста, в dry-run только печатает', () => {
+    const s = readMac('verify.sh');
+    const c = codeOnly(s);
+    assert(/hm_run_touchups "\$DIR" 30/.test(c), 'диспетчер вызван на каталоге самого verify.sh (как Invoke-HmTouchups -Dir $PSScriptRoot) с лимитом 30 с, как на Windows');
+    assert(/\. "\$DIR\/_touchups\.sh"/.test(c), 'библиотека _touchups.sh подключена из каталога verify.sh');
+    assertOrder(s, 'hm_run_touchups "$DIR" 30', 'echo "Финальная проверка установки..."', 'диспетчер — до чеклиста');
+    assertOrder(s, '# --- touch-ups', '# --- end touch-ups ---', 'границы блока на месте');
+    const block = s.slice(s.indexOf('# --- touch-ups'), s.indexOf('# --- end touch-ups ---'));
+    assert(block.length > 300, 'блок объяснён комментарием, а не голой строкой');
+    assert(/if \[ -n "\$\{HM_DRY_RUN:-\}" \]; then\s*\n\s*echo "  \[dry-run\] WOULD: прогнать быстрые[^\n]*\n\s*else\s*\n\s*\( \. "\$DIR\/_touchups\.sh" && hm_run_touchups "\$DIR" 30 \)/.test(block),
+      'в dry-run — одна строка WOULD, запуск только в else, диспетчер — в подоболочке (его ошибка не уносит чеклист)');
+    assert(!/\bexit\b/.test(codeOnly(block)), 'блок диспетчера не завершает verify раньше времени');
+    assert(/exit 0\s*$/.test(s), 'verify по-прежнему всегда завершается кодом 0');
+  });
+
+  // verify.sh в песочнице: свои копии _lib.sh/_touchups.sh/verify.sh и временные touch-up'ы.
+  const verifyBox = (opts) => {
+    const o = opts || {};
+    const work = mkTmp('hm-m4-');
+    const dir = work + '/scripts'; fs.mkdirSync(dir);
+    ['verify.sh', '_lib.sh', '_touchups.sh'].forEach((f) => fs.copyFileSync(path.join(MACDIR, f), dir + '/' + f));
+    if (o.verifySrc) fs.writeFileSync(dir + '/verify.sh', o.verifySrc);
+    if (o.touchupsSrc) fs.writeFileSync(dir + '/_touchups.sh', o.touchupsSrc);
+    const home = work + '/home'; fs.mkdirSync(home);
+    const run = (env) => spawnSync('bash', [dir + '/verify.sh'], {
+      encoding: 'utf8', timeout: 90000, cwd: work,
+      env: Object.assign({}, process.env, { HOME: home, HM_SELECTED: 'none' }, env || {})
+    });
+    return { work, dir, home, run };
+  };
+  const wr = (f, body) => fs.writeFileSync(f, body);
+
+  ok('u9/M-4: verify.sh (прогон bash) исполняет touch-up-ы рядом по именам до чеклиста и завершается кодом 0', () => {
+    needBash();
+    const b = verifyBox();
+    try {
+      wr(b.dir + '/touchup-b.sh', 'echo "ОБНОВЛЕНО: второй"\nexit 0\n');
+      wr(b.dir + '/touchup-a.sh', 'echo "ОБНОВЛЕНО: первый"\nexit 7\n');             // код выхода не учитывается
+      wr(b.dir + '/touchup-bad_name.sh', 'echo "НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ"\n');           // подчёркивание: чужое имя
+      wr(b.dir + '/other.sh', 'echo "НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ"\n');
+      const r = b.run();
+      assert.strictEqual(r.status, 0, 'verify всегда 0: ' + r.stdout + r.stderr);
+      const lines = String(r.stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const iA = lines.indexOf('ОБНОВЛЕНО: первый');
+      const iB = lines.indexOf('ОБНОВЛЕНО: второй');
+      const iCheck = lines.indexOf('Финальная проверка установки...');
+      assert(iA !== -1 && iB !== -1 && iCheck !== -1, 'все три строки на месте: ' + JSON.stringify(lines));
+      assert(iA < iB && iB < iCheck, 'порядок по имени (a, b) и оба — ДО чеклиста: ' + JSON.stringify(lines));
+      assert(!/НЕ ДОЛЖЕН/.test(r.stdout), 'чужие имена не запускаются');
+      assert(lines.filter((l) => /^CHECK /.test(l)).length >= 4, 'чеклист после touch-up\'ов напечатан целиком: ' + JSON.stringify(lines));
+    } finally { dropDir(b.work); }
+  });
+
+  ok('u9/M-4: verify.sh (прогон bash) — dry-run не запускает touch-up-ы, сломанный диспетчер verify не роняет', () => {
+    needBash();
+    let b = verifyBox();
+    try {
+      wr(b.dir + '/touchup-a.sh', ': > "' + b.work + '/RAN"\necho "ОБНОВЛЕНО: не должен печататься"\n');
+      const r = b.run({ HM_DRY_RUN: '1' });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/\[dry-run\] WOULD: прогнать быстрые исправления из touchup-\*\.sh/.test(r.stdout), 'строка WOULD: ' + r.stdout);
+      assert(!fs.existsSync(b.work + '/RAN') && !/не должен печататься/.test(r.stdout), 'в dry-run touch-up не исполнялся');
+    } finally { dropDir(b.work); }
+    // библиотека с синтаксической ошибкой, с exit и с set -u на неопределённой переменной
+    [['синтаксическая ошибка', 'hm_run_touchups() { if then fi\n'], ['exit внутри', 'hm_run_touchups() { exit 9; }\n'],
+      ['set -u на пустой переменной', 'hm_run_touchups() { echo "${HM_NO_SUCH_VAR}"; }\n']].forEach(([why, src]) => {
+      b = verifyBox({ touchupsSrc: src });
+      try {
+        const r = b.run();
+        assert.strictEqual(r.status, 0, why + ': verify не падает: ' + r.stdout + r.stderr);
+        assert(/Финальная проверка установки\.\.\./.test(r.stdout) && (r.stdout.match(/^CHECK /gm) || []).length >= 4, why + ': чеклист цел: ' + r.stdout);
+        assert(/Быстрые исправления пропущены/.test(r.stdout), why + ': сбой назван одной строкой: ' + r.stdout);
+      } finally { dropDir(b.work); }
+    });
+  });
+
+  ok('u9/M-4: контроль — verify.sh без блока диспетчера оставляет touch-up-ы мёртвыми', () => {
+    needBash();
+    const src = readMac('verify.sh');
+    const start = src.indexOf('# --- touch-ups');
+    const end = src.indexOf('# --- end touch-ups ---') + '# --- end touch-ups ---'.length;
+    assert(start !== -1 && end > start, 'блок диспетчера найден');
+    const b = verifyBox({ verifySrc: src.slice(0, start) + src.slice(end) });
+    try {
+      wr(b.dir + '/touchup-a.sh', 'echo "ОБНОВЛЕНО: первый"\n');
+      const r = b.run();
+      assert.strictEqual(r.status, 0);
+      assert(!/ОБНОВЛЕНО: первый/.test(r.stdout), 'без диспетчера touch-up не запускается — именно это и было дефектом M-4');
+    } finally { dropDir(b.work); }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-5: pkill -f при удалении скрепки на macOS не должен задевать чужие процессы
+  // -------------------------------------------------------------------------
+  const UT = require(path.join(ROOT, 'src', 'uninstall-targets.js'));
+  const killPattern = (home, appName) => {
+    const plan = UT.uninstallTargets('mascot', { platform: 'darwin', home, mascotMac: { appName, bundleId: 'com.hamidun.claude-mascot' } });
+    const kills = plan.targets.filter((t) => t.type === 'killproc');
+    assert.strictEqual(kills.length, 1, 'ровно одна цель killproc на macOS');
+    return kills[0].pattern;
+  };
+  // Оракул совпадения: настоящий POSIX ERE (grep -E ~ regcomp REG_EXTENDED, которым пользуется pkill -f) + JS RegExp.
+  // Строки отдаются ОДНИМ запуском bash из файла (каждая оканчивается NUL), ответ — по «0/1» на строку.
+  const ereMatchMany = (pattern, lines) => {
+    const viaJs = lines.map((l) => new RegExp(pattern).test(l));
+    if (!HAVE_BASH) return viaJs;
+    const dir = mkTmp('hm-ere-');
+    try {
+      fs.writeFileSync(dir + '/lines', lines.map((l) => l + '\0').join(''));
+      fs.writeFileSync(dir + '/pat', pattern);
+      const r = spawnSync('bash', ['-c',
+        'pat="$(cat "$1/pat")"; while IFS= read -r -d "" line; do if printf "%s\\n" "$line" | grep -Eq -- "$pat"; then echo 1; else echo 0; fi; done < "$1/lines"',
+        'x', mp(dir)], { encoding: 'utf8', timeout: 60000 });
+      const got = String(r.stdout || '').split(/\r?\n/).filter(Boolean).map((x) => x === '1');
+      assert.strictEqual(got.length, lines.length, 'grep -E ответил на каждую строку: ' + (r.stderr || '') + String(r.error || ''));
+      lines.forEach((l, k) => assert.strictEqual(viaJs[k], got[k], 'JS RegExp и POSIX ERE дают один ответ для ' + JSON.stringify(l)));
+    } finally { dropDir(dir); }
+    return viaJs;
+  };
+  const ereMatch = (pattern, line) => ereMatchMany(pattern, [line])[0];
+
+  ok('u9/M-5: pkill -f для скрепки (macOS) не задевает чужие процессы и находит настоящий', () => {
+    const HOME_DIR = '/Users/alice';
+    const pat = killPattern(HOME_DIR, 'Claude Mascot.app');
+    assert.notStrictEqual(pat, 'claude-mascot', 'голая подстрока (прежний шаблон) больше не используется');
+    assert(/\/Contents\/MacOS\//.test(pat), 'шаблон в форме /Contents/MacOS/… — как mascot.sh при установке');
+    assert(pat.charAt(0) === '^', 'шаблон привязан к началу командной строки: argv[0] обязан быть исполняемым файлом ЭТОГО бандла');
+    const real = [
+      '/Users/alice/Applications/Claude Mascot.app/Contents/MacOS/Claude Mascot',
+      '/Users/alice/Applications/Claude Mascot.app/Contents/MacOS/Claude Mascot --some-flag value',
+    ];
+    const other = [
+      'vim /Users/alice/.claude-mascot/config.json',
+      'tail -f /Users/alice/.claude-mascot/log.txt',
+      '/Applications/Visual Studio Code.app/Contents/MacOS/Electron /Users/alice/Projects/claude-mascot',
+      'node /Users/alice/Projects/claude-mascot/server.js',
+      'grep -r claude-mascot /Users/alice',
+      '/bin/bash /Users/alice/hamidun/scripts/macos/mascot.sh claude-mascot',
+      // редактор, открывший сам исполняемый файл скрепки: путь есть, но он не argv[0]
+      'code /Users/alice/Applications/Claude Mascot.app/Contents/MacOS/Claude Mascot',
+      // тот же бандл у ДРУГОГО пользователя и системная копия
+      '/Users/bob/Applications/Claude Mascot.app/Contents/MacOS/Claude Mascot',
+      '/Applications/Claude Mascot.app/Contents/MacOS/Claude Mascot',
+      // другой бандл в том же каталоге
+      '/Users/alice/Applications/Other.app/Contents/MacOS/Claude Mascot',
+    ];
+    const got = ereMatchMany(pat, real.concat(other));
+    real.forEach((l, k) => assert.strictEqual(got[k], true, 'настоящий процесс скрепки найден: ' + l));
+    other.forEach((l, k) => assert.strictEqual(got[real.length + k], false, 'чужой процесс НЕ задет: ' + l));
+    // КОНТРОЛЬ: прежний шаблон цеплял всё перечисленное — тест способен покраснеть
+    const old = ereMatchMany('claude-mascot', other);
+    assert(old.filter(Boolean).length >= 5, 'КОНТРОЛЬ: прежний шаблон «claude-mascot» задевал чужие процессы (' + old.filter(Boolean).length + ' из ' + other.length + ')');
+  });
+
+  ok('u9/M-5: pkill-шаблон скрепки экранирует спецсимволы ERE в домашнем каталоге и имени бандла', () => {
+    const home = '/Users/o.brien+x (1)';
+    const app = 'My [Mascot] {v2} ^$ | * ? .app';
+    const pat = killPattern(home, app);
+    const exact = home + '/Applications/' + app + '/Contents/MacOS/My Mascot';
+    // подстановка вместо спецсимвола не должна проходить («.» не «любой символ», «+»/«(» не операторы)
+    const others = [home.replace('o.brien', 'oXbrien'), home.replace('x (1)', 'xx 1'), home.replace('+', '')]
+      .map((h) => h + '/Applications/' + app + '/Contents/MacOS/My Mascot')
+      .concat([home + '/Applications/' + app.replace('.app', 'Xapp') + '/Contents/MacOS/My Mascot', home + '/Applications/My M/Contents/MacOS/x']);
+    const got = ereMatchMany(pat, [exact].concat(others));
+    assert.strictEqual(got[0], true, 'точный путь находится: ' + pat);
+    others.forEach((l, k) => assert.strictEqual(got[k + 1], false, 'вариант не проходит (спецсимволы экранированы): ' + l));
+  });
+
+  ok('u9/M-5: без доверенного vendor цели killproc нет, pkill берёт шаблон из плана удаления', () => {
+    const none = UT.uninstallTargets('mascot', { platform: 'darwin', home: '/Users/alice', mascotMac: null });
+    assert(!none.targets.some((t) => t.type === 'killproc'), 'без vendor убивать нечего и нечем подтвердить, что процесс наш (fail-closed)');
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'uninstall-targets.js'), 'utf8');
+    assert(!/pattern:\s*'claude-mascot'/.test(src), 'голый шаблон claude-mascot из плана удаления убран');
+    const m = MAIN();
+    assert(/execFileSync\('\/usr\/bin\/pkill', \['-f', t\.pattern\]/.test(m), 'исполнитель по-прежнему берёт шаблон из цели плана');
+    assert(!/'-f', 'claude-mascot'/.test(m), 'и не подставляет своего');
+  });
+
+  // -------------------------------------------------------------------------
+  // M-6: самолечение — проверка образа до снятия карантина, тома только этого образа, проверка перед open
+  // -------------------------------------------------------------------------
+  const SH = (() => {   // нет модуля (старый код) — тесты ниже краснеют по одному, а не рушат загрузку файла
+    try { return require(path.join(ROOT, 'src', 'mac-selfheal.js')); }
+    catch (e) { return new Proxy({}, { get() { throw new Error('нет src/mac-selfheal.js'); } }); }
+  })();
+  const DL = '/Users/alice/Downloads';
+  const OURS = DL + '/Hamidun-Setup-Mac.dmg';
+  const OURS2 = DL + '/Hamidun-Setup-Mac (1).dmg';
+  const FOREIGN_NAME = DL + '/Hamidun Archive.dmg';    // имя с похожим началом, но НЕ наш образ (не по шаблону)
+  // Подлинный вид вывода `hdiutil info -plist`: ключи по алфавиту, табуляции, сущности ESC-ировано.
+  const plistImage = (imagePath, mounts, extra) =>
+    '\t\t<dict>\n\t\t\t<key>image-alias</key>\n\t\t\t<string>' + imagePath + '</string>\n' +
+    '\t\t\t<key>image-encrypted</key>\n\t\t\t<false/>\n\t\t\t<key>image-path</key>\n\t\t\t<string>' + imagePath + '</string>\n' +
+    '\t\t\t<key>image-type</key>\n\t\t\t<string>read-only disk image</string>\n\t\t\t<key>owner-uid</key>\n\t\t\t<integer>501</integer>\n' +
+    (extra || '') +
+    '\t\t\t<key>system-entities</key>\n\t\t\t<array>\n' +
+    '\t\t\t\t<dict>\n\t\t\t\t\t<key>content-hint</key>\n\t\t\t\t\t<string>GUID_partition_scheme</string>\n\t\t\t\t\t<key>dev-entry</key>\n\t\t\t\t\t<string>/dev/disk4</string>\n\t\t\t\t\t<key>potentially-mountable</key>\n\t\t\t\t\t<false/>\n\t\t\t\t</dict>\n' +
+    mounts.map((m, k) => '\t\t\t\t<dict>\n\t\t\t\t\t<key>content-hint</key>\n\t\t\t\t\t<string>Apple_HFS</string>\n\t\t\t\t\t<key>dev-entry</key>\n\t\t\t\t\t<string>/dev/disk4s' + (k + 1) + '</string>\n' +
+      '\t\t\t\t\t<key>mount-point</key>\n\t\t\t\t\t<string>' + m.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</string>\n\t\t\t\t\t<key>potentially-mountable</key>\n\t\t\t\t\t<true/>\n\t\t\t\t</dict>\n').join('') +
+    '\t\t\t</array>\n\t\t</dict>\n';
+  const plistDoc = (images) =>
+    '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
+    '<plist version="1.0">\n<dict>\n\t<key>framework</key>\n\t<string>583.100.10</string>\n\t<key>images</key>\n\t<array>\n' +
+    images.join('') + '\t</array>\n</dict>\n</plist>\n';
+
+  ok('u9/M-6: parseHdiutilInfoPlist и mountPointsOfImage — тома только выбранного образа, а не маска имени', () => {
+    const xml = plistDoc([
+      plistImage(OURS, ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1']),             // наш образ смонтирован дважды
+      plistImage(OURS2, ['/Volumes/Hamidun Setup 2']),                                       // другой файл с нашим именем
+      plistImage('/Users/alice/Documents/Hamidun Archive.dmg', ['/Volumes/Hamidun Archive']), // посторонний образ, том на «Hamidun…»
+      plistImage('/Users/alice/Downloads/Other.dmg', ['/Volumes/Other & <Co>']),            // посторонний образ со спецсимволами
+      plistImage('/Users/alice/Downloads/NoMount.dmg', []),                                   // образ без смонтированных томов
+    ]);
+    const imgs = SH.parseHdiutilInfoPlist(xml);
+    assert.strictEqual(imgs.length, 5, 'все образы разобраны');
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, OURS), ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1']);
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, OURS2), ['/Volumes/Hamidun Setup 2']);
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, DL + '/Hamidun-Setup-Mac-Lite.dmg'), [], 'образа нет среди подключённых — нечего отцеплять');
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, '/Users/alice/Documents/Hamidun Archive.dmg'), ['/Volumes/Hamidun Archive']);
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, '/Users/alice/Downloads/Other.dmg'), ['/Volumes/Other & <Co>'], 'XML-сущности раскрыты');
+    // Главное свойство: том «Hamidun Archive» (маска /Volumes/Hamidun* его цепляла) к выбранному образу НЕ относится
+    assert(!SH.mountPointsOfImage(imgs, OURS).includes('/Volumes/Hamidun Archive'));
+    assert(!SH.mountPointsOfImage(imgs, OURS).includes('/Volumes/Hamidun Setup 2'), 'другой файл с тем же шаблоном имени — не этот образ');
+    // нормализация пути: двойной слэш и «.» не мешают сопоставлению, чужой путь не подходит
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, '/Users/alice/Downloads//./Hamidun-Setup-Mac.dmg'), ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1']);
+    assert.deepStrictEqual(SH.mountPointsOfImage(imgs, '/Users/bob/Downloads/Hamidun-Setup-Mac.dmg'), []);
+    // что отдаётся помощнику: абсолютные нормализованные, без управляющих символов, не «/», не больше 8
+    assert.deepStrictEqual(SH.safeMountPoints(['/Volumes/A', '/', '-force', 'rel/x', '/a/../b', '/Volumes/A', '/v\nw', '/Volumes/B/', '/Volumes/C']), ['/Volumes/A', '/Volumes/C']);
+    assert.strictEqual(SH.safeMountPoints(Array.from({ length: 20 }, (_, k) => '/Volumes/V' + k)).length, 8);
+  });
+
+  ok('u9/M-6: parsePlistXml — мусор и чрезмерная вложенность дают исключение, __proto__ не загрязняет прототип', () => {
+    assert.deepStrictEqual(SH.parseHdiutilInfoPlist(plistDoc([])), [], 'нет подключённых образов');
+    assert.deepStrictEqual(SH.parseHdiutilInfoPlist('<plist version="1.0"><dict/></plist>'), []);
+    ['', 'not xml', '<plist version="1.0"><dict><key>images</key><array><dict>', '<plist><dict><key>a</key></dict></plist>',
+      '<plist><dict><string>x</string></dict></plist>', '<plist><foo/></plist>', '<dict/>'].forEach((bad) => {
+      assert.throws(() => SH.parseHdiutilInfoPlist(bad), /plist/, 'отвергнут: ' + JSON.stringify(bad));
+    });
+    assert.throws(() => SH.parsePlistXml('<plist>' + '<array>'.repeat(200) + '</array>'.repeat(200) + '</plist>'), /вложенност/, 'глубина ограничена');
+    const polluted = SH.parsePlistXml('<plist><dict><key>__proto__</key><dict><key>x</key><string>y</string></dict></dict></plist>');
+    assert.strictEqual(({}).x, undefined, 'прототип Object не загрязнён');
+    assert.strictEqual(Object.getPrototypeOf(polluted), null);
+    const v = SH.parsePlistXml('<plist><dict><key>n</key><integer>-5</integer><key>f</key><real>1.5</real><key>t</key><true/><key>u</key><false></false>' +
+      '<key>s</key><string>a&amp;b&lt;c&#65;&#x42;</string><key>e</key><string/></dict></plist>');
+    assert.deepStrictEqual([v.n, v.f, v.t, v.u, v.s, v.e], [-5, 1.5, true, false, 'a&b<cAB', '']);
+  });
+
+  const CS_DEVID =
+    'Executable=/Applications/Hamidun Setup.app/Contents/MacOS/Hamidun Setup\n' +
+    'Identifier=com.hamidun.setup\nFormat=app bundle with Mach-O universal (x86_64 arm64)\n' +
+    'CodeDirectory v=20500 size=1234 flags=0x10000(runtime) hashes=30+7 location=embedded\n' +
+    'Signature size=9000\nAuthority=Developer ID Application: Example Person (ABCDE12345)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\n' +
+    'Timestamp=Oct 1, 2026 at 12:00:00\nInfo.plist entries=22\nTeamIdentifier=ABCDE12345\nSealed Resources version=2 rules=13 files=100\nInternal requirements count=1 size=200\n';
+  const CS_ADHOC =
+    'Executable=/Users/alice/dev/Hamidun Setup.app/Contents/MacOS/Hamidun Setup\nIdentifier=com.hamidun.setup\nFormat=app bundle with Mach-O thin (arm64)\n' +
+    'CodeDirectory v=20400 size=500 flags=0x20002(adhoc,linker-signed) hashes=10+7 location=embedded\nSignature=adhoc\nInfo.plist entries=22\nTeamIdentifier=not set\nSealed Resources version=2 rules=13 files=100\n';
+
+  ok('u9/M-6: parseCodesignIdentity и buildRequirement — Developer ID, ad-hoc и отказ при неопределённой личности', () => {
+    const dev = SH.parseCodesignIdentity(CS_DEVID);
+    assert.deepStrictEqual(dev, { identifier: 'com.hamidun.setup', teamId: 'ABCDE12345', adhoc: false });
+    assert.strictEqual(SH.buildRequirement(dev), 'anchor apple generic and identifier "com.hamidun.setup" and certificate leaf[subject.OU] = "ABCDE12345"');
+    const adhoc = SH.parseCodesignIdentity(CS_ADHOC);
+    assert.deepStrictEqual(adhoc, { identifier: 'com.hamidun.setup', teamId: '', adhoc: true });
+    assert.strictEqual(SH.buildRequirement(adhoc), 'identifier "com.hamidun.setup"');
+    // ad-hoc определяется и по флагу CodeDirectory, если строки Signature= нет
+    assert.strictEqual(SH.parseCodesignIdentity('Identifier=a.b\nCodeDirectory v=20400 flags=0x2(adhoc) hashes=1\nTeamIdentifier=not set\n').adhoc, true);
+    // ни издателя, ни пометки ad-hoc → требование не строится (раньше это было бы тихое «достаточно идентификатора»)
+    const unknown = SH.parseCodesignIdentity('Identifier=com.hamidun.setup\nFormat=app bundle\n');
+    assert.strictEqual(SH.buildRequirement(unknown), '', 'издатель неизвестен и это не ad-hoc → отказ, а не слабое требование');
+    ['', 'garbage', 'Identifier=\nTeamIdentifier=ABCDE12345\n', 'Identifier=bad id with spaces\nSignature=adhoc\n', 'Identifier=a"b\nSignature=adhoc\n',
+      'Identifier=com.x\nTeamIdentifier=abcde12345\n', 'Identifier=com.x\nTeamIdentifier=SHORT\n', 'Identifier=com.x\nTeamIdentifier=ABCDE12345" or true\n'].forEach((t) => {
+      assert.strictEqual(SH.buildRequirement(SH.parseCodesignIdentity(t)), '', 'отвергнуто: ' + JSON.stringify(t));
+    });
+    // кавычки и язык требований не прорвутся через идентификатор/Team ID
+    assert.strictEqual(SH.buildRequirement({ identifier: 'a" or anchor apple', teamId: 'ABCDE12345' }), '');
+    assert.strictEqual(SH.buildRequirement({ identifier: 'com.x', teamId: 'ABCDE12345" or "1' }), '');
+    assert.strictEqual(SH.bundlePathFromExecPath('/Applications/Hamidun Setup.app/Contents/MacOS/Hamidun Setup'), '/Applications/Hamidun Setup.app');
+    assert.strictEqual(SH.bundlePathFromExecPath('/Volumes/Hamidun Setup/Hamidun Setup.app/Contents/MacOS/Hamidun Setup'), '/Volumes/Hamidun Setup/Hamidun Setup.app');
+    assert.strictEqual(SH.bundlePathFromExecPath('/usr/local/bin/electron'), '', 'не из .app (dev-запуск) → личность неизвестна');
+    assert.strictEqual(SH.bundlePathFromExecPath('/x/App.app/Contents/Frameworks/Helper'), '');
+  });
+
+  // Стенд preflight: exec-заглушка пишет вызовы; ответы задаёт сценарий.
+  const preflightBox = (opts) => {
+    const o = opts || {};
+    const calls = []; const logs = []; const rm = []; const made = [];
+    const attached = {};                              // служебный каталог -> образ, смонтированный в него
+    const files = new Set(o.files || []);
+    const dirs = new Set(o.dirs || []);
+    const exec = async (file, args) => {
+      calls.push([file, args.slice()]);
+      const sub = file.split('/').pop();
+      if (sub === 'codesign' && args[0] === '-dv') return o.dv || { code: 0, stdout: '', stderr: CS_DEVID };
+      if (sub === 'hdiutil' && args[0] === 'info') return o.info || { code: 0, stdout: plistDoc([]), stderr: '' };
+      if (sub === 'hdiutil' && args[0] === 'attach') {
+        if (o.attachFails) return { code: 1, stdout: '', stderr: 'attach failed' };
+        const at = args[args.indexOf('-mountpoint') + 1];
+        attached[at] = args[args.length - 1];
+        dirs.add(at + '/Hamidun Setup.app');       // монтирование «показывает» приложение внутри образа
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (sub === 'hdiutil' && args[0] === 'detach') {
+        if (o.detachFails && !args.includes('-force')) return { code: 1, stdout: '', stderr: 'busy' };
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (sub === 'codesign' && args[0] === '--verify') {
+        const target = args[args.length - 1];
+        const image = attached[target.replace(/\/Hamidun Setup\.app$/, '')] || '';   // '' — проверка идёт на уже подключённом томе
+        return { code: (o.verifyOk ? o.verifyOk(target, image) : true) ? 0 : 3, stdout: '', stderr: '' };
+      }
+      return { code: 127, stdout: '', stderr: 'unexpected ' + file };
+    };
+    const deps = {
+      exec, runningBundle: o.bundle === undefined ? '/Applications/Hamidun Setup.app' : o.bundle,
+      fileCandidates: () => o.fileCandidates || [],
+      isFile: (p) => files.has(p), isDir: (p) => dirs.has(p),
+      mkPrivateDir: () => { const d = '/tmp/hm-selfheal-' + (made.length + 1); made.push(d); return d; },
+      rmPrivateDir: (d) => { rm.push(d); },
+      log: (l) => logs.push(l),
+    };
+    return { deps, calls, logs, rm, made, run: () => SH.preflight(deps) };
+  };
+  const callsTo = (b, sub, first) => b.calls.filter(([f, a]) => f.split('/').pop() === sub && (first === undefined || a[0] === first));
+  const verifyReq = (b) => callsTo(b, 'codesign', '--verify').map(([, a]) => a[a.indexOf('-R') + 1]);
+
+  asyncOk('u9/M-6: preflight — подключённый подлинный образ проверяется на его томе, монтирования и отцепления не нужны', async () => {
+    const b = preflightBox({
+      files: [OURS], dirs: ['/Volumes/Hamidun Setup/Hamidun Setup.app'],
+      info: { code: 0, stdout: plistDoc([plistImage(OURS, ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1']), plistImage(FOREIGN_NAME, ['/Volumes/Hamidun Archive'])]), stderr: '' },
+    });
+    const r = await b.run();
+    assert.strictEqual(r.ok, true, JSON.stringify(r) + b.logs.join('\n'));
+    assert.strictEqual(r.dmg, OURS);
+    assert.strictEqual(r.via, 'mounted');
+    assert.deepStrictEqual(r.mountPoints, ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1'], 'отцепляться будут тома ЭТОГО образа и только они');
+    assert.strictEqual(r.requirement, 'anchor apple generic and identifier "com.hamidun.setup" and certificate leaf[subject.OU] = "ABCDE12345"');
+    assert.deepStrictEqual(verifyReq(b), ['=' + r.requirement], 'codesign получил требование с Team ID и bundle id запущенного установщика');
+    assert.deepStrictEqual(b.calls.filter(([f, a]) => f.endsWith('hdiutil') && /attach|detach/.test(a[0])), [], 'preflight ничего не монтирует и не отцепляет, когда образ уже подключён');
+    const verifyCall = callsTo(b, 'codesign', '--verify')[0][1];
+    assert.deepStrictEqual(verifyCall.slice(0, 3), ['--verify', '--deep', '--strict'], 'полная проверка подписи, а не «каталог существует»');
+    assert.strictEqual(verifyCall[verifyCall.length - 1], '/Volumes/Hamidun Setup/Hamidun Setup.app');
+  });
+
+  asyncOk('u9/M-6: preflight — образ с чужой подписью отвергается, служебное монтирование отцеплено, карантин не трогается', async () => {
+    const b = preflightBox({ files: [OURS], fileCandidates: [OURS], verifyOk: () => false });
+    const r = await b.run();
+    assert.deepStrictEqual([r.ok, r.error, r.dmg], [false, 'verify-failed', OURS]);
+    const att = callsTo(b, 'hdiutil', 'attach');
+    assert.strictEqual(att.length, 1);
+    const a = att[0][1];
+    ['-nobrowse', '-readonly', '-noautoopen', '-mountpoint'].forEach((f) => assert(a.includes(f), 'служебное монтирование ' + f + ': ' + a.join(' ')));
+    assert.strictEqual(a[a.length - 1], OURS, 'образ — последним аргументом (путь аргументом, не подстановкой)');
+    assert.strictEqual(a[a.indexOf('-mountpoint') + 1], b.made[0], 'монтирование в служебный каталог');
+    assert.deepStrictEqual(callsTo(b, 'hdiutil', 'detach').map(([, x]) => x), [['detach', b.made[0]]], 'отцеплен ровно служебный каталог, без -force, раз отцепился сам');
+    assert.deepStrictEqual(b.rm, [b.made[0]], 'служебный каталог убран');
+    assert(!b.calls.some(([f]) => /xattr/.test(f)), 'ни одного xattr: карантин на непроверенном файле не снимается');
+    assert(b.logs.some((l) => /НЕ прошёл проверку/.test(l) && /не снимаю/.test(l)), 'причина названа в журнале по-русски: ' + b.logs.join(' | '));
+    assert(b.logs.some((l) => /fail-closed/.test(l)));
+  });
+
+  asyncOk('u9/M-6: preflight — подложенный свежий образ отвергается, подлинный старый берётся', async () => {
+    const FRESH = DL + '/Hamidun-Setup-Mac (2).dmg';
+    const b = preflightBox({
+      files: [FRESH, OURS], fileCandidates: [FRESH, OURS],            // свежий первым, как отдаёт поиск по mtime
+      verifyOk: (target, image) => image === OURS,                     // подпись сходится только у подлинного образа
+    });
+    const r = await b.run();
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(r.dmg, OURS, 'выбран подлинный образ, а не свежий по mtime');
+    assert.deepStrictEqual(callsTo(b, 'hdiutil', 'attach').map(([, a]) => a[a.length - 1]), [FRESH, OURS], 'сначала проверен свежий (и отвергнут), затем старый');
+    assert.strictEqual(callsTo(b, 'hdiutil', 'detach').length, 2, 'оба служебных монтирования отцеплены');
+    // КОНТРОЛЬ: прежнее правило «самый свежий по имени» вернуло бы ровно подложенный файл и сняло бы с него карантин
+    assert.strictEqual([FRESH, OURS][0], FRESH, 'контроль: по прежним правилам победил бы ' + FRESH);
+    assert.notStrictEqual(r.dmg, FRESH);
+  });
+
+  asyncOk('u9/M-6: preflight — ad-hoc сборка, нечитаемая личность запущенного установщика и опасный путь .app', async () => {
+    let b = preflightBox({ files: [OURS], dirs: ['/Volumes/Hamidun Setup/Hamidun Setup.app'], dv: { code: 0, stdout: '', stderr: CS_ADHOC },
+      info: { code: 0, stdout: plistDoc([plistImage(OURS, ['/Volumes/Hamidun Setup'])]), stderr: '' } });
+    let r = await b.run();
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.requirement, 'identifier "com.hamidun.setup"');
+    assert.deepStrictEqual(verifyReq(b), ['=identifier "com.hamidun.setup"'], 'проверка --verify --deep --strict остаётся и для ad-hoc');
+    for (const variant of [
+      { dv: { code: 1, stdout: '', stderr: 'code object is not signed at all' } },
+      { dv: { code: 0, stdout: '', stderr: 'Identifier=com.hamidun.setup\n' } },          // издатель не определён и не ad-hoc
+      { bundle: '' },
+      { bundle: '/Applications/Evil\nTeamIdentifier=ABCDE12345\n.app' },
+    ]) {
+      b = preflightBox(Object.assign({ files: [OURS], fileCandidates: [OURS] }, variant));
+      r = await b.run();
+      assert.deepStrictEqual([r.ok, r.error], [false, 'identity-unknown'], JSON.stringify(variant));
+      assert.deepStrictEqual(callsTo(b, 'hdiutil'), [], 'без личности образы не монтируются и не отцепляются: ' + JSON.stringify(variant));
+      assert.deepStrictEqual(callsTo(b, 'codesign', '--verify'), []);
+    }
+  });
+
+  asyncOk('u9/M-6: preflight — нет образов, сбой hdiutil info, потолок кандидатов, отцепление служебного тома', async () => {
+    let b = preflightBox({});
+    let r = await b.run();
+    assert.deepStrictEqual([r.ok, r.error], [false, 'dmg-not-found']);
+    for (const info of [{ code: 1, stdout: '', stderr: 'boom' }, { code: 0, stdout: 'not a plist', stderr: '' }]) {
+      b = preflightBox({ files: [OURS], fileCandidates: [OURS], info });
+      r = await b.run();
+      assert.strictEqual(r.ok, true, 'образ найден на диске');
+      assert.deepStrictEqual(r.mountPoints, [], 'без достоверного plist точек для отцепления нет — отцепляется МЕНЬШЕ, а не больше');
+    }
+    // потолок кандидатов
+    const many = Array.from({ length: 10 }, (_, k) => DL + '/Hamidun-Setup-Mac (' + k + ').dmg');
+    b = preflightBox({ files: many, fileCandidates: many, verifyOk: () => false });
+    r = await b.run();
+    assert.strictEqual(r.error, 'verify-failed');
+    assert.strictEqual(callsTo(b, 'hdiutil', 'attach').length, SH.MAX_CANDIDATES, 'проверено не больше ' + SH.MAX_CANDIDATES + ' образов');
+    // отцепление служебного тома сначала мягкое, затем -force; каталог убирается в любом случае
+    b = preflightBox({ files: [OURS], fileCandidates: [OURS], detachFails: true, verifyOk: () => true });
+    r = await b.run();
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(callsTo(b, 'hdiutil', 'detach').map(([, a]) => a), [['detach', b.made[0]], ['detach', b.made[0], '-force']]);
+    assert.deepStrictEqual(b.rm, [b.made[0]]);
+    // образ не монтируется / в нём нет приложения → кандидат отвергнут, служебный каталог убран
+    b = preflightBox({ files: [OURS], fileCandidates: [OURS], attachFails: true });
+    r = await b.run();
+    assert.strictEqual(r.error, 'verify-failed');
+    assert.deepStrictEqual(callsTo(b, 'hdiutil', 'detach'), [], 'не смонтировано — нечего отцеплять');
+    assert.deepStrictEqual(b.rm, [b.made[0]]);
+    // инвариант: preflight отцепляет только тома, созданные им самим
+    b = preflightBox({ files: [OURS, OURS2], fileCandidates: [OURS2], dirs: ['/Volumes/Hamidun Setup/Hamidun Setup.app'], verifyOk: (t, image) => image !== '',
+      info: { code: 0, stdout: plistDoc([plistImage(OURS, ['/Volumes/Hamidun Setup'])]), stderr: '' } });
+    await b.run();
+    callsTo(b, 'hdiutil', 'detach').forEach(([, a]) => assert(b.made.includes(a[1]), 'detach касается только служебного каталога: ' + a.join(' ')));
+  });
+
+  // okDmgName: имя НОМИНИРУЕТ кандидата, решает подпись (шапка mac-selfheal.js, п. 1). Прежний набор держал это только
+  // косвенно: единственный образ с чужим именем стоял за подлинным и до проверки не доходил (мутант okDmgName = true
+  // выжил). Здесь чужое имя — ЕДИНСТВЕННЫЙ подключённый образ, файл на диске есть, приложение на его томе «прошло бы»
+  // проверку: отказать может только фильтр имени/пути.
+  asyncOk('u9/M-6: preflight — имя образа лишь номинирует кандидата: единственный подключённый образ с чужим именем, чьё приложение прошло бы проверку, не берётся', async () => {
+    const MNT = '/Volumes/Hamidun Archive';
+    const run = async (imagePath) => {
+      const b = preflightBox({
+        files: [imagePath], dirs: [MNT + '/Hamidun Setup.app'],
+        info: { code: 0, stdout: plistDoc([plistImage(imagePath, [MNT])]), stderr: '' },
+      });
+      return { b, r: await b.run() };
+    };
+    // КОНТРОЛЬ метода: те же приспособления с нашим именем — образ принят; значит отказы ниже — именно за имя/путь
+    let t = await run(OURS);
+    assert.deepStrictEqual([t.r.ok, t.r.dmg, t.r.via], [true, OURS, 'mounted'], 'КОНТРОЛЬ: ' + JSON.stringify(t.r));
+    assert.strictEqual(callsTo(t.b, 'codesign', '--verify').length, 1, 'КОНТРОЛЬ: проверка подписи на этом стенде доходит до вызова');
+    for (const [why, p] of [
+      ['чужое имя (начало похоже, шаблона нет)', FOREIGN_NAME],
+      ['наш шаблон только в середине имени', DL + '/Old-Hamidun-Setup-Mac.dmg'],
+      ['не .dmg на конце', DL + '/Hamidun-Setup-Mac.dmg.zip'],
+      ['управляющий символ в каталоге', '/Users/ali\nce/Downloads/Hamidun-Setup-Mac.dmg'],
+      ['относительный путь', 'Downloads/Hamidun-Setup-Mac.dmg'],
+    ]) {
+      t = await run(p);
+      assert.deepStrictEqual([t.r.ok, t.r.error], [false, 'dmg-not-found'], why + ': ' + JSON.stringify(t.r));
+      assert.deepStrictEqual(callsTo(t.b, 'codesign', '--verify'), [], why + ': подпись не проверялась');
+      assert.deepStrictEqual(callsTo(t.b, 'hdiutil', 'attach').concat(callsTo(t.b, 'hdiutil', 'detach')), [], why + ': ни монтирований, ни отцеплений');
+      assert(t.b.logs.some((l) => /не найден/.test(l)), why + ': причина названа в журнале: ' + t.b.logs.join(' | '));
+    }
+  });
+
+  // Помощник в песочнице: заглушки hdiutil/open/pgrep/codesign на PATH случая; пакетный прогон (см. shBatch выше).
+  // Механические подстановки (логика помощника не меняется): префикс /usr/bin/ срезан — заглушки берутся с PATH;
+  // /Volumes/ уведён в каталог случая. «Установщик» — фоновый процесс, уже вышедший к моменту запуска помощника.
+  // Заглушки — функции оболочки (а не файлы): помощник зовёт их голыми именами, и функция в подоболочке случая
+  // не стоит запуска нового процесса (на Windows это секунды). Ответ attach — таблицей, где точка монтирования стоит
+  // В КОНЦЕ строки, как у настоящего hdiutil (её достаёт sed).
+  const HELPER_FUNCS = [
+    'hdiutil() { echo "hdiutil $*" >> "$HM_LOG"; if [ "$1" = attach ]; then echo "/dev/disk9          GUID_partition_scheme"; echo "/dev/disk9s1        Apple_HFS        $HM_VOLROOT/Hamidun Setup"; fi; return 0; }',
+    'open() { echo "open $*" >> "$HM_LOG"; : > "$HM_LAUNCHED"; return 0; }',
+    'pgrep() { [ -f "$HM_LAUNCHED" ]; }',
+    'codesign() { echo "codesign $*" >> "$HM_LOG"; [ "$HM_SIGN" = bad ] && return 3; return 0; }',
+  ].join('\n');
+  const helperBatch = (pfx) => shBatch(pfx, {},
+    (text, c) => text.split('/usr/bin/').join('').split('/Volumes/').join(mp(c.dir) + '/Volumes/'));
+  const REQ = 'anchor apple generic and identifier "com.hamidun.setup" and certificate leaf[subject.OU] = "ABCDE12345"';
+  // Случай помощника: тома песочницы HamidunOld / Hamidun Setup (наши) и HamidunForeign (посторонний «Hamidun…»).
+  const helperCase = (b, text, opts) => b.add((c) => {
+    const o = opts || {};
+    ['HamidunOld', 'Hamidun Setup', 'HamidunForeign'].forEach((v) => fs.mkdirSync(c.dir + '/Volumes/' + v, { recursive: true }));
+    if (!o.noApp) fs.mkdirSync(c.dir + '/Volumes/Hamidun Setup/Hamidun Setup.app', { recursive: true });
+    fs.writeFileSync(c.dir + '/fake.dmg', 'x');
+    c.vol = (n) => mp(c.dir) + '/Volumes/' + n;
+    const mounts = (o.mounts || []).map((n) => c.vol(n));
+    return {
+      script: text,
+      argsRaw: 'set -- ' + [shq(mp(c.dir) + '/fake.dmg'), '"$INST"', shq(mp(c.dir) + '/status.txt')]
+        .concat(o.old ? [] : [shq(REQ)].concat(mounts.map(shq))).join(' '),
+      env: Object.assign({ HM_LAUNCHED: mp(c.dir) + '/launched.flag', HM_VOLROOT: mp(c.dir) + '/Volumes' }, o.env || {}),
+      prelude: HELPER_FUNCS + '\n( true ) & INST=$!; wait $INST',
+    };
+  });
+  const helperResult = (c) => {
+    let status = ''; try { status = fs.readFileSync(c.dir + '/status.txt', 'utf8').trim(); } catch (e) { /* крошку не писали */ }
+    return { lines: c.logText().split(/\r?\n/).filter(Boolean), status };
+  };
+  // Прежний текст помощника (до u9), дословно: негативный контроль.
+  const OLD_HELPER = [
+    'DMG="$1"; PID="$2"; ST="$3";',
+    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
+    'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
+    'MP=$(/usr/bin/hdiutil attach -nobrowse "$DMG" 2>/dev/null | /usr/bin/sed -n "s|.*\\(/Volumes/.*\\)$|\\1|p" | /usr/bin/tail -1);',
+    'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
+    'if ! /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf relaunch-failed > "$ST"; exit 1; fi;',
+    'i=0; while [ $i -lt 20 ]; do',
+    '  if /usr/bin/pgrep -f "Hamidun Setup.app/Contents/MacOS" >/dev/null 2>&1; then',
+    '    printf ok > "$ST"; exit 0;',
+    '  fi;',
+    '  sleep 1; i=$((i+1));',
+    'done;',
+    'printf relaunch-not-seen > "$ST"; exit 1',
+  ].join(' ');
+
+  ok('u9/M-6: помощник (sh) отцепляет только переданные тома образа, посторонний том остаётся', () => {
+    needBash();
+    const b = helperBatch('hm-m6a-');
+    try {
+      const H = SH.buildHelperScript();
+      const mine = helperCase(b, H, { mounts: ['HamidunOld', 'Hamidun Setup'] });
+      const none = helperCase(b, H, { mounts: [] });                       // нет переданных томов → отцеплять нечего
+      const old = helperCase(b, OLD_HELPER, { old: true });
+      b.run();
+      let o = helperResult(mine);
+      assert.strictEqual(mine.rc, 0, 'помощник отработал: ' + mine.out + o.lines.join('|'));
+      assert.deepStrictEqual(o.lines.filter((l) => /^hdiutil detach /.test(l)),
+        [mine.vol('HamidunOld'), mine.vol('Hamidun Setup')].map((m) => 'hdiutil detach ' + m + ' -force'), 'отцеплены ровно тома образа, по одному');
+      assert(!o.lines.some((l) => /HamidunForeign/.test(l)), 'посторонний том не тронут: ' + o.lines.join('|'));
+      assert.strictEqual(o.status, 'ok');
+      o = helperResult(none);
+      assert.deepStrictEqual(o.lines.filter((l) => /^hdiutil detach /.test(l)), [], 'нечего отцеплять — и не отцепляет по маске');
+      o = helperResult(old);
+      assert(o.lines.some((l) => /^hdiutil detach .*HamidunForeign/.test(l)), 'КОНТРОЛЬ: прежний помощник отцеплял ВСЕ /Volumes/Hamidun*, включая посторонний: ' + o.lines.join('|'));
+    } finally { b.done(); }
+  });
+
+  ok('u9/M-6: помощник (sh) проверяет приложение на смонтированном томе до open, при отказе том отцеплен', () => {
+    needBash();
+    const b = helperBatch('hm-m6b-');
+    try {
+      const H = SH.buildHelperScript();
+      const bad = helperCase(b, H, { mounts: ['Hamidun Setup'], env: { HM_SIGN: 'bad' } });
+      const good = helperCase(b, H, { mounts: ['Hamidun Setup'] });
+      const noApp = helperCase(b, H, { mounts: [], noApp: true });         // том смонтировался без приложения
+      const oldBad = helperCase(b, OLD_HELPER, { old: true, env: { HM_SIGN: 'bad' } });
+      b.run();
+      let o = helperResult(bad);
+      assert.strictEqual(bad.rc, 1, 'код 1: ' + bad.out + o.lines.join('|'));
+      assert.strictEqual(o.status, 'verify-failed', 'крошка называет причину');
+      assert(!o.lines.some((l) => /^open /.test(l)), 'open НЕ вызван: ' + o.lines.join('|'));
+      const iSign = o.lines.findIndex((l) => /^codesign /.test(l));
+      const iAttach = o.lines.findIndex((l) => /^hdiutil attach /.test(l));
+      assert(iSign > iAttach && iAttach >= 0, 'проверка идёт после attach');
+      assert.strictEqual(o.lines[o.lines.length - 1], 'hdiutil detach ' + bad.vol('Hamidun Setup') + ' -force', 'свежесмонтированный том отцеплен последним действием');
+      // успешная проверка: codesign получает требование целиком (с пробелами и кавычками) одним аргументом
+      o = helperResult(good);
+      assert.strictEqual(good.rc, 0, good.out);
+      assert.strictEqual(o.lines.find((l) => /^codesign /.test(l)),
+        'codesign --verify --deep --strict -R =' + REQ + ' ' + good.vol('Hamidun Setup') + '/Hamidun Setup.app');
+      assert.strictEqual(o.status, 'ok');
+      assert(o.lines.findIndex((l) => /^open /.test(l)) > o.lines.findIndex((l) => /^codesign /.test(l)), 'open — после проверки');
+      o = helperResult(noApp);
+      assert.strictEqual(o.status, 'mount-failed', 'том без приложения → mount-failed, как и раньше');
+      assert(!o.lines.some((l) => /^(codesign|open) /.test(l)), 'проверка и запуск не начинались');
+      // КОНТРОЛЬ: прежний текст запускает приложение при «плохой подписи» — проверки в нём нет
+      o = helperResult(oldBad);
+      assert(o.lines.some((l) => /^open /.test(l)) && !o.lines.some((l) => /^codesign /.test(l)), 'КОНТРОЛЬ: прежний помощник открывает приложение без какой-либо проверки подписи');
+    } finally { b.done(); }
+  });
+
+  // Помощник — второй запуск скрипта из main.js (после скриптов компонентов, M-1), и он последний рубеж подписи перед
+  // `open`. /bin/sh на macOS — bash в POSIX-режиме; моделью служит `bash --posix` (настоящий /bin/sh Mac здесь недоступен).
+  // SHELLOPTS=xtrace заставляет его вычислять PS4 с подстановкой команды ДО первой строки текста — и в POSIX-режиме тоже;
+  // привилегированный режим (-p) игнорирует SHELLOPTS. Поэтому: окружение чистится (sanitizePosixEnv) И стоит -p.
+  ok('u9/M-1: помощник самолечения под `sh -p` — PS4 при SHELLOPTS=xtrace из окружения не исполняется, сам помощник работает', () => {
+    needBash();
+    const work = mkTmp('hm-m1p-');
+    try {
+      const marker = work + '/PWNED';
+      const env = Object.assign({}, process.env, { SHELLOPTS: 'xtrace', PS4: '$(: > "' + marker + '")' });
+      const probe = (flags) => {
+        try { fs.rmSync(marker, { force: true }); } catch (e) { /* */ }
+        const r = spawnSync('bash', flags.concat(['-c', 'echo helper-ran']), { encoding: 'utf8', timeout: 30000, env });
+        assert.strictEqual(r.status, 0, 'bash отработал: ' + (r.stderr || '') + String(r.error || ''));
+        assert(/helper-ran/.test(r.stdout || ''), 'позитивный контроль: тело выполнилось');
+        return fs.existsSync(marker);
+      };
+      assert.strictEqual(probe(['--posix']), true, 'КОНТРОЛЬ: без -p (прежний запуск `sh -c`) PS4 из окружения исполняется — вектор реален');
+      assert.strictEqual(probe(['--posix', '-p']), false, 'с -p PS4/SHELLOPTS из окружения игнорируются');
+      // и сам помощник (настоящий текст из buildHelperScript) под теми же флагами, с очищенным окружением
+      const dir = work + '/h';
+      fs.mkdirSync(dir + '/Volumes/Hamidun Setup/Hamidun Setup.app', { recursive: true });
+      fs.writeFileSync(dir + '/fake.dmg', 'x');
+      const patched = SH.buildHelperScript().split('/usr/bin/').join('').split('/Volumes/').join(mp(dir) + '/Volumes/');
+      const cleaned = IE.sanitizePosixEnv(Object.assign({}, process.env, HOSTILE));
+      Object.assign(cleaned, { HM_LOG: mp(dir) + '/log', HM_LAUNCHED: mp(dir) + '/launched.flag', HM_VOLROOT: mp(dir) + '/Volumes' });
+      const r = spawnSync('bash', ['--posix', '-p', '-c', HELPER_FUNCS + '\n' + patched, 'hm-selfheal', mp(dir) + '/fake.dmg', '2147483646',
+        mp(dir) + '/status.txt', REQ, mp(dir) + '/Volumes/Hamidun Setup'], { encoding: 'utf8', timeout: 60000, env: cleaned });
+      assert.strictEqual(r.status, 0, 'помощник под `sh -p -c` отработал: ' + (r.stderr || '') + String(r.error || ''));
+      assert.strictEqual(fs.readFileSync(dir + '/status.txt', 'utf8').trim(), 'ok');
+      const lines = fs.readFileSync(dir + '/log', 'utf8').split(/\r?\n/).filter(Boolean);
+      assert(lines.some((l) => /^hdiutil detach .*Hamidun Setup -force$/.test(l)), 'переданный том отцеплен: ' + lines.join('|'));
+      assert(lines.some((l) => l === 'codesign --verify --deep --strict -R =' + REQ + ' ' + mp(dir) + '/Volumes/Hamidun Setup/Hamidun Setup.app'), 'проверка подписи с требованием целиком: ' + lines.join('|'));
+      assert(lines.some((l) => /^open -n -a /.test(l)), 'приложение открыто после проверки');
+    } finally { dropDir(work); }
+  });
+
+  ok('u9/M-6: main.js — проверка образа до снятия карантина, аргументы помощника, журнал исхода', () => {
+    const m = MAIN();
+    const i = m.indexOf("ipcMain.handle('mac-selfheal'");
+    const end = m.indexOf("ipcMain.handle('quit'", i);
+    const h = jsCode(m.slice(i, end));
+    assert(/macSelfheal\.preflight\(\{/.test(h) && /runningBundle: macSelfheal\.bundlePathFromExecPath\(process\.execPath\)/.test(h), 'личность берётся у запущенного .app');
+    assert(/spawn\('\/bin\/sh',\s*\n?\s*\['-p', '-c', helper, 'hm-selfheal', dmg, String\(process\.pid\), statusFile, pre\.requirement\]\.concat\(pre\.mountPoints\),\s*\n?\s*\{ detached: true, stdio: 'ignore', env: installEnv\.sanitizePosixEnv\(process\.env\) \}\)/.test(h),
+      'помощник: sh -p -c, окружение — sanitizePosixEnv; аргументы: $1 образ, $2 pid, $3 крошка, $4 требование, $5… точки монтирования');
+    assert(/const helper = macSelfheal\.buildHelperScript\(\);/.test(h), 'текст помощника собирает чистый модуль');
+    assert(!/hdiutil/.test(h), 'в обработчике нет собственных вызовов hdiutil (всё через preflight и помощника)');
+    assert(/error: 'preflight-failed'/.test(h), 'исключение проверки → fail-closed с кодом, ничего не меняет');
+    assert(/if \(_macSelfhealBusy\) return \{ ok: false, error: 'busy' \};/.test(m) && /finally \{\s*\n\s*_macSelfhealBusy = false;/.test(h),
+      'второй вызов во время проверки получает busy, флаг снимается в finally');
+    const st = jsCode(m.slice(m.indexOf("ipcMain.handle('mac-selfheal-status'"), end));
+    assert(/macSelfheal\.statusMessageRu\(status\)/.test(st) && /logToFile\('selfheal', note\)/.test(st), 'исход помощника попадает в install.log при чтении крошки');
+    ['verify-failed', 'mount-failed', 'relaunch-failed', 'relaunch-not-seen'].forEach((s) => {
+      assert(/[А-Яа-я]{5}/.test(SH.statusMessageRu(s)), s + ': сообщение по-русски');
+    });
+    assert.strictEqual(SH.statusMessageRu('ok'), '');
+    assert.strictEqual(SH.statusMessageRu('started'), '');
+    const app = APPJS();
+    assert(/why === 'verify-failed'/.test(app) && /why === 'identity-unknown'/.test(app), 'окно знает новые коды ошибок');
+    const vf = jsCode(app.slice(app.indexOf("why === 'verify-failed'"), app.indexOf("why === 'identity-unknown'")));
+    assert(/не совпала с подписью/.test(vf) && !/Терминал/.test(vf), 'при непрошедшей проверке окно НЕ отправляет в Терминал (команда оттуда сняла бы карантин с такого же файла)');
+    assert(/st === 'verify-failed'/.test(app), 'крошка verify-failed показывается на следующем запуске');
+  });
+
+  // Обработчик mac-selfheal из НАСТОЯЩЕГО main.js исполняется с подставными зависимостями (Electron-точку входа не
+  // поднять): текст режется от защёлки busy до обработчика статуса и оборачивается в функцию. Статическая проверка выше
+  // доказывает только «строка есть»; здесь видно главное — при отказе проверки образа НЕ ВЫПОЛНЯЕТСЯ ни xattr, ни запись
+  // крошки, ни запуск помощника, ни выход (мутант `if (false) return` проходил прежний набор — найден мутационной пробой).
+  const loadSelfhealHandler = (opts) => {
+    const m = MAIN();
+    const a = m.indexOf('let _macSelfhealBusy = false;');
+    const z = m.indexOf("ipcMain.handle('mac-selfheal-status'");
+    assert(a !== -1 && z > a, 'обработчик mac-selfheal найден в main.js');
+    let src = m.slice(a, z);
+    if (opts.mutate) { const was = src; src = opts.mutate(src); assert.notStrictEqual(src, was, 'мутация контроля применилась'); }
+    const rec = { seq: [], execs: [], logs: [], writes: [], timers: [], spawns: [], quits: 0, preflightDeps: null };
+    let handler = null;
+    const stubFs = {
+      statSync: () => ({ isFile: () => true, isDirectory: () => true }),
+      mkdtempSync: (prefix) => prefix + 'AbC123',
+      rmdirSync: () => {},
+      mkdirSync: () => { rec.seq.push('mkdir'); rec.writes.push('mkdir'); },
+      writeFileSync: (f, t) => { rec.seq.push('status-write'); rec.writes.push({ file: f, text: t }); },
+    };
+    const factory = new Function('ipcMain', 'process', 'macSelfheal', 'macSelfhealExec', 'macFindOurDmgFiles', 'fs', 'path', 'os',
+      'logToFile', 'execFileSync', 'spawn', 'app', 'setTimeout', 'installEnv', src);
+    factory(
+      { handle: (name, fn) => { if (name === 'mac-selfheal') handler = fn; } },
+      // env — сырое окружение установщика со всем, что враждебный код того же пользователя мог в него положить
+      { platform: 'darwin', execPath: '/Applications/Hamidun Setup.app/Contents/MacOS/Hamidun Setup', pid: 4242,
+        env: Object.assign({}, BENIGN, HOSTILE) },
+      Object.assign({}, SH, { preflight: async (deps) => { rec.seq.push('preflight'); rec.preflightDeps = deps; return opts.preflight(); } }),
+      () => { throw new Error('macSelfhealExec: preflight подменён, вызываться не должен'); },
+      () => { throw new Error('macFindOurDmgFiles: preflight подменён, вызываться не должен'); },
+      stubFs, path.posix, { homedir: () => '/Users/alice', tmpdir: () => '/var/folders/x/T' },
+      (tag, line) => { rec.logs.push(tag + ': ' + line); },
+      (file, args) => {
+        rec.seq.push(path.posix.basename(file) + ' ' + args[0]);
+        rec.execs.push([file, args]);
+        if (!opts.attributeStays && args[0] === '-p') throw new Error('xattr: No such xattr: com.apple.quarantine');   // атрибута нет — штатный исход
+        return '';
+      },
+      (file, args, o) => { const child = { unrefd: false, unref() { this.unrefd = true; } }; rec.seq.push('spawn'); rec.spawns.push({ file, args, o, child }); return child; },
+      { quit: () => { rec.quits++; } },
+      (fn, ms) => { rec.seq.push('timer'); rec.timers.push(ms); return 0; },
+      IE);
+    assert.strictEqual(typeof handler, 'function', 'обработчик mac-selfheal зарегистрирован');
+    return { handler, rec };
+  };
+
+  asyncOk('u9/M-6: обработчик mac-selfheal (исполняется) — отказ проверки образа не оставляет ни xattr, ни крошки, ни помощника; успех идёт строго preflight → xattr → помощник', async () => {
+    const MOUNTS = ['/Volumes/Hamidun Setup', '/Volumes/Hamidun Setup 1'];
+    const good = { ok: true, dmg: OURS, requirement: REQ, mountPoints: MOUNTS, via: 'mounted' };
+    const untouched = (h, why) => {
+      assert.deepStrictEqual(h.rec.seq.filter((s) => s !== 'preflight'), [], why + ': после проверки не выполнено ничего — ' + JSON.stringify(h.rec.seq));
+      assert.strictEqual(h.rec.spawns.length, 0, why + ': помощник не запущен');
+      assert.deepStrictEqual(h.rec.writes, [], why + ': крошка selfheal.status не записана');
+      assert.deepStrictEqual(h.rec.timers, [], why + ': выход не запланирован');
+      assert.strictEqual(h.rec.quits, 0);
+    };
+    // 1) отказы проверки: ни карантин, ни помощник, ни выход — а код ошибки доходит до окна как есть
+    for (const refusal of [
+      { ok: false, error: 'verify-failed', dmg: OURS },
+      { ok: false, error: 'identity-unknown' },
+      { ok: false, error: 'dmg-not-found' },
+    ]) {
+      const h = loadSelfhealHandler({ preflight: () => refusal });
+      const r = await h.handler();
+      assert.deepStrictEqual(r, refusal.dmg ? { ok: false, error: refusal.error, dmg: refusal.dmg } : { ok: false, error: refusal.error });
+      untouched(h, refusal.error);
+    }
+    // 2) успех: порядок и содержимое вызовов
+    let h = loadSelfhealHandler({ preflight: () => good });
+    let r = await h.handler();
+    assert.deepStrictEqual(r, { ok: true, dmg: OURS, handoff: true });
+    assert.deepStrictEqual(h.rec.seq, ['preflight', 'xattr -dr', 'xattr -p', 'mkdir', 'status-write', 'spawn', 'timer'],
+      'сначала проверка, потом снятие карантина с ПРОВЕРЕННОГО образа, потом крошка, помощник и выход');
+    assert.deepStrictEqual(h.rec.execs, [
+      ['/usr/bin/xattr', ['-dr', 'com.apple.quarantine', OURS]],
+      ['/usr/bin/xattr', ['-p', 'com.apple.quarantine', OURS]],
+    ], 'xattr получает именно образ, выбранный проверкой');
+    const sp = h.rec.spawns[0];
+    assert.strictEqual(sp.file, '/bin/sh');
+    assert.deepStrictEqual(sp.args, ['-p', '-c', SH.buildHelperScript(), 'hm-selfheal', OURS, '4242',
+      '/Users/alice/Library/Application Support/HamidunSetup/selfheal.status', REQ].concat(MOUNTS),
+    'sh -p -c <помощник>; аргументы: образ, pid, крошка, требование подписи, тома ЭТОГО образа');
+    assert.deepStrictEqual(Object.keys(sp.o).sort(), ['detached', 'env', 'stdio'], 'опции spawn: отцепление, молчаливый stdio и ЯВНОЕ окружение');
+    assert.strictEqual(sp.o.detached, true);
+    assert.strictEqual(sp.o.stdio, 'ignore');
+    assert.deepStrictEqual(sp.o.env, IE.sanitizePosixEnv(Object.assign({}, BENIGN, HOSTILE)),
+      'окружение помощника — та же чистка deny-списком, что у скриптов компонентов (не сырой process.env)');
+    Object.keys(HOSTILE).forEach((k) => assert(!(k in sp.o.env), 'до помощника дошла ' + k));
+    Object.keys(BENIGN).forEach((k) => assert.strictEqual(sp.o.env[k], BENIGN[k], 'пользовательская ' + k + ' обязана дойти (PATH для sleep/sed/tail, локаль)'));
+    assert.strictEqual(sp.child.unrefd, true, 'помощник отцеплен от нашего процесса');
+    const started = JSON.parse(h.rec.writes.find((w) => w !== 'mkdir').text);
+    assert.deepStrictEqual([started.result, started.dmg], ['started', OURS]);
+    assert.deepStrictEqual(h.rec.timers, [6000], 'выход установщика инициирует main (не окно)');
+    const d = h.rec.preflightDeps;
+    assert.strictEqual(d.runningBundle, '/Applications/Hamidun Setup.app', 'личность берётся у запущенного .app, а не у образа');
+    assert.strictEqual(d.mkPrivateDir(), '/var/folders/x/T/hm-selfheal-AbC123', 'служебный каталог монтирования — mkdtemp (случайное имя, 0700) под tmpdir');
+    // 3) карантин не снялся: помощник не запускается
+    h = loadSelfhealHandler({ preflight: () => good, attributeStays: true });
+    r = await h.handler();
+    assert.deepStrictEqual(r, { ok: false, error: 'quarantine-not-cleared', dmg: OURS });
+    assert.strictEqual(h.rec.spawns.length, 0);
+    assert.deepStrictEqual(h.rec.writes, []);
+    // 4) исключение в проверке: fail-closed, защёлка отпущена (следующий вызов снова доходит до проверки)
+    let next = () => { throw new Error('boom'); };
+    h = loadSelfhealHandler({ preflight: () => next() });
+    r = await h.handler();
+    assert.deepStrictEqual(r, { ok: false, error: 'preflight-failed' });
+    untouched(h, 'preflight-failed');
+    assert(h.rec.logs.some((l) => /fail-closed/.test(l) && /boom/.test(l)), 'причина в журнале: ' + h.rec.logs.join(' | '));
+    next = () => good;
+    r = await h.handler();
+    assert.strictEqual(r.ok, true, 'после сбоя проверка запускается снова: ' + JSON.stringify(r));
+    // 5) второй вызов во время проверки получает busy и не запускает вторую проверку
+    let release;
+    const gate = new Promise((res) => { release = res; });
+    h = loadSelfhealHandler({ preflight: () => gate });
+    const first = h.handler();
+    assert.deepStrictEqual(await h.handler(), { ok: false, error: 'busy' });
+    release(good);
+    assert.strictEqual((await first).ok, true);
+    assert.strictEqual(h.rec.seq.filter((s) => s === 'preflight').length, 1, 'проверка запускалась один раз');
+    // 6) КОНТРОЛЬ метода: обработчик без выхода по !pre.ok (мутант, пропущенный прежним набором) снимает карантин с
+    //    образа, не прошедшего проверку, и запускает помощника — стенд это видит, значит пункт 1 что-то доказывает
+    h = loadSelfhealHandler({ preflight: () => ({ ok: false, error: 'verify-failed', dmg: OURS }), mutate: (s) => s.replace('if (!pre.ok) return', 'if (false) return') });
+    await h.handler();
+    assert(h.rec.seq.includes('xattr -dr') && h.rec.spawns.length === 1,
+      'КОНТРОЛЬ: без выхода по pre.ok карантин снимается и помощник запускается: ' + JSON.stringify(h.rec.seq));
+    // 7) КОНТРОЛЬ окружения: помощник, которому отдано сырое окружение установщика (прежний вид — spawn без чистки),
+    //    получает PS4/SHELLOPTS/BASH_ENV — стенд это видит, значит проверка `sp.o.env` выше что-то доказывает
+    h = loadSelfhealHandler({ preflight: () => good, mutate: (s) => s.replace('env: installEnv.sanitizePosixEnv(process.env)', 'env: process.env') });
+    await h.handler();
+    const rawEnv = h.rec.spawns[0].o.env;
+    assert(rawEnv.BASH_ENV && rawEnv.SHELLOPTS && rawEnv.PS4,
+      'КОНТРОЛЬ: без чистки в помощника уходят BASH_ENV/SHELLOPTS/PS4: ' + Object.keys(rawEnv).join(','));
+  });
+
+  // Окно (app.js, bindMacSelfHeal) исполняется в vm с подставными document/window: что именно видит человек.
+  asyncOk('u9/M-6: окно — verify-failed и busy показывают свои причины, verify-failed не советует Терминал; identity-unknown — советует; прошлый отказ verify-failed читается из крошки', async () => {
+    const vm = require('vm');
+    const A = APPJS();
+    const cutBlockJs = (src, header) => {
+      const i = src.indexOf(header);
+      assert(i !== -1, 'в app.js пропало: ' + header);
+      let depth = 0; const open = src.indexOf('{', i);
+      for (let k = open; k < src.length; k++) {
+        if (src[k] === '{') depth++;
+        else if (src[k] === '}') { depth--; if (!depth) return src.slice(i, k + 1); }
+      }
+      throw new Error('не нашёл конец блока: ' + header);
+    };
+    const cutLineJs = (src, snippet) => { const l = src.split('\n').find((x) => x.includes(snippet)); assert(l, 'в app.js пропала строка: ' + snippet); return l; };
+    const script = [
+      cutLineJs(A, 'let SELF_HEAL_BUSY'),
+      cutBlockJs(A, 'function setSelfHealButtonsBusy'),
+      cutBlockJs(A, 'function bindMacSelfHeal'),
+      cutLineJs(A, 'let PREV_SELFHEAL_TEXT'),
+      cutBlockJs(A, 'async function loadPrevSelfHealFailure'),
+      cutBlockJs(A, 'function showPrevSelfHealFailure'),
+      'this.API = { bindMacSelfHeal, loadPrevSelfHealFailure, showPrevSelfHealFailure, getPrev: () => PREV_SELFHEAL_TEXT };',
+    ].join('\n');
+    const mkBtn = () => ({ dataset: {}, disabled: false, textContent: 'Исправить автоматически', onClick: null,
+      addEventListener(ev, fn) { if (ev === 'click') this.onClick = fn; } });
+    const flush = async () => { for (let k = 0; k < 6; k++) await Promise.resolve(); };
+    const run = async (result, status) => {
+      const els = { 'mac-selfheal': mkBtn(), 'mac-selfheal-banner': mkBtn(), 'mac-selfheal-status': { textContent: '' }, 'mac-selfheal-banner-status': { textContent: '' } };
+      const sandbox = { document: { getElementById: (id) => els[id] || null },
+        window: { installer: { macSelfHeal: () => Promise.resolve(result), macSelfHealStatus: () => Promise.resolve({ status: status || '' }) } } };
+      vm.runInNewContext(script, sandbox);
+      sandbox.API.bindMacSelfHeal('mac-selfheal', 'mac-selfheal-status');
+      els['mac-selfheal'].onClick();
+      await flush();
+      return { text: els['mac-selfheal-status'].textContent, btn: els['mac-selfheal'], sandbox, els };
+    };
+    let r = await run({ ok: false, error: 'verify-failed' });
+    assert(/не совпала с подписью этого установщика/.test(r.text) && /не стал его запускать/.test(r.text) && /ничего не менял/.test(r.text), 'причина названа: ' + r.text);
+    assert(!/Терминал/.test(r.text), 'в Терминал не отправляет: ' + r.text);
+    assert(/@vibecodeguidebot/.test(r.text), 'путь к поддержке назван: ' + r.text);
+    assert(!r.btn.disabled, 'кнопка снова доступна');
+    r = await run({ ok: false, error: 'busy' });
+    assert(/уже идёт/.test(r.text) && !/Терминал/.test(r.text), r.text);
+    r = await run({ ok: false, error: 'identity-unknown' });
+    assert(/не смог проверить подпись/i.test(r.text) && /Терминал/.test(r.text), 'без личности — запасной путь остаётся: ' + r.text);
+    r = await run({ ok: false, error: 'preflight-failed' });
+    assert(/не смог проверить подпись/i.test(r.text), r.text);
+    r = await run({ ok: false, error: 'quarantine-not-cleared' });
+    assert(/Автоматически не вышло \(quarantine-not-cleared\)/.test(r.text), 'остальные коды — общий текст, как раньше: ' + r.text);
+    r = await run({ ok: false, error: 'dmg-not-found' });
+    assert(/Скачай установщик заново/.test(r.text), r.text);
+    // крошка прошлой попытки
+    r = await run({ ok: true }, 'verify-failed');
+    await r.sandbox.API.loadPrevSelfHealFailure();
+    assert(/не прошло проверку подписи, поэтому я его не запускал/.test(r.sandbox.API.getPrev()), 'verify-failed из крошки: ' + r.sandbox.API.getPrev());
+    assert(!/Терминал/.test(r.sandbox.API.getPrev().split('.')[0]), 'первая фраза без совета про Терминал');
+    r.sandbox.API.showPrevSelfHealFailure('mac-selfheal-status');
+    assert(r.els['mac-selfheal-status'].textContent === r.sandbox.API.getPrev(), 'текст показан в окне');
+    for (const st of ['mount-failed', 'relaunch-not-seen', 'relaunch-failed']) {
+      const rr = await run({ ok: true }, st);
+      await rr.sandbox.API.loadPrevSelfHealFailure();
+      assert(rr.sandbox.API.getPrev().length > 30 && !/подписи/.test(rr.sandbox.API.getPrev()), st + ': прежний текст не затронут');
+    }
+    for (const st of ['', 'ok', 'started']) {
+      const rr = await run({ ok: true }, st);
+      await rr.sandbox.API.loadPrevSelfHealFailure();
+      assert.strictEqual(rr.sandbox.API.getPrev(), '', JSON.stringify(st) + ': ничего не показываем');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // M-10 / N2: hm_jxa без потолка по времени; vscode-settings.js читает файл целиком до проверки размера;
+  // isSymlink() при недоступных атрибутах отвечал «не ссылка»
+  // -------------------------------------------------------------------------
+  ok('u9/N2: hm_jxa под сторожем времени — зависший osascript снимается с кодом 124', () => {
+    needBash();
+    const work = mkTmp('hm-jxa-');
+    try {
+      const hang = work + '/osascript';
+      exe(hang, '#!/bin/sh\nsleep 30\n');   // ведёт себя как чтение пустого FIFO: не возвращается
+      const lib = readMac('_lib.sh');
+      const line = lib.split('\n').find((l) => /^hm_jxa\(\) \{/.test(l));
+      assert(line, 'hm_jxa найдена в _lib.sh');
+      assert(/hm_run_with_timeout "\$\{HM_JXA_TIMEOUT:-20\}" \/usr\/bin\/osascript -l JavaScript "\$@"/.test(line), 'osascript запускается через сторож времени с потолком 20 с по умолчанию: ' + line);
+      // НАСТОЯЩИЙ текст hm_jxa из _lib.sh, подменён только путь osascript на «зависающую» заглушку; потолок — 2 с
+      const patched = line.replace('/usr/bin/osascript', mp(hang));
+      const t0 = Date.now();
+      const r = spawnSync('bash', ['-c', '. "$1"; ' + patched + '; hm_jxa /x.js; echo "rc=$?"', 'x', LIB],
+        { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HM_JXA_TIMEOUT: '2' }) });
+      const sec = (Date.now() - t0) / 1000;
+      assert(/rc=124/.test(r.stdout || ''), 'код 124 «не уложился»: ' + r.stdout + r.stderr);
+      assert(sec < 25, 'вернулось за секунды, а не через 30 с заглушки: ' + sec);
+      // контроль: прежняя форма (голый osascript) не возвращается, пока её не убьёт сам тест
+      const old = spawnSync('bash', ['-c', mp(hang) + ' -l JavaScript /x.js; echo "rc=$?"'], { encoding: 'utf8', timeout: 6000 });
+      assert(old.status === null && !/rc=/.test(old.stdout || ''), 'КОНТРОЛЬ: без сторожа вызов висит, пока его не убьёт тест: ' + JSON.stringify([old.status, String(old.error)]));
+    } finally { dropDir(work); }
+  });
+
+  // Заглушки Foundation: macIo() из vscode-settings.js исполняется в Node поверх них (на Mac — настоящие ObjC/$).
+  const VS = require(path.join(MACDIR, 'vscode-settings.js'));
+  const withFoundation = (spec, fn) => {
+    const reads = [];
+    const wrap = (v) => ({ __v: v, isNil: () => false });
+    const nil = { isNil: () => true };
+    const fm = {
+      fileExistsAtPath: (p) => !!(spec.exists || {})[p],
+      attributesOfItemAtPathError: (p) => {
+        const a = (spec.attrs || {})[p];
+        return a ? { isNil: () => false, objectForKey: (k) => wrap(a[k]) } : nil;
+      },
+      contentsOfDirectoryAtPathError: (d) => ((spec.lists || {})[d] ? wrap(spec.lists[d]) : nil),
+    };
+    const dollar = () => ({});
+    Object.assign(dollar, {
+      NSFileManager: { defaultManager: fm }, NSFileType: 'type', NSFileSize: 'size', NSUTF8StringEncoding: 4,
+      NSData: { dataWithContentsOfFile: (p) => { reads.push(p); return Object.assign(wrap('data'), { base64EncodedStringWithOptions: () => wrap('AAAA') }); } },
+      NSString: { alloc: { initWithDataEncoding: () => Object.assign(wrap('str'), { js: 'содержимое' }) } },
+    });
+    const saved = { ObjC: globalThis.ObjC, $: globalThis.$ };
+    globalThis.ObjC = { import() {}, unwrap: (x) => (x && x.__v !== undefined ? x.__v : x), deepUnwrap: (x) => x.__v };
+    globalThis.$ = dollar;
+    try { return fn(VS.macIo(), reads); } finally { globalThis.ObjC = saved.ObjC; globalThis.$ = saved.$; }
+  };
+  // Прежний isSymlink() дословно (до u9): негативный контроль.
+  const oldIsSymlink = (fm, ObjC, $) => (p) => {
+    const attrs = fm.attributesOfItemAtPathError(p, null);
+    if (!attrs || attrs.isNil()) return false;
+    return ObjC.unwrap(attrs.objectForKey($.NSFileType)) === 'NSFileTypeSymbolicLink';
+  };
+
+  ok('u9/N2: vscode-settings.js (macOS) — канал и крупный файл не читаются, ссылка с нечитаемыми атрибутами считается ссылкой', () => {
+    // чистые решения
+    assert.deepStrictEqual(VS.readVerdict({ type: 'NSFileTypeRegular', size: 100 }), { ok: true });
+    assert.strictEqual(VS.readVerdict({ type: 'NSFileTypeRegular', size: VS.HM_MAX_BYTES }).ok, true, 'ровно потолок ещё читаем');
+    assert.strictEqual(VS.readVerdict({ type: 'NSFileTypeRegular', size: VS.HM_MAX_BYTES + 1 }).ok, false);
+    assert(/файл слишком большой \(\d+ КБ\)/.test(VS.readVerdict({ type: 'NSFileTypeRegular', size: 5 * 1024 * 1024 }).error));
+    ['NSFileTypeUnknown', 'NSFileTypeDirectory', 'NSFileTypeSymbolicLink', 'NSFileTypeCharacterSpecial', 'NSFileTypeSocket', 'NSFileTypeBlockSpecial', '', undefined].forEach((t) => {
+      assert.strictEqual(VS.readVerdict({ type: t, size: 1 }).ok, false, 'не читаем: ' + String(t));
+    });
+    assert.strictEqual(VS.readVerdict(null).ok, false, 'атрибуты не прочитались — не читаем');
+    assert.strictEqual(VS.readVerdict({ type: 'NSFileTypeRegular', size: NaN }).ok, false);
+    // тексты — без слов, которые failure-explain принимает за причину провала всего шага (см. шапку файла)
+    [VS.readVerdict(null), VS.readVerdict({ type: 'x', size: 1 }), VS.readVerdict({ type: 'NSFileTypeRegular', size: 1e9 })].forEach((v) => {
+      assert(!/не найден|не удалось|ошибк|\.\.\.|…$/i.test(v.error), 'формулировка безопасна для failure-explain: ' + v.error);
+    });
+    assert.strictEqual(VS.symlinkVerdict('NSFileTypeSymbolicLink', true), true);
+    assert.strictEqual(VS.symlinkVerdict('NSFileTypeRegular', true), false);
+    assert.strictEqual(VS.symlinkVerdict('NSFileTypeDirectory', true), false);
+    assert.strictEqual(VS.symlinkVerdict(null, true), true, 'атрибутов нет, имя в каталоге есть → fail-closed');
+    assert.strictEqual(VS.symlinkVerdict(null, false), false, 'пути нет вовсе → не ссылка (первый запуск: Code/User ещё не создан)');
+    // macIo поверх заглушек Foundation
+    const P = '/Users/a/Library/Application Support/Code/User/settings.json';
+    withFoundation({
+      exists: { [P]: true },
+      attrs: { [P]: { type: 'NSFileTypeUnknown', size: 0 } },                     // FIFO: Foundation называет такой тип Unknown
+    }, (io, reads) => {
+      const r = io.readText(P);
+      assert.deepStrictEqual([r.ok, typeof r.error], [false, 'string'], 'FIFO не читается: ' + JSON.stringify(r));
+      assert.deepStrictEqual(reads, [], 'NSData.dataWithContentsOfFile НЕ вызывался — вот что подвешивало шаг');
+    });
+    withFoundation({ exists: { [P]: true }, attrs: { [P]: { type: 'NSFileTypeRegular', size: 3 * 1024 * 1024 * 1024 } } }, (io, reads) => {
+      const r = io.readText(P);
+      assert.strictEqual(r.ok, false);
+      assert(/файл слишком большой \(3145728 КБ\)/.test(r.error), r.error);
+      assert.deepStrictEqual(reads, [], 'гигабайтный файл не загружается в память');
+    });
+    withFoundation({ exists: { [P]: true } }, (io, reads) => {                        // атрибуты не прочитались
+      assert.strictEqual(io.readText(P).ok, false);
+      assert.deepStrictEqual(reads, []);
+    });
+    withFoundation({ exists: { [P]: true }, attrs: { [P]: { type: 'NSFileTypeRegular', size: 120 } } }, (io, reads) => {
+      const r = io.readText(P);
+      assert.deepStrictEqual([r.ok, r.text, r.bom], [true, 'содержимое', false], 'обычный маленький файл читается как раньше');
+      assert.deepStrictEqual(reads, [P]);
+    });
+    withFoundation({}, (io) => assert.strictEqual(io.readText(P), null, 'файла нет — null, как раньше'));
+    // isSymlink: настоящая ссылка / обычный файл / нечитаемое / отсутствующее
+    const parent = '/Users/a/Library/Application Support/Code/User';
+    withFoundation({ attrs: { [P]: { type: 'NSFileTypeSymbolicLink' } } }, (io) => assert.strictEqual(io.isSymlink(P), true));
+    withFoundation({ attrs: { [P]: { type: 'NSFileTypeRegular' } } }, (io) => assert.strictEqual(io.isSymlink(P), false));
+    const unreadable = { lists: { [parent]: ['settings.json', 'keybindings.json'] } };        // имя в каталоге есть, атрибутов нет
+    withFoundation(unreadable, (io) => assert.strictEqual(io.isSymlink(P), true, 'нечитаемые атрибуты → fail-closed'));
+    withFoundation({ lists: { [parent]: ['keybindings.json'] } }, (io) => assert.strictEqual(io.isSymlink(P), false, 'в каталоге такого имени нет → не ссылка'));
+    withFoundation({}, (io) => assert.strictEqual(io.isSymlink(P), false, 'каталога нет вовсе → не ссылка (свежий Mac)'));
+    // связка с linkOnPath: на свежем Mac цепочка не существующих каталогов даёт «ссылок нет», на нечитаемом — путь-нарушитель
+    withFoundation({}, (io) => assert.strictEqual(VS.linkOnPath(io, P, '/Users/a/Library/Application Support', true), '', 'первый запуск: настройки создаются как раньше'));
+    // цепочка существующих каталогов, последнее звено (settings.json) есть в списке каталога, а атрибуты не читаются
+    const chainExisting = Object.assign({}, unreadable, {
+      exists: { '/Users/a/Library/Application Support/Code': true, [parent]: true },
+      attrs: { '/Users/a/Library/Application Support/Code': { type: 'NSFileTypeDirectory' }, [parent]: { type: 'NSFileTypeDirectory' } },
+    });
+    withFoundation(chainExisting, (io) => assert.strictEqual(VS.linkOnPath(io, P, '/Users/a/Library/Application Support', false), P, 'нечитаемое звено цепочки останавливает запись и названо'));
+    // КОНТРОЛЬ: прежний isSymlink называл нечитаемое «не ссылкой»
+    withFoundation(unreadable, () => {
+      const fm = globalThis.$.NSFileManager.defaultManager;
+      assert.strictEqual(oldIsSymlink(fm, globalThis.ObjC, globalThis.$)(P), false, 'КОНТРОЛЬ: прежняя форма отвечала false там, где теперь true');
+    });
+  });
+
+  // <<< u9-section-end >>>
 })();

@@ -45,6 +45,80 @@ function filterRendererEnv(rendererEnv) {
   return out;
 }
 
+// POSIX (macOS): окружение дочерних скриптов компонентов = КОПИЯ process.env за вычетом
+// списка запретов. Allowlist, как на Windows, здесь не годится: скрипты законно ищут
+// brew/node/python/git по пользовательскому PATH, а прокси и локаль (https_proxy, LANG,
+// LC_*) обязаны дойти до curl/pip/npm. Поэтому режем только то, что ЗАПУСКАЕТ чужой код
+// или подменяет настройки инструментов ещё до первой строки скрипта.
+//
+// Зачем это нужно именно на macOS. Главный процесс и каждый скрипт компонента работают
+// от ПРОСТОГО пользователя; root появляется только внутри admin_run (osascript «with
+// administrator privileges»), и там окружение стирается `env -i` (_lib.sh). Но команду
+// для root — и тексты HM_*_INSTALL_SH — собирает НЕпривилегированный bash. Код того же
+// пользователя (launchctl setenv, LaunchAgent с EnvironmentVariables, ~/.zshenv при запуске
+// из терминала) кладёт в окружение установщика BASH_ENV/ENV/SHELLOPTS+PS4/BASH_FUNC_*, и bash
+// каждого скрипта выполняет это ДО его первой строки: `unset BASH_ENV` внутри скрипта уже
+// опоздал. Подменённый admin_run или переписанный HM_APP_INSTALL_SH уходит в окно с
+// настоящим системным запросом пароля — и человек сам вводит пароль для чужого текста.
+// Единственное место, где это закрывается целиком, — окружение, с которым bash стартует.
+//
+// Сознательно НЕ режем (остаточное, тот же пользователь = тот же доступ): PATH, HOME, прокси,
+// локаль и переменные доверия к TLS (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, CURL_CA_BUNDLE —
+// нужны людям за корпоративным прокси; скачанное всё равно сверяется по sha256 и подписи),
+// PIP_*/UV_* (зеркала пакетов), переменные сборочных инструментов (CC, CFLAGS, RUSTFLAGS).
+// Режем же DEVELOPER_DIR/SDKROOT/TOOLCHAINS: это не «настройки сборки», а выбор исполняемого файла
+// ЗА системными шимами /usr/bin/git, /usr/bin/python3, /usr/bin/clang (xcode-select(1), xcrun(1):
+// шим запускает `$DEVELOPER_DIR/usr/bin/<tool>`) — тот же класс, что GIT_EXEC_PATH.
+//
+// Сравнение имён РЕГИСТРОНЕЗАВИСИМО: legitimate-переменных, отличающихся от этих только
+// регистром, нет, а лишний отброс безвреден.
+const POSIX_ENV_DENY_EXACT = new Set([
+  // bash/sh: что исполняется или включается при старте оболочки
+  'env', 'shellopts', 'bashopts', 'ps4', 'prompt_command', 'cdpath', 'globignore', 'ifs', 'posixly_correct',
+  // интерпретаторы: чужой код/модули до первой строки программы
+  'node_options', 'node_path',
+  'rubyopt', 'rubylib',
+  'perl5opt', 'perl5lib',
+  // JVM: -javaagent и подобное подхватывается любой java, которую запустит скрипт
+  'java_tool_options', '_java_options', 'jdk_java_options',
+  // OpenSSL: engine/provider из конфига — это загрузка чужой динамической библиотеки
+  'openssl_conf', 'openssl_modules', 'openssl_engines',
+  // xcode-select: набор инструментов за шимами /usr/bin/git, python3, clang … (см. комментарий выше)
+  'developer_dir', 'sdkroot', 'toolchains'
+]);
+const POSIX_ENV_DENY_PREFIX = [
+  'bash_',         // BASH_ENV, BASH_FUNC_<имя>%% (экспортируемые функции), BASH_XTRACEFD, BASH_LOADABLES_PATH
+  'dyld_', 'ld_',  // динамический загрузчик (DYLD_INSERT_LIBRARIES, LD_PRELOAD)
+  'python',        // PYTHONSTARTUP, PYTHONPATH, PYTHONHOME, PYTHONINSPECT, PYTHONUSERBASE, PYTHONBREAKPOINT …
+  'perl', 'ruby',  // PERL5DB, PERLLIB, RUBYPATH, RUBYSHELL … (в паре с точными именами выше)
+  'git_',          // GIT_EXEC_PATH, GIT_CONFIG*, GIT_SSH*, GIT_PROXY_COMMAND, GIT_TEMPLATE_DIR … (нужные нам
+                   // GIT_TERMINAL_PROMPT/GIT_ASKPASS main задаёт сам ПОСЛЕ — NONINTERACTIVE_ENV)
+  'npm_config_',   // как и на Windows (npm_config_yes main возвращает через NONINTERACTIVE_ENV)
+  'hm_'            // переменные установщика: те, что нужны скриптам, main задаёт сам и авторитетно
+];
+
+// Старая форма экспорта функции bash (до Shellshock-патча значение вида «() { … }» под ЛЮБЫМ
+// именем становилось функцией). Системный bash 3.2.57 её не принимает, но вложенный/чужой bash
+// в PATH мог бы; отбросить такое значение ничего не стоит.
+const LEGACY_BASH_FUNCTION_VALUE = /^\s*\(\)\s*\{/;
+
+function isDeniedPosixEnvEntry(key, value) {
+  const k = String(key).toLowerCase();
+  if (POSIX_ENV_DENY_EXACT.has(k)) return true;
+  if (POSIX_ENV_DENY_PREFIX.some((p) => k.startsWith(p))) return true;
+  return typeof value === 'string' && LEGACY_BASH_FUNCTION_VALUE.test(value);
+}
+
+// Вернуть НОВЫЙ объект: process.env без запрещённых записей (исходник не мутируем).
+function sanitizePosixEnv(src) {
+  const out = {};
+  const env = src || {};
+  for (const k of Object.keys(env)) {
+    if (!isDeniedPosixEnvEntry(k, env[k])) out[k] = env[k];
+  }
+  return out;
+}
+
 // #4 (finalize round-2) — АВТОРИТЕТНЫЕ системные path-переменные из ВАЛИДИРОВАННОГО
 // диска, а НЕ из launch-env. Update-Path в install-скриптах выводит каталоги git/node
 // из $env:ProgramFiles/$env:SystemRoot; если установщик запущен с crafted env
@@ -80,4 +154,7 @@ function authoritativeWinSystemEnv(winRoot, drive) {
   };
 }
 
-module.exports = { isAllowedRendererEnvKey, filterRendererEnv, authoritativeWinSystemEnv };
+module.exports = {
+  isAllowedRendererEnvKey, filterRendererEnv, authoritativeWinSystemEnv,
+  isDeniedPosixEnvEntry, sanitizePosixEnv
+};

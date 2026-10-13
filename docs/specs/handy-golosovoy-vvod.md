@@ -131,7 +131,7 @@ Lite-издание качает по двум записям `remote-components
 root: `admin_run /bin/sh -c "$HM_APP_INSTALL_SH" hm_app_install "$MNT/$APP" "$HANDY_TEAM_ID" "$APP"`
 (`:95`). Примитив (`_lib.sh:319-328`) копирует бандл в root-owned staging, проверяет
 `codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"UWFLB4GC25\""`,
-затем `spctl --assess --type execute`, и только потом кладёт копию в `/Applications`.
+затем `spctl --assess --type execute`, и только потом ставит проверенную копию в `/Applications` одним `mv -n` — при условии, что имя `$3` одно (`*.app`, без `/` и ведущей точки) и на месте назначения ничего нет (находка M-3; ранее здесь был второй `cp -R` поверх назначения). Первой строкой скрипта идёт `HOME=/var/root`.
 Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта, снят зондом
 `.github/workflows/probe-handy-teamid.yml` с официального релиза v0.9.4. Дальше — проверка
 появления каталога (`:102-105`) и пре-сид `settings_store.json`, если его нет: `ru`,

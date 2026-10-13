@@ -37,7 +37,7 @@ else
     exit 120
   fi
   if [ -n "$DRY" ]; then
-    echo "  [dry-run] WOULD: под ОДНИМ admin_run (root): staging /var/root, cp вшитого vscode.zip в staging, ditto -x -k, codesign -R Team ID(UBF8T346G9)+spctl распакованного .app в staging, cp .app в /Applications, xattr -dr com.apple.quarantine; поставить расширения anthropic.claude-code + openai.chatgpt"
+    echo "  [dry-run] WOULD: под ОДНИМ admin_run (root): staging /var/root, cp вшитого vscode.zip в staging, ditto -x -k, codesign -R Team ID(UBF8T346G9)+spctl распакованного .app в staging, снять карантин и передать владельцу на staged-копии, переименовать (mv -n) проверенный .app в /Applications (место должно быть пустым); поставить расширения anthropic.claude-code + openai.chatgpt"
   else
     verify_artifact "$ZIP"    # вшитый артефакт — предварительный fail-closed SHA-256 (быстрый отсев повреждённого zip без пароля)
     # verify + install АТОМАРНО под root на root-owned staging (Codex — тот же TOCTOU, что
@@ -47,9 +47,11 @@ else
     # checksums.json тоже same-UID (атакующий подменит и zip, и хэш). Теперь под root в
     # ОДНОМ admin_run (HM_VSCODE_INSTALL_SH): cp вшитого zip -> root-owned staging (0700) ->
     # ditto распаковка в staging -> codesign -R (ТОЧНЫЙ Team ID Microsoft; крипто-оценка
-    # подписи, не парсинг -dv) + spctl (нотаризация) распакованного .app -> cp .app в
-    # /Applications -> снять карантин. Между verify и install окна нет (всё над root-owned
-    # staging). Team ID и dest — ПОЗИЦИОННЫЕ параметры (не интерполяция в текст).
+    # подписи, не парсинг -dv) + spctl (нотаризация) распакованного .app -> снять карантин и
+    # передать владельцу НА staged-копии -> переименовать (mv -n) её в /Applications; место
+    # назначения обязано быть пустым (находка M-3, подробности в _lib.sh). Между verify и
+    # install окна нет (всё над root-owned staging). Team ID и dest — ПОЗИЦИОННЫЕ параметры
+    # (не интерполяция в текст).
     # Team ID VS Code. Подтверждено сетью (2026-07): официальные сборки VS Code подписаны
     # "Developer ID Application: Microsoft Corporation (UBF8T346G9)", TeamIdentifier=UBF8T346G9
     # (community.jamf.com — codesign output; fullmetalmac.com/team-ids — Microsoft = UBF8T346G9).
