@@ -1,14 +1,295 @@
 ﻿# Build-time: download ALL third-party software into vendor/ for fully OFFLINE install (Windows).
 # Idempotent: existing files are skipped. Run via: npm run fetch:vendor
+# -VerifyOnly: ничего не качать, не создавать и не удалять — только проверить подписи издателей у того, что
+# уже лежит в vendor\apps (так его зовёт tools\regen-checksums.js перед записью манифеста). Код выхода:
+# 0 — всё подтверждено пином, 1 — нет.
 # Continue (not Stop): нативные команды (npm/pip) пишут notice в stderr — под Stop это рушит скрипт.
+param([switch]$VerifyOnly)
 $ErrorActionPreference = 'Continue'
 $root  = Split-Path -Parent $PSScriptRoot
 $apps  = Join-Path $root 'vendor\apps'
-New-Item -ItemType Directory -Force $apps | Out-Null
+if (-not $VerifyOnly) { New-Item -ItemType Directory -Force $apps | Out-Null }
 $UA = @{ 'User-Agent' = 'hamidun-setup' }
 
+# --- Пин издателя скачанных файлов (находка S-1; таблица — tools/vendor-signers.json) ---------
+# Установщики качаются по «latest»/API-ссылкам БЕЗ закреплённой версии, а checksums.json ниже
+# снимается с того, что легло на диск, — то есть файл, подменённый по дороге (CDN, DNS, TLS),
+# стал бы эталоном для всех гейтов Lite/Offline и уехал бы покупателям. Сумма, снятая с
+# непроверенного файла, ничего не доказывает; доказывает подпись ИЗДАТЕЛЯ, и сверяем её здесь —
+# в единственном месте, где файл ещё не попал в манифест. Онлайн-фолбэки установки (git.ps1,
+# node.ps1, cursor.ps1, pydeps.ps1) подпись проверяют давно; офлайн-копия — нет.
+#
+# Принимается подпись, у которой выполнено ВСЁ вместе:
+#  1) Status = Valid: Windows проверяет подпись с меткой времени на момент подписания;
+#  2) подпись встроенная (SignatureType = Authenticode), а не каталожная, и у листа есть назначение
+#     Code Signing;
+#  3) общее имя подписанта сверяется ТОЧНО (с регистром), а не подстрокой: «Microsoft Corporation
+#     Ltd» подстроку «Microsoft Corporation» содержит;
+#  4) корень цепочки подписанта лежит в LocalMachine\Root. Status = Valid считает ПОЛЬЗОВАТЕЛЬСКИЙ
+#     движок цепочек, а он доверяет и корням из HKCU, куда процесс среднего уровня целостности пишет
+#     без UAC (certutil -user -addstore Root ...): сертификат с нужным именем, выпущенный таким
+#     корнем (или самоподписанный и положенный туда же), получал бы Valid, и подмена по сети ложилась
+#     бы в манифест. Тот же принцип, что у Test-HmTrustedSigner на установке (_deelev.ps1); функция
+#     здесь своя — _deelev.ps1 при загрузке трогает планировщик задач.
+# Цепочку при этом строим БЕЗ оценки сроков (IgnoreNotTimeValid и родственные флаги): у части издателей
+# лист (Microsoft ID Verified) живёт 72 часа и к моменту сборки давно просрочен, а подпись при этом
+# настоящая. Отсюда правило для сроков: если вне срока годности ХОТЬ ОДНО звено цепочки (лист, промежуточный
+# или корень), подпись держится только на метке времени, и принимается лишь та, чья собственная цепочка
+# тоже заканчивается в LocalMachine\Root (назначение Time Stamping). Иначе медиум-процесс клал бы свой
+# корень метки времени в HKCU и «датировал» подпись украденным просроченным ключом задним числом. Сроки
+# самой метки времени не оцениваются: у настоящего python-setup.exe сертификат метки уже просрочен, и
+# отвергнуть его по нынешним часам нельзя — метке времени метки времени не бывает.
+# Не совпало что-либо — файл удаляется и сборка падает (exit 1); «предупредить и продолжить» здесь нет,
+# иначе подмена тихо становится эталоном.
+$HmSigners = $null
+try { $HmSigners = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'vendor-signers.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json } catch { }
+if (-not $HmSigners -or -not $HmSigners.signed -or -not $HmSigners.unsigned -or -not $HmSigners.pythonSdists.pyaes.sha256) {
+  Write-Host "[vendor] FATAL: tools\vendor-signers.json не читается или без разделов signed/unsigned/pythonSdists — без таблицы пинов качать установщики и пакеты нельзя."
+  exit 1
+}
+# Проверять подпись нечем — стоп ДО первой загрузки, а не «удалить 200 МБ установщика, потому что
+# модуль безопасности не подгрузился» (Test-HmVendorSigner считает сбой чтения подписи подозрительным).
+if (-not (Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue)) {
+  Write-Host "[vendor] FATAL: Get-AuthenticodeSignature недоступна (модуль Microsoft.PowerShell.Security не загружен) — подпись установщиков проверить нечем, а качать без проверки нельзя."
+  exit 1
+}
+
+function New-HmSignerVerdict($Ok, $Kind, $Delete, $Reason) {
+  return [pscustomobject]@{ Ok = [bool]$Ok; Kind = [string]$Kind; Delete = [bool]$Delete; Reason = [string]$Reason }
+}
+
+# Отпечатки корней МАШИНЫ: LocalMachine\Root, только чтение. Отдельной функцией — шов для тестов (настоящее
+# хранилище им подменять нельзя). CurrentUser\Root здесь не смотрим вовсе: его пишет любой процесс пользователя.
+function Get-HmMachineRootThumbprints {
+  $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+  $out = New-Object System.Collections.Generic.List[string]
+  try {
+    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+    foreach ($c in $store.Certificates) { [void]$out.Add([string]$c.Thumbprint) }
+  } finally { try { $store.Close() } catch { } }
+  return $out.ToArray()
+}
+
+# Построитель цепочек — второй шов для тестов: тестовые корни не лежат ни в одном хранилище Windows, и тесту
+# нужна цепочка с дополнительными сертификатами и разрешением «неизвестный корень». В бою — обычная чистая цепочка.
+function New-HmX509Chain {
+  return (New-Object System.Security.Cryptography.X509Certificates.X509Chain)
+}
+
+# Есть ли у сертификата ЯВНОЕ назначение (EKU) с этим OID. Лист вовсе без расширения движок цепочек
+# считает «пригодным для любого назначения», а кодовую подпись и метку времени вправе ставить только
+# сертификат, где назначение названо.
+function Test-HmCertHasEku {
+  param($Cert, [string]$Oid)
+  foreach ($ext in $Cert.Extensions) {
+    if ($ext -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
+      foreach ($o in $ext.EnhancedKeyUsages) { if ($o.Value -eq $Oid) { return $true } }
+    }
+  }
+  return $false
+}
+
+# Цепочка сертификата БЕЗ оценки сроков годности: { Built; Why; Root; OutOfWindow }.
+#   Built       — цепочка выстроилась до доверенного корня (Why — причина, если нет);
+#   Root        — верхний сертификат цепочки (X509Certificate2);
+#   OutOfWindow — имена звеньев, у которых СЕГОДНЯ срок вышел или ещё не начался. Срок оценивается у
+#                 КАЖДОГО звена, а не только у листа: лист, годный сегодня под просроченным
+#                 промежуточным, проходил бы «листовую» проверку, а подпись держится на метке времени.
+# Назначение (Eku) обязана допускать вся цепочка: Code Signing для подписи, Time Stamping для метки.
+# Отзыв не проверяется (сеть не нужна; решение о подписи — Status = Valid). Доверие к самому корню строит
+# движок Windows, поэтому «корень в LocalMachine\Root» проверяется отдельно, по отпечатку (см. ниже).
+function Get-HmChainAnchor {
+  param([Parameter(Mandatory = $true)]$Cert, [Parameter(Mandatory = $true)][string]$Eku)
+  $F = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]
+  $chain = New-HmX509Chain
+  $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+  $chain.ChainPolicy.VerificationFlags = $chain.ChainPolicy.VerificationFlags -bor $F::IgnoreNotTimeValid -bor $F::IgnoreCtlNotTimeValid -bor $F::IgnoreNotTimeNested
+  [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid($Eku)))
+  $built = $false
+  try { $built = $chain.Build($Cert) }
+  catch { return [pscustomobject]@{ Built = $false; Why = ("не удалось построить цепочку: " + $_.Exception.Message); Root = $null; OutOfWindow = @() } }
+  $st = (@($chain.ChainStatus | ForEach-Object { [string]$_.Status }) -join ',')
+  if (-not $built) { return [pscustomobject]@{ Built = $false; Why = ("цепочка не выстроилась (" + $st + "; без сети цепочку может не достроить)"); Root = $null; OutOfWindow = @() } }
+  $els = @($chain.ChainElements)
+  if ($els.Count -lt 1) { return [pscustomobject]@{ Built = $false; Why = 'цепочка пуста'; Root = $null; OutOfWindow = @() } }
+  $now = [DateTime]::UtcNow
+  $out = New-Object System.Collections.ArrayList
+  foreach ($e in $els) {
+    $c = $e.Certificate
+    if (($c.NotAfter.ToUniversalTime() -lt $now) -or ($c.NotBefore.ToUniversalTime() -gt $now)) {
+      [void]$out.Add([string]$c.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false))
+    }
+  }
+  $root = $els[$els.Count - 1].Certificate
+  if (-not $root -or -not $root.Thumbprint) { return [pscustomobject]@{ Built = $false; Why = 'корень цепочки не определён'; Root = $null; OutOfWindow = @() } }
+  return [pscustomobject]@{ Built = $true; Why = ''; Root = $root; OutOfWindow = $out.ToArray() }
+}
+
+# Якорь подписи: '' — подписи можно верить, иначе причина отказа. Подпись $Sig — объект
+# Get-AuthenticodeSignature (SignerCertificate, TimeStamperCertificate).
+function Test-HmSignerAnchored {
+  param([Parameter(Mandatory = $true)]$Sig)
+  $machine = $null
+  try { $machine = @(Get-HmMachineRootThumbprints) }
+  catch { return ("хранилище корней машины (LocalMachine\Root) не открылось: " + $_.Exception.Message) }
+  $a = Get-HmChainAnchor -Cert $Sig.SignerCertificate -Eku '1.3.6.1.5.5.7.3.3'
+  if (-not $a.Built) { return ("цепочка сертификата подписанта: " + $a.Why) }
+  $rootName = [string]$a.Root.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+  if ($machine -notcontains [string]$a.Root.Thumbprint) {
+    return ("корень цепочки подписанта «" + $rootName + "» не лежит в LocalMachine\Root (Status=Valid мог выдать корень из пользовательского хранилища HKCU: туда пишет любой процесс пользователя без UAC)")
+  }
+  if (@($a.OutOfWindow).Count -gt 0) {
+    $names = (@($a.OutOfWindow) -join '; ')
+    $ts = $Sig.TimeStamperCertificate
+    if (-not $ts) { return ("у подписи нет метки времени, а звенья цепочки вне срока годности (" + $names + ") — срок подтвердить нечем") }
+    $t = Get-HmChainAnchor -Cert $ts -Eku '1.3.6.1.5.5.7.3.8'
+    if (-not $t.Built) { return ("звенья цепочки вне срока годности (" + $names + "), а цепочка метки времени: " + $t.Why) }
+    $tsRoot = [string]$t.Root.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+    if ($machine -notcontains [string]$t.Root.Thumbprint) {
+      return ("звенья цепочки вне срока годности (" + $names + "), а корень метки времени «" + $tsRoot + "» не лежит в LocalMachine\Root — чужой метке времени срок подписи не доверяем")
+    }
+    if (-not (Test-HmCertHasEku $ts '1.3.6.1.5.5.7.3.8')) {
+      return ("звенья цепочки вне срока годности (" + $names + "), а у сертификата метки времени нет назначения Time Stamping (EKU 1.3.6.1.5.5.7.3.8)")
+    }
+  }
+  return ''
+}
+
+# Вердикт по одному файлу: { Ok; Kind = signed|unsigned|unknown; Delete; Reason }.
+#   signed   — Status = Valid, встроенная подпись, CN подписанта ровно из пина, назначение Code Signing у листа
+#              и корень цепочки в LocalMachine\Root (иначе Ok = $false, файл подлежит удалению);
+#   unsigned — подписи нет по построению (причина названа в таблице) — Ok;
+#   unknown  — имени нет ни в одном разделе: Ok = $false, но файл НЕ удаляется (он не подделан, он не внесён).
+function Test-HmVendorSigner {
+  param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Pins)
+  $name = [IO.Path]::GetFileName($Path)
+  $rule = $null
+  if ($Pins -and $Pins.signed) { $p = $Pins.signed.PSObject.Properties[$name]; if ($p) { $rule = $p.Value } }
+  if ($null -eq $rule) {
+    if ($Pins -and $Pins.unsigned) {
+      $u = $Pins.unsigned.PSObject.Properties[$name]
+      if ($u) { return New-HmSignerVerdict $true 'unsigned' $false ([string]$u.Value) }
+    }
+    return New-HmSignerVerdict $false 'unknown' $false 'нет записи в tools\vendor-signers.json: нужен пин подписанта либо явное «unsigned: <причина>»'
+  }
+  $sig = $null
+  try { $sig = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop }
+  catch { return New-HmSignerVerdict $false 'signed' $true ("подпись не читается: " + $_.Exception.Message) }
+  if (-not $sig) { return New-HmSignerVerdict $false 'signed' $true 'подпись не читается' }
+  if ([string]$sig.Status -ne 'Valid') {
+    return New-HmSignerVerdict $false 'signed' $true ("Authenticode Status=" + [string]$sig.Status + " (нужен Valid: файл не подписан, изменён после подписи или подпись не доверена)")
+  }
+  # Подпись обязана быть ВСТРОЕННОЙ: каталожная (SignatureType = Catalog) даёт Status = Valid любому файлу из
+  # каталога ОС — а у такого «подписанта» совсем другое имя и другой смысл.
+  if ([string]$sig.SignatureType -ne 'Authenticode') {
+    return New-HmSignerVerdict $false 'signed' $true ("тип подписи «" + [string]$sig.SignatureType + "» вместо встроенной Authenticode (каталожная подпись установщика издателя не подтверждает)")
+  }
+  $cert = $sig.SignerCertificate
+  if (-not $cert) { return New-HmSignerVerdict $false 'signed' $true 'подпись Valid, но сертификат подписанта не отдан' }
+  $cn = ''
+  try { $cn = [string]$cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) }
+  catch { return New-HmSignerVerdict $false 'signed' $true ("имя подписанта не читается: " + $_.Exception.Message) }
+  $allowed = @($rule.cn)
+  if ($allowed -cnotcontains $cn) {
+    return New-HmSignerVerdict $false 'signed' $true ("подписант «" + $cn + "» не из пина (ожидалось: " + ($allowed -join ' | ') + ")")
+  }
+  if (-not (Test-HmCertHasEku $cert '1.3.6.1.5.5.7.3.3')) {
+    return New-HmSignerVerdict $false 'signed' $true 'у сертификата подписанта нет назначения Code Signing (EKU 1.3.6.1.5.5.7.3.3)'
+  }
+  # Якорь: корень цепочки — в LocalMachine\Root; звенья вне срока — только с машинно-заякоренной меткой времени.
+  $why = Test-HmSignerAnchored -Sig $sig
+  if ($why) { return New-HmSignerVerdict $false 'signed' $true $why }
+  return New-HmSignerVerdict $true 'signed' $false ''
+}
+
+# Проверить файл и при провале УДАЛИТЬ его (если это подделка/нечитаемая подпись) и завершить сборку
+# кодом 1. $CleanupDir — каталог-заготовка, который тоже надо убрать (uv распаковывается в _uv-stage).
+# Кэша «этот файл уже проверяли» нет НАМЕРЕННО: между загрузкой и снятием сумм проходят минуты
+# (npm, pip, Chromium), а ключ кэша — размер и время записи — подделать проще, чем подпись.
+# Итоговый обход (Assert-HmVendorApps) поэтому проверяет каждый файл заново, прямо перед манифестом.
+function Assert-HmVendorFile {
+  param([Parameter(Mandatory = $true)][string]$Path, [string]$CleanupDir = '')
+  $name = [IO.Path]::GetFileName($Path)
+  $v = Test-HmVendorSigner -Path $Path -Pins $HmSigners
+  if ($v.Ok) {
+    if ($v.Kind -eq 'unsigned') { Write-Host ("  unsigned: {0} — {1}" -f $name, $v.Reason) }
+    return
+  }
+  if ($v.Delete) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+  if ($CleanupDir -and (Test-Path -LiteralPath $CleanupDir)) { Remove-Item -LiteralPath $CleanupDir -Recurse -Force -ErrorAction SilentlyContinue }
+  Write-Host ''
+  Write-Host ("[vendor] FATAL: {0}: {1}" -f $name, $v.Reason)
+  if ($v.Delete) {
+    Write-Host '         Файл УДАЛЁН и в checksums.json не попадёт. Либо его подменили по дороге (CDN, DNS, TLS, чужой корень в'
+    Write-Host '         пользовательском хранилище), либо издатель сменил подписанта или цепочку: во втором случае проверь вручную,'
+    Write-Host '         что это он, и только потом правь tools\vendor-signers.json. Цепочку, не достроенную без сети, повтори с сетью.'
+  } else {
+    Write-Host '         Файл не тронут, но сборка остановлена: допиши его в tools\vendor-signers.json (signed или unsigned с причиной).'
+  }
+  exit 1
+}
+
+# Итоговый обход vendor\apps перед снятием сумм: проверяет всё, что туда попало не через Dl
+# (скрепка из локальной сборки, шрифт из zip, распакованный uv) и всё, что осталось от прошлых
+# прогонов. Недокачанные *.part раньше молча попадали в checksums.json — теперь удаляются.
+# Рабочие остатки самого фетчера после оборванного прогона (*.part, *.tmp от снятия gzip, zip
+# шрифта, заготовка uv) тоже убираются: иначе правило «неизвестное имя — стоп» упиралось бы в
+# мусор, а совет «допиши в таблицу» в сообщении был бы ложным.
+function Assert-HmVendorApps {
+  param([Parameter(Mandatory = $true)][string]$Apps)
+  $uvStageLeft = Join-Path $Apps '_uv-stage'
+  if (Test-Path -LiteralPath $uvStageLeft) {
+    Remove-Item -LiteralPath $uvStageLeft -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "  заготовка _uv-stage от оборванного прогона удалена"
+  }
+  foreach ($f in @(Get-ChildItem -LiteralPath $Apps -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+    if ($f.Name -like '*.part' -or $f.Name -like '*.tmp' -or $f.Name -eq '_jbmono.zip') {
+      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+      Write-Host "  остаток оборванного прогона $($f.Name) удалён"
+      continue
+    }
+    if ($f.Length -eq 0) { continue }
+    Assert-HmVendorFile -Path $f.FullName
+  }
+}
+
+# Режим «только проверить» (-VerifyOnly): для tools\regen-checksums.js — второго писателя манифеста.
+# Тот же вердикт (Test-HmVendorSigner), но без загрузок, без создания каталогов и БЕЗ удаления: файл,
+# не прошедший проверку, остаётся на диске, а скрипт говорит «нет» кодом 1. Набор файлов — как у манифеста
+# (vendor\apps рекурсивно, непустые). Остатки оборванного прогона (*.part, *.tmp) в таблице не значатся,
+# поэтому тоже дают «нет»: убрать их умеет только полный прогон фетчера.
+if ($VerifyOnly) {
+  # Вывод читает другой процесс (node): кириллица в кодировке консоли PS 5.1 дошла бы до него кракозябрами.
+  try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+  if (-not (Test-Path -LiteralPath $apps)) {
+    Write-Host "[vendor] FATAL: нет каталога $apps — проверять нечего."
+    exit 1
+  }
+  $vSeen = 0
+  $vBad = 0
+  foreach ($f in @(Get-ChildItem -LiteralPath $apps -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+    if ($f.Length -eq 0) { continue }
+    $vSeen++
+    $v = Test-HmVendorSigner -Path $f.FullName -Pins $HmSigners
+    if ($v.Ok) { Write-Host ("  ok {0} ({1})" -f $f.Name, $v.Kind); continue }
+    $vBad++
+    Write-Host ("[vendor] ОТКАЗ: {0}: {1}" -f $f.Name, $v.Reason)
+  }
+  if ($vBad -gt 0) {
+    Write-Host ("[vendor] Подписи НЕ подтверждены: файлов {0}, не прошло {1}. Ничего не удалено; полный прогон fetch-vendor.ps1 перекачает и проверит." -f $vSeen, $vBad)
+    exit 1
+  }
+  Write-Host ("[vendor] OK: подписи издателей подтверждены пином (файлов: {0})." -f $vSeen)
+  exit 0
+}
+
 function Dl($url, $out) {
-  if (Test-Path $out) { Write-Host "  skip $([IO.Path]::GetFileName($out))"; return }
+  if (Test-Path $out) {
+    Write-Host "  skip $([IO.Path]::GetFileName($out))"
+    # «skip» не освобождает от проверки: файл мог лечь прошлым прогоном (до пина) или быть подменён на диске.
+    Assert-HmVendorFile -Path $out
+    return
+  }
   # Качаем во ВРЕМЕННЫЙ файл и переносим на место только при успехе.
   #
   # Прежняя редакция писала прямо в $out. Invoke-WebRequest в PS 5.1 пишет тело потоково,
@@ -34,6 +315,9 @@ function Dl($url, $out) {
     Write-Host "  ! не скачалось ($([IO.Path]::GetFileName($out))): $($_.Exception.Message)"
     if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
   }
+  # Подпись издателя — СРАЗУ после загрузки, вне try: exit 1 при провале должен сработать, а не
+  # раствориться в catch. Не докачалось (файла нет) — проверять нечего, это отдельный сигнал выше.
+  if (Test-Path $out) { Assert-HmVendorFile -Path $out }
 }
 
 Write-Host "[vendor] Git for Windows..."
@@ -108,7 +392,14 @@ New-Item -ItemType Directory -Force $tmp | Out-Null
 # недоступный реестр) не оставлял вообще НИКАКОГО следа — а гейт полноты ниже считал
 # npm-cache заполненным, если в нём лежал хоть один файл от прошлых прогонов. Тогда
 # офлайн-установка Claude Code падала уже у покупателя.
-& npm install '@anthropic-ai/claude-code' --prefix $tmp --cache $cache --no-audit --no-fund 2>&1 | Out-Null
+# --ignore-scripts: цель шага — наполнить КЕШ архивами, а не запустить пакет. Скрипты установки
+# (postinstall у claude-code и у любой зависимости) исполнялись бы на машине, где живёт сессия
+# подписи Certum и боевые ключи S3, — а версия при этом «плавающая» (latest на момент сборки).
+# Проверено офлайн на копии vendor/npm-cache (09.10.2026): содержимое _cacache — набор архивов и
+# их integrity — с флагом и без него побайтно одинаково; единственное отличие — postinstall
+# claude-code кладёт нативный бинарь поверх заглушки bin/claude.exe в УЖЕ удаляемой папке $tmp,
+# и никто этот файл не читает.
+& npm install '@anthropic-ai/claude-code' --prefix $tmp --cache $cache --no-audit --no-fund --ignore-scripts 2>&1 | Out-Null
 $npmCacheOk = ($LASTEXITCODE -eq 0)
 if (-not $npmCacheOk) { Write-Host "  ! npm install завершился с кодом $LASTEXITCODE — npm-кеш НЕПОЛНЫЙ (гейт полноты ниже это назовёт)" }
 Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
@@ -219,74 +510,221 @@ if (Test-Path $cxvsix) {
 Write-Host "[vendor] Русский языковой пакет VS Code (MS-CEINTL.vscode-language-pack-ru, офлайн)..."
 # Интерфейс VS Code на английском — повторяющаяся беда новичков. Пакет ставит vscode.ps1
 # (необязательно), а vscode-settings.ps1 включает "locale":"ru", только когда пакет на диске.
-# Пакет ПРИВЯЗАН к версии редактора: его engines.vscode = ^1.<minor>.0, и пакет новее
-# вшитого VS Code не встанет («not compatible»). VS Code выше качается как «последний
-# stable», поэтому минор берём из самого вшитого установщика, а не из «последнего пакета».
-$lpvsix = Join-Path $apps 'vscode-language-pack-ru.vsix'
-$vsMinor = $null
-try {
-  $vsPv = [string](Get-Item -LiteralPath (Join-Path $apps 'vscode-setup.exe') -ErrorAction Stop).VersionInfo.ProductVersion
-  if ($vsPv -match '^1\.(\d+)\.') { $vsMinor = [int]$Matches[1] }
-} catch { }
-if (Test-Path $lpvsix) {
-  Write-Host "  skip vscode-language-pack-ru.vsix"
-} elseif ($null -eq $vsMinor) {
-  Write-Host "  ! версия вшитого VS Code не определена — языковой пакет не вшиваю (подобрать совместимый не по чему)"
-} else {
-  $lpVer = $null
-  try {
-    # flags 0x1 — список версий (новые первыми). Нужна последняя версия ровно под наш минор.
-    $q = '{"filters":[{"criteria":[{"filterType":7,"value":"MS-CEINTL.vscode-language-pack-ru"}]}],"flags":1}'
-    $resp = Invoke-RestMethod 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1' -Method Post -Body $q -ContentType 'application/json' -Headers $UA -TimeoutSec 120
-    $lpVer = (@($resp.results[0].extensions[0].versions) | Where-Object { [string]$_.version -match ('^1\.' + $vsMinor + '\.') } | Select-Object -First 1).version
-  } catch { }
-  if ($lpVer) {
-    Dl "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/MS-CEINTL/vsextensions/vscode-language-pack-ru/$lpVer/vspackage" $lpvsix
-  } else {
-    Write-Host "  ! Marketplace не отдал пакет под VS Code 1.$vsMinor — не вшиваю (поставится онлайн при установке)"
-  }
-}
-if (Test-Path $lpvsix) {
-  # Как у claude-code.vsix: Marketplace часто отдаёт vspackage в gzip, IWR в PS 5.1 его не снимает.
-  try {
-    $fs = [IO.File]::OpenRead($lpvsix); $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte(); $fs.Close()
-    if ($b0 -eq 0x1f -and $b1 -eq 0x8b) {
-      Write-Host "  ответ Marketplace в gzip — распаковываю в .vsix"
-      $gzTmp = "$lpvsix.gz.tmp"
-      Move-Item $lpvsix $gzTmp -Force
-      $in  = [IO.File]::OpenRead($gzTmp)
-      $gz  = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
-      $out = [IO.File]::Create($lpvsix)
-      $gz.CopyTo($out)
-      $out.Close(); $gz.Close(); $in.Close()
-      Remove-Item $gzTmp -Force
+#
+# ПОЧЕМУ ВЫБОР ИДЁТ ПО engines.vscode, А НЕ ПО «ВЕРСИЯ ПАКЕТА НАЧИНАЕТСЯ С 1.<минор редактора>.».
+# Прежняя редакция брала из Marketplace только пакет вида 1.<минор вшитого VS Code>.*.
+# Но VS Code выше качается как «последний stable», а пакеты отстают от него: 09.10.2026
+# вшитый редактор был 1.140, новейший пакет на Marketplace — 1.131 (от 04.09). Совпадения не
+# было, фетчер печатал «не вшиваю», vendor объявлялся неполным (offlineEdition=false), а
+# release-check и publish-vendor.py отказывались собирать архив vscode — релиз вставал из-за
+# файла, который нужен только ради русских подписей в меню.
+#
+# engines.vscode пакета — НИЖНЯЯ граница (`^1.131.0` = редактор не старше 1.131.0): VS Code
+# ставит любой пакет, чей движок не новее самого редактора. Поэтому нужен НОВЕЙШИЙ пакет, у
+# которого движок <= вшитому редактору, а не пакет «ровно под наш минор».
+#
+# Версии и их engines.vscode Marketplace отдаёт, если попросить свойства версий (флаг 0x10)
+# вместе со списком версий (0x1); 0x20 — только прошедшие проверку. Если свойств в ответе нет
+# вовсе (API перестал их отдавать) — запасной путь: качаем кандидатов от новых к старым и
+# читаем extension.vsixmanifest; гейт честности ниже остаётся последним словом в обоих путях.
+
+# engines.vscode -> { Caret; Version = @(мажор, минор, патч) } либо $null. Принимаются только
+# `^X.Y.Z` и `>=X.Y.Z`: это нижние границы. `~1.131.0`, голое `1.131.0`, `*` и мусор нижней
+# границей не являются — по ним нельзя утверждать, что редактор новее, поэтому $null.
+function ConvertFrom-HmVsEngine {
+    param([string]$Engine)
+    if ($Engine -match '^\s*(\^|>=)\s*(\d{1,9})\.(\d{1,9})\.(\d{1,15})(-[0-9A-Za-z.+-]*)?\s*$') {
+        return [pscustomobject]@{ Caret = ($Matches[1] -eq '^'); Version = [long[]]@([long]$Matches[2], [long]$Matches[3], [long]$Matches[4]) }
     }
-  } catch { Write-Host "  ! постобработка языкового пакета не удалась - $($_.Exception.Message)" }
-  # Гейт честности (как у chatgpt.vsix): вшиваем ТОЛЬКО zip с манифестом именно этого пакета и
-  # движком не новее вшитого редактора. Иначе файл удаляется и в checksums.json не попадает.
-  $lpOk = $false
-  try {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $za = [IO.Compression.ZipFile]::OpenRead($lpvsix)
-    try {
-      $entry = $za.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' } | Select-Object -First 1
-      if ($entry) {
-        $sr = New-Object IO.StreamReader($entry.Open())
-        try { $lpManifest = $sr.ReadToEnd() } finally { $sr.Dispose() }
-        $idOk  = ($lpManifest -match 'Id\s*=\s*"vscode-language-pack-ru"') -and ($lpManifest -match 'Publisher\s*=\s*"MS-CEINTL"')
-        $engOk = $true
-        if ($lpManifest -match 'Microsoft\.VisualStudio\.Code\.Engine"\s+Value\s*=\s*"\^?1\.(\d+)\.') { $engOk = ($null -eq $vsMinor) -or ([int]$Matches[1] -le $vsMinor) }
-        $lpOk = $idOk -and $engOk
-      }
-    } finally { $za.Dispose() }
-  } catch { }
-  if ($lpOk) {
-    Write-Host "  ok vscode-language-pack-ru.vsix (MS-CEINTL, под VS Code 1.$vsMinor)"
-  } else {
-    Remove-Item $lpvsix -Force -ErrorAction SilentlyContinue
-    Write-Host "  ! vscode-language-pack-ru.vsix не тот пакет, битый zip или движок новее вшитого VS Code — НЕ вшиваю, поставится онлайн при установке"
-  }
+    return $null
 }
+
+# Подходит ли редактор @(мажор, минор, патч) под engines.vscode пакета. Сравнение полной
+# тройки: `^1.140.1` не встанет на редактор 1.140.0, а `^1.131.0` встанет на любой 1.14x.
+# Каретка держит мажор (`^2.0.0` на редакторе 1.x не встанет), `>=` его не держит.
+function Test-HmVsEngineFits {
+    param([string]$Engine, [long[]]$Editor)
+    $req = ConvertFrom-HmVsEngine $Engine
+    if ($null -eq $req) { return $false }
+    if ($req.Caret -and ($req.Version[0] -ne $Editor[0])) { return $false }
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($req.Version[$i] -lt $Editor[$i]) { return $true }
+        if ($req.Version[$i] -gt $Editor[$i]) { return $false }
+    }
+    return $true
+}
+
+# Ответ extensionquery -> список версий пакета: Version, Key (тройка чисел), Engine, PreRelease.
+# Версия вида 1.131.2026090407: хвост — дата со временем, поэтому сравнивать надо ЧИСЛОМ
+# (как строку `1.131.999` оказалась бы «больше»). Кривые версии пропускаются. Порядок в
+# ответе не обещан, и на него ничего не опирается.
+function Get-HmLanguagePackVersions {
+    param($Response)
+    $list = New-Object System.Collections.ArrayList
+    $vers = @()
+    try { $vers = @($Response.results[0].extensions[0].versions) } catch { }
+    foreach ($v in $vers) {
+        if ($null -eq $v) { continue }
+        $ver = [string]$v.version
+        if ($ver -notmatch '^(\d{1,9})\.(\d{1,9})\.(\d{1,15})$') { continue }
+        $key = [long[]]@([long]$Matches[1], [long]$Matches[2], [long]$Matches[3])
+        $engine = $null
+        $pre = $false
+        foreach ($p in @($v.properties)) {
+            if ($null -eq $p) { continue }
+            if ([string]$p.key -eq 'Microsoft.VisualStudio.Code.Engine') { $engine = [string]$p.value }
+            elseif ([string]$p.key -eq 'Microsoft.VisualStudio.Code.PreRelease' -and [string]$p.value -eq 'true') { $pre = $true }
+        }
+        [void]$list.Add([pscustomobject]@{ Version = $ver; Key = $key; Engine = $engine; PreRelease = $pre })
+    }
+    return $list.ToArray()
+}
+
+# ШОВ ДЛЯ ТЕСТОВ: ответ Marketplace (разобранный) + минор (и патч) вшитого редактора ->
+# версия пакета либо $null. Берётся наибольшая версия, чей движок не новее редактора;
+# пре-релизы не берутся; версия без читаемого engines.vscode не выбирается (судить не по чему).
+function Select-HmLanguagePackVersion {
+    param($Response, [int]$EditorMinor, [int]$EditorPatch = 0)
+    $editor = [long[]]@(1, $EditorMinor, $EditorPatch)
+    $best = $null
+    foreach ($c in @(Get-HmLanguagePackVersions $Response)) {
+        if ($c.PreRelease) { continue }
+        if (-not (Test-HmVsEngineFits $c.Engine $editor)) { continue }
+        $newer = ($null -eq $best)
+        if (-not $newer) {
+            for ($i = 0; $i -lt 3; $i++) {
+                if ($c.Key[$i] -ne $best.Key[$i]) { $newer = ($c.Key[$i] -gt $best.Key[$i]); break }
+            }
+        }
+        if ($newer) { $best = $c }
+    }
+    if ($null -eq $best) { return $null }
+    return $best.Version
+}
+
+# Запрос к публичному каталогу расширений (только чтение). Отдельной функцией — как шов для тестов.
+function Get-HmMarketplaceQuery {
+    param([string]$ExtensionId, [int]$Flags)
+    $q = '{"filters":[{"criteria":[{"filterType":7,"value":"' + $ExtensionId + '"}]}],"flags":' + $Flags + '}'
+    return Invoke-RestMethod 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1' -Method Post -Body $q -ContentType 'application/json' -Headers $UA -TimeoutSec 120
+}
+
+# Постобработка скачанного .vsix: снять gzip и пустить через гейт честности. Файл, не прошедший
+# гейт, УДАЛЯЕТСЯ (в checksums.json он тогда не попадёт). $EditorMinor = -1 — редактор неизвестен:
+# движок не сравниваем (id и издатель проверяются всегда). Возвращает $true, если файл оставлен.
+function Confirm-HmLanguagePackVsix {
+    param([string]$Path, [int]$EditorMinor, [int]$EditorPatch = 0)
+    # Как у claude-code.vsix: Marketplace часто отдаёт vspackage в gzip, IWR в PS 5.1 его не снимает.
+    try {
+        $fs = [IO.File]::OpenRead($Path); $b0 = $fs.ReadByte(); $b1 = $fs.ReadByte(); $fs.Close()
+        if ($b0 -eq 0x1f -and $b1 -eq 0x8b) {
+            Write-Host "  ответ Marketplace в gzip — распаковываю в .vsix"
+            $gzTmp = "$Path.gz.tmp"
+            Move-Item $Path $gzTmp -Force
+            $in  = [IO.File]::OpenRead($gzTmp)
+            $gz  = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+            $out = [IO.File]::Create($Path)
+            $gz.CopyTo($out)
+            $out.Close(); $gz.Close(); $in.Close()
+            Remove-Item $gzTmp -Force
+        }
+    } catch { Write-Host "  ! постобработка языкового пакета не удалась - $($_.Exception.Message)" }
+    # Гейт честности (как у chatgpt.vsix): вшиваем ТОЛЬКО zip с манифестом именно этого пакета
+    # и движком не новее вшитого редактора. Иначе файл удаляется и в checksums.json не попадает.
+    # Тот же гейт — единственный судья на запасном пути, когда Marketplace не отдал engines.vscode.
+    $lpOk = $false
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $za = [IO.Compression.ZipFile]::OpenRead($Path)
+        try {
+            $entry = $za.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' } | Select-Object -First 1
+            if ($entry) {
+                $sr = New-Object IO.StreamReader($entry.Open())
+                try { $lpManifest = $sr.ReadToEnd() } finally { $sr.Dispose() }
+                # Идентичность — из тега <Identity>, а не из любого `Id="..."` манифеста.
+                $ident = ''
+                if ($lpManifest -match '<Identity\b[^>]*>') { $ident = $Matches[0] }
+                $idOk = ($ident -match '\bId\s*=\s*"vscode-language-pack-ru"') -and ($ident -match '\bPublisher\s*=\s*"MS-CEINTL"')
+                # Движок обязан читаться: нет движка — нечем доказать совместимость (раньше молча пропускали).
+                $engOk = $false
+                if ($lpManifest -match 'Microsoft\.VisualStudio\.Code\.Engine"\s+Value\s*=\s*"([^"]*)"') {
+                    $engOk = ($EditorMinor -lt 0) -or (Test-HmVsEngineFits $Matches[1] ([long[]]@(1, $EditorMinor, $EditorPatch)))
+                }
+                $lpOk = $idOk -and $engOk
+            }
+        } finally { $za.Dispose() }
+    } catch { }
+    if ($lpOk) {
+        $forEditor = 'редактор не определён, движок не сравнивался'
+        if ($EditorMinor -ge 0) { $forEditor = "под VS Code 1.$EditorMinor" }
+        Write-Host "  ok vscode-language-pack-ru.vsix (MS-CEINTL, $forEditor)"
+        return $true
+    }
+    Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    Write-Host "  ! vscode-language-pack-ru.vsix не тот пакет, битый zip или движок новее вшитого VS Code — НЕ вшиваю, поставится онлайн при установке"
+    return $false
+}
+
+# Весь блок: версия редактора -> запрос -> выбор -> загрузка -> гейт. $EditorVersion можно
+# задать явно (тесты и ручной прогон); по умолчанию берётся из вшитого vscode-setup.exe.
+function Invoke-HmLanguagePackFetch {
+    param([string]$Apps, [string]$EditorVersion = '')
+    $lpvsix = Join-Path $Apps 'vscode-language-pack-ru.vsix'
+    $vsMinor = $null
+    $vsPatch = 0
+    if ($EditorVersion -eq '') {
+        try { $EditorVersion = [string](Get-Item -LiteralPath (Join-Path $Apps 'vscode-setup.exe') -ErrorAction Stop).VersionInfo.ProductVersion } catch { }
+    }
+    if ($EditorVersion -match '^1\.(\d+)(?:\.(\d+))?') {
+        $vsMinor = [int]$Matches[1]
+        if ($Matches[2]) { $vsPatch = [int]$Matches[2] }
+    }
+    $base = 'https://marketplace.visualstudio.com/_apis/public/gallery/publishers/MS-CEINTL/vsextensions/vscode-language-pack-ru/'
+    if (Test-Path -LiteralPath $lpvsix) {
+        Write-Host "  skip vscode-language-pack-ru.vsix"
+        $eMin = -1
+        if ($null -ne $vsMinor) { $eMin = $vsMinor }
+        [void](Confirm-HmLanguagePackVsix -Path $lpvsix -EditorMinor $eMin -EditorPatch $vsPatch)
+        return
+    }
+    if ($null -eq $vsMinor) {
+        Write-Host "  ! версия вшитого VS Code не определена — языковой пакет не вшиваю (подобрать совместимый не по чему)"
+        return
+    }
+    $resp = $null
+    try { $resp = Get-HmMarketplaceQuery 'MS-CEINTL.vscode-language-pack-ru' 49 }
+    catch { Write-Host "  ! Marketplace не ответил ($($_.Exception.Message))" }
+    $lpVer = Select-HmLanguagePackVersion -Response $resp -EditorMinor $vsMinor -EditorPatch $vsPatch
+    if ($lpVer) {
+        Write-Host "  выбран пакет $lpVer (его движок не новее VS Code 1.$vsMinor.$vsPatch)"
+        Dl ($base + $lpVer + '/vspackage') $lpvsix
+        if (Test-Path -LiteralPath $lpvsix) { [void](Confirm-HmLanguagePackVsix -Path $lpvsix -EditorMinor $vsMinor -EditorPatch $vsPatch) }
+        else { Write-Host "  ! пакет $lpVer не скачался — не вшиваю (поставится онлайн при установке)" }
+        return
+    }
+    # Запасной путь — ТОЛЬКО когда свойств версий в ответе нет вовсе (если они есть и ни одна не
+    # подошла, подходящего пакета не существует, и качать нечего).
+    $all = @(Get-HmLanguagePackVersions $resp)
+    $withEngine = @($all | Where-Object { $null -ne $_.Engine })
+    if ($all.Count -gt 0 -and $withEngine.Count -eq 0) {
+        Write-Host "  Marketplace не отдал engines.vscode версий — качаю кандидатов от новых к старым и читаю манифест"
+        # Минор версии пакета совпадает с минором его движка или больше на единицу (так у всех
+        # 437 версий на 09.10.2026), поэтому заведомо более новые кандидаты не качаем.
+        $cands = @($all | Where-Object { -not $_.PreRelease -and $_.Key[1] -le ($vsMinor + 1) } |
+                   Sort-Object { $_.Key[0] }, { $_.Key[1] }, { $_.Key[2] } -Descending)
+        $tried = 0
+        foreach ($c in $cands) {
+            if ($tried -ge 6) { break }
+            $tried++
+            Dl ($base + $c.Version + '/vspackage') $lpvsix
+            if (-not (Test-Path -LiteralPath $lpvsix)) { continue }
+            if (Confirm-HmLanguagePackVsix -Path $lpvsix -EditorMinor $vsMinor -EditorPatch $vsPatch) { return }
+        }
+    }
+    Write-Host "  ! Marketplace не отдал пакет, совместимый с VS Code 1.$vsMinor.$vsPatch (движок не новее редактора) — не вшиваю (поставится онлайн при установке)"
+}
+
+Invoke-HmLanguagePackFetch -Apps $apps
 
 Write-Host "[vendor] JetBrains Mono Regular (шрифт, лицензия OFL)..."
 $font = Join-Path $apps 'JetBrainsMono-Regular.ttf'
@@ -372,6 +810,11 @@ if ($uvNeedFetch) {
       # Требуем ОБА бинаря непустыми (та же проверка, что для skip) — иначе не публикуем.
       if (Test-HmUvVendorValid $uvStage) { $uvOk = $true }
       else { Write-Host "  ! в архиве uv нет uv.exe/uvx.exe (или пустые) — не публикую" }
+      # Подпись издателя — ДО публикации stage: подменённый архив не должен доехать даже до apps\uv.
+      # Провал = exit 1 (stage убирается), так что дальше сюда управление не вернётся.
+      if ($uvOk) {
+        foreach ($n in @('uv.exe', 'uvx.exe')) { Assert-HmVendorFile -Path (Join-Path $uvStage $n) -CleanupDir $uvStage }
+      }
     } catch { Write-Host "  ! uv не распаковался - $($_.Exception.Message)" }
     Remove-Item $uvZip -Force -ErrorAction SilentlyContinue
   }
@@ -392,20 +835,79 @@ $req = Join-Path $root 'vendor\config-pack\requirements.txt'
 $wheels = Join-Path $root 'vendor\pywheels'
 if (Test-Path $wheels) { Remove-Item -Recurse -Force $wheels -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Force $wheels | Out-Null
-# Код возврата pip проверяем ПОСЛЕ КАЖДОЙ команды. Скачиваний два: базовые
-# pip/setuptools/wheel и весь requirements.txt. Раньше не смотрели ни на одно, а гейт
+
+# ТОЛЬКО КОЛЁСА (находка S-6). `pip download` обычного sdist ИСПОЛНЯЕТ его setup.py (иначе
+# не узнать зависимости), а эта машина держит сессию подписи Certum и боевые ключи S3: пакет,
+# подменённый в индексе, получил бы и то и другое. Поэтому везде --only-binary=:all: — пакет без
+# колеса теперь роняет шаг громко, а не собирается молча у владельца ключей.
+#
+# Единственное исключение — pyaes (зависимость telethon, на PyPI только sdist), и оно не
+# «разрешить sdist», а закрепление: отдельным вызовом с --require-hashes (pip сверяет sha256
+# ДО распаковки и сборки метаданных — подменённый архив не исполнится вовсе), а в общем вызове
+# pyaes идёт прямой ссылкой file:///...#sha256=..., так что индекс про него не спрашивают
+# (иначе при равной версии ничья между локальным файлом и индексом решалась бы порядком
+# поиска, а не нашим пином). Пин лежит в tools\vendor-signers.json (pythonSdists).
+#
+# Что этим закрыто и что НЕТ (формулировка «на машине подписи не исполняется чужой код» была бы
+# завышена). Закрыто: setup.py подменённого pyaes и любого пакета без колеса (pip отказывает по
+# sha256 / по --only-binary до сборки), скрипты установки npm-пакета. Остаётся: pip собирает метаданные
+# sdist pyaes в изолированном окружении и ставит туда сборочный бэкенд (setuptools) из PyPI БЕЗ хеша —
+# исполняется его код; поэтому `--no-binary` стоит только на pyaes (с `:all:` бэкенд собирался бы ещё и
+# из sdist). Плюс playwright и его драйвер ставятся из PyPI колёсами без хеша, версия claude-code плавает
+# (скрипты не исполняются, архивы берутся из реестра npm). Доверие остаётся к PyPI/npm и TLS до них.
+#
+# Код возврата pip проверяем ПОСЛЕ КАЖДОЙ команды. Скачиваний три: базовые
+# pip/setuptools/wheel, pyaes и весь requirements.txt. Раньше не смотрели ни на одно, а гейт
 # полноты ниже считал каталог заполненным по признаку «есть хоть один файл» — то есть
 # трёх базовых колёс от ПЕРВОЙ команды хватало, чтобы провал ВТОРОЙ (обрыв сети, пакет
 # без колеса под эту платформу) прошёл незамеченным. Сборка уезжала с неполным набором
 # зависимостей, а установка у покупателя падала уже на его машине, где чинить нечем.
 # $LASTEXITCODE переживает конвейер с Select-Object (проверено запуском) — в отличие от
 # bash-пайпа, который отдал бы код последней команды в цепочке.
+function Get-HmPyWheels {
+  param([string]$Py, [string]$Req, [string]$Wheels, $Pyaes)
+  # stderr нативной команды под Stop рушит скрипт (см. шапку файла): режим держим сами, а не по вызывающему.
+  $ErrorActionPreference = 'Continue'
+  $ok = $true
+  & $Py -m pip download pip setuptools wheel --only-binary=:all: -d $Wheels 2>&1 | Select-Object -Last 1 | Out-Host
+  if ($LASTEXITCODE -ne 0) { $ok = $false; Write-Host "  ! pip download (pip/setuptools/wheel) завершился с кодом $LASTEXITCODE" }
+  $pyaesFile = Join-Path $Wheels ('pyaes-' + $Pyaes.version + '.tar.gz')
+  $pin = Join-Path ([IO.Path]::GetTempPath()) ('hm-pyaes-pin-' + [guid]::NewGuid().ToString('N') + '.txt')
+  $pyaesOk = $false
+  try {
+    [IO.File]::WriteAllText($pin, ('pyaes==' + $Pyaes.version + ' --hash=sha256:' + $Pyaes.sha256 + "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
+    & $Py -m pip download --no-deps --no-binary pyaes --require-hashes -r $pin -d $Wheels 2>&1 | Select-Object -Last 3 | Out-Host
+    $pyaesRc = $LASTEXITCODE
+    $pyaesOk = ($pyaesRc -eq 0)
+    if (-not $pyaesOk) { Write-Host "  ! pip download (pyaes с пином sha256) завершился с кодом $pyaesRc — архив не принят, остальные пакеты не качаю" }
+  } finally { Remove-Item -LiteralPath $pin -Force -ErrorAction SilentlyContinue }
+  if (-not $pyaesOk) { return $false }
+  $pyaesU = New-Object System.Uri $pyaesFile
+  if ($pyaesU.LocalPath -ne $pyaesFile) {
+    Write-Host "  ! путь к pyaes не выражается ссылкой file:/// без искажений ($pyaesFile) — перенеси репозиторий в каталог без символов # и %"
+    return $false
+  }
+  $pyaesUri = $pyaesU.AbsoluteUri + '#sha256=' + $Pyaes.sha256
+  & $Py -m pip download -r $Req pystray pillow ('pyaes @ ' + $pyaesUri) --only-binary=:all: -d $Wheels 2>&1 | Select-Object -Last 3 | Out-Host
+  if ($LASTEXITCODE -ne 0) { $ok = $false; Write-Host "  ! pip download (requirements.txt + pystray/pillow) завершился с кодом $LASTEXITCODE" }
+  # Результат — по файлу, а не по тексту pip: в pywheels лежит ровно тот pyaes, что закреплён.
+  $got = ''
+  if (Test-Path -LiteralPath $pyaesFile) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = [IO.File]::OpenRead($pyaesFile)
+    try { $got = ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '').ToLower() } finally { $fs.Dispose(); $sha.Dispose() }
+  }
+  if ($got -ne $Pyaes.sha256) {
+    $ok = $false
+    Remove-Item -LiteralPath $pyaesFile -Force -ErrorAction SilentlyContinue
+    Write-Host "  ! pyaes в pywheels не совпал с пином sha256 (или не скачан) — архив удалён, набор НЕПОЛНЫЙ"
+  }
+  return $ok
+}
+
 $wheelsOk = $true
 if ($py -and (Test-Path $req)) {
-  & $py -m pip download pip setuptools wheel -d $wheels 2>&1 | Select-Object -Last 1
-  if ($LASTEXITCODE -ne 0) { $wheelsOk = $false; Write-Host "  ! pip download (pip/setuptools/wheel) завершился с кодом $LASTEXITCODE" }
-  & $py -m pip download -r $req pystray pillow -d $wheels 2>&1 | Select-Object -Last 3
-  if ($LASTEXITCODE -ne 0) { $wheelsOk = $false; Write-Host "  ! pip download (requirements.txt + pystray/pillow) завершился с кодом $LASTEXITCODE" }
+  $wheelsOk = Get-HmPyWheels -Py $py -Req $req -Wheels $wheels -Pyaes $HmSigners.pythonSdists.pyaes
   Write-Host "  wheels/sdists: $((Get-ChildItem $wheels -File).Count) шт."
 } else { $wheelsOk = $false; Write-Host "  (python/requirements не найдены, пропускаю wheels)" }
 
@@ -414,7 +916,7 @@ $pw = Join-Path $root 'vendor\playwright-browsers'
 New-Item -ItemType Directory -Force $pw | Out-Null
 if ($py) {
   try {
-    & $py -m pip install --quiet playwright 2>&1 | Out-Null
+    & $py -m pip install --quiet --only-binary=:all: playwright 2>&1 | Out-Null
     $env:PLAYWRIGHT_BROWSERS_PATH = $pw
     & $py -m playwright install chromium 2>&1 | Select-Object -Last 2
     # Drop chromium_headless_shell (~254 MB) to stay under the NSIS 2 GiB limit.
@@ -470,7 +972,91 @@ if (Test-Path $mascotSrc) {
 # Юридическое имя из сертификата Apple и Team ID добавлены после того, как ученик
 # увидел это имя у себя. Один поимённо удаляемый файл (см. 1b) проблему не закрывает:
 # то же имя приезжает в любой новый документ про подпись или в лог сборки.
-$NOMAD_LEAK_RE = '95\.179\.242\.167|transform-ai\.online|[Jj]emal[ _-]*[Mm]ohamed[ _-]*[Ll]emine|3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+# Паттерны деанона/секретов для экспорт-фильтра. РЕПОЗИТОРИЙ ПУБЛИЧНЫЙ (находка S-3), поэтому здесь
+# лежат только ОБЩИЕ паттерны — ключи и токены. Личные (имя владельца, его адреса и домены)
+# раньше стояли прямо в этой строке, то есть сам фильтр публиковал то, что должен был не пропустить.
+# Теперь они читаются из НЕОТСЛЕЖИВАЕМОГО файла tools\leak-patterns.local.json (он в .gitignore)
+# либо из переменной окружения HM_LEAK_PATTERNS (тот же JSON целиком — под секрет CI). Формат:
+#   { "patterns": [ { "re": "<regex, годный и для .NET, и для POSIX ERE>", "scrub": "<чем заменить>" }, ... ] }
+# scrub необязателен: он разрешает в install-critical файле ЗАМЕНИТЬ совпадение этой строкой (так
+# поступают с адресами и доменами); без него совпадение в таком файле — FATAL.
+# Нет личного списка:
+#   - локально — фильтр работает по общим паттернам и громко об этом говорит (личный файл лежит на машине
+#     владельца; свежий рабочий каталог его не получает — это предупреждение, а не отказ);
+#   - в РЕЛИЗНОЙ сборке (CI=true / GITHUB_ACTIONS=true / HM_RELEASE=1) — стоп: фильтр, «предупредивший» и
+#     пропустивший имя владельца в раздаваемый exe, хуже отсутствующего фильтра. Осознанный обход — переменная
+#     HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 (баннер в журнале). Как CI получает список — см. спеку «Обслуживание vendor».
+# Список есть, но битый или пустой — стоп: тихо потерять защиту хуже, чем остановиться.
+# Team ID Apple остаётся в общей части: он виден в любом подписанном бинаре и уже стоит в
+# отслеживаемых файлах (пин скрепки), прятать его здесь нечего.
+$HM_LEAK_GENERIC_RE = '3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+
+# Общие + личные паттерны -> { Patterns = @(общий, личные…); Scrubs = @({Re; With}); Private; Count; Source }.
+# Паттерны отдаются МАССИВОМ, а не склеиваются в один regex через `|`: Select-String компилирует каждый
+# элемент отдельно, поэтому встроенные параметры ((?-i), (?s)) и номера групп одного паттерна не
+# перетекают в соседей (склеенное `(?-i)Aaa|SECRET` делало второй регистрозависимым, а `(zq)|(ab)\1`
+# ссылалось на чужую группу — личный паттерн молча переставал ловить).
+# Битый JSON, пустой список, пустой или не компилируемый паттерн, паттерн, совпадающий с пустой строкой
+# (он выбил бы из экспорта ВСЕ файлы), перевод строки/табуляция в значении (ломает bash-версию) — исключение.
+# Пустой список — тоже ошибка: пустое значение HM_LEAK_PATTERNS иначе заслоняло бы настоящий файл и
+# гасило предупреждение «личный список не найден», не добавляя ни одного паттерна.
+# Значения паттернов в текст ошибки не попадают: журнал сборки не должен их повторять.
+function Get-HmLeakPatterns {
+  param([string]$LocalFile = '', [string]$EnvJson = '', [Parameter(Mandatory = $true)][string]$GenericRe)
+  $json = $null
+  $source = ''
+  if ($EnvJson -and $EnvJson.Trim()) { $json = $EnvJson; $source = 'переменная HM_LEAK_PATTERNS' }
+  elseif ($LocalFile -and (Test-Path -LiteralPath $LocalFile)) {
+    $json = [IO.File]::ReadAllText($LocalFile, [System.Text.Encoding]::UTF8)
+    $source = [IO.Path]::GetFileName($LocalFile)
+  }
+  $patterns = New-Object System.Collections.ArrayList
+  [void]$patterns.Add($GenericRe)
+  $scrubs = New-Object System.Collections.ArrayList
+  $count = 0
+  if ($null -ne $json) {
+    $obj = $null
+    try { $obj = $json | ConvertFrom-Json } catch { throw 'JSON не разбирается' }
+    if ($null -eq $obj -or $null -eq $obj.patterns) { throw 'в JSON нет массива patterns' }
+    foreach ($p in @($obj.patterns)) {
+      $count++
+      $re = [string]$p.re
+      if (-not $re.Trim()) { throw ("паттерн №$count пуст") }
+      if ($re -match '[\r\n\t]') { throw ("в паттерне №$count перевод строки или табуляция") }
+      $rx = $null
+      try { $rx = New-Object System.Text.RegularExpressions.Regex($re) } catch { throw ("паттерн №$count не компилируется") }
+      if ($rx.IsMatch('')) { throw ("паттерн №$count совпадает с пустой строкой") }
+      [void]$patterns.Add($re)
+      $with = ''
+      if ($null -ne $p.scrub) { $with = [string]$p.scrub }
+      if ($with -match '[\r\n\t]') { throw ("в scrub паттерна №$count перевод строки или табуляция") }
+      if ($with -ne '') { [void]$scrubs.Add([pscustomobject]@{ Re = $re; With = $with }) }
+    }
+    if ($count -eq 0) { throw 'в списке нет ни одного паттерна' }
+  }
+  return [pscustomobject]@{ Patterns = $patterns.ToArray(); Scrubs = $scrubs.ToArray(); Private = ($null -ne $json); Count = $count; Source = $source }
+}
+
+# Релизная ли сборка: CI / GITHUB_ACTIONS = true|1|yes либо явный HM_RELEASE = 1|true|yes (без учёта регистра).
+# Значения приходят параметрами, а не читаются здесь, — чтобы решение проверялось таблицей.
+function Test-HmReleaseBuild {
+  param([string]$Ci = '', [string]$GithubActions = '', [string]$Release = '')
+  foreach ($v in @($Ci, $GithubActions, $Release)) {
+    if ($v -and ($v.Trim() -match '^(?i:true|1|yes)$')) { return $true }
+  }
+  return $false
+}
+
+# Что делать с отсутствующим личным списком: 'ok' (список есть) | 'warn' (локальная сборка: предупредить) |
+# 'fatal' (релизная сборка без списка) | 'allowed' (релизная, но явно разрешено HM_ALLOW_NO_PRIVATE_LEAK_LIST).
+# Флаг «разрешить» действует ТОЛЬКО в релизной сборке: локально он ничего не меняет — там и так предупреждение.
+function Get-HmLeakListVerdict {
+  param([bool]$Private, [bool]$Release, [string]$Allow = '')
+  if ($Private) { return 'ok' }
+  if (-not $Release) { return 'warn' }
+  if ($Allow -and ($Allow.Trim() -match '^(?i:true|1|yes)$')) { return 'allowed' }
+  return 'fatal'
+}
 
 function Test-NomadSrcCritical {
   # $Rel = путь ОТНОСИТЕЛЬНО корня nomad-src, разделители '/'. Код, нужный `uv tool install`:
@@ -491,6 +1077,43 @@ function Invoke-NomadSrcSanitize {
   # Возвращает $true = фильтр пройден; $false = FATAL (несводимые паттерны / битая структура).
   param([string]$Src)
   Write-Host "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
+  # Паттерны: общие (в репозитории) + личные (неотслеживаемый файл / HM_LEAK_PATTERNS) — см. Get-HmLeakPatterns.
+  # HM_LEAK_PATTERNS_FILE — явный путь к списку (другой рабочий каталог, общий файл на несколько сборок);
+  # заданный, но несуществующий путь — стоп: тихо работать без списка по явной просьбе было бы враньём.
+  $leakFile = $env:HM_LEAK_PATTERNS_FILE
+  if ($leakFile -and -not (Test-Path -LiteralPath $leakFile)) {
+    Write-Host "[vendor] FATAL: HM_LEAK_PATTERNS_FILE указывает на несуществующий файл — личный список паттернов не прочитать."
+    return $false
+  }
+  if (-not $leakFile) { $leakFile = Join-Path $PSScriptRoot 'leak-patterns.local.json' }
+  $leak = $null
+  try { $leak = Get-HmLeakPatterns -LocalFile $leakFile -EnvJson $env:HM_LEAK_PATTERNS -GenericRe $HM_LEAK_GENERIC_RE }
+  catch {
+    Write-Host "[vendor] FATAL: список личных паттернов (tools\leak-patterns.local.json / HM_LEAK_PATTERNS) не годится: $($_.Exception.Message)"
+    Write-Host "         Починить список или убрать его; молча работать без него фильтр не станет."
+    return $false
+  }
+  # Нет личного списка: в релизной сборке (CI / GITHUB_ACTIONS / HM_RELEASE) это стоп, локально — предупреждение
+  # (разбор — в шапке блока паттернов). Флаг HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 разрешает релиз без списка осознанно.
+  $release = Test-HmReleaseBuild -Ci $env:CI -GithubActions $env:GITHUB_ACTIONS -Release $env:HM_RELEASE
+  $verdict = Get-HmLeakListVerdict -Private ([bool]$leak.Private) -Release ([bool]$release) -Allow $env:HM_ALLOW_NO_PRIVATE_LEAK_LIST
+  if ($verdict -eq 'ok') {
+    Write-Host "  [nomad-src] личных паттернов: $($leak.Count) (источник: $($leak.Source))"
+  } elseif ($verdict -eq 'fatal') {
+    Write-Host "[vendor] FATAL: релизная сборка (CI / GITHUB_ACTIONS / HM_RELEASE) без личного списка паттернов экспорт-фильтра nomad-src."
+    Write-Host "         Без него имя владельца, его адреса и домены не ищутся, и сборка раздала бы их покупателям, оставшись зелёной."
+    Write-Host "         Дай список: файл tools\leak-patterns.local.json (скопируй с машины владельца), путь в HM_LEAK_PATTERNS_FILE"
+    Write-Host "         или JSON целиком в HM_LEAK_PATTERNS (в CI — секрет; лучше записать его файлом во временный каталог раннера)."
+    Write-Host "         Осознанно без списка — HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 (в журнале будет баннер)."
+    return $false
+  } elseif ($verdict -eq 'allowed') {
+    Write-Host "  [nomad-src] !!! ВНИМАНИЕ: РЕЛИЗНАЯ СБОРКА БЕЗ ЛИЧНОГО СПИСКА ПАТТЕРНОВ (разрешено HM_ALLOW_NO_PRIVATE_LEAK_LIST) !!!"
+    Write-Host "              Проверяются только общие ключи и токены; имя владельца, его адреса и домены в раздаваемый exe НЕ проверены."
+  } else {
+    Write-Host "  [nomad-src] ВНИМАНИЕ: личный список паттернов не найден (tools\leak-patterns.local.json или HM_LEAK_PATTERNS) —"
+    Write-Host "              проверяются только общие ключи и токены. Имя владельца, его адреса и домены НЕ ловятся: релиз собирай на машине с локальным файлом."
+  }
+  $NOMAD_LEAK_PATTERNS = $leak.Patterns
   # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
   # docs целиком: каталог не нужен ни сборке, ни рантайму — его нет ни в MANIFEST.in, ни
   # в [tool.setuptools] (packages.find / package-data / data-files), и ни один .py дерева
@@ -501,7 +1124,7 @@ function Invoke-NomadSrcSanitize {
                      'docs',
                      'deploy', 'scripts\tests')) {
     $p = Join-Path $Src $rel
-    if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')/" }
+    if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force -LiteralPath $p; Write-Host "    - удалил $($rel -replace '\\','/')/" }
   }
   # 1a) СТОРОЖ вместо одного лишь списка. Поимённый список отстаёт молча: он
   #     писался под структуру репозитория Nomad на тот день, а за 422 коммита
@@ -517,7 +1140,7 @@ function Invoke-NomadSrcSanitize {
   Get-ChildItem -LiteralPath $Src -Force -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name.StartsWith('.') -and ($dotKeep -notcontains $_.Name) } |
     ForEach-Object {
-      Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue
       Write-Host "    - удалил по признаку (точка в начале): $($_.Name)/"
     }
   #     Тот же сторож — по ФАЙЛАМ верхнего уровня. Прежняя редакция смотрела только
@@ -527,7 +1150,7 @@ function Invoke-NomadSrcSanitize {
   Get-ChildItem -LiteralPath $Src -Force -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '(?i)(_plan|plan_|_spec|spec_|internal|audit|backlog|^phase[0-9])' } |
     ForEach-Object {
-      Remove-Item -Force $_.FullName -ErrorAction SilentlyContinue
+      Remove-Item -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue
       Write-Host "    - удалил по признаку (внутренний документ): $($_.Name)"
     }
   # 1b) Поимённые внутренние документы, которые под глобы ниже не подпадают.
@@ -536,21 +1159,21 @@ function Invoke-NomadSrcSanitize {
   #     ехало каждому внутри exe. Именно это имя ученик и увидел у себя на машине.
   foreach ($rel in @('apps\desktop\MAC_SIGNING.md')) {
     $p = Join-Path $Src $rel
-    if (Test-Path $p) { Remove-Item -Force $p; Write-Host "    - удалил $($rel -replace '\\','/')" }
+    if (Test-Path -LiteralPath $p) { Remove-Item -Force -LiteralPath $p; Write-Host "    - удалил $($rel -replace '\\','/')" }
   }
   # 2) Внутренние *report*-отчёты: top-level (PHASE1_*_REPORT.md), docs\, scripts\.
   #    Продуктовые файлы, матчащие глоб (agent/lsp/reporter.py, шаблоны skills/bug-report.md
   #    и т.п.), НЕ трогаем — они часть агента.
-  $reportFiles = @(Get-ChildItem $Src -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
+  $reportFiles = @(Get-ChildItem -LiteralPath $Src -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
   foreach ($d in @('docs', 'scripts')) {
     $dp = Join-Path $Src $d
     if (Test-Path $dp) {
-      $reportFiles += @(Get-ChildItem $dp -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
+      $reportFiles += @(Get-ChildItem -LiteralPath $dp -File -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*report*' })
     }
   }
   foreach ($f in $reportFiles) {
     $rel = $f.FullName.Substring($Src.Length + 1) -replace '\\', '/'
-    Remove-Item -Force $f.FullName
+    Remove-Item -Force -LiteralPath $f.FullName
     Write-Host "    - удалил $rel"
   }
   # 3) Файлы с деанон/секрет-паттернами: НЕ нужные установке — удаляем (с логом);
@@ -558,24 +1181,24 @@ function Invoke-NomadSrcSanitize {
   #    и в строковом литерале). Токен-паттерн в критическом коде скрабить нельзя
   #    (меняет семантику) → останется до гейта ниже → FATAL.
   $removed = 0
-  $matched = @(Get-ChildItem $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
-    Where-Object { Select-String -Path $_.FullName -Pattern $NOMAD_LEAK_RE -Quiet -ErrorAction SilentlyContinue })
+  $matched = @(Get-ChildItem -LiteralPath $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { Select-String -LiteralPath $_.FullName -Pattern $NOMAD_LEAK_PATTERNS -Quiet -ErrorAction SilentlyContinue })
   foreach ($f in $matched) {
     $rel = $f.FullName.Substring($Src.Length + 1) -replace '\\', '/'
     if (Test-NomadSrcCritical $rel) {
       $txt = [IO.File]::ReadAllText($f.FullName)
-      $txt = $txt -replace '95\.179\.242\.167', 'REDACTED-IP' -replace 'transform-ai\.online', 'redacted.example'
+      foreach ($s in $leak.Scrubs) { $txt = [regex]::Replace($txt, $s.Re, $s.With.Replace('$', '$$'), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) }
       [IO.File]::WriteAllText($f.FullName, $txt)
       Write-Host "    ~ скраб IP/домена в $rel (install-critical, файл сохранён)"
     } else {
-      Remove-Item -Force $f.FullName; $removed++
+      Remove-Item -Force -LiteralPath $f.FullName; $removed++
       Write-Host "    - удалил $rel (деанон/секрет-паттерн)"
     }
   }
   # 4) Жёсткий гейт: после чистки паттернов быть НЕ должно НИГДЕ. Сюда доходит только
   #    несводимое (токен в install-critical коде / непокрытый скраб) → FATAL со списком.
-  $left = @(Get-ChildItem $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
-    Where-Object { Select-String -Path $_.FullName -Pattern $NOMAD_LEAK_RE -Quiet -ErrorAction SilentlyContinue })
+  $left = @(Get-ChildItem -LiteralPath $Src -File -Recurse -Force -ErrorAction SilentlyContinue |
+    Where-Object { Select-String -LiteralPath $_.FullName -Pattern $NOMAD_LEAK_PATTERNS -Quiet -ErrorAction SilentlyContinue })
   if ($left.Count -gt 0) {
     Write-Host "[vendor] FATAL: в vendor\nomad-src остались деанон/секрет-паттерны (IP/домен/токены) в файлах:"
     foreach ($f in $left) { Write-Host ("  - " + ($f.FullName.Substring($Src.Length + 1) -replace '\\', '/')) }
@@ -703,6 +1326,12 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
 } else {
   Write-Host "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"
 }
+
+# Подпись издателя у ВСЕГО, что лежит в vendor\apps, — ДО снятия сумм: после этой строки манифест
+# заверит ровно проверенные файлы. Сюда же попадает то, что мимо Dl (скрепка из локальной сборки,
+# шрифт из zip, распакованный uv) и то, что осталось от прошлых прогонов; неизвестное имя — стоп.
+Write-Host "[vendor] Проверка подписей издателей (tools\vendor-signers.json)..."
+Assert-HmVendorApps -Apps $apps
 
 Write-Host "[vendor] checksums.json — SHA-256 файлов vendor/apps + архива курса (целостность/доверие)..."
 try {
