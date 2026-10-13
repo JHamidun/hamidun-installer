@@ -11,14 +11,17 @@
 # (verify.ps1) обязан ПЕРЕНЕСТИ его, а не выводить заново по наличию файла.
 # Один факт «claude работает» — один стандарт доказательства.
 # Каталог ~/.hamidun-setup — ссылка (junction): писать «сквозь» неё под администратором нельзя
-# (процесс обычного пользователя подменил бы каталог ссылкой на системный) — тихо пропускаем,
-# диагностика не должна ломать установку.
+# (процесс обычного пользователя подменил бы каталог ссылкой на системный) — пропускаем с одной
+# строкой в журнал, диагностика не должна ломать установку.
 function Write-HmCheck($name, $verdict) {
     try {
         $dir = Join-Path $env:USERPROFILE '.hamidun-setup'
-        if (Test-HmIsReparse $dir) { return }
-        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
         $file = Join-Path $dir 'checks.json'
+        if ((Test-HmIsReparse $dir) -or (Test-HmIsReparse $file)) {
+            Write-Host "  (вердикт '$name' не записан: ~/.hamidun-setup или checks.json в нём — ссылка, сквозь неё не пишу)"
+            return
+        }
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
         # $null, а не @{}: пустая хеш-таблица в условии «истинна», и её служебные свойства (Count,
         # Keys, Values…) попадали в checks.json отдельными записями при самой первой записи файла.
         $data = $null
@@ -26,15 +29,18 @@ function Write-HmCheck($name, $verdict) {
             try { $data = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json) } catch { $data = New-Object psobject }
         }
         $entry = @{ verdict = $verdict; at = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds }
-        # atomic: temp + move (как маркеры/квитанции)
         $obj = @{}
         if ($data) { foreach ($p in $data.PSObject.Properties) { $obj[$p.Name] = $p.Value } }
         $obj[$name] = $entry
-        $tmp = "$file.tmp"
-        if ((Test-HmIsReparse $dir) -or (Test-HmIsReparse $tmp) -or (Test-HmIsReparse $file)) { return }
-        ($obj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8
-        Move-Item -LiteralPath $tmp -Destination $file -Force
-    } catch { }   # диагностика не должна ломать установку
+        # Сначала сериализуем (на разросшемся файле это секунды), и только потом пишем: Write-HmFileSafe
+        # проверяет ссылку впритык к записи, кладёт данные во временный файл СО СЛУЧАЙНЫМ именем рядом
+        # (CreateNew) и повторяет проверку перед заменой. Прежний «$file.tmp + Move-Item -Force» проверял
+        # ссылку ДО долгого ConvertTo-Json, а имя временного файла было известно заранее: за это время
+        # каталог подменяли ссылкой, и запись шла в чужую папку. Байты файла прежние (BOM, CRLF).
+        # -ClearReadOnly: checks.json — наш файл; «только чтение» на нём (антивирус, синхронизация) прежний
+        # Move-Item -Force перебивал, а File.Replace отказал бы, и вердикт не записывался бы на каждом прогоне.
+        Write-HmFileSafe -Path $file -Bytes (ConvertTo-HmBomLineBytes ($obj | ConvertTo-Json -Depth 6)) -ClearReadOnly
+    } catch { Write-Host "  (вердикт '$name' не записан: $($_.Exception.Message))" }   # диагностика не должна ломать установку
 }
 
 # PowerShell и политика выполнения (ExecutionPolicy). npm кладёт рядом с claude.cmd ещё и

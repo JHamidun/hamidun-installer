@@ -73,6 +73,59 @@ function Test-NomadNetwork {
     }
     return $false
 }
+
+# Копия исходников Nomad для сборки: в ЗАЩИЩЁННОЙ папке (создаётся атомарно, доступ только у
+# Администраторов и SYSTEM — тот же примитив New-HmSecureStagingDir, что у git/node/pydeps) и сверенная
+# с манифестом УЖЕ ПОСЛЕ копирования.
+# Почему так. uv не просто ставит пакет: несколько минут он резолвит и качает зависимости, а потом
+# ИСПОЛНЯЕТ сборочный код проекта (pyproject.toml, setup.py, модули) — под администратором. Раньше копия
+# лежала в %TEMP% (права пользователя): процесс обычного пользователя подменял в ней файл за эти минуты, и
+# его код выполнялся у нас с правами администратора. Проверка суммы исходного дерева этого не закрывала:
+# проверялся оригинал, а исполнялась копия. Теперь копия недоступна обычному процессу, и проверяется
+# именно она — исполняется ровно то, что проверено.
+# Возвращает { Stage; Path } или $null (причина напечатана, защищённая папка уже убрана). Папку Stage
+# после сборки убирает вызывающий: Remove-HmSecureStagingDir. Нужен подключённый _deelev.ps1.
+function New-HmNomadBuildCopy {
+    param([Parameter(Mandatory = $true)][string]$Src, [Parameter(Mandatory = $true)][string]$TreeWant)
+    $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $icacls   = Join-Path (Join-Path $sysRoot 'System32') 'icacls.exe'
+    $progData = Join-Path ([System.IO.Path]::GetPathRoot($sysRoot)) 'ProgramData'
+    $stage = $null
+    if ((Test-Path -LiteralPath $icacls) -and (Test-Path -LiteralPath $progData)) {
+        $stage = New-HmSecureStagingDir -ProgramData $progData -Icacls $icacls -Elevated $true
+    }
+    if (-not ($stage -and (Test-Path -LiteralPath $stage))) {
+        Write-Host "Nomad: не удалось создать защищённую папку для сборки в ProgramData — из общей временной папки собирать не буду: подменить в ней файлы мог бы любой процесс обычного пользователя. Установка Nomad остановлена."
+        Write-Host "  Что делать: нажми «Повторить»; если не помогло — пришли журнал установки в бота поддержки."
+        return $null
+    }
+    $dst = Join-Path $stage 'nomad-src'
+    Write-Host "  Копирую исходники в защищённую папку и сверяю копию с манифестом (на медленном диске это до минуты)..."
+    try {
+        # Каталог копируем целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок: Copy-Item -LiteralPath "...\*"
+        # в Windows PowerShell 5.1 (боевой интерпретатор) НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов.
+        Copy-Item -LiteralPath $Src -Destination $dst -Recurse -Force -ErrorAction Stop
+        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
+        if (-not (Test-Path -LiteralPath (Join-Path $dst 'pyproject.toml'))) {
+            throw 'копия исходников пуста (нет pyproject.toml)'
+        }
+        $got = Get-HmTreeSha256 $dst
+        if (-not $TreeWant -or $got -ne $TreeWant) {
+            Write-Host "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 КОПИИ nomad-src в защищённой папке — исходники менялись во время копирования. Установка Nomad остановлена."
+            Write-Host "  ожидалось: $TreeWant"
+            Write-Host "  получено:  $got"
+            Remove-HmSecureStagingDir -Path $stage
+            return $null
+        }
+    } catch {
+        Write-Host "Nomad: не удалось подготовить копию исходников в защищённой папке ($($_.Exception.Message)) — установка остановлена."
+        Remove-HmSecureStagingDir -Path $stage
+        return $null
+    }
+    Write-Host "  Копия для сборки лежит в защищённой папке и сверена с манифестом."
+    return [pscustomobject]@{ Stage = $stage; Path = $dst }
+}
+
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -235,7 +288,7 @@ if (-not $uv -and -not $uvPlannedOffline) {
 # БЕЗ принудительной перезаписи: uv-тул/шимы этого имени уже отсеяны guard-ом выше, а
 # принудительная замена могла бы затронуть и не-uv бинарь того же имени — недопустимо.
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 `"$src`" (без принудительной перезаписи)"
+    Write-Host "  [dry-run] WOULD: uv python install 3.12; скопировать исходники в защищённую папку (ProgramData, только администраторы), сверить КОПИЮ с манифестом и поставить из неё: uv tool install --python 3.12 <копия> (без принудительной перезаписи)"
 } else {
     if (-not $uv) { Write-Host "uv не найден после установки — прерываю."; exit 1 }
     # P1-5: коды нативных команд НЕ проглатываем ($ErrorActionPreference=Continue их
@@ -269,27 +322,21 @@ if ($DRY) {
     # честно говорит «vendor подменён» — компонент больше не ставится никогда.
     # Проверено запуском: 4929 файлов в дереве превращались в 7374, SHA переставал
     # совпадать. На macOS это уже было сделано (nomad.sh, BUILD_SRC) — переносим сюда.
-    # ВАЖНО: копируем каталог целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок.
-    # Copy-Item -LiteralPath "...\*" в Windows PowerShell 5.1 (а это боевой интерпретатор)
-    # НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов: исключения нет, catch не
-    # срабатывает, и uv получает пустой каталог. Проверено запуском: 2 файла -> 0.
-    $buildSrc = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
-    $srcForInstall = $src
+    # Копия лежит в ЗАЩИЩЁННОЙ папке (не в %TEMP%) и сверяется с манифестом после копирования —
+    # подробности и причина в New-HmNomadBuildCopy. Не вышло — fail-closed, запасного пути
+    # «из vendor напрямую» нет: он вернул бы исполнение непроверенного дерева.
+    # _deelev.ps1 при подключении подметает осиротевшие задачи планировщика, поэтому подключаем его
+    # только здесь, перед сборкой: ранние выходы выше (уже стоит, нет vendor, нет сети) обходятся без этого.
+    . (Join-Path $PSScriptRoot '_deelev.ps1')   # New-HmSecureStagingDir, Remove-HmSecureStagingDir
+    $build = New-HmNomadBuildCopy -Src $src -TreeWant $treeWant
+    if (-not $build) { exit 1 }
     try {
-        Copy-Item -LiteralPath $src -Destination $buildSrc -Recurse -Force -ErrorAction Stop
-        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
-        if (-not (Test-Path -LiteralPath (Join-Path $buildSrc 'pyproject.toml'))) {
-            throw 'копия исходников пуста (нет pyproject.toml)'
-        }
-        $srcForInstall = $buildSrc
-    } catch {
-        Write-Host "  Не удалось подготовить временную копию исходников ($($_.Exception.Message)) — ставлю из vendor напрямую."
-        if (Test-Path -LiteralPath $buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
-        $buildSrc = ''
+        & $uv tool install --python 3.12 "$($build.Path)"
+        $toolRc = $LASTEXITCODE
+    } finally {
+        Remove-HmSecureStagingDir -Path $build.Stage
     }
-    & $uv tool install --python 3.12 "$srcForInstall"
-    if ($buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
+    if ($toolRc -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $toolRc — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
     # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
     # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в

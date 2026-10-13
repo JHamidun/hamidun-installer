@@ -34,7 +34,7 @@
 # или symlink на каталоге или файле — проверка повторяется непосредственно перед записью),
 # копия создаётся режимом CreateNew (падает на любом занятом имени, в том числе на ссылке),
 # а сам файл пишется во временный CreateNew-файл и переносится поверх целевого.
-. (Join-Path $PSScriptRoot '_userpath.ps1')   # Test-HmIsReparse
+. (Join-Path $PSScriptRoot '_userpath.ps1')   # Test-HmIsReparse, Write-HmFileSafe
 
 # Плагины, которые без токена или входа падают при запуске Claude Code, блокируют запись
 # файлов или шумят на каждом ответе. Первые восемь — PLUGINS_OFF из guard_student_defaults.py
@@ -266,50 +266,8 @@ function Invoke-HmSettingsFixes {
     return $done.ToArray()
 }
 
-# Записать файл так, чтобы не писать «сквозь» ссылку и не оставить половину: новый временный
-# файл рядом (CreateNew — падает на любом занятом имени, в том числе на ссылке), затем перенос
-# поверх целевого (подменённый symlink на целевом имени заменяется, а не пишется насквозь).
-# Каталог и целевой файл проверяются на ссылку и ПЕРЕД созданием временного файла, и ПЕРЕД
-# переносом: между проверкой и записью процесс обычного пользователя мог подменить каталог
-# ссылкой на системный. Бросает исключение с причиной — вызывающий печатает её человеку.
-function Write-HmFileSafe {
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][byte[]]$Bytes)
-    $dir = Split-Path -Parent $Path
-    if ((Test-HmIsReparse $dir) -or (Test-HmIsReparse $Path)) { throw "каталог или файл — ссылка (symlink/junction): $Path" }
-    $tmp = $Path + '.hamidun-tmp-' + [guid]::NewGuid().ToString('N')
-    $fs = $null
-    $created = $false
-    try {
-        $fs = [IO.File]::Open($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $created = $true
-        $fs.Write($Bytes, 0, $Bytes.Length)
-        $fs.Dispose(); $fs = $null
-        # File.Replace сохраняет права и владельца заменяемого файла; Move-Item не годится: его
-        # -Destination понимает маски, а в имени профиля бывают «[» и «]». Третий аргумент — имя копии,
-        # её не нужно: настоящий null для строки в PowerShell — [NullString]::Value (голый $null
-        # превращается в пустую строку, и Replace падает с «путь не в допустимой форме»).
-        # Только что прочитанный или записанный файл на мгновенье могут держать антивирус, индексатор
-        # поиска или редактор — тогда Replace падает с «Unable to remove the file to be replaced». Это
-        # проходит само, поэтому до восьми попыток с растущей паузой (всего около 4 секунд), а не сразу
-        # отказ. Ссылку проверяем перед КАЖДОЙ попыткой: пауза — это окно для подмены каталога.
-        $placed = $false
-        for ($try = 1; -not $placed; $try++) {
-            if ((Test-HmIsReparse $dir) -or (Test-HmIsReparse $Path)) { throw "каталог или файл стал ссылкой (symlink/junction) во время записи: $Path" }
-            try {
-                if (Test-Path -LiteralPath $Path -PathType Leaf) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) }
-                else { [IO.File]::Move($tmp, $Path) }
-                $placed = $true
-            } catch [System.IO.IOException] {
-                if ($try -ge 8) { throw }
-                Start-Sleep -Milliseconds (150 * $try)
-            }
-        }
-        $created = $false
-    } finally {
-        if ($fs) { $fs.Dispose() }
-        if ($created) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-    }
-}
+# (Write-HmFileSafe — запись без хода сквозь ссылку — живёт в _userpath.ps1: её зовут и другие
+# скрипты, а копия в двух местах расходится молча.)
 
 # Копия файла рядом: <имя>.hamidun-bak-<дата-время>. Режим CreateNew не перезапишет и не пройдёт
 # сквозь существующее имя (файл, каталог, ссылка) — берётся следующее (-2 … -9). Возвращает
