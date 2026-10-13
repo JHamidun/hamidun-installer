@@ -12426,21 +12426,25 @@ ok('config.json в репозитории без сборочных маркер
   const rnd = () => Math.random().toString(36).slice(2, 10);
   const vsSrc = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'vscode.ps1'), 'utf8');
 
-  ok('fetch-vendor.ps1: русский языковой пакет — под минор вшитого VS Code, Marketplace vspackage, гейт манифеста, в проверке полноты', () => {
+  ok('fetch-vendor.ps1: русский языковой пакет — по engines.vscode вшитого VS Code (а не по совпадению минора), Marketplace vspackage, гейт манифеста, в проверке полноты', () => {
     const s = codeOnly(fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor.ps1'), 'utf8'));
-    assertOrder(s, 'os=win32-x64-user', "Join-Path $apps 'vscode-language-pack-ru.vsix'",
+    assertOrder(s, 'os=win32-x64-user', 'Invoke-HmLanguagePackFetch -Apps $apps',
       'пакет подбирается ПОСЛЕ скачивания VS Code — по версии именно вшитого установщика');
-    assert(/VersionInfo\.ProductVersion/.test(s) && /'\^1\\\.\(\\d\+\)\\\.'/.test(s), 'минор берётся из vscode-setup.exe');
+    assert(/VersionInfo\.ProductVersion/.test(s) && /'\^1\\\.\(\\d\+\)\(\?:\\\.\(\\d\+\)\)\?'/.test(s), 'версия редактора (минор и патч) берётся из vscode-setup.exe');
     assert(/MS-CEINTL\.vscode-language-pack-ru/.test(s), 'запрос в Marketplace по точному id пакета');
-    assert(/\('\^1\\\.' \+ \$vsMinor \+ '\\\.'\)/.test(s), 'из списка версий берётся последняя ПОД НАШ минор, а не просто последняя');
-    assert(/publishers\/MS-CEINTL\/vsextensions\/vscode-language-pack-ru\/\$lpVer\/vspackage/.test(s), 'качается версионный vspackage');
+    // Поломка 09.10.2026: из списка брался только пакет вида 1.<минор редактора>.* — а пакеты отстают
+    // от VS Code (1.131 против 1.140), и подходящего не находилось. Эта логика вернуться не должна.
+    assert(!/\('\^1\\\.' \+ \$vsMinor \+ '\\\.'\)/.test(s), 'выбор «версия обязана начинаться с 1.<минор>.» вернулся');
+    assert(/Select-HmLanguagePackVersion -Response \$resp -EditorMinor \$vsMinor -EditorPatch \$vsPatch/.test(s), 'версия выбирается по движку (engines.vscode)');
+    assert(/Get-HmMarketplaceQuery 'MS-CEINTL\.vscode-language-pack-ru' 49/.test(s), 'у Marketplace просим версии и их свойства (флаги 0x1|0x10|0x20)');
+    assert(/publishers\/MS-CEINTL\/vsextensions\/vscode-language-pack-ru\//.test(s) && /\$lpVer \+ '\/vspackage'/.test(s), 'качается версионный vspackage');
     assert(/-TimeoutSec/.test(s.slice(s.indexOf('vscode-language-pack-ru'))), 'сетевой запрос с таймаутом');
     const gate = s.slice(s.indexOf('$lpOk = $false'));
     assert(/Id\\s\*=\\s\*"vscode-language-pack-ru"/.test(gate) && /Publisher\\s\*=\\s\*"MS-CEINTL"/.test(gate),
       'вшивается только zip с манифестом именно этого пакета');
-    assert(/Microsoft\\\.VisualStudio\\\.Code\\\.Engine/.test(gate) && /-le \$vsMinor/.test(gate),
+    assert(/Microsoft\\\.VisualStudio\\\.Code\\\.Engine/.test(gate) && /Test-HmVsEngineFits \$Matches\[1\]/.test(gate),
       'движок пакета не новее вшитого VS Code');
-    assert(/Remove-Item \$lpvsix/.test(gate), 'не прошёл гейт — файл удаляется и в checksums.json не попадает');
+    assert(/Remove-Item \$Path -Force/.test(gate), 'не прошёл гейт — файл удаляется и в checksums.json не попадает');
     assert(/'claude-code\.vsix','vscode-language-pack-ru\.vsix'\)/.test(s), 'пакет — в проверке полноты vendor');
   });
 
@@ -23970,5 +23974,1155 @@ ok('config.json в репозитории без сборочных маркер
       assert(y.includes('electron-builder до 26.16.0'), n + ': причина закрепления на месте');
       assert(new RegExp('lock-файле сейчас electron-builder\\s+' + ebVersion.replace(/\./g, '\\.')).test(y.replace(/\n\s*#\s*/g, ' ')), n + ': комментарий называет версию из lock-файла (' + ebVersion + ')');
     }
+  });
+})();
+
+// ===========================================================================
+// Фетчер vendor на машине сборки (tools/fetch-vendor.ps1, tools/fetch-vendor-mac.sh) — u7, 09.10.2026.
+// Эта машина держит сессию подписи Certum и боевые ключи S3, поэтому всё, что фетчер
+// тянет и исполняет, — часть защиты релиза. Четыре темы:
+//   A. русский языковой пакет VS Code не вшивался: логика требовала пакет ровно под минор
+//      вшитого редактора (1.140), а Marketplace отстаёт от VS Code, и «подходящих» не было;
+//   B. скачанные установщики не проверялись: манифест целостности снимал сумму с того, что
+//      легло на диск, и подменённый файл становился «эталоном» (подпись издателя — пин);
+//   C. install-time код на машине подписи: npm без --ignore-scripts, pip собирает sdist;
+//   D. личные паттерны (юридическое имя, боевой IP, снятый домен) лежали в публичном репо.
+// Логика проверяется ИСПОЛНЕНИЕМ: функции достаются из скрипта по AST (test/fetch-vendor-harness.ps1)
+// и бегут в настоящем PowerShell 5.1 на заготовленных ответах и подставных подписях.
+// ===========================================================================
+(function () {
+  console.log('\n== Фетчер vendor: языковой пакет, подписи установщиков, install-time код, личные паттерны ==');
+  const { spawnSync } = require('child_process');
+  const crypto = require('crypto');
+  const FV = path.join(ROOT, 'tools', 'fetch-vendor.ps1');
+  const FVM = path.join(ROOT, 'tools', 'fetch-vendor-mac.sh');
+  const HARNESS = path.join(ROOT, 'test', 'fetch-vendor-harness.ps1');
+  const psAvail = (() => {
+    if (process.platform !== 'win32') return false;
+    const p = spawnSync('powershell.exe', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', timeout: 30000 });
+    return !(p.error || p.status !== 0);
+  })();
+  const needPs = () => { if (!psAvail) SKIP('нужен Windows PowerShell 5.1'); };
+  // Запуск случая из test/fetch-vendor-harness.ps1: строки «МЕТКА значение» + код выхода.
+  const runCase = (name, work, timeoutMs) => {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', HARNESS,
+      '-Script', FV, '-Case', name, '-Work', work], { encoding: 'utf8', timeout: timeoutMs || 240000 });
+    const out = String(r.stdout || '').replace(/^﻿/, '') + String(r.stderr || '');
+    return { status: r.status, out, lines: out.split(/\r?\n/).map((l) => l.replace(/^﻿/, '')).filter(Boolean) };
+  };
+  const mkWork = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u7-' + tag + '-'));
+  const writeCases = (work, cases) => fs.writeFileSync(path.join(work, 'cases.json'), JSON.stringify({ cases }), 'utf8');
+  // Результат harness-метки: «SELECT <имя> <значение>» → { имя: значение }.
+  const pick = (lines, label) => {
+    const m = {};
+    lines.forEach((l) => { const x = new RegExp('^' + label + ' (\\S+) (.*)$').exec(l); if (x) m[x[1]] = x[2]; });
+    return m;
+  };
+  // Заготовка ответа Marketplace: ровно та форма, что отдаёт extensionquery с flags 0x1|0x10.
+  const ENG = 'Microsoft.VisualStudio.Code.Engine';
+  const mkVer = (v, engine, extra) => ({
+    version: v, flags: 'validated', lastUpdated: '2026-09-04T07:58:54.1Z',
+    properties: engine === null ? [] : [{ key: ENG, value: engine }].concat(extra || [])
+  });
+  const mkResp = (versions) => ({ results: [{ extensions: [{ extensionName: 'vscode-language-pack-ru', versions }], pagingToken: null, resultMetadata: [] }] });
+
+  // ---- A. выбор версии языкового пакета -----------------------------------------------------
+  ok('fetch-vendor.ps1 (прогон PS 5.1): пакет выбирается по engines.vscode — самый новый, чей движок не новее вшитого редактора; новее редактора не берётся', () => {
+    needPs();
+    const work = mkWork('sel');
+    try {
+      const cases = [
+        // Ровно сегодняшний ответ Marketplace: пакеты отстали, новейший — под 1.131, редактор 1.140.
+        { name: 'older-only', editorMinor: 140, response: mkResp([
+          mkVer('1.131.2026090407', '^1.131.0'), mkVer('1.131.2026082318', '^1.131.0'), mkVer('1.130.2026072017', '^1.130.0')]) },
+        { name: 'newer-only', editorMinor: 140, response: mkResp([mkVer('1.150.2026100101', '^1.150.0'), mkVer('1.141.2026091001', '^1.141.0')]) },
+        { name: 'exact', editorMinor: 140, response: mkResp([
+          mkVer('1.141.2026091001', '^1.141.0'), mkVer('1.140.2026092001', '^1.140.0'), mkVer('1.139.2026091001', '^1.139.0')]) },
+        // Порядок в ответе не обещан: берём наибольшую версию, а не первую подходящую.
+        { name: 'mixed-unsorted', editorMinor: 140, response: mkResp([
+          mkVer('1.130.2026072017', '^1.130.0'), mkVer('1.150.2026100101', '^1.150.0'), mkVer('1.139.2026060101', '^1.139.0'),
+          mkVer('1.141.2026091001', '^1.141.0'), mkVer('1.139.2026070101', '^1.139.0')]) },
+        // Хвост версии — дата: 1.131.999 по тексту «больше» 1.131.2026090407, по числу — меньше.
+        { name: 'date-patch-numeric', editorMinor: 140, response: mkResp([
+          mkVer('1.131.999', '^1.131.0'), mkVer('1.131.2026090407', '^1.131.0'), mkVer('1.131.20260904', '^1.131.0')]) },
+        // Пре-релиз ставить новичку незачем.
+        { name: 'prerelease', editorMinor: 140, response: mkResp([
+          mkVer('1.139.2026100101', '^1.139.0', [{ key: 'Microsoft.VisualStudio.Code.PreRelease', value: 'true' }]), mkVer('1.138.2026090101', '^1.138.0')]) },
+        // Патч в движке: ^1.140.1 не встанет на редактор 1.140.0.
+        { name: 'patch-engine-editor0', editorMinor: 140, editorPatch: 0, response: mkResp([mkVer('1.140.2026100101', '^1.140.1'), mkVer('1.139.2026091001', '^1.139.0')]) },
+        { name: 'patch-engine-editor1', editorMinor: 140, editorPatch: 1, response: mkResp([mkVer('1.140.2026100101', '^1.140.1'), mkVer('1.139.2026091001', '^1.139.0')]) },
+        // Движок, не являющийся нижней границей, по нему нельзя утверждать «редактор новее».
+        { name: 'engine-shapes', editorMinor: 140, response: mkResp([
+          mkVer('1.139.2026100101', '~1.139.0'), mkVer('1.138.2026100101', '1.138.0'), mkVer('1.137.2026100101', '*'),
+          mkVer('1.136.2026100101', '>=1.100.0'), mkVer('1.135.2026100101', 'мусор')]) },
+        { name: 'malformed-versions', editorMinor: 140, response: mkResp([
+          mkVer('1.139.x', '^1.139.0'), mkVer('abc', '^1.139.0'), mkVer('1.139', '^1.139.0'), mkVer('1.139.2026.1', '^1.139.0'), mkVer('1.120.2026010101', '^1.120.0')]) },
+        { name: 'empty-versions', editorMinor: 140, response: mkResp([]) },
+        { name: 'no-extensions', editorMinor: 140, response: { results: [{ extensions: [] }] } },
+        { name: 'no-results', editorMinor: 140, response: { results: [] } },
+        { name: 'null-response', editorMinor: 140, response: null },
+        // Ответ без свойств версий (API не принял флаг) — судить не по чему: пусто, а не угадывание.
+        { name: 'no-properties', editorMinor: 140, response: mkResp([mkVer('1.131.2026090407', null), mkVer('1.130.2026072017', null)]) }
+      ];
+      writeCases(work, cases);
+      const r = runCase('select', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'в fetch-vendor.ps1 нет функции выбора: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, 'harness упал: ' + r.out.slice(-800));
+      const got = pick(r.lines, 'SELECT');
+      const want = {
+        'older-only': '1.131.2026090407', 'newer-only': 'NULL', exact: '1.140.2026092001', 'mixed-unsorted': '1.139.2026070101',
+        'date-patch-numeric': '1.131.2026090407', prerelease: '1.138.2026090101', 'patch-engine-editor0': '1.139.2026091001',
+        'patch-engine-editor1': '1.140.2026100101', 'engine-shapes': '1.136.2026100101', 'malformed-versions': '1.120.2026010101',
+        'empty-versions': 'NULL', 'no-extensions': 'NULL', 'no-results': 'NULL', 'null-response': 'NULL', 'no-properties': 'NULL'
+      };
+      Object.keys(want).forEach((k) => assert.strictEqual(got[k], want[k], 'случай «' + k + '»: ' + got[k] + ', ожидалось ' + want[k]));
+      // Негативный контроль: ПРЕЖНЯЯ логика (версия пакета обязана начинаться с 1.<минор редактора>.)
+      // на сегодняшнем ответе не находит ничего — это и была поломка; тест её различает.
+      const old = pick(r.lines, 'OLD');
+      assert.strictEqual(old['older-only'], 'NULL', 'контроль: прежняя логика на сегодняшнем ответе пуста');
+      assert.notStrictEqual(old['older-only'], got['older-only'], 'контроль: новая и прежняя логика различаются там, где была поломка');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): Test-HmVsEngineFits — только нижняя граница (^ и >=), патч редактора учитывается, мажор держит ^', () => {
+    needPs();
+    const work = mkWork('eng');
+    try {
+      const t = (name, engine, editor, expect) => ({ name, engine, editor, expect });
+      const rows = [
+        t('caret-lower-minor', '^1.131.0', [1, 140, 0], true), t('caret-same-minor', '^1.140.0', [1, 140, 0], true),
+        t('caret-higher-minor', '^1.141.0', [1, 140, 0], false), t('caret-patch-higher', '^1.140.1', [1, 140, 0], false),
+        t('caret-patch-ok', '^1.140.1', [1, 140, 1], true), t('caret-major-higher', '^2.0.0', [1, 140, 0], false),
+        t('caret-major-lower', '^0.99.0', [1, 140, 0], false), t('ge-lower', '>=1.100.0', [1, 140, 0], true),
+        t('ge-major-lower-ok', '>=0.50.0', [1, 140, 0], true), t('ge-higher', '>=1.141.0', [1, 140, 0], false),
+        t('tilde', '~1.131.0', [1, 140, 0], false), t('bare', '1.131.0', [1, 140, 0], false), t('star', '*', [1, 140, 0], false),
+        t('empty', '', [1, 140, 0], false), t('garbage', 'abc', [1, 140, 0], false), t('prerelease-suffix', '^1.131.0-insider', [1, 140, 0], true)
+      ];
+      writeCases(work, rows);
+      const r = runCase('engine', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-600));
+      const got = pick(r.lines, 'ENGINE');
+      rows.forEach((x) => assert.strictEqual(got[x.name], x.expect ? 'True' : 'False', x.name + ' (' + x.engine + ' на редакторе ' + x.editor.join('.') + '): ' + got[x.name]));
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): гейт честности .vsix — id, издатель MS-CEINTL, движок не новее редактора; gzip снимается; чужое и битое удаляется', () => {
+    needPs();
+    const work = mkWork('cfm');
+    try {
+      const base = { editorMinor: 140 };
+      const c = (name, extra) => Object.assign({ name }, base, extra);
+      const cases = [
+        c('ok', { engine: '^1.131.0' }),
+        c('ok-gzip', { engine: '^1.131.0', gzip: true }),
+        c('ok-exact-minor', { engine: '^1.140.0' }),
+        c('engine-newer', { engine: '^1.141.0' }),
+        c('engine-patch-newer', { engine: '^1.140.1' }),
+        c('engine-patch-ok', { engine: '^1.140.1', editorPatch: 1 }),
+        c('wrong-id', { id: 'some-other-pack', engine: '^1.131.0' }),
+        c('wrong-publisher', { publisher: 'Someone', engine: '^1.131.0' }),
+        c('no-engine', { noEngine: true }),
+        c('engine-garbage', { engine: '*' }),
+        c('no-manifest', { noManifest: true }),
+        c('corrupt', { corrupt: true }),
+        // редактор не определён (-1): движок не сравниваем, но id и издатель — всегда
+        c('editor-unknown-ok', { editorMinor: -1, engine: '^1.999.0' }),
+        c('editor-unknown-wrong-id', { editorMinor: -1, id: 'x', engine: '^1.1.0' })
+      ];
+      writeCases(work, cases);
+      const r = runCase('confirm', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-800));
+      const got = {};
+      r.lines.forEach((l) => { const m = /^CONFIRM (\S+) kept=(\w+) zip=(\w+)$/.exec(l); if (m) got[m[1]] = { kept: m[2] === 'True', zip: m[3] === 'True' }; });
+      const keep = ['ok', 'ok-gzip', 'ok-exact-minor', 'engine-patch-ok', 'editor-unknown-ok'];
+      cases.forEach((x) => {
+        const g = got[x.name];
+        assert(g, 'нет строки результата для «' + x.name + '»: ' + r.out.slice(-400));
+        assert.strictEqual(g.kept, keep.indexOf(x.name) !== -1, '«' + x.name + '»: kept=' + g.kept);
+      });
+      assert.strictEqual(got['ok-gzip'].zip, true, 'gzip снят — остался настоящий zip');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): весь блок языкового пакета на подставной сети — совместимый берёт, новее редактора не берёт, без свойств идёт запасным путём', () => {
+    needPs();
+    const work = mkWork('e2e');
+    try {
+      const vs = (v, e) => ({ [v]: { engine: e } });
+      const today = mkResp([mkVer('1.131.2026090407', '^1.131.0'), mkVer('1.130.2026072017', '^1.130.0')]);
+      const cases = [
+        // Сегодняшняя картина целиком: редактор 1.140.0, новейший пакет 1.131 — вшивается он.
+        { name: 'today', editor: '1.140.0', response: today, downloads: Object.assign({}, vs('1.131.2026090407', '^1.131.0')) },
+        // Пакетов, совместимых с редактором, нет: ничего не качаем, файла нет, предупреждение осталось.
+        { name: 'nothing-fits', editor: '1.100.0', response: mkResp([mkVer('1.131.2026090407', '^1.131.0')]), downloads: {} },
+        // Marketplace не ответил.
+        { name: 'api-down', editor: '1.140.0', response: 'throw', downloads: {} },
+        // Версия выбрана, но скачанный файл — не тот пакет: гейт удаляет, файла нет.
+        { name: 'wrong-file', editor: '1.140.0', response: today, downloads: { '1.131.2026090407': { id: 'other-pack', engine: '^1.131.0' } } },
+        // Скачанный файл под gzip — снимается и вшивается.
+        { name: 'gzip', editor: '1.140.0', response: today, downloads: { '1.131.2026090407': { engine: '^1.131.0', gzip: true } } },
+        // Свойств версий в ответе нет: запасной путь, кандидаты от новых к старым, первый прошедший гейт остаётся.
+        { name: 'fallback', editor: '1.140.0', response: mkResp([mkVer('1.141.2026091001', null), mkVer('1.140.2026092001', null), mkVer('1.139.2026091001', null)]),
+          downloads: Object.assign({}, vs('1.141.2026091001', '^1.141.0'), vs('1.140.2026092001', '^1.140.0'), vs('1.139.2026091001', '^1.139.0')) },
+        // Запасной путь не качает заведомо более новых (минор версии > минор редактора + 1) и не ходит без конца.
+        { name: 'fallback-capped', editor: '1.100.0', response: mkResp(
+          Array.from({ length: 91 }, (_, i) => 150 - i).map((m) => mkVer('1.' + m + '.2026010101', null))), downloads: {} },
+        // Файл уже лежит и годится: ни запроса, ни скачивания.
+        { name: 'existing-ok', editor: '1.140.0', response: 'throw', existing: { engine: '^1.131.0' }, downloads: {} },
+        // Файл уже лежит, но он не тот: гейт его удаляет (и новый не качается — «skip» срабатывает раньше).
+        { name: 'existing-bad', editor: '1.140.0', response: 'throw', existing: { id: 'other-pack', engine: '^1.131.0' }, downloads: {} },
+        // Версию вшитого VS Code определить нельзя: пакет не подбираем, в сеть не ходим.
+        { name: 'editor-unknown', editor: '', response: 'throw', downloads: {} }
+      ];
+      writeCases(work, cases);
+      const r = runCase('e2e', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-1200));
+      const res = {};
+      r.lines.forEach((l) => { const m = /^E2E (\S+) FILE=(\w+) DL=(\S*) Q=(\d+)$/.exec(l); if (m) res[m[1]] = { file: m[2] === 'True', dl: m[3] ? m[3].split(',') : [], q: Number(m[4]) }; });
+      const log = pick(r.lines, 'LOG');
+      assert.deepStrictEqual(res.today, { file: true, dl: ['1.131.2026090407'], q: 1 }, 'today: ' + JSON.stringify(res.today));
+      assert(/выбран пакет 1\.131\.2026090407/.test(log.today), 'выбранная версия названа в журнале: ' + log.today);
+      assert.deepStrictEqual(res['nothing-fits'], { file: false, dl: [], q: 1 }, 'nothing-fits: ' + JSON.stringify(res['nothing-fits']));
+      assert(/не отдал пакет, совместимый с VS Code 1\.100\.0/.test(log['nothing-fits']), 'предупреждение осталось: ' + log['nothing-fits']);
+      assert.deepStrictEqual(res['api-down'], { file: false, dl: [], q: 1 }, 'api-down: ' + JSON.stringify(res['api-down']));
+      assert(/Marketplace не ответил/.test(log['api-down']), 'сбой запроса назван: ' + log['api-down']);
+      assert.deepStrictEqual(res['wrong-file'], { file: false, dl: ['1.131.2026090407'], q: 1 }, 'wrong-file: ' + JSON.stringify(res['wrong-file']));
+      assert.deepStrictEqual(res.gzip, { file: true, dl: ['1.131.2026090407'], q: 1 }, 'gzip: ' + JSON.stringify(res.gzip));
+      assert.deepStrictEqual(res.fallback, { file: true, dl: ['1.141.2026091001', '1.140.2026092001'], q: 1 }, 'fallback: от новых к старым, первый прошедший остаётся: ' + JSON.stringify(res.fallback));
+      assert(/читаю манифест/.test(log.fallback), 'запасной путь назван в журнале: ' + log.fallback);
+      assert.strictEqual(res['fallback-capped'].file, false, 'fallback-capped: ничего не подошло');
+      assert.deepStrictEqual(res['fallback-capped'].dl, ['1.101.2026010101', '1.100.2026010101', '1.99.2026010101', '1.98.2026010101', '1.97.2026010101', '1.96.2026010101'],
+        'запасной путь: не более 6 скачиваний, от новых к старым, заведомо более новые (минор > 101) не качаются: ' + res['fallback-capped'].dl.join(','));
+      assert.deepStrictEqual(res['existing-ok'], { file: true, dl: [], q: 0 }, 'existing-ok: ' + JSON.stringify(res['existing-ok']));
+      assert.deepStrictEqual(res['existing-bad'], { file: false, dl: [], q: 0 }, 'existing-bad: ' + JSON.stringify(res['existing-bad']));
+      assert.deepStrictEqual(res['editor-unknown'], { file: false, dl: [], q: 0 }, 'editor-unknown: ' + JSON.stringify(res['editor-unknown']));
+      assert(/версия вшитого VS Code не определена/.test(log['editor-unknown']), 'причина названа: ' + log['editor-unknown']);
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  // ---- B. пин издателя скачанных установщиков (S-1) -----------------------------------------
+  const SIGNERS = path.join(ROOT, 'tools', 'vendor-signers.json');
+  const readSigners = () => JSON.parse(fs.readFileSync(SIGNERS, 'utf8'));
+  const stripPs = (t) => codeOnly(t);
+
+  ok('vendor-signers.json: структура — signed с точными именами (cn), unsigned с названной причиной, имена не пересекаются', () => {
+    const j = readSigners();
+    assert.strictEqual(j.schema, 1, 'версия схемы');
+    const signed = Object.keys(j.signed);
+    const unsigned = Object.keys(j.unsigned);
+    assert(signed.length >= 8, 'подписанных записей мало: ' + signed.length);
+    signed.forEach((k) => {
+      const cn = j.signed[k].cn;
+      assert(Array.isArray(cn) && cn.length >= 1 && cn.every((s) => typeof s === 'string' && s.trim() === s && s.length >= 3), k + ': cn — непустой массив чистых строк');
+      assert(!/[*?]/.test(cn.join('')), k + ': шаблоны в cn не допускаются — имя сверяется ТОЧНО');
+    });
+    unsigned.forEach((k) => assert(typeof j.unsigned[k] === 'string' && j.unsigned[k].length >= 20, k + ': причина «unsigned» не названа'));
+    assert.deepStrictEqual(signed.filter((k) => unsigned.includes(k)), [], 'имя не может быть и signed, и unsigned');
+    // Ключи — имена файлов (без путей): checksums.json тоже ключуется по basename.
+    signed.concat(unsigned).forEach((k) => assert(!/[\\/]/.test(k), k + ': только имя файла'));
+  });
+
+  ok('fetch-vendor.ps1: КАЖДЫЙ файл, который скрипт кладёт в vendor/apps, внесён в vendor-signers.json (signed либо unsigned с причиной); лишних записей нет', () => {
+    const src = stripPs(fs.readFileSync(FV, 'utf8'));
+    const j = readSigners();
+    const known = new Set(Object.keys(j.signed).concat(Object.keys(j.unsigned)).map((s) => s.toLowerCase()));
+    // Имена файлов — одиночные строковые литералы 'xxx.ext' (Join-Path $apps 'git-setup.exe', @('uv.exe', 'uvx.exe') и т.п.).
+    const found = (text) => {
+      const names = new Set();
+      const re = /'([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:exe|msi|msix|appx|dll|vsix|ttf|zip|tgz|gz|dmg|pkg))'/g;
+      let m;
+      while ((m = re.exec(text))) names.add(m[1]);
+      return names;
+    };
+    // Временные файлы, которые скрипт убирает до итогового обхода и до манифеста, в таблицу не идут.
+    const TRANSIENT = new Set(['_jbmono.zip']);
+    const missing = (text) => Array.from(found(text)).filter((n) => !TRANSIENT.has(n) && !known.has(n.toLowerCase()));
+    assert.deepStrictEqual(missing(src), [], 'скрипт качает/кладёт файлы, которых нет в таблице пинов');
+    // Контроль: добавили новый установщик и забыли внести в таблицу — проверка это видит.
+    const injected = src + "\nDl 'https://example.invalid/x' (Join-Path $apps 'new-tool-setup.exe')\n";
+    assert.deepStrictEqual(missing(injected), ['new-tool-setup.exe'], 'контроль: новый файл без записи не должен проходить');
+    // Обратное: запись в таблице, которой в скрипте нет, — мусор, который скрывает дыры.
+    const all = found(src);
+    const lower = new Set(Array.from(all).map((s) => s.toLowerCase()));
+    const stale = Array.from(known).filter((n) => !lower.has(n));
+    assert.deepStrictEqual(stale, [], 'в таблице есть файлы, которых скрипт не кладёт');
+  });
+
+  ok('vendor-signers.json: пин python-setup.exe согласован с allow-list pydeps.ps1 (Python Software Foundation); пины — точные имена, а не подстроки', () => {
+    const j = readSigners();
+    const pyd = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'pydeps.ps1'), 'utf8');
+    const m = /Test-HmTrustedSigner -Path \$pyDl -ExpectedSubjectMatch '([^']+)'/.exec(pyd);
+    assert(m, 'в pydeps.ps1 пропал пин издателя Python');
+    assert.deepStrictEqual(j.signed['python-setup.exe'].cn, [m[1]], 'пин фетчера и пин установки называют одного издателя');
+    // Подстрока из фетчера не годилась бы: такое «имя» пропустило бы чужой сертификат с подходящим куском.
+    Object.keys(j.signed).forEach((k) => j.signed[k].cn.forEach((cn) => {
+      assert(!cn.endsWith(' ') && !cn.startsWith(' '), k + ': пробелы по краям');
+    }));
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): Test-HmVendorSigner — Valid и точное имя проходят; чужое имя, надстрока, регистр, NotSigned/HashMismatch/NotTimeValid/NotTrusted, нет сертификата, сбой чтения — нет', () => {
+    needPs();
+    const work = mkWork('sgn');
+    try {
+      const S = (name, file, status, cn, extra) => Object.assign({ name, file, status, cn }, extra || {});
+      const rows = [
+        S('ok-git', 'git-setup.exe', 'Valid', 'Johannes Schindelin'), S('ok-node', 'node-lts.msi', 'Valid', 'OpenJS Foundation'),
+        S('ok-cursor-comma', 'cursor-setup.exe', 'Valid', 'Anysphere, Inc.'), S('ok-vscode', 'vscode-setup.exe', 'Valid', 'Microsoft Corporation'),
+        S('ok-handy', 'handy-setup.exe', 'Valid', 'YNYNG LLC'), S('ok-python', 'python-setup.exe', 'Valid', 'Python Software Foundation'),
+        S('ok-uv', 'uv.exe', 'Valid', 'OpenAI OpCo, LLC'), S('ok-uvx', 'uvx.exe', 'Valid', 'OpenAI OpCo, LLC'),
+        // подпись настоящая, но чужая
+        S('wrong-subject', 'git-setup.exe', 'Valid', 'Evil Corp'),
+        S('other-vendor-cn', 'node-lts.msi', 'Valid', 'Johannes Schindelin'),
+        // подстрока пина — не пин
+        S('superstring', 'vscode-setup.exe', 'Valid', 'Microsoft Corporation Ltd'),
+        S('prefixed', 'vscode-setup.exe', 'Valid', 'Not Microsoft Corporation'),
+        S('case-variant', 'vscode-setup.exe', 'Valid', 'microsoft corporation'),
+        S('trailing-space', 'vscode-setup.exe', 'Valid', 'Microsoft Corporation '),
+        // статусы Authenticode, кроме Valid
+        S('not-signed', 'git-setup.exe', 'NotSigned', null), S('hash-mismatch', 'git-setup.exe', 'HashMismatch', 'Johannes Schindelin'),
+        S('not-time-valid', 'git-setup.exe', 'NotTimeValid', 'Johannes Schindelin'), S('not-trusted', 'git-setup.exe', 'NotTrusted', 'Johannes Schindelin'),
+        S('unknown-error', 'git-setup.exe', 'UnknownError', 'Johannes Schindelin'),
+        S('valid-without-cert', 'git-setup.exe', 'Valid', 'Johannes Schindelin', { nocert: true }),
+        S('read-throws', 'git-setup.exe', 'Valid', 'Johannes Schindelin', { throwRead: true }),
+        // подписи по построению нет — явная запись unsigned
+        S('unsigned-mascot', 'claude-mascot.exe', 'NotSigned', null), S('unsigned-vsix', 'chatgpt.vsix', 'NotSigned', null),
+        S('unsigned-pack', 'vscode-language-pack-ru.vsix', 'NotSigned', null), S('unsigned-font', 'JetBrainsMono-Regular.ttf', 'NotSigned', null),
+        // имени нет нигде
+        S('unknown-file', 'new-tool-setup.exe', 'Valid', 'Johannes Schindelin')
+      ];
+      writeCases(work, rows);
+      const r = runCase('signer', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-1000));
+      const got = {};
+      r.lines.forEach((l) => { const m = /^SIGNER (\S+) (\w+) (\w+) (\w+) ?(.*)$/.exec(l); if (m) got[m[1]] = { ok: m[2] === 'True', kind: m[3], del: m[4] === 'True', reason: m[5] }; });
+      const accept = rows.filter((x) => /^(ok-|unsigned-)/.test(x.name)).map((x) => x.name);
+      rows.forEach((x) => {
+        const g = got[x.name];
+        assert(g, 'нет строки для «' + x.name + '»: ' + r.out.slice(-500));
+        assert.strictEqual(g.ok, accept.includes(x.name), '«' + x.name + '»: Ok=' + g.ok + ' (' + g.reason + ')');
+      });
+      // Причина названа так, чтобы по журналу сборки было понятно, что случилось.
+      assert(/Status=NotSigned/.test(got['not-signed'].reason) && /Status=HashMismatch/.test(got['hash-mismatch'].reason)
+        && /Status=NotTimeValid/.test(got['not-time-valid'].reason), 'статус назван в причине');
+      assert(/Evil Corp/.test(got['wrong-subject'].reason) && /Johannes Schindelin/.test(got['wrong-subject'].reason), 'названы и увиденный подписант, и ожидаемый');
+      assert(/vendor-signers\.json/.test(got['unknown-file'].reason), 'для неизвестного имени названа таблица');
+      // Подделка/нечитаемая подпись подлежит удалению; неизвестное имя и unsigned — не удаляются.
+      ['wrong-subject', 'superstring', 'case-variant', 'not-signed', 'hash-mismatch', 'valid-without-cert', 'read-throws'].forEach((k) => assert.strictEqual(got[k].del, true, k + ': файл подлежит удалению'));
+      assert.strictEqual(got['unknown-file'].del, false, 'неизвестное имя не удаляется: файл не подделан, он не внесён');
+      assert.strictEqual(got['unknown-file'].kind, 'unknown');
+      assert.strictEqual(got['unsigned-mascot'].kind, 'unsigned');
+      // Негативный контроль: «наивная» проверка (достаточно Status = Valid) пропустила бы все подмены с настоящей подписью.
+      const naive = (x) => x.status === 'Valid';
+      ['wrong-subject', 'other-vendor-cn', 'superstring', 'prefixed', 'case-variant', 'trailing-space'].forEach((k) => {
+        const row = rows.find((x) => x.name === k);
+        assert.strictEqual(naive(row), true, 'контроль: наивная проверка «Valid» принимает «' + k + '»');
+        assert.strictEqual(got[k].ok, false, 'а пин издателя — отклоняет «' + k + '»');
+      });
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  // ---- B2. якорь доверия: корень цепочки подписанта — в хранилище корней МАШИНЫ ----------------------
+  // Status = Valid считает ПОЛЬЗОВАТЕЛЬСКИЙ движок цепочек: он доверяет и корням из HKCU, куда любой процесс
+  // пользователя пишет без UAC. Поэтому «Valid + точное имя» мало: сертификат с нужным CN, выпущенный таким
+  // корнем (или самоподписанный), получал бы Valid, подмена ложилась бы в checksums.json и ехала покупателям.
+  // Цепочка строится БЕЗ учёта сроков (листы Microsoft ID Verified живут 72 часа и ко дню сборки истекли), а
+  // значит звено цепочки вне срока годности допустимо только вместе с меткой времени, чья собственная
+  // цепочка тоже заканчивается в машинном хранилище (иначе чужая метка «датирует» украденный ключ задним числом).
+  ok('fetch-vendor.ps1 (прогон PS 5.1): пин издателя требует корень цепочки в хранилище корней машины — самоподписанный сертификат с нужным CN и чужой корень отвергаются; звено цепочки вне срока годности принимается только с меткой времени от машинного корня', () => {
+    needPs();
+    const work = mkWork('anc');
+    try {
+      const S = (name, kind, extra) => Object.assign({ name, file: 'git-setup.exe', status: 'Valid', cn: 'Johannes Schindelin', kind }, extra || {});
+      const rows = [
+        // положительный контроль: цепочка под (подставленным) машинным корнем, лист годен, метки нет
+        S('control-machine-chain', 'machine'),
+        // корень: самоподписанный сертификат с пинованным CN; корень, которому «доверяет» пользовательский движок, но которого нет у машины
+        S('selfsigned-pinned-cn', 'selfsigned'),
+        S('rogue-root-pinned-cn', 'rogue'),
+        // лист ИСТЁК (как 72-часовые листы Microsoft ID Verified): подпись держится только меткой времени
+        S('expired-leaf-machine-ts', 'exp-ts-machine'),
+        S('expired-leaf-expired-tsa-machine', 'exp-ts-expired-machine'),
+        S('expired-leaf-rogue-ts', 'exp-ts-rogue'),
+        S('expired-leaf-no-ts', 'exp-nots'),
+        S('expired-leaf-ts-without-eku', 'exp-ts-noeku'),
+        S('expired-leaf-ts-wrong-eku', 'exp-ts-wrongeku'),
+        // лист годен СЕГОДНЯ, но истёк промежуточный сертификат-издатель: прежний «срок оценивается только у листа» это пропускал
+        S('expired-intermediate-machine-ts', 'inter-exp-ts-machine'),
+        S('expired-intermediate-rogue-ts', 'inter-exp-ts-rogue'),
+        S('expired-intermediate-no-ts', 'inter-exp-nots'),
+        // всё годно сегодня — метка времени не нужна, чужая метка ничего не меняет
+        S('all-valid-rogue-ts', 'valid-ts-rogue'),
+        // сам лист: нет назначения Code Signing / назначение только метки времени
+        S('leaf-without-eku', 'noeku'),
+        S('leaf-wrong-eku', 'wrongeku'),
+        // каталожная подпись (Status = Valid у любого файла из каталога ОС), а не встроенная Authenticode
+        S('catalog-signature', 'machine', { sigType: 'Catalog' })
+      ];
+      writeCases(work, rows);
+      const r = runCase('signer', work, 600000);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, 'harness упал: ' + r.out.slice(-1200));
+      const got = {};
+      r.lines.forEach((l) => { const m = /^SIGNER (\S+) (\w+) (\w+) (\w+) ?(.*)$/.exec(l); if (m) got[m[1]] = { ok: m[2] === 'True', kind: m[3], del: m[4] === 'True', reason: m[5] }; });
+      const accept = ['control-machine-chain', 'expired-leaf-machine-ts', 'expired-leaf-expired-tsa-machine', 'expired-intermediate-machine-ts', 'all-valid-rogue-ts'];
+      rows.forEach((x) => {
+        const g = got[x.name];
+        assert(g, 'нет строки для «' + x.name + '»: ' + r.out.slice(-600));
+        assert.strictEqual(g.ok, accept.includes(x.name), '«' + x.name + '»: Ok=' + g.ok + ' (' + g.reason + ')');
+        if (!accept.includes(x.name)) assert.strictEqual(g.del, true, '«' + x.name + '»: отвергнутый файл подлежит удалению');
+      });
+      // Причина названа так, чтобы по журналу сборки было понятно, что случилось.
+      ['selfsigned-pinned-cn', 'rogue-root-pinned-cn'].forEach((k) => assert(/LocalMachine/.test(got[k].reason), k + ': причина называет машинное хранилище: ' + got[k].reason));
+      ['expired-leaf-rogue-ts', 'expired-leaf-no-ts', 'expired-intermediate-rogue-ts', 'expired-intermediate-no-ts', 'expired-leaf-ts-without-eku', 'expired-leaf-ts-wrong-eku']
+        .forEach((k) => assert(/метк/i.test(got[k].reason), k + ': причина называет метку времени: ' + got[k].reason));
+      assert(/EKU/.test(got['leaf-without-eku'].reason) && /EKU/.test(got['leaf-wrong-eku'].reason), 'причина отказа по назначению сертификата названа');
+      assert(/Catalog/.test(got['catalog-signature'].reason), 'каталожная подпись названа: ' + got['catalog-signature'].reason);
+      // Негативный контроль: прежняя проверка («Valid» + точное имя) принимает ВСЕ эти строки — она и была дырой.
+      const naive = (x) => x.status === 'Valid' && x.cn === 'Johannes Schindelin';
+      rows.forEach((x) => assert.strictEqual(naive(x), true, 'контроль: прежняя проверка принимает «' + x.name + '»'));
+      assert.strictEqual(rows.filter((x) => !accept.includes(x.name)).length, 11, 'отвергается 11 из 16 — прежняя проверка не отвергала ни одной');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  // Швы подменяются в поведенческих тестах, поэтому их СОДЕРЖИМОЕ сторожится отдельно: что именно читает шов
+  // и с какими флагами строится цепочка. Настоящие швы исполняет тест «настоящие подписи настоящих файлов» ниже.
+  ok('fetch-vendor.ps1: шов машинных корней читает настоящее хранилище корней LocalMachine только на чтение; цепочка строится без проверки отзыва, с игнорированием сроков и с назначением Code Signing / Time Stamping; метка времени проверяется своей цепочкой', () => {
+    const src = stripPs(fs.readFileSync(FV, 'utf8'));
+    const fn = (name) => {
+      const i = src.indexOf('function ' + name);
+      assert(i !== -1, 'пропала функция ' + name);
+      const j = src.indexOf('\n}', i);
+      assert(j !== -1, 'не найден конец функции ' + name);
+      return src.slice(i, j + 2);
+    };
+    const seam = fn('Get-HmMachineRootThumbprints');
+    assert(/StoreName\]::Root/.test(seam) && /StoreLocation\]::LocalMachine/.test(seam) && /OpenFlags\]::ReadOnly/.test(seam), 'шов: LocalMachine, Root, только чтение');
+    assert(!/CurrentUser/.test(seam), 'шов не смотрит в пользовательское хранилище (его пишет любой процесс пользователя без UAC)');
+    const chain = fn('Get-HmChainAnchor');
+    ['IgnoreNotTimeValid', 'IgnoreCtlNotTimeValid', 'IgnoreNotTimeNested'].forEach((f) => assert(chain.includes(f), 'цепочка строится без оценки сроков: нет ' + f));
+    assert(/RevocationMode\]::NoCheck/.test(chain), 'отзыв не проверяется (сеть не нужна; Status = Valid его уже учёл)');
+    assert(/ApplicationPolicy\.Add/.test(chain), 'назначение (EKU) задаётся цепочке');
+    assert(/New-HmX509Chain/.test(chain), 'цепочка создаётся через шов (для тестов)');
+    assert(!/AllowUnknownCertificateAuthority|IgnoreUnknownCertificateAuthority/.test(chain + fn('Test-HmSignerAnchored') + fn('Test-HmVendorSigner')), 'боевой код не разрешает неизвестный корень (это делает только тестовый шов)');
+    const anchored = fn('Test-HmSignerAnchored');
+    assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(anchored) && /1\.3\.6\.1\.5\.5\.7\.3\.8/.test(anchored), 'проверяются оба назначения: Code Signing у подписанта, Time Stamping у метки');
+    assert(/TimeStamperCertificate/.test(anchored), 'цепочка метки времени проверяется отдельно');
+    assert(/OutOfWindow/.test(anchored), 'срок оценивается у КАЖДОГО звена, а не только у листа');
+    const v = fn('Test-HmVendorSigner');
+    assert(/SignatureType/.test(v) && /Test-HmSignerAnchored/.test(v), 'тип подписи и якорь проверяются в самом вердикте');
+    assertOrder(v, "-cnotcontains $cn", 'Test-HmSignerAnchored', 'якорь проверяется после имени подписанта');
+    assertOrder(v, 'Test-HmSignerAnchored', "return New-HmSignerVerdict $true 'signed' $false", 'положительный вердикт возможен только после якоря');
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): настоящая Dl — подменённая загрузка УДАЛЯЕТСЯ и сборка падает (exit 1); хорошая остаётся; пропуск готового файла (skip) тоже проверяется', () => {
+    needPs();
+    const run = (sc) => {
+      const work = mkWork('dl');
+      try {
+        fs.writeFileSync(path.join(work, 'scenario.json'), JSON.stringify(sc), 'utf8');
+        const r = runCase('dl', work);
+        return { r, exists: fs.existsSync(path.join(work, sc.file)) };
+      } finally { fs.rmSync(work, { recursive: true, force: true }); }
+    };
+    const good = run({ file: 'git-setup.exe', status: 'Valid', cn: 'Johannes Schindelin' });
+    assert(!good.r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + good.r.lines.join(' | '));
+    assert.strictEqual(good.r.status, 0, 'хорошая загрузка: ' + good.r.out.slice(-600));
+    assert(good.r.lines.includes('DL_RETURNED exists=True') && good.exists, 'хороший файл остался на месте');
+    const swapped = run({ file: 'git-setup.exe', status: 'Valid', cn: 'Evil Corp' });
+    assert.strictEqual(swapped.r.status, 1, 'подмена: сборка обязана упасть кодом 1, а не предупредить: ' + swapped.r.out.slice(-600));
+    assert(!swapped.exists, 'подменённый файл удалён');
+    assert(!swapped.r.lines.includes('DL_RETURNED exists=False') && !/DL_RETURNED/.test(swapped.r.out), 'после провала управление в скрипт не вернулось');
+    assert(/FATAL: git-setup\.exe/.test(swapped.r.out) && /Evil Corp/.test(swapped.r.out), 'FATAL назван в журнале с подписантом: ' + swapped.r.out.slice(-500));
+    const unsigned = run({ file: 'node-lts.msi', status: 'NotSigned', cn: null });
+    assert.strictEqual(unsigned.r.status, 1, 'неподписанный установщик: exit 1');
+    assert(!unsigned.exists, 'неподписанный файл удалён');
+    const tamper = run({ file: 'vscode-setup.exe', status: 'HashMismatch', cn: 'Microsoft Corporation' });
+    assert.strictEqual(tamper.r.status, 1, 'файл изменён после подписи: exit 1');
+    assert(!tamper.exists);
+    // «skip»: файл уже лежит от прошлого прогона — он тоже обязан пройти проверку.
+    const skipBad = run({ file: 'cursor-setup.exe', preexisting: true, status: 'Valid', cn: 'Evil Corp' });
+    assert.strictEqual(skipBad.r.status, 1, 'skip подменённого файла: exit 1');
+    assert(!skipBad.exists, 'и он удалён');
+    const skipGood = run({ file: 'cursor-setup.exe', preexisting: true, status: 'Valid', cn: 'Anysphere, Inc.' });
+    assert.strictEqual(skipGood.r.status, 0, skipGood.r.out.slice(-400));
+    assert(skipGood.exists, 'годный файл при skip остаётся');
+    // Незнакомое имя: стоп, но файл НЕ удаляется (он не подделан, он не внесён в таблицу).
+    const unk = run({ file: 'brand-new-tool.exe', preexisting: true, status: 'Valid', cn: 'Johannes Schindelin' });
+    assert.strictEqual(unk.r.status, 1, 'неизвестное имя: exit 1');
+    assert(unk.exists, 'файл не тронут');
+    assert(/vendor-signers\.json/.test(unk.r.out), 'сказано, куда дописать');
+    // Не скачалось (сеть): проверять нечего — это отдельный сигнал «не скачалось», не FATAL подписи.
+    const dead = run({ file: 'git-setup.exe', failDownload: true, status: 'Valid', cn: 'Johannes Schindelin' });
+    assert.strictEqual(dead.r.status, 0, 'сбой сети не выдаётся за подмену: ' + dead.r.out.slice(-400));
+    assert(!dead.exists && /не скачалось/.test(dead.r.out), 'сбой сети назван своими словами');
+    // unsigned по построению: проходит, причина в журнале.
+    const unsignedOk = run({ file: 'chatgpt.vsix', status: 'NotSigned', cn: null });
+    assert.strictEqual(unsignedOk.r.status, 0, unsignedOk.r.out.slice(-400));
+    assert(/unsigned: chatgpt\.vsix/.test(unsignedOk.r.out), 'в журнале названо «unsigned: <причина>»');
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): итоговый обход vendor/apps проверяет ВСЁ (включая uv/uv.exe и файлы мимо Dl), удаляет недокачанные *.part, неизвестное имя — стоп', () => {
+    needPs();
+    const run = (files) => {
+      const work = mkWork('swp');
+      try {
+        fs.writeFileSync(path.join(work, 'scenario.json'), JSON.stringify({ files }), 'utf8');
+        const r = runCase('sweep', work);
+        const left = [];
+        const walk = (d, rel) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => {
+          if (e.isDirectory()) walk(path.join(d, e.name), rel + e.name + '/'); else left.push(rel + e.name);
+        });
+        if (fs.existsSync(path.join(work, 'apps'))) walk(path.join(work, 'apps'), '');
+        return { r, left };
+      } finally { fs.rmSync(work, { recursive: true, force: true }); }
+    };
+    const F = (rel, status, cn, extra) => Object.assign({ rel, status, cn }, extra || {});
+    const okFiles = [F('git-setup.exe', 'Valid', 'Johannes Schindelin'), F('uv/uv.exe', 'Valid', 'OpenAI OpCo, LLC'), F('uv/uvx.exe', 'Valid', 'OpenAI OpCo, LLC'),
+      F('claude-mascot/claude-mascot.exe', 'NotSigned', null), F('JetBrainsMono-Regular.ttf', 'NotSigned', null), F('chatgpt.vsix', 'NotSigned', null),
+      F('git-setup.exe.part', 'NotSigned', null), F('empty.bin', 'NotSigned', null, { empty: true })];
+    const good = run(okFiles);
+    assert(!good.r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + good.r.lines.join(' | '));
+    assert.strictEqual(good.r.status, 0, 'годное дерево: ' + good.r.out.slice(-600));
+    assert(good.r.lines.includes('SWEEP_DONE'), 'обход завершился');
+    assert(!good.left.includes('git-setup.exe.part'), 'недокачанный .part удалён (раньше уезжал в checksums.json)');
+    assert(good.left.includes('uv/uv.exe') && good.left.includes('git-setup.exe'), 'проверенные файлы на месте');
+    // Остатки ОБОРВАННОГО прогона (снятие gzip, zip шрифта, заготовка uv) — мусор самого фетчера: убираются,
+    // а не роняют сборку правилом «неизвестное имя — стоп» (иначе совет «допиши в таблицу» был бы ложным).
+    const scratch = run([F('git-setup.exe', 'Valid', 'Johannes Schindelin'), F('vscode-language-pack-ru.vsix.gz.tmp', 'NotSigned', null),
+      F('_jbmono.zip', 'NotSigned', null), F('_uv-stage/uv.exe', 'Valid', 'Evil Corp'), F('empty.part', 'NotSigned', null, { empty: true })]);
+    assert.strictEqual(scratch.r.status, 0, 'остатки оборванного прогона не должны ронять сборку: ' + scratch.r.out.slice(-500));
+    assert.deepStrictEqual(scratch.left.slice().sort(), ['git-setup.exe'], 'остались только проверенные файлы: ' + scratch.left.join(','));
+    // подмена внутри подкаталога (uv\uv.exe)
+    const bad = run([F('git-setup.exe', 'Valid', 'Johannes Schindelin'), F('uv/uv.exe', 'Valid', 'Evil Corp'), F('uv/uvx.exe', 'Valid', 'OpenAI OpCo, LLC')]);
+    assert.strictEqual(bad.r.status, 1, 'подмена uv.exe в подкаталоге: exit 1');
+    assert(!bad.left.includes('uv/uv.exe'), 'подменённый uv.exe удалён');
+    // неизвестное имя
+    const unk = run([F('git-setup.exe', 'Valid', 'Johannes Schindelin'), F('mystery.exe', 'Valid', 'Johannes Schindelin')]);
+    assert.strictEqual(unk.r.status, 1, 'неизвестный файл в vendor\\apps: exit 1');
+    assert(unk.left.includes('mystery.exe'), 'и он не удалён');
+    // неподписанный установщик, не внесённый как unsigned
+    const unsignedExe = run([F('git-setup.exe', 'NotSigned', null)]);
+    assert.strictEqual(unsignedExe.r.status, 1, 'установщик без подписи: exit 1');
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): повторная проверка того же файла не берётся из кэша — подмена между загрузкой и итоговым обходом ловится', () => {
+    needPs();
+    const work = mkWork('rev');
+    try {
+      const r = runCase('reverify', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert(r.lines.includes('FIRST_OK'), 'первая проверка (подпись настоящая) прошла: ' + r.out.slice(-500));
+      assert.strictEqual(r.status, 1, 'вторая проверка того же файла (размер и время записи те же, подпись уже чужая) обязана упасть: ' + r.out.slice(-500));
+      assert(!r.lines.includes('SECOND_RETURNED'), 'после провала управление не вернулось');
+      assert(!fs.existsSync(path.join(work, 'git-setup.exe')), 'подменённый файл удалён');
+      assert(/Evil Corp/.test(r.out), 'подписант назван в журнале');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('vendor-signers.json: настоящие подписи настоящих файлов vendor/apps совпадают с пинами (проверка идёт, если vendor развёрнут)', () => {
+    needPs();
+    const apps = process.env.HM_TEST_VENDOR_APPS || path.join(ROOT, 'vendor', 'apps');
+    if (!fs.existsSync(apps)) SKIP('vendor/apps нет (' + apps + ') — подписи проверять не на чем; задай HM_TEST_VENDOR_APPS');
+    const pins = readSigners();
+    const known = new Set(Object.keys(pins.signed).concat(Object.keys(pins.unsigned)).map((s) => s.toLowerCase()));
+    const work = apps;
+    const r = runCase('realsig', work, 600000);
+    assert.strictEqual(r.status, 0, r.out.slice(-800));
+    const rows = r.lines.map((l) => /^REAL (\S+) (\w+) (\w+) ?(.*)$/.exec(l)).filter(Boolean)
+      .map((m) => ({ name: m[1], ok: m[2] === 'True', kind: m[3], reason: m[4] }))
+      .filter((x) => known.has(x.name.toLowerCase()));
+    if (!rows.length) SKIP('в vendor/apps нет ни одного файла из таблицы пинов');
+    const signedRows = rows.filter((x) => x.kind === 'signed');
+    assert(signedRows.length >= 1, 'в vendor/apps нет ни одного подписанного файла из таблицы');
+    rows.forEach((x) => assert(x.ok, 'пин не совпал с настоящей подписью: ' + x.name + ' — ' + x.reason));
+  });
+
+  ok('fetch-vendor.ps1: подпись проверяется в Dl (и при skip), в uv-stage ДО публикации и в итоговом обходе ДО checksums.json; провал = удаление и exit 1', () => {
+    const src = stripPs(fs.readFileSync(FV, 'utf8'));
+    const fn = (name) => {
+      const i = src.indexOf('function ' + name);
+      assert(i !== -1, 'пропала функция ' + name);
+      const j = src.indexOf('\n}', i);   // стиль скрипта: закрывающая скобка функции — в нулевой колонке
+      assert(j !== -1, 'не найден конец функции ' + name);
+      return src.slice(i, j + 2);
+    };
+    const dl = fn('Dl');
+    assert((dl.match(/Assert-HmVendorFile -Path \$out/g) || []).length === 2, 'Dl: проверка и при skip, и после загрузки');
+    assertOrder(dl, 'Move-Item -LiteralPath $tmp -Destination $out -Force', 'if (Test-Path $out) { Assert-HmVendorFile -Path $out }', 'Dl: проверка идёт после переноса файла на место');
+    const afterCatch = dl.slice(dl.lastIndexOf('catch'));
+    assert(afterCatch.indexOf('Assert-HmVendorFile') > afterCatch.indexOf('\n  }'), 'Dl: проверка вне try/catch (exit не должен тонуть в catch)');
+    const aff = fn('Assert-HmVendorFile');
+    assertOrder(aff, 'Remove-Item -LiteralPath $Path -Force', 'exit 1', 'Assert-HmVendorFile: подделку удаляем, затем падаем');
+    assert(/\bexit 1\b/.test(aff), 'Assert-HmVendorFile: провал = exit 1, не предупреждение');
+    assert(!/exit 0/.test(aff), 'нет ветки «предупредить и продолжить»');
+    assertOrder(src, 'Assert-HmVendorFile -Path (Join-Path $uvStage $n) -CleanupDir $uvStage', 'Move-Item -Force $uvStage $uvDir', 'uv: подпись проверяется ДО публикации stage');
+    assertOrder(src, 'Assert-HmVendorApps -Apps $apps', 'checksums.json — SHA-256', 'итоговый обход идёт ДО снятия сумм');
+    assertOrder(src, 'Assert-HmVendorApps -Apps $apps', '[IO.File]::WriteAllText($chkPath, $json)', 'и ДО записи манифеста');
+    // Таблица пинов читается ДО первой загрузки и без неё скрипт не идёт дальше.
+    assertOrder(src, "'vendor-signers.json'", 'Dl $a.browser_download_url', 'пины читаются до первой загрузки');
+    assert(/vendor-signers\.json не читается[^\n]*\n\s*exit 1/.test(src), 'нет таблицы — exit 1');
+    // Нет самого средства проверки подписи — стоп до первой загрузки, а не удаление файла «за нечитаемую подпись».
+    assert(/if \(-not \(Get-Command Get-AuthenticodeSignature[^\n]*\n[^\n]*FATAL[^\n]*\n\s*exit 1/.test(src), 'нет Get-AuthenticodeSignature — exit 1');
+    assertOrder(src, 'Get-Command Get-AuthenticodeSignature', 'Dl $a.browser_download_url', 'наличие проверки подписи проверяется до первой загрузки');
+    assert(!/HmVerified/.test(src),'кэша «файл уже проверен» нет: итоговый обход проверяет каждый файл заново прямо перед манифестом');
+  });
+
+  // ---- C. install-time код на машине подписи (S-6) ------------------------------------------
+  // Команды pip — это строки с `-m pip download|install` (упоминания в сообщениях и комментариях не в счёт).
+  const pipCommands = (text) => String(text).split('\n').filter((l) => !/^\s*#/.test(l) && /-m pip (download|install)\b/.test(l));
+  const npmInstalls = (text) => String(text).split('\n').filter((l) => !/^\s*#/.test(l) && /\bnpm install '@anthropic-ai\/claude-code'/.test(l));
+
+  ok('fetch-vendor.ps1 и fetch-vendor-mac.sh: npm install идёт с --ignore-scripts (скрипты пакета с плавающей версией не исполняются на машине подписи); флаги --no-audit --no-fund на месте', () => {
+    [['fetch-vendor.ps1', fs.readFileSync(FV, 'utf8')], ['fetch-vendor-mac.sh', fs.readFileSync(FVM, 'utf8')]].forEach(([name, text]) => {
+      const lines = npmInstalls(text);
+      assert.strictEqual(lines.length, 1, name + ': ровно один npm install claude-code (нашлось ' + lines.length + ')');
+      assert(/--ignore-scripts\b/.test(lines[0]) && /--no-audit\b/.test(lines[0]) && /--no-fund\b/.test(lines[0]), name + ': нет флагов: ' + lines[0].trim());
+      // Контроль: без флага проверка краснеет.
+      assert(!/--ignore-scripts\b/.test(lines[0].replace('--ignore-scripts', '')), 'контроль на самой проверке');
+    });
+  });
+
+  ok('fetch-vendor.ps1 и fetch-vendor-mac.sh: КАЖДЫЙ вызов pip — с --only-binary=:all:, кроме закреплённого pyaes (--require-hashes); sdist-вызовов без хеша нет', () => {
+    const checkAll = (text) => pipCommands(text).filter((l) => !/--only-binary[= ]:all:/.test(l) && !/--require-hashes\b/.test(l));
+    ['fetch-vendor.ps1', 'fetch-vendor-mac.sh'].forEach((name) => {
+      const text = fs.readFileSync(path.join(ROOT, 'tools', name), 'utf8');
+      const cmds = pipCommands(text);
+      assert(cmds.length >= 4, name + ': вызовов pip найдено ' + cmds.length + ' (ожидалось >= 4)');
+      assert.deepStrictEqual(checkAll(text).map((l) => l.trim()), [], name + ': вызов pip без --only-binary=:all: и без --require-hashes');
+      // Единственный вызов, которому sdist разрешён, — закреплённый pyaes: --no-deps, --require-hashes, -r файл с хешем.
+      // И разрешён он ТОЛЬКО для pyaes: `--no-binary :all:` pip пробрасывает и в изолированную сборку, а тогда сам
+      // сборочный бэкенд (setuptools) собирался бы из sdist — ещё один недоверенный код на машине подписи.
+      const sdistOk = cmds.filter((l) => /--no-binary\b/.test(l));
+      assert.strictEqual(sdistOk.length, 1, name + ': sdist разрешён ровно одному вызову');
+      assert(/--no-binary pyaes\b/.test(sdistOk[0]) && !/--no-binary :all:/.test(sdistOk[0]), name + ': --no-binary только для pyaes, не для всего подряд: ' + sdistOk[0].trim());
+      assert(/--no-deps\b/.test(sdistOk[0]) && /--require-hashes\b/.test(sdistOk[0]) && /-r \$?\{?"?\$?\w*pin/i.test(sdistOk[0]), name + ': вызов sdist обязан быть --no-deps --require-hashes -r <файл с пином>: ' + sdistOk[0].trim());
+      // В общем вызове pyaes — прямой ссылкой с sha256, а не из индекса.
+      assert(cmds.some((l) => /pyaes @/.test(l) && /--only-binary=:all:/.test(l)), name + ': общий вызов берёт pyaes прямой ссылкой file://…#sha256=…');
+      // Контроль: вызов без флага (как было) проверка отвергает.
+      const mutant = text.replace('--only-binary=:all: -d', '-d');
+      assert(checkAll(mutant).length >= 1, name + ': контроль — без флага проверка краснеет');
+    });
+    // playwright ставится в Python машины сборки — тоже только колёсами.
+    assert(/pip install --quiet --only-binary=:all: playwright/.test(fs.readFileSync(FV, 'utf8')), 'playwright (ps1): только колёса');
+    assert(/pip install --quiet --only-binary=:all: playwright/.test(fs.readFileSync(FVM, 'utf8')), 'playwright (mac): только колёса');
+  });
+
+  ok('vendor-signers.json: пин pyaes (версия + sha256) в нужной форме; оба фетчера читают его оттуда, а не держат свою копию хеша', () => {
+    const j = readSigners();
+    const p = j.pythonSdists && j.pythonSdists.pyaes;
+    assert(p && /^\d+\.\d+\.\d+$/.test(p.version) && /^[0-9a-f]{64}$/.test(p.sha256), 'pythonSdists.pyaes: version и sha256 (64 hex)');
+    const ps = fs.readFileSync(FV, 'utf8');
+    const sh = fs.readFileSync(FVM, 'utf8');
+    assert(/pythonSdists\.pyaes/.test(ps) && /\["pythonSdists"\]\["pyaes"\]\["sha256"\]/.test(sh), 'оба фетчера берут пин из таблицы');
+    assert(!ps.includes(p.sha256) && !sh.includes(p.sha256), 'хеш не продублирован в самих скриптах (расхождение копий молчит)');
+    // Если рядом лежит настоящий pywheels — пин обязан совпадать с файлом, который реально едет покупателям.
+    const wheels = process.env.HM_TEST_PYWHEELS || path.join(ROOT, 'vendor', 'pywheels');
+    const f = path.join(wheels, 'pyaes-' + p.version + '.tar.gz');
+    if (fs.existsSync(f)) {
+      assert.strictEqual(crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'), p.sha256, 'пин не совпал с pyaes в pywheels');
+    }
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1 + pip): Get-HmPyWheels на локальном индексе без сети — подмена pyaes и пакет без колеса НЕ исполняются, честный набор собирается; прежняя команда подмену исполняла (контроль)', () => {
+    needPs();
+    const py = spawnSync('python', ['-c', 'import sys;print(sys.executable)'], { encoding: 'utf8', timeout: 30000 });
+    if (py.error || py.status !== 0) SKIP('нет python');
+    const pyExe = String(py.stdout).trim();
+    const pipv = spawnSync(pyExe, ['-m', 'pip', '--version'], { encoding: 'utf8', timeout: 60000 });
+    if (pipv.error || pipv.status !== 0) SKIP('нет pip');
+    const stp = spawnSync(pyExe, ['-c', 'import setuptools'], { encoding: 'utf8', timeout: 30000 });
+    if (stp.error || stp.status !== 0) SKIP('в Python нет setuptools (нужен для сборки метаданных pyaes без изоляции)');
+    const { pathToFileURL } = require('url');
+    const work = mkWork('pip');
+    try {
+      const fx = spawnSync(pyExe, ['-I', path.join(ROOT, 'test', 'fixtures', 'pip-sim-index.py'), work], { encoding: 'utf8', timeout: 120000 });
+      assert.strictEqual(fx.status, 0, 'фикстура индекса: ' + (fx.stderr || fx.stdout));
+      const goodSha = String(fx.stdout).trim();
+      assert(/^[0-9a-f]{64}$/.test(goodSha), 'sha256 честного pyaes: ' + goodSha);
+      const marker = (n) => fs.existsSync(path.join(work, 'markers', n));
+      const clear = () => ['PINNED_EXECUTED', 'DECOY_EXECUTED', 'SDISTONLY_EXECUTED'].forEach((n) => fs.rmSync(path.join(work, 'markers', n), { force: true }));
+      const indexOf = (kind) => pathToFileURL(path.join(work, kind, 'simple')).href + '/';
+      const pin = { version: '1.6.1', sha256: goodSha };
+      const run = (name, kind, reqText) => {
+        clear();
+        const dir = path.join(work, 'run-' + name);
+        fs.mkdirSync(dir, { recursive: true });
+        const req = path.join(dir, 'req.txt');
+        fs.writeFileSync(req, reqText + '\n');
+        fs.writeFileSync(path.join(dir, 'scenario.json'), JSON.stringify({ index: indexOf(kind), python: pyExe, req, wheels: path.join(dir, 'wheels'), pin }), 'utf8');
+        const r = runCase('pipwheels', dir, 400000);
+        return { r, files: fs.existsSync(path.join(dir, 'wheels')) ? fs.readdirSync(path.join(dir, 'wheels')) : [], dir };
+      };
+      // 0. КОНТРОЛЬ: прежняя команда (без флагов) против индекса с подменой исполняет код подмены.
+      clear();
+      const oldOut = path.join(work, 'old-out');
+      fs.mkdirSync(oldOut);
+      const oldReq = path.join(work, 'old-req.txt');
+      fs.writeFileSync(oldReq, 'fakepkg\n');
+      const oldRun = spawnSync(pyExe, ['-I', '-m', 'pip', 'download', '-r', oldReq, '-d', oldOut, '--index-url', indexOf('evil'), '--no-cache-dir', '--disable-pip-version-check'],
+        { encoding: 'utf8', timeout: 300000, env: Object.assign({}, process.env, { PIP_CONFIG_FILE: 'NUL', HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9' }) });
+      assert.strictEqual(oldRun.status, 0, 'контроль: прежняя команда отработала: ' + String(oldRun.stderr).slice(-400));
+      assert(marker('DECOY_EXECUTED'), 'контроль: прежняя команда ИСПОЛНИЛА setup.py подменённого sdist — это и была дыра');
+      // 1. честный индекс: набор собирается, закреплённый pyaes на месте, байт в байт.
+      const good = run('good', 'good', 'fakepkg');
+      assert(!good.r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + good.r.lines.join(' | '));
+      assert(good.r.lines.includes('PIPWHEELS ok=True'), 'честный набор: ' + good.r.out.slice(-1200));
+      assert(good.files.includes('fakepkg-1.0-py3-none-any.whl') && good.files.includes('pyaes-1.6.1.tar.gz'), 'в pywheels: ' + good.files.join(','));
+      assert.strictEqual(crypto.createHash('sha256').update(fs.readFileSync(path.join(good.dir, 'wheels', 'pyaes-1.6.1.tar.gz'))).digest('hex'), goodSha, 'pyaes в pywheels — ровно закреплённый');
+      assert(!marker('DECOY_EXECUTED'), 'в честном прогоне подмены нет');
+      // 2. подмена pyaes в индексе: ни один setup.py не исполнился, набор НЕПОЛНЫЙ, остальные пакеты даже не качались.
+      const evil = run('evil', 'evil', 'fakepkg');
+      assert(evil.r.lines.includes('PIPWHEELS ok=False'), 'подмена: набор обязан быть признан неполным: ' + evil.r.out.slice(-800));
+      assert(!marker('DECOY_EXECUTED') && !marker('PINNED_EXECUTED'), 'подменённый sdist НЕ исполнялся (pip отверг его по sha256 до сборки метаданных)');
+      assert(!evil.files.includes('pyaes-1.6.1.tar.gz') && !evil.files.includes('fakepkg-1.0-py3-none-any.whl'), 'подмена не лежит в pywheels, общий вызов не запускался: ' + evil.files.join(','));
+      assert(/sha256|пином/.test(evil.r.out), 'причина названа в журнале: ' + evil.r.out.slice(-600));
+      // 3. зависимость без колеса (не pyaes): --only-binary=:all: роняет вызов, её setup.py не исполняется.
+      const nowheel = run('nowheel', 'good', 'fakepkg2');
+      assert(nowheel.r.lines.includes('PIPWHEELS ok=False'), 'пакет без колеса: набор НЕПОЛНЫЙ, громко: ' + nowheel.r.out.slice(-800));
+      assert(!marker('SDISTONLY_EXECUTED'), 'sdist без хеш-пина НЕ исполнялся');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  // ---- D. личные паттерны вне публичного репозитория (S-3) ----------------------------------
+  // Значения здесь выдуманные: настоящие лежат ТОЛЬКО в неотслеживаемом файле на машине сборки.
+  const FAKE_KEY = 'ghp_' + 'a1'.repeat(18);            // подложенный «токен GitHub» (36 знаков после ghp_)
+  const PRIV_NAME = 'Ivan Petrov-Test';
+  const PRIV_IP = '203.0.113.77';                       // TEST-NET-3: адрес для документации, не боевой
+  const PRIV_DOMAIN = 'example-retired.invalid';
+  const privJson = JSON.stringify({ patterns: [
+    { re: '[Ii]van[ _-]*Petrov-Test' },
+    { re: '203\\.0\\.113\\.77', scrub: 'REDACTED-IP' },
+    { re: 'example-retired\\.invalid', scrub: 'redacted.example' }
+  ] });
+  const bashAvail = (() => { const p = spawnSync('bash', ['--version'], { encoding: 'utf8' }); return !(p.error || p.status !== 0); })();
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): Get-HmLeakPatterns — личный файл и переменная окружения подмешиваются к общим; без них работают общие и подложенный ключ ловится; битый список — стоп без значений в тексте ошибки', () => {
+    needPs();
+    const work = mkWork('leak');
+    try {
+      const sc = (name, extra) => Object.assign({ name }, extra);
+      const scenarios = [
+        sc('file', { file: privJson }),
+        sc('env', { env: privJson }),
+        sc('env-wins', { env: privJson, file: JSON.stringify({ patterns: [{ re: 'file-only-marker' }] }) }),
+        sc('absent', {}),
+        // пустой список — ошибка, а не «личный список есть»: иначе пустая переменная окружения глушила бы настоящий файл
+        sc('empty-list', { file: JSON.stringify({ patterns: [] }) }),
+        sc('empty-env-shadows-file', { env: JSON.stringify({ patterns: [] }), file: privJson }),
+        // у паттернов своя область: (?-i) одного и номера групп другого не перетекают в соседей
+        sc('grouping', { file: JSON.stringify({ patterns: [{ re: '(?-i)Aaa-Marker' }, { re: 'Secret-Two-Marker' }, { re: '(zq)x' }, { re: '(ab)\\1c' }] }) }),
+        sc('bad-json', { file: '{ это не json' }),
+        sc('no-patterns', { file: JSON.stringify({ other: 1 }) }),
+        sc('empty-re', { file: JSON.stringify({ patterns: [{ re: '  ' }] }) }),
+        sc('bad-regex', { file: JSON.stringify({ patterns: [{ re: '(' + PRIV_NAME }] }) }),
+        sc('matches-empty', { file: JSON.stringify({ patterns: [{ re: 'a*' }] }) }),
+        sc('tab-in-re', { file: JSON.stringify({ patterns: [{ re: 'a\tb' }] }) }),
+        sc('bom-file', { file: '﻿' + privJson })
+      ];
+      fs.writeFileSync(path.join(work, 'scenarios.json'), JSON.stringify({ scenarios, probes: {
+        key: FAKE_KEY, name: PRIV_NAME, ip: PRIV_IP, domain: PRIV_DOMAIN, plain: 'обычный текст без секретов 1.2.3',
+        // (?-i) первого паттерна не должно делать регистрозависимым второй; \1 четвёртого — это ЕГО группа, а не чужая
+        p_inline_other: 'secret-two-marker', p_inline_own_exact: 'Aaa-Marker', p_inline_own_lower: 'aaa-marker', p_backref: 'ababc'
+      } }), 'utf8');
+      const r = runCase('leak', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-800));
+      const row = {};
+      r.lines.forEach((l) => {
+        let m = /^LEAK (\S+) private=(\w+) count=(\d+) scrubs=(\d+) source=(.*)$/.exec(l);
+        if (m) { row[m[1]] = { private: m[2] === 'True', count: Number(m[3]), scrubs: Number(m[4]), source: m[5], probe: {} }; return; }
+        m = /^THROWS (\S+) (.*)$/.exec(l);
+        if (m) { row[m[1]] = { throws: m[2] }; return; }
+        m = /^PROBE (\S+) (\w+) (\w+)$/.exec(l);
+        if (m && row[m[1]]) row[m[1]].probe[m[2]] = m[3] === 'True';
+      });
+      // личный файл / переменная: общие + личные
+      ['file', 'env', 'bom-file'].forEach((k) => {
+        assert(row[k] && row[k].private && row[k].count === 3 && row[k].scrubs === 2, k + ': ' + JSON.stringify(row[k]));
+        assert(row[k].probe.key && row[k].probe.name && row[k].probe.ip && row[k].probe.domain && !row[k].probe.plain, k + ': пробы ' + JSON.stringify(row[k].probe));
+      });
+      assert(row.env.source === 'переменная HM_LEAK_PATTERNS', 'источник назван: ' + row.env.source);
+      assert.strictEqual(row['env-wins'].count, 3, 'переменная главнее файла: 3 паттерна из неё, а не 1 из файла');
+      assert(row['env-wins'].probe.name && row['env-wins'].probe.ip, 'и работают именно паттерны из переменной');
+      // нет списка: ТОЛЬКО общие паттерны, но подложенный ключ всё равно ловится, личное — нет, сборка не падает
+      assert(row.absent && row.absent.private === false && row.absent.count === 0 && row.absent.scrubs === 0, 'absent: ' + JSON.stringify(row.absent));
+      assert(row.absent.probe.key === true, 'общий паттерн ловит подложенный ключ и без личного списка');
+      assert(row.absent.probe.name === false && row.absent.probe.ip === false && row.absent.probe.domain === false, 'личного без списка не ловится — об этом говорит предупреждение');
+      // группировка: каждый личный паттерн сам по себе
+      assert(row.grouping && row.grouping.private === true && row.grouping.count === 4, 'grouping: ' + JSON.stringify(row.grouping));
+      assert(row.grouping.probe.p_inline_other === true, 'grouping: (?-i) соседнего паттерна не должно делать этот регистрозависимым');
+      assert(row.grouping.probe.p_inline_own_exact === true && row.grouping.probe.p_inline_own_lower === false, 'grouping: собственный (?-i) работает на своём паттерне');
+      assert(row.grouping.probe.p_backref === true, 'grouping: обратная ссылка паттерна ссылается на его собственную группу');
+      // битые списки — исключение, без значений паттернов в тексте; пустой список — тоже ошибка
+      ['empty-list', 'empty-env-shadows-file', 'bad-json', 'no-patterns', 'empty-re', 'bad-regex', 'matches-empty', 'tab-in-re'].forEach((k) => {
+        assert(row[k] && typeof row[k].throws === 'string', k + ' обязан бросать: ' + JSON.stringify(row[k]));
+        assert(!row[k].throws.includes(PRIV_NAME), k + ': значение паттерна попало в ошибку: ' + row[k].throws);
+      });
+      // Контроль: фильтр БЕЗ общей части ключ пропустил бы — общие паттерны в смеси нужны, а не декор.
+      assert.strictEqual(new RegExp('[Ii]van[ _-]*Petrov-Test|203\\.0\\.113\\.77').test(FAKE_KEY), false, 'контроль: один лишь личный список ключ не ловит');
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor-mac.sh (прогон bash): leak_patterns_load — те же правила, что у PowerShell-версии (личный файл, переменная, без списка, битые списки)', () => {
+    if (!bashAvail) SKIP('нет bash');
+    const py = spawnSync('python', ['-c', 'import sys;print(sys.executable)'], { encoding: 'utf8', timeout: 30000 });
+    if (py.error || py.status !== 0) SKIP('нет python (нужен загрузчику для разбора JSON)');
+    const sh = fs.readFileSync(FVM, 'utf8');
+    const a = sh.indexOf("NOMAD_LEAK_GENERIC_RE='");
+    const b = sh.indexOf('leak_patterns_load() {');
+    assert(a !== -1 && b !== -1 && a < b, 'в fetch-vendor-mac.sh пропал загрузчик личных паттернов');
+    const end = sh.indexOf('\n}\n', b);
+    assert(end !== -1, 'не найден конец leak_patterns_load');
+    const fn = sh.slice(a, end + 3);
+    const work = mkWork('leaksh');
+    try {
+      const fnFile = path.join(work, 'fn.sh');
+      fs.writeFileSync(fnFile, fn);
+      const probes = { key: FAKE_KEY, name: PRIV_NAME, ip: PRIV_IP, domain: PRIV_DOMAIN, plain: 'обычный текст без секретов 1.2.3' };
+      const run = (name, fileText, envText) => {
+        const f = path.join(work, name + '.json');
+        if (fileText !== null) fs.writeFileSync(f, fileText);
+        const script = ['set -uo pipefail', 'PY=' + JSON.stringify(String(py.stdout).trim().replace(/\\/g, '/')), '. ' + JSON.stringify(fnFile.replace(/\\/g, '/')),
+          'leak_patterns_load ' + JSON.stringify(f.replace(/\\/g, '/')), 'rc=$?',
+          'echo "RC=$rc PRIVATE=${NOMAD_LEAK_PRIVATE:-?} COUNT=${NOMAD_LEAK_COUNT:-?} SCRUBS=$(printf "%s" "$NOMAD_LEAK_SCRUBS" | grep -c .) SOURCE=${NOMAD_LEAK_SOURCE:-}"']
+          .concat(Object.keys(probes).map((k) => 'if printf "%s\\n" "$PROBE_' + k + '" | grep -Eq -- "$NOMAD_LEAK_RE"; then echo "PROBE ' + k + ' True"; else echo "PROBE ' + k + ' False"; fi')).join('\n');
+        const env = Object.assign({}, process.env, { MSYS_NO_PATHCONV: '1', HM_LEAK_PATTERNS: envText || '' });
+        Object.keys(probes).forEach((k) => { env['PROBE_' + k] = probes[k]; });
+        const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 120000, env });
+        const out = String(r.stdout || '') + String(r.stderr || '');
+        const m = /RC=(\d+) PRIVATE=(\S+) COUNT=(\S+) SCRUBS=(\d+) SOURCE=(.*)/.exec(out);
+        const probe = {};
+        out.split(/\r?\n/).forEach((l) => { const x = /^PROBE (\S+) (\w+)$/.exec(l); if (x) probe[x[1]] = x[2] === 'True'; });
+        return { out, rc: m ? Number(m[1]) : null, priv: m && m[2], count: m && m[3], scrubs: m && Number(m[4]), source: m && m[5], probe };
+      };
+      const f1 = run('file', privJson, '');
+      assert.strictEqual(f1.rc, 0, f1.out.slice(-600));
+      assert(f1.priv === '1' && f1.count === '3' && f1.scrubs === 2, 'файл: ' + f1.out.slice(-400));
+      assert(f1.probe.key && f1.probe.name && f1.probe.ip && f1.probe.domain && !f1.probe.plain, 'файл: пробы ' + JSON.stringify(f1.probe));
+      const e1 = run('absent-file', null, privJson);
+      assert(e1.rc === 0 && e1.priv === '1' && e1.count === '3' && /HM_LEAK_PATTERNS/.test(e1.source || ''), 'переменная: ' + e1.out.slice(-400));
+      const none = run('absent', null, '');
+      assert(none.rc === 0 && none.priv === '0' && none.count === '0', 'нет списка: ' + none.out.slice(-400));
+      assert(none.probe.key === true && none.probe.name === false && none.probe.ip === false, 'без списка работают общие паттерны, личные не ловятся: ' + JSON.stringify(none.probe));
+      [['bad-json', '{ это не json'], ['no-patterns', JSON.stringify({ x: 1 })], ['empty-list', JSON.stringify({ patterns: [] })],
+        ['empty-re', JSON.stringify({ patterns: [{ re: ' ' }] })],
+        ['bad-regex', JSON.stringify({ patterns: [{ re: '(' + PRIV_NAME }] })], ['matches-empty', JSON.stringify({ patterns: [{ re: 'a*' }] })],
+        ['tab-in-re', JSON.stringify({ patterns: [{ re: 'a\tb' }] })]].forEach(([k, text]) => {
+        const r = run(k, text, '');
+        assert.strictEqual(r.rc, 1, k + ': битый список обязан остановить (rc=' + r.rc + '): ' + r.out.slice(-300));
+        assert(!r.out.includes(PRIV_NAME), k + ': значение паттерна попало в сообщение: ' + r.out.slice(-300));
+      });
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor.ps1 и fetch-vendor-mac.sh: личных паттернов в отслеживаемых скриптах нет (ни IPv4, ни старой строки); читают tools/leak-patterns.local.json / HM_LEAK_PATTERNS; файл в .gitignore; scrub берётся из списка', () => {
+    ['fetch-vendor.ps1', 'fetch-vendor-mac.sh'].forEach((name) => {
+      const text = fs.readFileSync(path.join(ROOT, 'tools', name), 'utf8');
+      // Знаний о значениях тест не имеет — ловит КЛАСС: четвёрка чисел через точки (и в виде регулярки, с `\.`).
+      // Идентификаторы назначений сертификатов (OID вида 1.3.6.1.5.5.7.3.3) — это не адреса: за четвёркой у них
+      // идёт ещё `.число`, у адреса IPv4 — нет.
+      const hits = [];
+      text.split(/\r?\n/).forEach((line, i) => {
+        const re = /(?<![\w.])(\d{1,3})((?:\\?\.\d{1,3}){3})(?!\w|\\?\.\d)/g;
+        let m;
+        while ((m = re.exec(line))) hits.push((i + 1) + ': ' + m[0].replace(/\d/g, '#'));
+      });
+      assert.deepStrictEqual(hits, [], name + ': IPv4-адрес в публичном репозитории (строка: маска)');
+      assert(/leak-patterns\.local\.json/.test(text) && /HM_LEAK_PATTERNS/.test(text), name + ': не читает личный список');
+      // Общая часть — ЗАКРЫТЫЙ перечень «ключи и токены»: любая лишняя альтернатива (имя, адрес, домен) — провал.
+      // Значений тест не знает и не печатает (в сообщении — только длины лишних альтернатив).
+      const gen = (name === 'fetch-vendor.ps1' ? /\$HM_LEAK_GENERIC_RE\s*=\s*'([^']*)'/ : /NOMAD_LEAK_GENERIC_RE='([^']*)'/).exec(text);
+      assert(gen, name + ': не найдена общая часть паттернов');
+      const GENERIC_SHAPES = [/^3VN93XA9DY$/, /^ghp_\[A-Za-z0-9\]\{36\}$/, /^github_pat_\[A-Za-z0-9_\]\{36\}$/, /^sk-\[A-Za-z0-9_-\]\{40\}$/, /^xoxb-\[0-9\]\{8\}$/];
+      const extra = gen[1].split('|').filter((alt) => !GENERIC_SHAPES.some((re) => re.test(alt)));
+      assert.deepStrictEqual(extra.map((s) => s.length), [], name + ': в общей части паттерны вне перечня «ключи и токены» (длины)');
+      // И никакого присваивания NOMAD_LEAK_RE одним строковым литералом: так лежала прежняя строка с личными значениями.
+      assert(!/\bNOMAD_LEAK_RE\s*=\s*'/.test(text), name + ': NOMAD_LEAK_RE присваивается литералом — личные паттерны могли вернуться');
+    });
+    const ps = codeOnly(fs.readFileSync(FV, 'utf8'));
+    assert(/foreach \(\$s in \$leak\.Scrubs\)/.test(ps), 'ps1: замена адресов берётся из списка, а не из зашитых значений');
+    const sh = fs.readFileSync(FVM, 'utf8');
+    assert(/NOMAD_LEAK_SCRUBS/.test(sh) && /\$ENV\{HM_RE\}/.test(sh), 'sh: замена адресов берётся из списка');
+    assertOrder(ps, 'Get-HmLeakPatterns -LocalFile', 'Select-String -LiteralPath $_.FullName -Pattern $NOMAD_LEAK_PATTERNS', 'ps1: паттерны загружены до первого скана');
+    // Select-String -Path трактует [ ] в пути как шаблон и молча пропускает такой файл (ложное «чисто»): сканируем по LiteralPath.
+    assert(!/Select-String\s+-Path\b/.test(ps), 'ps1: Select-String -Path в скрипте не должно остаться — файл с [ ] в пути не просканируется');
+    assert((ps.match(/Select-String -LiteralPath \$_\.FullName -Pattern \$NOMAD_LEAK_PATTERNS -Quiet/g) || []).length === 2, 'ps1: оба скана (чистка и жёсткий гейт) идут по LiteralPath и по массиву паттернов');
+    assertOrder(sh, 'leak_patterns_load "${HM_LEAK_PATTERNS_FILE:-$ROOT/tools/leak-patterns.local.json}"', 'grep -rIlE "$NOMAD_LEAK_RE"', 'sh: паттерны загружены до первого скана');
+    assert(/HM_LEAK_PATTERNS_FILE[\s\S]{0,300}?FATAL[\s\S]{0,200}?return 1/.test(sh) && /HM_LEAK_PATTERNS_FILE[\s\S]{0,300}?FATAL[\s\S]{0,200}?return \$false/.test(ps), 'явный путь к списку, которого нет, — стоп, а не тихая работа без списка');
+    const gi = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+    assert(/^tools\/leak-patterns\.local\.json\s*$/m.test(gi), '.gitignore скрывает tools/leak-patterns.local.json');
+    // git сам подтверждает (если git есть): файл игнорируется и не отслеживается.
+    const g = spawnSync('git', ['check-ignore', '-q', 'tools/leak-patterns.local.json'], { cwd: ROOT, encoding: 'utf8' });
+    if (!g.error && g.status !== 128) assert.strictEqual(g.status, 0, 'git check-ignore: файл не игнорируется');
+    const ls = spawnSync('git', ['ls-files', '--', 'tools/leak-patterns.local.json'], { cwd: ROOT, encoding: 'utf8' });
+    if (!ls.error && ls.status === 0) assert.strictEqual(String(ls.stdout).trim(), '', 'личный список отслеживается git — его там быть не должно');
+  });
+
+  // ---- D2. нет личного списка: в релизной сборке это стоп, а не строка в журнале ---------------
+  // Раньше личные паттерны были вшиты в оба скрипта, и любой прогон (локальный или на раннере GitHub) их применял.
+  // Теперь они только в локальном файле, а на CI и в свежем рабочем каталоге его нет — и фильтр, «предупредив»,
+  // выпускал сборку с именем владельца в nomad-src. Релизная сборка без списка обязана остановиться.
+  ok('fetch-vendor.ps1 (прогон PS 5.1): релизная сборка (CI, GITHUB_ACTIONS или HM_RELEASE) без личного списка паттернов — отказ; флаг HM_ALLOW_NO_PRIVATE_LEAK_LIST снимает его только в релизной сборке; локально — предупреждение', () => {
+    needPs();
+    const work = mkWork('lpol');
+    try {
+      const c = (name, extra) => Object.assign({ name, private: false, ci: '', gha: '', release: '', allow: '' }, extra || {});
+      const rows = [
+        c('local-no-list'), c('local-allow-flag-is-noop', { allow: '1' }),
+        c('ci-false', { ci: 'false' }), c('gha-false', { gha: 'false' }), c('release-0', { release: '0' }),
+        c('ci-true', { ci: 'true' }), c('ci-1', { ci: '1' }), c('ci-TRUE-case', { ci: 'TRUE' }), c('gha-true', { gha: 'true' }),
+        c('hm-release-1', { release: '1' }), c('hm-release-yes', { release: 'YES' }),
+        c('ci-true-allowed', { ci: 'true', allow: '1' }), c('release-allowed-true', { release: '1', allow: 'true' }),
+        c('ci-true-allow-garbage', { ci: 'true', allow: 'maybe' }), c('ci-true-allow-0', { ci: 'true', allow: '0' }),
+        c('ci-true-private', { ci: 'true', private: true }), c('local-private', { private: true })
+      ];
+      writeCases(work, rows);
+      const r = runCase('leakpolicy', work);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'нет функции: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, r.out.slice(-800));
+      const got = {};
+      r.lines.forEach((l) => { const m = /^POLICY (\S+) release=(\w+) verdict=(\w+)$/.exec(l); if (m) got[m[1]] = { release: m[2] === 'True', verdict: m[3] }; });
+      const want = {
+        'local-no-list': [false, 'warn'], 'local-allow-flag-is-noop': [false, 'warn'],
+        'ci-false': [false, 'warn'], 'gha-false': [false, 'warn'], 'release-0': [false, 'warn'],
+        'ci-true': [true, 'fatal'], 'ci-1': [true, 'fatal'], 'ci-TRUE-case': [true, 'fatal'], 'gha-true': [true, 'fatal'],
+        'hm-release-1': [true, 'fatal'], 'hm-release-yes': [true, 'fatal'],
+        'ci-true-allowed': [true, 'allowed'], 'release-allowed-true': [true, 'allowed'],
+        'ci-true-allow-garbage': [true, 'fatal'], 'ci-true-allow-0': [true, 'fatal'],
+        'ci-true-private': [true, 'ok'], 'local-private': [false, 'ok']
+      };
+      Object.keys(want).forEach((k) => {
+        assert(got[k], 'нет строки для «' + k + '»: ' + r.out.slice(-400));
+        assert.deepStrictEqual([got[k].release, got[k].verdict], want[k], '«' + k + '»: ' + JSON.stringify(got[k]));
+      });
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  ok('fetch-vendor.ps1 (прогон PS 5.1): экспорт-фильтр nomad-src целиком — в релизной сборке без личного списка стоп, с флагом баннер и работа по общим паттернам, локально предупреждение; файлы с [ ] в имени и в пути сканируются', () => {
+    needPs();
+    const run = (env, extra) => {
+      const work = mkWork('san');
+      try {
+        const files = [
+          { rel: 'pyproject.toml', text: '[project]\nname = "x"\nreadme = "README.md"\n' },
+          { rel: 'README.md', text: '# x\n' }, { rel: 'LICENSE', text: 'MIT\n' },
+          { rel: 'agent/core.py', text: 'print(1)\n' },
+          { rel: 'notes[1].txt', text: 'token ' + FAKE_KEY + '\n' },            // [ ] в имени файла
+          { rel: 'lib[2]/inner.txt', text: 'token ' + FAKE_KEY + '\n' },        // [ ] в имени каталога
+          { rel: 'extra/plain.txt', text: 'ничего секретного\n' }
+        ].concat((extra && extra.files) || []);
+        const sc = { env, files };
+        if (extra && extra.privateFile) sc.privateFile = extra.privateFile;
+        fs.writeFileSync(path.join(work, 'scenario.json'), JSON.stringify(sc), 'utf8');
+        const r = runCase('sanitize', work, 300000);
+        const left = r.lines.filter((l) => /^LEFT /.test(l)).map((l) => l.slice(5));
+        const ret = (r.lines.find((l) => /^SANITIZE returned=/.test(l)) || '').replace('SANITIZE returned=', '');
+        const log = (r.lines.find((l) => /^LOG /.test(l)) || '').slice(4);
+        return { r, left, ret, log };
+      } finally { fs.rmSync(work, { recursive: true, force: true }); }
+    };
+    const check = (x, label) => { assert(!x.r.lines.some((l) => /^MISSING-FN/.test(l)), label + ': нет функции: ' + x.r.lines.join(' | ')); assert.strictEqual(x.r.status, 0, label + ': harness: ' + x.r.out.slice(-800)); };
+    // локально, без списка: предупреждение, работа по общим паттернам; ключ в файле с [ ] в имени и в каталоге с [ ] найден и удалён
+    const local = run({});
+    check(local, 'local');
+    assert.strictEqual(local.ret, 'True', 'local: фильтр пройден: ' + local.log);
+    assert(/ВНИМАНИЕ/.test(local.log) && /не найден/.test(local.log), 'local: предупреждение о пропавшем списке в журнале: ' + local.log);
+    assert(!local.left.includes('notes[1].txt') && !local.left.includes('lib[2]/inner.txt'), 'файлы с [ ] в пути просканированы и удалены (Select-String -Path их молча пропускал): остались ' + local.left.join(','));
+    assert(local.left.includes('extra/plain.txt') && local.left.includes('agent/core.py') && local.left.includes('pyproject.toml'), 'чистое осталось: ' + local.left.join(','));
+    // релиз (CI) без списка — стоп; причина и выход названы
+    ['{"CI":"true"}', '{"GITHUB_ACTIONS":"true"}', '{"HM_RELEASE":"1"}'].forEach((envJson) => {
+      const x = run(JSON.parse(envJson));
+      check(x, envJson);
+      assert.strictEqual(x.ret, 'False', envJson + ': релизная сборка без списка обязана вернуть отказ: ' + x.log);
+      assert(/FATAL/.test(x.log) && /HM_ALLOW_NO_PRIVATE_LEAK_LIST/.test(x.log) && /HM_LEAK_PATTERNS/.test(x.log) && /leak-patterns\.local\.json/.test(x.log), envJson + ': сказано, что делать: ' + x.log);
+    });
+    // флаг: сборка идёт, баннер громкий, общие паттерны работают
+    const allowed = run({ CI: 'true', HM_ALLOW_NO_PRIVATE_LEAK_LIST: '1' });
+    check(allowed, 'allowed');
+    assert.strictEqual(allowed.ret, 'True', 'allowed: ' + allowed.log);
+    assert(/БЕЗ ЛИЧНОГО СПИСКА/.test(allowed.log), 'allowed: баннер в журнале: ' + allowed.log);
+    assert(!allowed.left.includes('notes[1].txt'), 'allowed: общие паттерны работают и в релизе');
+    // список есть — релиз идёт без флага, личные значения чистятся
+    const withList = run({ CI: 'true' }, {
+      privateFile: { name: 'priv.json', text: privJson },
+      files: [{ rel: 'extra/name[1].txt', text: 'автор ' + PRIV_NAME + '\n' }]
+    });
+    check(withList, 'withList');
+    assert.strictEqual(withList.ret, 'True', 'withList: ' + withList.log);
+    assert(/личных паттернов: 3/.test(withList.log), 'withList: список подхвачен: ' + withList.log);
+    assert(!withList.left.includes('extra/name[1].txt'), 'withList: личное имя в файле с [ ] в имени найдено: ' + withList.left.join(','));
+  });
+
+  ok('fetch-vendor-mac.sh (прогон bash): релизная сборка без личного списка — отказ, флаг HM_ALLOW_NO_PRIVATE_LEAK_LIST пропускает с баннером, локально предупреждение; пустой список — ошибка; правила те же, что у PowerShell-версии', () => {
+    if (!bashAvail) SKIP('нет bash');
+    const py = spawnSync('python', ['-c', 'import sys;print(sys.executable)'], { encoding: 'utf8', timeout: 30000 });
+    const havePy = !(py.error || py.status !== 0);
+    const sh = fs.readFileSync(FVM, 'utf8');
+    const a = sh.indexOf("NOMAD_LEAK_GENERIC_RE='");
+    const b = sh.indexOf('echo "[vendor-mac] Исходник Nomad');
+    assert(a !== -1 && b !== -1 && a < b, 'в fetch-vendor-mac.sh пропал блок паттернов / экспорт-фильтра');
+    const work = mkWork('shpol');
+    try {
+      const fnFile = path.join(work, 'fn.sh');
+      fs.writeFileSync(fnFile, sh.slice(a, b));
+      const fwd = (p) => p.replace(/\\/g, '/');
+      // 1. чистые функции решения
+      const rows = [
+        ['local-no-list', '', '', '', 0, ''], ['local-allow-noop', '', '', '', 0, '1'], ['ci-false', 'false', '', '', 0, ''],
+        ['ci-true', 'true', '', '', 0, ''], ['ci-1', '1', '', '', 0, ''], ['gha-TRUE', '', 'TRUE', '', 0, ''], ['hm-release-yes', '', '', 'yes', 0, ''],
+        ['ci-allowed', 'true', '', '', 0, '1'], ['ci-allow-garbage', 'true', '', '', 0, 'maybe'], ['ci-private', 'true', '', '', 1, '']
+      ];
+      const want = {
+        'local-no-list': 'release=0 verdict=warn', 'local-allow-noop': 'release=0 verdict=warn', 'ci-false': 'release=0 verdict=warn',
+        'ci-true': 'release=1 verdict=fatal', 'ci-1': 'release=1 verdict=fatal', 'gha-TRUE': 'release=1 verdict=fatal', 'hm-release-yes': 'release=1 verdict=fatal',
+        'ci-allowed': 'release=1 verdict=allowed', 'ci-allow-garbage': 'release=1 verdict=fatal', 'ci-private': 'release=1 verdict=ok'
+      };
+      const lines = ['set -uo pipefail', '. ' + JSON.stringify(fwd(fnFile))];
+      rows.forEach((x) => {
+        lines.push('if leak_is_release_build ' + JSON.stringify(x[1]) + ' ' + JSON.stringify(x[2]) + ' ' + JSON.stringify(x[3]) + '; then R=1; else R=0; fi');
+        lines.push('echo "ROW ' + x[0] + ' release=$R verdict=$(leak_list_verdict ' + x[4] + ' $R ' + JSON.stringify(x[5]) + ')"');
+      });
+      const p1 = spawnSync('bash', ['-c', lines.join('\n')], { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { MSYS_NO_PATHCONV: '1' }) });
+      const got = {};
+      String(p1.stdout || '').split(/\r?\n/).forEach((l) => { const m = /^ROW (\S+) (.*)$/.exec(l); if (m) got[m[1]] = m[2]; });
+      Object.keys(want).forEach((k) => assert.strictEqual(got[k], want[k], k + ': ' + got[k] + ' | ' + String(p1.stderr).slice(-300)));
+      // 2. nomad_src_sanitize на временном дереве
+      const root = path.join(work, 'root');
+      fs.mkdirSync(path.join(root, 'tools'), { recursive: true });
+      const runSan = (env, tag) => {
+        const src = path.join(work, 'src-' + tag);
+        fs.mkdirSync(path.join(src, 'agent'), { recursive: true });
+        fs.mkdirSync(path.join(src, 'lib[2]'), { recursive: true });
+        fs.writeFileSync(path.join(src, 'pyproject.toml'), '[project]\nname = "x"\nreadme = "README.md"\n');
+        fs.writeFileSync(path.join(src, 'README.md'), '# x\n');
+        fs.writeFileSync(path.join(src, 'LICENSE'), 'MIT\n');
+        fs.writeFileSync(path.join(src, 'agent', 'core.py'), 'print(1)\n');
+        fs.writeFileSync(path.join(src, 'notes.txt'), 'token ' + FAKE_KEY + '\n');
+        fs.writeFileSync(path.join(src, 'lib[2]', 'inner.txt'), 'token ' + FAKE_KEY + '\n');
+        const script = ['set -uo pipefail', 'ROOT=' + JSON.stringify(fwd(root)), 'PY=' + JSON.stringify(havePy ? fwd(String(py.stdout).trim()) : 'python3'),
+          '. ' + JSON.stringify(fwd(fnFile)), 'nomad_src_sanitize ' + JSON.stringify(fwd(src)), 'echo "RC=$?"'].join('\n');
+        const base = Object.assign({}, process.env, { MSYS_NO_PATHCONV: '1', CI: '', GITHUB_ACTIONS: '', HM_RELEASE: '', HM_ALLOW_NO_PRIVATE_LEAK_LIST: '', HM_LEAK_PATTERNS: '', HM_LEAK_PATTERNS_FILE: '' });
+        const r = spawnSync('bash', ['-c', script], { encoding: 'utf8', timeout: 120000, env: Object.assign(base, env) });
+        const out = String(r.stdout || '') + String(r.stderr || '');
+        const m = /RC=(\d+)/.exec(out);
+        return { out, rc: m ? Number(m[1]) : null, notes: fs.existsSync(path.join(src, 'notes.txt')), inner: fs.existsSync(path.join(src, 'lib[2]', 'inner.txt')) };
+      };
+      const local = runSan({}, 'local');
+      assert.strictEqual(local.rc, 0, 'локально без списка: фильтр пройден: ' + local.out.slice(-500));
+      assert(/ВНИМАНИЕ/.test(local.out) && !local.notes, 'локально: предупреждение, общий паттерн работает: ' + local.out.slice(-500));
+      const ci = runSan({ CI: 'true' }, 'ci');
+      assert.strictEqual(ci.rc, 1, 'CI без списка: отказ: ' + ci.out.slice(-600));
+      assert(/FATAL/.test(ci.out) && /HM_ALLOW_NO_PRIVATE_LEAK_LIST/.test(ci.out) && /leak-patterns\.local\.json/.test(ci.out), 'CI: сказано, что делать: ' + ci.out.slice(-600));
+      const rel = runSan({ HM_RELEASE: '1' }, 'rel');
+      assert.strictEqual(rel.rc, 1, 'HM_RELEASE=1 без списка: отказ: ' + rel.out.slice(-400));
+      const allowed = runSan({ CI: 'true', HM_ALLOW_NO_PRIVATE_LEAK_LIST: '1' }, 'allowed');
+      assert.strictEqual(allowed.rc, 0, 'флаг: сборка идёт: ' + allowed.out.slice(-500));
+      assert(/БЕЗ ЛИЧНОГО СПИСКА/.test(allowed.out) && !allowed.notes, 'флаг: баннер и общие паттерны: ' + allowed.out.slice(-500));
+      if (havePy) {
+        const withList = runSan({ CI: 'true', HM_LEAK_PATTERNS: privJson }, 'list');
+        assert.strictEqual(withList.rc, 0, 'список есть: релиз идёт без флага: ' + withList.out.slice(-500));
+        assert(/личных паттернов: 3/.test(withList.out), 'список подхвачен: ' + withList.out.slice(-300));
+      }
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
+  // ---- B3. tools/regen-checksums.js — второй писатель доверенного манифеста ------------------------
+  // Он ничего не качает, поэтому цепочка «подмена по дороге» до него не доходит, но это документированный способ
+  // обновить манифест БЕЗ перекачки — и естественная реакция на FATAL фетчера «подписант сменился». Без проверки
+  // он закрепил бы в манифесте любой файл, лежащий в vendor/apps под нужным именем.
+  ok('regen-checksums.js: манифест не пишется, пока подписи в vendor/apps не подтверждены пином издателя (режим VerifyOnly фетчера): случайный git-setup.exe и неизвестное имя — отказ без записи; unsigned по построению проходят; --check ничего не пишет; обход только явным флагом', () => {
+    needPs();
+    const mkTree = (files) => {
+      const root = mkWork('regen');
+      fs.mkdirSync(path.join(root, 'tools'), { recursive: true });
+      ['regen-checksums.js', 'fetch-vendor.ps1', 'vendor-signers.json'].forEach((n) => fs.copyFileSync(path.join(ROOT, 'tools', n), path.join(root, 'tools', n)));
+      fs.mkdirSync(path.join(root, 'vendor', 'apps'), { recursive: true });
+      Object.keys(files).forEach((n) => fs.writeFileSync(path.join(root, 'vendor', 'apps', n), files[n]));
+      return root;
+    };
+    const run = (root, args) => spawnSync(process.execPath, [path.join(root, 'tools', 'regen-checksums.js')].concat(args || []), { encoding: 'utf8', timeout: 300000, cwd: root });
+    const manifest = (root) => path.join(root, 'vendor', 'checksums.json');
+    const cleanup = [];
+    try {
+      // 1. файл с именем из таблицы, но не подписанный издателем (случайные байты)
+      const bad = mkTree({ 'git-setup.exe': crypto.randomBytes(1000) }); cleanup.push(bad);
+      const r1 = run(bad);
+      assert.notStrictEqual(r1.status, 0, 'случайный git-setup.exe: отказ, а не запись манифеста: ' + r1.stdout + r1.stderr);
+      assert(!fs.existsSync(manifest(bad)), 'манифест не записан');
+      assert(/git-setup\.exe/.test(String(r1.stdout) + String(r1.stderr)), 'названо, какой файл не прошёл: ' + String(r1.stdout).slice(-300) + String(r1.stderr).slice(-300));
+      // 2. имя, которого нет в таблице
+      const unk = mkTree({ 'mystery.exe': crypto.randomBytes(500) }); cleanup.push(unk);
+      const r2 = run(unk);
+      assert.notStrictEqual(r2.status, 0, 'неизвестное имя: отказ');
+      assert(!fs.existsSync(manifest(unk)), 'манифест не записан');
+      // 3. только то, что подписи не имеет по построению, — проходит, манифест записан
+      const okTree = mkTree({ 'chatgpt.vsix': Buffer.from('PK-fake-vsix'), 'JetBrainsMono-Regular.ttf': Buffer.from('fake-ttf-bytes') }); cleanup.push(okTree);
+      const r3 = run(okTree);
+      assert.strictEqual(r3.status, 0, 'unsigned по построению: ' + String(r3.stdout).slice(-400) + String(r3.stderr).slice(-400));
+      const m = JSON.parse(fs.readFileSync(manifest(okTree), 'utf8'));
+      assert.deepStrictEqual(Object.keys(m.files).sort(), ['JetBrainsMono-Regular.ttf', 'chatgpt.vsix'], 'манифест записан');
+      // 4. --check не пишет ничего
+      const chk = mkTree({ 'git-setup.exe': crypto.randomBytes(300) }); cleanup.push(chk);
+      run(chk, ['--check']);
+      assert(!fs.existsSync(manifest(chk)), '--check не пишет манифест');
+      // 5. явный обход: пишет, но громко
+      const skip = mkTree({ 'git-setup.exe': crypto.randomBytes(300) }); cleanup.push(skip);
+      const r5 = run(skip, ['--skip-signer-check']);
+      assert.strictEqual(r5.status, 0, '--skip-signer-check: ' + String(r5.stdout).slice(-300) + String(r5.stderr).slice(-300));
+      assert(fs.existsSync(manifest(skip)), 'с явным обходом манифест пишется');
+      assert(/НЕ ПРОВЕРЕНЫ/.test(String(r5.stdout) + String(r5.stderr)), 'обход назван в журнале громко');
+      // Негативный контроль: прежний regen записал бы манифест на случайном «установщике» — это и была дыра.
+      const src = fs.readFileSync(path.join(ROOT, 'tools', 'regen-checksums.js'), 'utf8');
+      assert(/VerifyOnly/.test(src) && /fetch-vendor\.ps1/.test(src), 'regen зовёт проверку фетчера');
+    } finally { cleanup.forEach((d) => fs.rmSync(d, { recursive: true, force: true })); }
+  });
+
+  ok('личный список паттернов не просочился ни в один отслеживаемый файл репозитория (проверка идёт, если локальный список есть)', () => {
+    const local = process.env.HM_LEAK_PATTERNS_FILE || path.join(ROOT, 'tools', 'leak-patterns.local.json');
+    if (!fs.existsSync(local)) SKIP('личного списка нет (' + path.basename(local) + ') — сверять нечем; на машине владельца он есть');
+    const j = JSON.parse(fs.readFileSync(local, 'utf8').replace(/^﻿/, ''));
+    assert(Array.isArray(j.patterns) && j.patterns.length >= 1, 'в личном списке нет паттернов');
+    const ls = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (ls.error || ls.status !== 0) SKIP('git не отдал список файлов');
+    const files = String(ls.stdout).split(/\r?\n/).filter((f) => f && !/\.(png|jpg|jpeg|gif|ico|woff2?|ttf|zip|gz|7z|exe|dll|pdf|icns|mp4)$/i.test(f));
+    const leaks = [];
+    files.forEach((rel) => {
+      let text;
+      try { text = fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch (e) { return; }
+      j.patterns.forEach((p, i) => {
+        // Совпадение по самому тексту регулярки (так прятался прежний вариант) и по тому, что она находит.
+        if (text.includes(p.re)) leaks.push(rel + ' (паттерн №' + (i + 1) + ', исходник регулярки)');
+        else { try { if (new RegExp(p.re).test(text)) leaks.push(rel + ' (паттерн №' + (i + 1) + ')'); } catch (e) { /* ERE не всегда JS-regex */ } }
+      });
+    });
+    assert.deepStrictEqual(leaks, [], 'личные значения лежат в отслеживаемых файлах: ' + leaks.slice(0, 5).join('; '));
+  });
+
+  // ---- кодировки и синтаксис файлов этого раздела ---------------------------------------------
+  ok('fetch-vendor.ps1 и test/fetch-vendor-harness.ps1: UTF-8 BOM + CRLF и PowerShell-парсер без ошибок; fetch-vendor-mac.sh — LF без BOM и bash -n', () => {
+    [FV, HARNESS].forEach((f) => {
+      const b = fs.readFileSync(f);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, path.basename(f) + ': первые байты — UTF-8 BOM (кириллица в Windows PowerShell 5.1)');
+      const s = b.toString('utf8');
+      assert.strictEqual((s.match(/\r\n/g) || []).length, (s.match(/\n/g) || []).length, path.basename(f) + ': все переводы строки CRLF');
+      if (psAvail) {
+        const cmd = "$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('" + f + "',[ref]$null,[ref]$e);if($e -and $e.Count -gt 0){$e|%{[Console]::Error.WriteLine($_.Message)};exit 3};exit 0";
+        const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(r.status, 0, path.basename(f) + ' ParseFile: ' + (r.stderr || r.stdout || ''));
+      }
+    });
+    const sh = fs.readFileSync(FVM);
+    assert(!(sh[0] === 0xEF && sh[1] === 0xBB && sh[2] === 0xBF), 'fetch-vendor-mac.sh: BOM быть не должно');
+    assert(!sh.includes(Buffer.from('\r\n')), 'fetch-vendor-mac.sh: только LF');
+    if (bashAvail) {
+      const r = spawnSync('bash', ['-n', FVM], { encoding: 'utf8', timeout: 30000 });
+      assert.strictEqual(r.status, 0, 'bash -n: ' + (r.stderr || ''));
+    }
+    const j = fs.readFileSync(SIGNERS);
+    assert(!(j[0] === 0xEF && j[1] === 0xBB && j[2] === 0xBF) && !j.includes(Buffer.from('\r\n')), 'vendor-signers.json: UTF-8 без BOM, LF');
   });
 })();

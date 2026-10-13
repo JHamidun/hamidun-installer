@@ -18,18 +18,28 @@
  * Формат байт-в-байт как у ps1: те же поля, тот же порядок (сортировка по имени),
  * CRLF, отступы. Иначе каждый прогон fetch:vendor давал бы шумный дифф.
  *
- * Запуск:  node tools/regen-checksums.js [--check]
+ * ПОДПИСИ ИЗДАТЕЛЕЙ. Этот скрипт — второй писатель доверенного манифеста (первый — fetch-vendor.ps1).
+ * Он ничего не качает, но естественная реакция на «подписант сменился» у фетчера — пересчитать манифест
+ * здесь, и без проверки он закрепил бы любой файл, лежащий под нужным именем. Поэтому перед ЗАПИСЬЮ он
+ * зовёт `fetch-vendor.ps1 -VerifyOnly`: тот же пин (Authenticode Valid, имя подписанта, корень цепочки в
+ * LocalMachine\Root) по всему vendor/apps, без удаления. Не прошло — отказ (exit 3), манифест не
+ * трогается. Не Windows — проверить нечем, тоже отказ. Обход только явный и громкий: --skip-signer-check.
+ *
+ * Запуск:  node tools/regen-checksums.js [--check] [--skip-signer-check]
  *   --check — не писать, только сказать, разошёлся ли манифест (exit 1 если да).
+ *   --skip-signer-check — записать БЕЗ проверки подписей издателей (в журнале об этом сказано громко).
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const VENDOR = path.join(ROOT, 'vendor');
 const OUT = path.join(VENDOR, 'checksums.json');
 const CHECK = process.argv.includes('--check');
+const SKIP_SIGNER_CHECK = process.argv.includes('--skip-signer-check');
 
 function walkFiles(dir, acc) {
   let ents;
@@ -103,6 +113,27 @@ if (prev) {
 if (CHECK) {
   console.error('\n--check: манифест разошёлся с диском. Почини: node tools/regen-checksums.js');
   process.exit(1);
+}
+// Писать будем — значит, подписи издателей должны быть подтверждены ТЕМ ЖЕ пином, что у фетчера (см. шапку).
+if (SKIP_SIGNER_CHECK) {
+  console.error('\nВНИМАНИЕ: подписи издателей у файлов vendor/apps НЕ ПРОВЕРЕНЫ (--skip-signer-check) —\n' +
+                'манифест заверит всё, что лежит на диске, в том числе подмену.');
+} else {
+  if (process.platform !== 'win32') {
+    console.error('\nОТКАЗ: подписи установщиков Windows проверяет fetch-vendor.ps1 (Windows PowerShell), на этой платформе\n' +
+                  'проверить нечем. Пересчёт без проверки — только осознанно: --skip-signer-check.');
+    process.exit(3);
+  }
+  console.log('\nПроверка подписей издателей (fetch-vendor.ps1 -VerifyOnly)...');
+  const ps = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(__dirname, 'fetch-vendor.ps1'), '-VerifyOnly'], { encoding: 'utf8', timeout: 15 * 60 * 1000 });
+  process.stdout.write(String(ps.stdout || ''));
+  if (ps.error || ps.status !== 0) {
+    process.stderr.write(String(ps.stderr || ''));
+    console.error('\nОТКАЗ: подписи издателей не подтверждены' + (ps.error ? ' (' + ps.error.message + ')' : '') +
+                  ' — манифест НЕ записан. Полный прогон fetch-vendor.ps1 перекачает и проверит файлы.');
+    process.exit(3);
+  }
 }
 fs.writeFileSync(OUT, json);
 console.log('\nЗаписано: ' + OUT);

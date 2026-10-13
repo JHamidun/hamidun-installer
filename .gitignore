@@ -42,3 +42,7 @@ _bak-*/
 *.key
 # Временный набор vendor, который tools/build-lite.js собирает для lite-издания и убирает в finally.
 vendor-lite/
+
+# Личные паттерны экспорт-фильтра nomad-src (имя владельца, его адреса и домены): ЛОКАЛЬНЫЙ файл на машине сборки.
+# Репозиторий публичный, поэтому значения в нём лежать не должны (tools/fetch-vendor*.{ps1,sh}: Get-HmLeakPatterns / leak_patterns_load).
+tools/leak-patterns.local.json
