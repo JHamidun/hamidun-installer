@@ -977,6 +977,13 @@ console.log('== Задача 2: десктоп Claude/ChatGPT — secure-cache d
 
 const DT_CLAUDE_PS1 = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'claude-desktop.ps1'), 'utf8');
 const DT_CHATGPT_PS1 = () => fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'chatgpt-desktop.ps1'), 'utf8');
+// Гейт подписи десктоп-скриптов — ОБЩАЯ функция примитива (Test-HmTrustedSigner в _deelev.ps1): своих копий у них
+// больше нет (копии расходились с общей функцией — S-11, пин «Anthropic, PBC» не совпадал никогда). Проверки цепочки,
+// корня, O= и EKU живут там; скрипты обязаны её звать с точным O= и не ослаблять.
+const DT_SIGNER_FN = () => {
+  const d = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), 'utf8');
+  return d.slice(d.indexOf('function Get-HmMachineRootThumbprints'), d.indexOf('# --- УБОРКА ОСИРОТЕВШИХ'));
+};
 const DT_CLAUDE_SH = () => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'claude-desktop.sh'), 'utf8');
 const DT_CHATGPT_SH = () => fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'chatgpt-desktop.sh'), 'utf8');
 
@@ -1002,18 +1009,22 @@ ok('claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпи�
   assert(/\$installer = Join-Path \$cache/.test(s), 'файл установщика лежит в secure-cache ($cache), не в %TEMP%');
   assert(/-OutFile \$installer/.test(s), 'Invoke-WebRequest пишет именно в secure-cache-файл');
   assert(!/-OutFile[^\n]*\$env:(TEMP|TMP)/i.test(s), 'НЕТ скачивания в user-writable %TEMP%/%TMP%');
-  // НАДЁЖНЫЙ гейт: цепочка к МАШИННОМУ корню (не CurrentUser), точное O=, Code Signing EKU.
-  assert(/Test-HmSignerTrusted/.test(s), 'подпись проверяется надёжной функцией Test-HmSignerTrusted');
-  assert(/Get-AuthenticodeSignature/.test(s) && /\.Status -ne 'Valid'/.test(s), 'Status=Valid (хеш файла не подменён)');
-  assert(/X509Chain/.test(s) && /StoreName\]::Root/.test(s) && /StoreLocation\]::LocalMachine/.test(s),
+  // НАДЁЖНЫЙ гейт: цепочка к МАШИННОМУ корню (не CurrentUser), точное O=, Code Signing EKU — в общей функции
+  // примитива; скрипт обязан её звать с точным O= и не держать собственной (ослабленной) копии.
+  const g = DT_SIGNER_FN();
+  assert(/\. \(Join-Path \$PSScriptRoot '_deelev\.ps1'\)/.test(s), 'скрипт подключает примитив с общей проверкой подписи');
+  assert(/Test-HmTrustedSigner -Path \$installer -ExpectedOrg \$PUBLISHER_O/.test(s), 'подпись проверяется общей функцией Test-HmTrustedSigner с точным O=');
+  assert(!/function Test-HmSignerTrusted/.test(s) && !/X509Chain/.test(s) && !/NoFlag/.test(s), 'своей копии проверки подписи в скрипте нет (копии расходились с общей — S-11)');
+  assert(/Get-AuthenticodeSignature/.test(g) && /\.Status -ne 'Valid'/.test(g), 'Status=Valid (хеш файла не подменён)');
+  assert(/X509Chain/.test(g) && /StoreName\]::Root/.test(g) && /StoreLocation\]::LocalMachine/.test(g),
     'строит X509Chain и требует корень в LocalMachine\\Root (не доверяет CurrentUser-корням)');
-  assert(/SubjectName\.Format\(\$true\)/.test(s) && /'Anthropic, PBC'/.test(s), "точное O='Anthropic, PBC' из RDN (не подстрока Subject)");
-  assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(s), 'требует EKU Code Signing');
+  assert(/SubjectName\.Format\(\$true\)/.test(g) && /'Anthropic, PBC'/.test(s), "точное O='Anthropic, PBC' из RDN (не подстрока Subject)");
+  assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(g), 'требует EKU Code Signing');
   // НЕТ spoofable substring-пина издателя (старый '-notmatch $PUBLISHER' убран).
   assert(!/-notmatch \$PUBLISHER/.test(s) && !/\$subject -notmatch/.test(s), 'НЕТ подстрочного -notmatch пина издателя (spoofable)');
   // ГЕЙТ ПОРЯДКА: надёжная проверка ДО запуска ТОГО ЖЕ $installer (без ре-резолва).
-  assertOrder(s, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
-    'Test-HmSignerTrusted($installer) ИДЁТ ДО Start-Process $installer (проверяем тот же бинарь)');
+  assertOrder(s, 'Test-HmTrustedSigner -Path $installer', 'Start-Process -FilePath $installer',
+    'Test-HmTrustedSigner($installer) ИДЁТ ДО Start-Process $installer (проверяем тот же бинарь)');
   assert(/Start-Process -FilePath \$installer -WorkingDirectory \$cache/.test(s), 'запуск ИЗ защищённого кэша (CWD=кэш, run-from-protected)');
   assert(/exit 120/.test(s), 'нет сети/подпись не прошла → graceful skip 120');
   assert(/Test-ClaudeDesktopInstalled/.test(s), 'идемпотентность: детект уже установленного');
@@ -1030,11 +1041,14 @@ ok('claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпи�
 //     fallback) + НАДЁЖНАЯ подпись winget.exe (chain→machine-root + exact O=) + --exact.
 ok('chatgpt-desktop.ps1: winget PublisherId 8wekyb3d8bbwe + БЕЗ Get-Command fallback; надёжная подпись winget.exe (chain→machine-root + O=Microsoft) ДО запуска; --exact; exit 120', () => {
   const s = DT_CHATGPT_PS1();
-  assert(/Test-HmSignerTrusted/.test(s), 'подпись winget.exe проверяется надёжной функцией');
-  assert(/Get-AuthenticodeSignature/.test(s) && /\.Status -ne 'Valid'/.test(s), 'Status=Valid (хеш winget.exe не подменён)');
-  assert(/X509Chain/.test(s) && /StoreLocation\]::LocalMachine/.test(s), 'chain к корню в LocalMachine\\Root (не CurrentUser)');
-  assert(/SubjectName\.Format\(\$true\)/.test(s) && /'Microsoft Corporation'/.test(s), "точное O='Microsoft Corporation' из RDN");
-  assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(s), 'требует EKU Code Signing');
+  const g = DT_SIGNER_FN();
+  assert(/\. \(Join-Path \$PSScriptRoot '_deelev\.ps1'\)/.test(s), 'скрипт подключает примитив с общей проверкой подписи (раньше его не грузил)');
+  assert(/Test-HmTrustedSigner -Path \$winget -ExpectedOrg \$PUBLISHER_O/.test(s), 'подпись winget.exe проверяется общей функцией с точным O=');
+  assert(!/function Test-HmSignerTrusted/.test(s) && !/X509Chain/.test(s) && !/NoFlag/.test(s), 'своей копии проверки подписи в скрипте нет (копии расходились с общей — S-11)');
+  assert(/Get-AuthenticodeSignature/.test(g) && /\.Status -ne 'Valid'/.test(g), 'Status=Valid (хеш winget.exe не подменён)');
+  assert(/X509Chain/.test(g) && /StoreLocation\]::LocalMachine/.test(g), 'chain к корню в LocalMachine\\Root (не CurrentUser)');
+  assert(/SubjectName\.Format\(\$true\)/.test(g) && /'Microsoft Corporation'/.test(s), "точное O='Microsoft Corporation' из RDN");
+  assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(g), 'требует EKU Code Signing');
   assert(!/-notmatch \$PUBLISHER\b/.test(s), 'НЕТ подстрочного -notmatch пина издателя (spoofable)');
   // winget-резолв: пин PublisherId 8wekyb3d8bbwe (полное имя пакета), без Get-Command fallback.
   assert(/8wekyb3d8bbwe/.test(s), 'пин PublisherId 8wekyb3d8bbwe (не подстрока DesktopAppInstaller_)');
@@ -1043,7 +1057,7 @@ ok('chatgpt-desktop.ps1: winget PublisherId 8wekyb3d8bbwe + БЕЗ Get-Command f
   assert(/--exact/.test(s), 'winget install --exact (нет подмены id по совпадению/монике)');
   // winget запускается через Process.Start с потолком времени (не `& $winget`): проверка
   // подписи обязана стоять ДО запуска — сравниваем с ВЫЗОВОМ проверки, а не с объявлением.
-  assertOrder(s, 'Test-HmSignerTrusted -Path $winget', '[System.Diagnostics.Process]::Start($psi)',
+  assertOrder(s, 'Test-HmTrustedSigner -Path $winget', '[System.Diagnostics.Process]::Start($psi)',
     'подпись winget.exe проверяется ДО его запуска');
   assert(/\$psi\.FileName = \$winget/.test(s), 'запускается ровно тот winget, чья подпись проверена');
   assert(/--source msstore/.test(s) && /9NT1R1C2HH7J/.test(s), 'ставит из Microsoft Store (Store ID)');
@@ -1095,7 +1109,7 @@ ok('chatgpt-desktop.sh: абсолютные codesign/spctl (require) + ТОЧН
 ok('grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи', () => {
   const cps = DT_CLAUDE_PS1();
   // Windows Claude: единственный запуск скачанного бинаря — Start-Process $installer, и он ПОСЛЕ надёжной проверки.
-  assertOrder(cps, 'Test-HmSignerTrusted -Path $installer', 'Start-Process -FilePath $installer',
+  assertOrder(cps, 'Test-HmTrustedSigner -Path $installer', 'Start-Process -FilePath $installer',
     'claude-desktop.ps1: установщик не запускается до надёжного гейта подписи');
   // Никаких -OutFile в TEMP.
   [DT_CLAUDE_PS1(), DT_CHATGPT_PS1()].forEach((s) => {
@@ -1113,15 +1127,19 @@ ok('grep-инвариант: нет download-в-user-writable + нет запу�
 //      Subject/authority (Win: chain→LocalMachine\Root + exact O=; Mac: точный Team ID + require spctl).
 ok('6b: нет spoofable substring-пина подписи + есть проверяемая криптоцепочка (все 4 desktop-скрипта)', () => {
   // --- Windows: X509Chain до корня в LocalMachine\Root + точное O= из RDN + Code Signing EKU ---
+  // Криптоцепочка живёт в общей функции примитива (Test-HmTrustedSigner), скрипты обязаны звать её с точным O=.
+  const shared = DT_SIGNER_FN();
   [DT_CLAUDE_PS1(), DT_CHATGPT_PS1()].forEach((s) => {
     assert(!/-notmatch \$PUBLISHER\b/.test(s), 'PS: нет "-notmatch $PUBLISHER" как гейта (spoofable substring)');
     assert(!/\$subject -notmatch/.test(s), 'PS: нет "$subject -notmatch ..." (substring по всему Subject)');
-    assert(/X509Chain/.test(s), 'PS: строит X509Chain (проверяемая криптоцепочка)');
-    assert(/StoreLocation\]::LocalMachine/.test(s) && /StoreName\]::Root/.test(s),
-      'PS: корень требуется в LocalMachine\\Root (не доверяет отравляемому CurrentUser\\Root)');
-    assert(/SubjectName\.Format\(\$true\)/.test(s), 'PS: парсит O= из RDN (не подстрока Subject)');
-    assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(s), 'PS: требует Code Signing EKU');
+    assert(/Test-HmTrustedSigner -Path \$\w+ -ExpectedOrg \$PUBLISHER_O/.test(s), 'PS: гейт — общая проверяемая функция с точным O=');
+    assert(!/X509Chain/.test(s), 'PS: своей копии цепочки в скрипте нет');
   });
+  assert(/X509Chain/.test(shared), 'PS: общая функция строит X509Chain (проверяемая криптоцепочка)');
+  assert(/StoreLocation\]::LocalMachine/.test(shared) && /StoreName\]::Root/.test(shared),
+    'PS: корень требуется в LocalMachine\\Root (не доверяет отравляемому CurrentUser\\Root)');
+  assert(/SubjectName\.Format\(\$true\)/.test(shared), 'PS: парсит O= из RDN (не подстрока Subject)');
+  assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(shared), 'PS: требует Code Signing EKU');
   // --- macOS: точный Team ID пин + require spctl (нет fail-open) ---
   [DT_CLAUDE_SH(), DT_CHATGPT_SH()].forEach((s) => {
     assert(/(Q6L2SF6YDW|2DC432GLL2)/.test(s) && /certificate leaf\[subject\.OU\]/.test(s) && /-R "=/.test(s), 'mac: Team ID+bundle пин через нативный designated requirement -R (codesign оценивает крипто, не парсинг -dv)');
@@ -23050,5 +23068,907 @@ ok('config.json в репозитории без сборочных маркер
         'контроль (' + out.runtime + '): с подменённым fs снос дерева с .asar не проходит — original-fs нужен');
     }
     skipIfVolumeGaps(assertSafeRuntime(out, out.runtime));
+  });
+})();
+
+// ===========================================================================
+// Волна безопасности u8 (S-7…S-11): гейты сборки и подписи не должны быть пустыми.
+//
+// Независимое ревью нашло пять мест, где проверка либо молчала, либо отвечала «зелёным», когда ничего
+// не проверила, либо отказывала настоящему:
+//   S-11  Test-HmTrustedSigner строил цепочку на «сегодня» и отвергал КАЖДЫЙ настоящий установщик с
+//         просроченным листом (подписи с меткой времени при этом Valid) — онлайн-фолбэки git/node/
+//         cursor/python были вечно красными;
+//   S-7   verify-packed-vendor печатал «проверено файлов 0» и выходил с нулём, audit-pack говорил
+//         «связность в порядке» на пустом каталоге, preflight шёл дальше, когда аудит падал без вердикта;
+//   S-8   хук подписи держал чёрный список по пути, а итоговый exe не проверялся на подпись вовсе;
+//   S-9   CI: права токена по умолчанию, плавающие теги действий, npm install в джобах с секретами;
+//   S-10  .gitignore без секретов, MAC-SIGNING.md с устаревшим «Windows не подписан».
+// Каждая проверка исполняет настоящий код (PS 5.1, дочерние процессы, временные каталоги), а не ищет в
+// нём слова; у каждой — отрицательный контроль: мутант старого поведения, который тест обязан краснить.
+//
+// Переменные окружения, которых нет в репозитории (пути с машины разработчика сюда не пишем):
+//   HM_TEST_VENDOR_APPS — каталог с вшитыми установщиками (по умолчанию <repo>/vendor/apps);
+//   HM_TEST_SIGNED_EXE  — exe, подписанный нашим сертификатом (по умолчанию <repo>/release/…).
+// Нет файлов — соответствующая проверка честно пропускается (SKIP), а не зеленеет.
+// ===========================================================================
+(function () {
+  console.log('\n== u8: гейты сборки и подписи (S-7…S-11) ==');
+  const cp = require('child_process');
+  const crypto = require('crypto');
+  const jsNoComments = (t) => String(t).split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
+  const onWin = process.platform === 'win32';
+  const PSEXE = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const T = (n) => path.join(ROOT, 'tools', n);
+  const cleanEnv = (extra) => {
+    const e = Object.assign({}, process.env);
+    delete e.HM_WIN_SIGN; delete e.HM_WIN_CERT_SHA1; delete e.CI; delete e.GITHUB_ACTIONS;
+    return Object.assign(e, extra || {});
+  };
+  const runNode = (args, opts) => cp.spawnSync(process.execPath, args, Object.assign({ encoding: 'utf8', timeout: 600000, env: cleanEnv() }, opts || {}));
+  const text = (r) => String(r.stdout || '') + String(r.stderr || '');
+  const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
+  const rmrf = (d) => { try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { /* мусор во временной папке не критичен */ } };
+  const put = (root, rel, body) => { const p = path.join(root, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, body); return p; };
+  const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+  const writeManifest = (root, files) => fs.writeFileSync(path.join(root, 'checksums.json'), JSON.stringify({ algorithm: 'sha256', files }));
+  const pkgJson = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+  // ---- A. Test-HmTrustedSigner (S-11) --------------------------------------------------------------
+  const HARNESS = path.join(ROOT, 'test', 'signer-trust.ps1');
+  const DEELEV = path.join(ROOT, 'scripts', 'windows', '_deelev.ps1');
+  const HERMETIC_IDS = [
+    'expired-leaf-valid-status-trusted', 'unexpired-leaf-valid-status-trusted',
+    'status-NotSigned-rejected', 'status-HashMismatch-rejected', 'status-UnknownError-rejected', 'status-NotTrusted-rejected',
+    'status-NotTimeValid-rejected', 'status-Incompatible-rejected', 'status-NotSupportedFileFormat-rejected',
+    'root-not-in-machine-store-rejected', 'empty-machine-store-rejected', 'machine-store-unreadable-rejected', 'foreign-root-rejected',
+    'wrong-eku-rejected', 'no-eku-extension-rejected',
+    'subject-pin-wrong-rejected', 'subject-pin-right-trusted', 'org-pin-wrong-rejected', 'org-pin-right-trusted',
+    'expired-leaf-expired-tsa-certificate-trusted', 'expired-leaf-without-timestamp-rejected',
+    'expired-leaf-timestamp-root-not-in-machine-store-rejected', 'expired-leaf-timestamp-wrong-eku-rejected', 'unexpired-leaf-needs-no-timestamp-trusted',
+    'no-signer-certificate-rejected', 'signature-unreadable-rejected', 'missing-file-rejected',
+    'chain-helper-expired-leaf-builds-to-root', 'chain-helper-production-flags-trust-nothing-extra',
+  ];
+  // Срок ЛЮБОГО звена цепочки, а не только листа (находка ревью по S-11): годный лист под просроченным
+  // промежуточным УЦ или корнем, лист, ещё не вступивший в силу, и помощник, не сообщивший про срок.
+  const WINDOW_IDS = [
+    'valid-leaf-expired-intermediate-rogue-tsa-rejected', 'valid-leaf-expired-intermediate-without-timestamp-rejected', 'valid-leaf-expired-intermediate-machine-tsa-trusted',
+    'valid-leaf-expired-root-rogue-tsa-rejected', 'valid-leaf-expired-root-machine-tsa-trusted',
+    'valid-chain-with-valid-intermediate-needs-no-timestamp-trusted',
+    'not-yet-valid-leaf-rogue-tsa-rejected', 'not-yet-valid-leaf-without-timestamp-rejected', 'not-yet-valid-leaf-machine-tsa-trusted',
+    'window-unknown-fails-closed', 'chain-helper-window-flags-every-element',
+  ];
+  // Пин O= со значением, которое .NET берёт в кавычки (запятая в «Anthropic, PBC»): сравнивается значение, а не обрамление.
+  const ORG_IDS = ['org-pin-quoted-comma-right-trusted', 'org-pin-quoted-comma-prefix-rejected', 'org-pin-literal-quotes-not-confused-with-framing'];
+  // Пин отпечатка листа (-ExpectedThumbprint; claude-desktop.ps1 держит его выключенным, но включить обязан уметь).
+  const THUMB_IDS = ['thumbprint-pin-right-trusted', 'thumbprint-pin-formatted-trusted', 'thumbprint-pin-wrong-rejected', 'thumbprint-pin-without-hex-digits-rejected'];
+  const ALL_HERMETIC = HERMETIC_IDS.length + WINDOW_IDS.length + ORG_IDS.length + THUMB_IDS.length;
+  function harness(mode, mutant, extra) {
+    if (!onWin) SKIP('нужен Windows PowerShell 5.1 (Get-AuthenticodeSignature, X509Chain)');
+    const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', HARNESS, '-DeelevPath', DEELEV, '-Mode', mode];
+    if (mutant) args.push('-Mutant', mutant);
+    const r = cp.spawnSync(PSEXE, args.concat(extra || []), { encoding: 'utf8', timeout: 900000 });
+    const cases = {};
+    for (const line of String(r.stdout || '').split(/\r?\n/)) {
+      const m = /^CASE\t([^\t]+)\t(PASS|FAIL)\t?(.*)$/.exec(line);
+      if (m) cases[m[1]] = { pass: m[2] === 'PASS', detail: m[3] };
+    }
+    const skip = /^SKIP\t(.*)$/m.exec(String(r.stdout || ''));
+    const smp = /^SAMPLES\t(\d+)/m.exec(String(r.stdout || ''));
+    return { cases, skip: skip ? skip[1] : '', samples: smp ? Number(smp[1]) : 0, raw: text(r), status: r.status };
+  }
+  let hermeticBase = null;
+  const hermetic = (mutant) => {
+    if (!mutant && hermeticBase) return hermeticBase;
+    const r = harness('hermetic', mutant);
+    if (r.skip) SKIP(r.skip);
+    assert(Object.keys(r.cases).length >= ALL_HERMETIC, 'стенд не выдал набор проверок (' + Object.keys(r.cases).length + '): ' + r.raw.slice(-600));
+    if (!mutant) hermeticBase = r;
+    return r;
+  };
+  const vendorApps = () => {
+    const d = process.env.HM_TEST_VENDOR_APPS || path.join(ROOT, 'vendor', 'apps');
+    return fs.existsSync(d) ? ['-VendorDir', d] : [];
+  };
+
+  ok('Test-HmTrustedSigner: подпись Valid при ПРОСРОЧЕННОМ листе — доверие только с меткой времени от TSA, которому доверяет машина; другой статус, корень не из LocalMachine\\Root, нет EKU Code Signing, чужой пин — отказ (PS 5.1, своя цепочка в памяти)', () => {
+    const r = hermetic();
+    const bad = HERMETIC_IDS.filter((id) => !r.cases[id] || !r.cases[id].pass);
+    assert.deepStrictEqual(bad, [], 'не прошли: ' + bad.map((id) => id + ' [' + ((r.cases[id] || {}).detail || 'нет в выводе') + ']').join('; '));
+  });
+
+  ok('Test-HmTrustedSigner: вне срока ЛЮБОЕ звено цепочки (годный лист под просроченным промежуточным УЦ или корнем, лист ещё не вступил в силу) — доверие только по метке времени от машинного TSA, иначе отказ; помощник без ответа про срок — отказ', () => {
+    const r = hermetic();
+    const bad = WINDOW_IDS.filter((id) => !r.cases[id] || !r.cases[id].pass);
+    assert.deepStrictEqual(bad, [], 'не прошли: ' + bad.map((id) => id + ' [' + ((r.cases[id] || {}).detail || 'нет в выводе') + ']').join('; '));
+  });
+
+  ok('Test-HmTrustedSigner: пины издателя — O= сравнивает ЗНАЧЕНИЕ, а не обрамление («Anthropic, PBC» с запятой), настоящие кавычки в значении не путаются с обрамлением, отпечаток листа не зависит от регистра и разделителей; наивный Trim(\'"\') и пропуск пинов краснят свои случаи', () => {
+    const r = hermetic();
+    const bad = ORG_IDS.concat(THUMB_IDS).filter((id) => !r.cases[id] || !r.cases[id].pass);
+    assert.deepStrictEqual(bad, [], 'не прошли: ' + bad.map((id) => id + ' [' + ((r.cases[id] || {}).detail || 'нет в выводе') + ']').join('; '));
+    const kills = {
+      'no-org-unquote': ['org-pin-quoted-comma-right-trusted', 'org-pin-literal-quotes-not-confused-with-framing'],
+      'org-trim-quotes': ['org-pin-literal-quotes-not-confused-with-framing'],
+      'no-thumbprint-pin': ['thumbprint-pin-wrong-rejected', 'thumbprint-pin-without-hex-digits-rejected'],
+    };
+    for (const [mutant, ids] of Object.entries(kills)) {
+      const m = harness('hermetic', mutant);
+      assert(!/МУТАНТ НЕ ПРИМЕНИЛСЯ/.test(m.raw), 'мутант ' + mutant + ' не нашёл что менять: ' + m.raw.slice(-300));
+      assert(Object.keys(m.cases).length >= ALL_HERMETIC, 'мутант ' + mutant + ': стенд не отработал: ' + m.raw.slice(-300));
+      const alive = ids.filter((id) => !m.cases[id] || m.cases[id].pass);
+      assert.deepStrictEqual(alive, [], 'мутант «' + mutant + '» ПРОШЁЛ незамеченным в случаях: ' + alive.join(', '));
+    }
+  });
+
+  // Мутант = ровно та поломка, которую ловит проверка. Если он не краснит свои случаи, проверка — украшение.
+  const MUTANT_KILLS = {
+    'old-flags': ['expired-leaf-valid-status-trusted', 'chain-helper-expired-leaf-builds-to-root', 'subject-pin-right-trusted', 'org-pin-right-trusted'],
+    'no-anchor': ['root-not-in-machine-store-rejected', 'empty-machine-store-rejected', 'foreign-root-rejected'],
+    'any-status': ['status-NotSigned-rejected', 'status-HashMismatch-rejected', 'status-UnknownError-rejected', 'status-NotTrusted-rejected',
+      'status-NotTimeValid-rejected', 'status-Incompatible-rejected', 'status-NotSupportedFileFormat-rejected'],
+    'no-eku': ['no-eku-extension-rejected'],
+    'no-subject-pin': ['subject-pin-wrong-rejected'],
+    'no-org-pin': ['org-pin-wrong-rejected'],
+    'no-tsa-anchor': ['expired-leaf-timestamp-root-not-in-machine-store-rejected', 'valid-leaf-expired-intermediate-rogue-tsa-rejected'],
+    'no-tsa-required': ['expired-leaf-without-timestamp-rejected', 'expired-leaf-timestamp-root-not-in-machine-store-rejected', 'expired-leaf-timestamp-wrong-eku-rejected',
+      'valid-leaf-expired-intermediate-rogue-tsa-rejected', 'not-yet-valid-leaf-rogue-tsa-rejected'],
+  };
+  ok('Test-HmTrustedSigner: отрицательные контроли — старые флаги цепочки, снятая привязка к машинному корню, снятая проверка метки времени, статуса, EKU и пинов краснят свои случаи', () => {
+    hermetic(); // SKIP вне Windows
+    const runs = {};
+    for (const [mutant, kills] of Object.entries(MUTANT_KILLS)) {
+      const r = harness('hermetic', mutant);
+      runs[mutant] = r;
+      assert(!/МУТАНТ НЕ ПРИМЕНИЛСЯ/.test(r.raw), 'мутант ' + mutant + ' не нашёл что менять в функции — проверка ничего не доказывает: ' + r.raw.slice(-300));
+      assert(Object.keys(r.cases).length >= ALL_HERMETIC, 'мутант ' + mutant + ': стенд не отработал: ' + r.raw.slice(-400));
+      const alive = kills.filter((id) => !r.cases[id] || r.cases[id].pass);
+      assert.deepStrictEqual(alive, [], 'мутант «' + mutant + '» ПРОШЁЛ незамеченным в случаях: ' + alive.join(', '));
+    }
+    // Контроль к контролю: мутант старых флагов ломает только просроченный лист, непросроченный остаётся доверенным.
+    assert.strictEqual(runs['old-flags'].cases['unexpired-leaf-valid-status-trusted'].pass, true, 'непросроченный лист обязан оставаться доверенным и со старыми флагами');
+  });
+
+  // Мутанты срока звеньев: каждый возвращает ровно ту поломку, из-за которой утёкший ключ просроченного УЦ плюс
+  // отравленный корень TSA в HKCU проходили гейт (срок смотрели по одному листу).
+  const WINDOW_MUTANT_KILLS = {
+    'leaf-only-window': ['valid-leaf-expired-intermediate-rogue-tsa-rejected', 'valid-leaf-expired-intermediate-without-timestamp-rejected',
+      'valid-leaf-expired-root-rogue-tsa-rejected', 'chain-helper-window-flags-every-element'],
+    'no-root-in-window': ['valid-leaf-expired-root-rogue-tsa-rejected', 'chain-helper-window-flags-every-element'],
+    'no-notbefore-clause': ['not-yet-valid-leaf-rogue-tsa-rejected', 'not-yet-valid-leaf-without-timestamp-rejected', 'chain-helper-window-flags-every-element'],
+    'no-notafter-clause': ['expired-leaf-without-timestamp-rejected', 'valid-leaf-expired-intermediate-rogue-tsa-rejected', 'chain-helper-window-flags-every-element'],
+    'window-fail-open': ['window-unknown-fails-closed'],
+  };
+  ok('Test-HmTrustedSigner: отрицательные контроли срока звеньев — срок только у листа, без корня, без NotBefore, без NotAfter, без отказа в сторону строгости краснят свои случаи', () => {
+    hermetic(); // SKIP вне Windows
+    for (const [mutant, kills] of Object.entries(WINDOW_MUTANT_KILLS)) {
+      const r = harness('hermetic', mutant);
+      assert(!/МУТАНТ НЕ ПРИМЕНИЛСЯ/.test(r.raw), 'мутант ' + mutant + ' не нашёл что менять в функции — проверка ничего не доказывает: ' + r.raw.slice(-300));
+      assert(Object.keys(r.cases).length >= ALL_HERMETIC, 'мутант ' + mutant + ': стенд не отработал: ' + r.raw.slice(-400));
+      const alive = kills.filter((id) => !r.cases[id] || r.cases[id].pass);
+      assert.deepStrictEqual(alive, [], 'мутант «' + mutant + '» ПРОШЁЛ незамеченным в случаях: ' + alive.join(', '));
+    }
+  });
+
+  ok('Test-HmTrustedSigner: НАСТОЯЩИЕ файлы — Valid с просроченным листом (системные exe Windows, вшитые установщики) принимаются, чужой пин отвергается, пин python.org из pydeps.ps1 совпадает с подписантом', () => {
+    const r = harness('real', '', vendorApps());
+    if (!r.samples) SKIP('нет ни одного файла со статусом Valid и просроченным листом (ни системных, ни в vendor/apps) — доказывать не на чем');
+    const ids = Object.keys(r.cases);
+    assert(ids.length >= 2 * r.samples, 'стенд не выдал проверок на ' + r.samples + ' образцов: ' + r.raw.slice(-400));
+    const bad = ids.filter((id) => !r.cases[id].pass);
+    assert.deepStrictEqual(bad, [], 'настоящие файлы: ' + bad.map((id) => id + ' [' + r.cases[id].detail + ']').join('; '));
+    // Есть вшитый python-setup.exe с просроченным листом — пин, который реально передаёт pydeps.ps1, обязан совпасть с его подписантом.
+    const va = vendorApps();
+    if (va.length && fs.existsSync(path.join(va[1], 'python-setup.exe')) && r.cases['real-expired-leaf-python-setup.exe-trusted']) {
+      assert(r.cases['real-python-setup-pydeps-pin-matches-signer'] && r.cases['real-python-setup-pydeps-pin-matches-signer'].pass, 'пин pydeps.ps1 «Python Software Foundation» не совпал с подписантом python-setup.exe');
+    }
+  });
+
+  ok('Test-HmTrustedSigner: старое поведение (цепочка на «сегодня» без IgnoreNotTimeValid) отвергает те же настоящие файлы с NotTimeValid — предпосылка S-11 воспроизводится', () => {
+    const r = harness('real', 'old-flags', vendorApps());
+    if (!r.samples) SKIP('нет образца со статусом Valid и просроченным листом — воспроизводить нечем');
+    const rejected = Object.keys(r.cases).filter((id) => /-trusted$/.test(id) && !r.cases[id].pass && /NotTimeValid/.test(r.cases[id].detail));
+    assert(rejected.length >= 1, 'старая цепочка обязана отвергать просроченный лист с NotTimeValid: ' + r.raw.slice(-500));
+  });
+
+  ok('_deelev.ps1: гейт подписи сохранил привязку к LocalMachine\\Root, EKU и пины, не получил AllowUnknownCertificateAuthority; сигнатура и вызовы git/node/cursor/pydeps прежние', () => {
+    const s = fs.readFileSync(DEELEV, 'utf8');
+    const fn = s.slice(s.indexOf('function Test-HmTrustedSigner'), s.indexOf('# --- УБОРКА ОСИРОТЕВШИХ'));
+    assert(fn.length > 500, 'функция найдена');
+    assert(/\[Parameter\(Mandatory = \$true\)\]\[string\]\$Path,\s+\[string\]\$ExpectedOrg = '',\s+\[string\]\$ExpectedSubjectMatch = ''/.test(fn), 'сигнатура прежняя');
+    assert(/Get-AuthenticodeSignature -LiteralPath \$Path/.test(fn) && /\.Status -ne 'Valid'/.test(fn), 'Status=Valid по-прежнему обязателен');
+    assert(/Get-HmSignerChainRoot -Cert \$cert/.test(fn) && /Get-HmMachineRootThumbprints/.test(fn), 'корень цепочки сверяется с машинным стором');
+    assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(fn) && /\$ExpectedSubjectMatch -and/.test(fn) && /\$org -ne \$ExpectedOrg/.test(fn), 'EKU и оба пина на месте');
+    assert(/\$sig\.TimeStamperCertificate/.test(fn) && /Get-HmSignerChainRoot -Cert \$tsCert -Eku '1\.3\.6\.1\.5\.5\.7\.3\.8'/.test(fn) && /\$machineRoots -notcontains \[string\]\$tsAnchor\.Root\.Thumbprint/.test(fn),
+      'просроченный лист принимается только по метке времени от TSA, чей корень лежит в LocalMachine\\Root');
+    const helpers = s.slice(s.indexOf('function Get-HmMachineRootThumbprints'), s.indexOf('function Test-HmTrustedSigner'));
+    assert(/StoreName\]::Root/.test(helpers) && /StoreLocation\]::LocalMachine/.test(helpers), 'машинные корни читаются из LocalMachine\\Root');
+    assert(/IgnoreNotTimeValid -bor \$ExtraFlags/.test(helpers), 'срок годности не оценивается «на сегодня»');
+    assert(!/AllowUnknownCertificateAuthority/.test(codeOnly(helpers)), 'боевой путь не доверяет неизвестному центру сертификации (это только подставка теста)');
+    // Корни МАШИНЫ читаются из одного места и только из LocalMachine\Root: CurrentUser\Root (его HKCU-ветку пишет
+    // любой процесс пользователя без UAC) в список не попадает ни обходом, ни вторым обращением к стору, ни
+    // диском Cert:. Раньше тут проверялось лишь ПРИСУТСТВИЕ LocalMachine — добавленный перебор CurrentUser
+    // оставался незамеченным (находка ревью).
+    const mrCode = codeOnly(s.slice(s.indexOf('function Get-HmMachineRootThumbprints'), s.indexOf('function Get-HmSignerChainRoot')));
+    assert(mrCode.length > 150, 'функция машинных корней найдена');
+    assert(!/CurrentUser/i.test(mrCode) && !/Cert:\\/i.test(mrCode) && !/certutil/i.test(mrCode), 'машинные корни не читаются из CurrentUser, диска Cert: и certutil');
+    assert.strictEqual((mrCode.match(/X509Store\b/g) || []).length, 1, 'ровно одно обращение к стору сертификатов');
+    assert.strictEqual((mrCode.match(/StoreLocation\]::/g) || []).length, 1, 'ровно одно расположение стора');
+    assert(/StoreLocation\]::LocalMachine/.test(mrCode), 'и это LocalMachine');
+    assert.strictEqual((fn.match(/X509Store\b/g) || []).length, 0, 'сама Test-HmTrustedSigner стор не открывает — только через помощник');
+    assert(/try \{ \$machineRoots = @\(Get-HmMachineRootThumbprints\) \}/.test(fn) && (fn.match(/\$machineRoots\s*\+?=/g) || []).length === 2,
+      'список машинных корней: «$null», затем одно присваивание из помощника — без добавок из других мест');
+    // Срок звеньев: считает помощник по ВСЕМ звеньям цепочки, гейт читает его ответ и отказывает в сторону строгости.
+    assert(/\$anchor\.OutOfWindow -ne \$false/.test(fn), 'метка времени требуется, если помощник сказал «вне срока» ИЛИ не сказал ничего');
+    assert(!/\$cert\.NotAfter|\$cert\.NotBefore/.test(codeOnly(fn)), 'срок по одному листу в решении гейта не оценивается');
+    const chainFn = codeOnly(s.slice(s.indexOf('function Get-HmSignerChainRoot'), s.indexOf('# --- НАДЁЖНЫЙ гейт Authenticode')));
+    assert(/foreach \(\$el in @\(\$elems\)\)/.test(chainFn) && /NotAfter\.ToUniversalTime\(\) -lt \$nowUtc/.test(chainFn) && /NotBefore\.ToUniversalTime\(\) -gt \$nowUtc/.test(chainFn), 'срок каждого звена: оба конца окна, все звенья');
+    assert((chainFn.match(/OutOfWindow = /g) || []).length >= 3, 'у каждого ответа помощника есть OutOfWindow (ошибочные — «вне срока»)');
+    for (const [f, call] of [['git.ps1', 'Test-HmTrustedSigner -Path $exe'], ['node.ps1', 'Test-HmTrustedSigner -Path $msi'], ['cursor.ps1', 'Test-HmTrustedSigner -Path $inst'],
+      ['pydeps.ps1', "Test-HmTrustedSigner -Path $pyDl -ExpectedSubjectMatch 'Python Software Foundation'"]]) {
+      assert(fs.readFileSync(path.join(ROOT, 'scripts', 'windows', f), 'utf8').includes(call), f + ': вызов гейта подписи не должен меняться');
+    }
+    for (const f of [DEELEV, HARNESS]) {
+      const b = fs.readFileSync(f);
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, path.basename(f) + ': UTF-8 с BOM');
+      assert.strictEqual(b.toString('utf8').split('\n').length - 1, b.toString('utf8').split('\r\n').length - 1, path.basename(f) + ': только CRLF');
+    }
+    if (onWin) {
+      const r = cp.spawnSync(PSEXE, ['-NoProfile', '-Command', "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:HM_F,[ref]$null,[ref]$e); if($e){$e|Out-String; exit 1}"],
+        { encoding: 'utf8', env: Object.assign({}, process.env, { HM_F: HARNESS }) });
+      assert.strictEqual(r.status, 0, 'стенд signer-trust.ps1 не разбирается в PS 5.1: ' + text(r).slice(0, 300));
+    }
+  });
+
+  // ---- B. Пустые зелёные гейты (S-7) -----------------------------------------------------------------
+  ok('verify-packed-vendor: код 2 — нет папки, нет манифеста, манифест не JSON, пустой манифест, ни один файл манифеста не найден в сборке', () => {
+    const base = tmp('hm-u8-vpv2-');
+    try {
+      const code = (dir, extra) => runNode([T('verify-packed-vendor.js'), dir].concat(extra || [])).status;
+      assert.strictEqual(code(path.join(base, 'нет-такой-папки')), 2, 'нет папки');
+      fs.mkdirSync(path.join(base, 'a'));
+      assert.strictEqual(code(path.join(base, 'a')), 2, 'нет манифеста');
+      fs.mkdirSync(path.join(base, 'b')); fs.writeFileSync(path.join(base, 'b', 'checksums.json'), '{не json');
+      assert.strictEqual(code(path.join(base, 'b')), 2, 'манифест не JSON');
+      fs.mkdirSync(path.join(base, 'c')); writeManifest(path.join(base, 'c'), {});
+      assert.strictEqual(code(path.join(base, 'c')), 2, 'манифест без записей');
+      fs.mkdirSync(path.join(base, 'd')); writeManifest(path.join(base, 'd'), { 'a.exe': { sha256: sha('A'), bytes: 1 } });
+      const r = runNode([T('verify-packed-vendor.js'), path.join(base, 'd')]);
+      assert.strictEqual(r.status, 2, 'ни один файл манифеста не найден: «зелёный» без проверки недопустим\n' + text(r));
+      assert(!/OK: проверено/.test(text(r)), 'строки «OK: проверено файлов 0» больше нет');
+      fs.mkdirSync(path.join(base, 'e')); writeManifest(path.join(base, 'e'), { 'a.exe': { sha256: sha('A') } }); put(path.join(base, 'e'), 'apps/a.exe', 'A');
+      assert.strictEqual(code(path.join(base, 'e'), ['--source', path.join(base, 'нет-источника')]), 2, '--source указывает в никуда');
+    } finally { rmrf(base); }
+  });
+
+  ok('verify-packed-vendor: код 1 — расхождение sha256, запись манифеста без sha256, обязательный файл пропал из сборки; код 0 — здоровая сборка (файл, исключённый фильтром упаковки, не нужен)', () => {
+    const base = tmp('hm-u8-vpv1-');
+    try {
+      const run = (name, files, manifest) => {
+        const d = path.join(base, name); fs.mkdirSync(d);
+        for (const [rel, body] of Object.entries(files)) put(d, rel, body);
+        writeManifest(d, manifest);
+        return runNode([T('verify-packed-vendor.js'), d]);
+      };
+      const ok0 = run('healthy', { 'apps/a.exe': 'AAA', 'apps/b.exe': 'BBB' },
+        { 'a.exe': { sha256: sha('AAA'), bytes: 3 }, 'b.exe': { sha256: sha('BBB') }, 'chatgpt.vsix': { sha256: sha('X'), bytes: 1 } });
+      assert.strictEqual(ok0.status, 0, text(ok0));
+      assert(/проверено файлов 2/.test(text(ok0)) && /chatgpt\.vsix/.test(text(ok0)), 'исключённое фильтром названо в отчёте: ' + text(ok0));
+      const mis = run('mismatch', { 'apps/a.exe': 'AAAx' }, { 'a.exe': { sha256: sha('AAA'), bytes: 3 } });
+      assert.strictEqual(mis.status, 1, text(mis)); assert(/РАСХОЖДЕНИЕ/.test(text(mis)));
+      const nohash = run('nohash', { 'apps/a.exe': 'AAA' }, { 'a.exe': {} });
+      assert.strictEqual(nohash.status, 1, 'запись без sha256 проверенной не считается\n' + text(nohash)); assert(/ЗАПИСЬ БЕЗ SHA-256/.test(text(nohash)));
+      const bytesOnly = run('bytesonly', { 'apps/a.exe': 'AAA', 'apps/b.exe': 'BBB' }, { 'a.exe': { sha256: sha('AAA') }, 'b.exe': { bytes: 3 } });
+      assert.strictEqual(bytesOnly.status, 1, 'запись только с bytes не считается проверенной\n' + text(bytesOnly));
+      const lost = run('lost', { 'apps/a.exe': 'AAA' }, { 'a.exe': { sha256: sha('AAA') }, 'b.exe': { sha256: sha('BBB') } });
+      assert.strictEqual(lost.status, 1, 'пропавший обязательный файл — не справка, а отказ\n' + text(lost)); assert(/ПРОПАЛ ИЗ СБОРКИ: b\.exe/.test(text(lost)));
+    } finally { rmrf(base); }
+  });
+
+  ok('verify-packed-vendor: lite — с --source обязательны только вшитые файлы, без него тот же манифест красный, а файл, потерянный упаковщиком, ловится', () => {
+    const base = tmp('hm-u8-vpvlite-');
+    try {
+      const COURSE = 'vibecoding-course.zip';
+      const full = { 'uv.exe': { sha256: sha('UV') }, [COURSE]: { sha256: sha('Z') }, 'git-setup.exe': { sha256: sha('G') }, 'cursor-setup.exe': { sha256: sha('C') } };
+      const src = path.join(base, 'vendor-lite'); put(src, 'apps/uv/uv.exe', 'UV'); put(src, 'course/' + COURSE, 'Z'); writeManifest(src, full);
+      const packed = path.join(base, 'packed'); put(packed, 'apps/uv/uv.exe', 'UV'); put(packed, 'course/' + COURSE, 'Z'); writeManifest(packed, full);
+      const okLite = runNode([T('verify-packed-vendor.js'), packed, '--source', src]);
+      assert.strictEqual(okLite.status, 0, 'lite с --source здоров: ' + text(okLite));
+      assert(/проверено файлов 2/.test(text(okLite)) && /git-setup\.exe/.test(text(okLite)), 'проверены оба вшитых файла, остальное названо законно отсутствующим: ' + text(okLite));
+      const strict = runNode([T('verify-packed-vendor.js'), packed]);
+      assert.strictEqual(strict.status, 1, 'без --source манифест полный, а вшито два файла: ' + text(strict));
+      assert(/--source vendor-lite/.test(text(strict)), 'отчёт подсказывает про --source');
+      const lost = path.join(base, 'lost'); put(lost, 'apps/uv/uv.exe', 'UV'); writeManifest(lost, full);
+      const r = runNode([T('verify-packed-vendor.js'), lost, '--source', src]);
+      assert.strictEqual(r.status, 1, 'упаковщик потерял курс: ' + text(r)); assert(/ПРОПАЛ ИЗ СБОРКИ: vibecoding-course\.zip/.test(text(r)));
+    } finally { rmrf(base); }
+  });
+
+  ok('verify-packed-vendor: файлы манифеста ищутся только там, где их берёт генератор манифеста (одноимённый шрифт в config-pack не даёт ложного красного); список мест = regen-checksums.js', () => {
+    const base = tmp('hm-u8-vpvloc-');
+    try {
+      const d = path.join(base, 'v');
+      put(d, 'apps/JetBrainsMono-Regular.ttf', 'FONT-OURS');
+      put(d, 'config-pack/.claude/skills/x/JetBrainsMono-Regular.ttf', 'ANOTHER-FONT');
+      put(d, 'nomad-src/skills/y/JetBrainsMono-Regular.ttf', 'ANOTHER-FONT-2');
+      put(d, 'nomad-src/pyproject.toml', 'P'); put(d, 'config-pack/pyproject.toml', 'OTHER-P');
+      writeManifest(d, { 'JetBrainsMono-Regular.ttf': { sha256: sha('FONT-OURS'), bytes: 9 }, 'pyproject.toml': { sha256: sha('P'), bytes: 1 } });
+      const r = runNode([T('verify-packed-vendor.js'), d]);
+      assert.strictEqual(r.status, 0, 'одноимённые файлы вне мест генератора не должны давать расхождений: ' + text(r));
+      assert(/проверено файлов 2/.test(text(r)), text(r));
+    } finally { rmrf(base); }
+    const gen = fs.readFileSync(T('regen-checksums.js'), 'utf8');
+    const listed = (/for \(const rel of \[([^\]]+)\]/.exec(gen) || [])[1] || '';
+    const rels = listed.split(',').map((x) => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+    assert(/path\.join\(VENDOR, 'apps'\)/.test(gen) && rels.length === 3, 'генератор манифеста: apps + три файла: ' + rels.join(', '));
+    const vpv = require(T('verify-packed-vendor.js'));
+    for (const rel of rels.concat(['apps/x/y.exe'])) assert(vpv.HASHED_LOCATIONS.some((re) => re.test(rel)), 'verify-packed-vendor не ищет там, где генератор кладёт: ' + rel);
+    assert(!vpv.HASHED_LOCATIONS.some((re) => re.test('config-pack/pyproject.toml')) && !vpv.HASHED_LOCATIONS.some((re) => re.test('nomad-src/skills/y/pyproject.toml')), 'и не ищет лишнего');
+  });
+
+  const makePack = (root, settings, files) => {
+    const c = path.join(root, '.claude'); fs.mkdirSync(c, { recursive: true });
+    if (settings !== null) fs.writeFileSync(path.join(c, 'settings.json'), typeof settings === 'string' ? settings : JSON.stringify(settings));
+    for (const f of files || []) put(c, f, '// заглушка\n');
+    return root;
+  };
+  ok('audit-pack: код 2 «НЕ ПРОВЕРЕНО» на пустом и отсутствующем паке (нет каталога, пустой .claude, нет settings.json, не JSON, пустой объект); здоровый пак — 0, пак с проблемой — 1', () => {
+    const base = tmp('hm-u8-audit-');
+    try {
+      const audit = (pack) => runNode([T('audit-pack.js'), pack]);
+      const expect2 = (name, pack) => {
+        const r = audit(pack);
+        assert.strictEqual(r.status, 2, name + ': ожидался код 2\n' + text(r));
+        assert(/ВЕРДИКТ: НЕ ПРОВЕРЕНО/.test(text(r)) && !/связность в порядке/.test(text(r)), name + ': «в порядке» на пустом месте недопустимо\n' + text(r));
+      };
+      expect2('нет каталога', path.join(base, 'нет'));
+      fs.mkdirSync(path.join(base, 'пустой')); expect2('пустой каталог', path.join(base, 'пустой'));
+      fs.mkdirSync(path.join(base, 'e1', '.claude'), { recursive: true }); expect2('пустой .claude', path.join(base, 'e1'));
+      expect2('нет settings.json', makePack(path.join(base, 'e2'), null, ['skills/x/SKILL.md']));
+      expect2('settings.json не JSON', makePack(path.join(base, 'e3'), '{не json', ['skills/x/SKILL.md']));
+      expect2('settings.json — пустой объект', makePack(path.join(base, 'e4'), {}, []));
+      expect2('settings.json — массив', makePack(path.join(base, 'e5'), '[]', []));
+      const good = audit(makePack(path.join(base, 'ok'), { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node "${HOME}/.claude/hooks/stop.js"' }] }] } }, ['hooks/stop.js']));
+      assert.strictEqual(good.status, 0, text(good)); assert(/связность в порядке/.test(text(good)));
+      const broken = audit(makePack(path.join(base, 'bad'), { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node "${HOME}/.claude/hooks/нет.js"' }] }] } }, ['hooks/x.js']));
+      assert.strictEqual(broken.status, 1, text(broken)); assert(/СТОП/.test(text(broken)));
+    } finally { rmrf(base); }
+  });
+
+  ok('preflight: падение audit-pack, код 2 и нулевой выход без ВЕРДИКТа останавливают сборку; --allow-broken-pack снимает громко; честный вердикт и СТОП ведут себя как раньше', () => {
+    const base = tmp('hm-u8-pre-');
+    try {
+      const mkRoot = (name, auditBody) => {
+        const root = path.join(base, name);
+        put(root, 'tools/preflight-build.js', fs.readFileSync(T('preflight-build.js'), 'utf8'));
+        put(root, 'tools/audit-pack.js', auditBody);
+        return root;
+      };
+      const pre = (root, extra) => runNode([path.join(root, 'tools', 'preflight-build.js'), '--platform', 'win32', '--offline', '--skip-size', '--skip-config'].concat(extra || []), { cwd: root });
+      const cases = {
+        crash: "throw new Error('boom');\n",
+        'exit-2': "console.log('ВЕРДИКТ: НЕ ПРОВЕРЕНО — пак пуст');\nprocess.exit(2);\n",
+        'silent-0': "console.log('привет');\n",
+        'empty-0': '',
+      };
+      for (const [name, body] of Object.entries(cases)) {
+        const root = mkRoot(name, body);
+        const r = pre(root);
+        assert.strictEqual(r.status, 1, name + ': аудит без вердикта «в порядке» обязан ронять сборку\n' + text(r));
+        assert(/проверка связности НЕ выполнена/.test(text(r)) && /СБОРКА ОСТАНОВЛЕНА/.test(text(r)), name + ': причина названа\n' + text(r));
+        const bypass = pre(root, ['--allow-broken-pack']);
+        assert.strictEqual(bypass.status, 0, name + ': осознанный обход существует\n' + text(bypass));
+        assert(/ВНИМАНИЕ: --allow-broken-pack/.test(text(bypass)) && /НЕ выполнена/.test(text(bypass)), name + ': обход громкий, находка не спрятана\n' + text(bypass));
+      }
+      const fine = pre(mkRoot('fine', "console.log('ВЕРДИКТ: связность в порядке. Замечаний: 0.');\n"));
+      assert.strictEqual(fine.status, 0, text(fine)); assert(/связность пака: ВЕРДИКТ: связность в порядке/.test(text(fine)));
+      const stop = pre(mkRoot('stop', "console.log('  СТОП правило ссылается на скрипт, которого нет');\nconsole.log('ВЕРДИКТ: 1 проблем(ы), 0 замечани(й).');\nprocess.exit(1);\n"));
+      assert.strictEqual(stop.status, 1, text(stop)); assert(/СБОРКА ОСТАНОВЛЕНА/.test(text(stop)) && /правило ссылается/.test(text(stop)));
+    } finally { rmrf(base); }
+  });
+
+  ok('preflight на ПУСТОМ паке (настоящий audit-pack) останавливает сборку, на здоровом — пропускает', () => {
+    const base = tmp('hm-u8-pre2-');
+    try {
+      const root = path.join(base, 'r');
+      put(root, 'tools/preflight-build.js', fs.readFileSync(T('preflight-build.js'), 'utf8'));
+      put(root, 'tools/audit-pack.js', fs.readFileSync(T('audit-pack.js'), 'utf8'));
+      const pre = () => runNode([path.join(root, 'tools', 'preflight-build.js'), '--platform', 'win32', '--offline', '--skip-size', '--skip-config'], { cwd: root });
+      fs.mkdirSync(path.join(root, 'vendor', 'config-pack'), { recursive: true });
+      const empty = pre();
+      assert.strictEqual(empty.status, 1, 'пустой vendor/config-pack раньше проходил как «связность в порядке»\n' + text(empty));
+      assert(/НЕ ПРОВЕРЕНО/.test(text(empty)) && /СБОРКА ОСТАНОВЛЕНА/.test(text(empty)), text(empty));
+      makePack(path.join(root, 'vendor', 'config-pack'), { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node "${HOME}/.claude/hooks/stop.js"' }] }] } }, ['hooks/stop.js']);
+      const healthy = pre();
+      assert.strictEqual(healthy.status, 0, text(healthy)); assert(/связность в порядке/.test(text(healthy)));
+    } finally { rmrf(base); }
+  });
+
+  // ---- C. Подпись: allow-list и итоговая проверка (S-8) ----------------------------------------------------
+  const sw = require(T('sign-win.js'));
+  ok('sign-win: подписываются ровно свои файлы (exe приложения, elevate.exe, итоговый portable); смена раскладки, одноимённые двойники и любые другие пути — пропуск, даже при HM_WIN_SIGN=1', () => {
+    const own = [
+      'D:\\r\\release\\win-unpacked\\Hamidun Setup.exe', 'D:\\r\\release\\win-arm64-unpacked\\Hamidun Setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\elevate.exe', 'D:/r/release/win-unpacked/resources/elevate.exe', 'C:\\T\\elevate-staging\\resources\\elevate.exe',
+      'D:\\r\\release\\Hamidun-Setup-Windows.exe', 'D:\\r\\release\\Hamidun-Setup-Windows-Lite.exe', 'D:/r/release/Hamidun-Setup-Windows.exe',
+      'D:\\resources\\repo\\release\\win-unpacked\\Hamidun Setup.exe',
+      // Папка vendor ВЫШЕ win-*unpacked — это путь к репозиторию, а не раскладка сборки: свой elevate.exe подписывается.
+      'D:\\vendor\\repo\\release\\win-unpacked\\resources\\elevate.exe', 'D:/vendor/repo/release/win-arm64-unpacked/resources/elevate.exe',
+    ];
+    const foreign = [
+      'D:\\r\\release\\win-unpacked\\vendor\\apps\\git-setup.exe',                      // раскладка без resources\ — случай ревью S-8
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\git-setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\uv\\uvx.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\apps\\claude-mascot\\claude-mascot.exe',
+      'D:/r/release/win-arm64-unpacked/resources/vendor/apps/cursor-setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\elevate.exe',                    // двойник по имени внутри vendor
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\resources\\elevate.exe',
+      'D:\\vendor\\repo\\release\\win-unpacked\\resources\\vendor\\resources\\elevate.exe',   // vendor и выше, и ниже: ниже — чужое
+      'D:\\r\\release\\win-unpacked\\elevate.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\Hamidun Setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\Hamidun Setup.exe',
+      'D:\\r\\release\\win-unpacked\\resources\\vendor\\Hamidun-Setup-Windows.exe',      // имя артефакта внутри распакованного дерева
+      'D:\\r\\release\\win-unpacked\\chrome_crashpad_handler.exe',                       // чужой exe рядом с нашим
+      'D:\\r\\release\\__uninstaller-nsis-hamidun-setup.exe',
+      'D:\\r\\release\\Hamidun-Setup-Windows.exe.blockmap',
+      'Hamidun Setup.exe', '', undefined, null,
+    ];
+    for (const f of own) {
+      assert.strictEqual(sw.isOwn(f), true, 'свой файл остался бы без подписи: ' + f);
+      assert.strictEqual(sw.isForeign(f), false);
+      assert.strictEqual(sw.plan(f, { HM_WIN_SIGN: '1' }, 'win32').sign, true, f);
+    }
+    for (const f of foreign) {
+      assert.strictEqual(sw.isOwn(f), false, 'чужой файл подписался бы: ' + f);
+      assert.strictEqual(sw.isForeign(f), true);
+      const p = sw.plan(f, { HM_WIN_SIGN: '1' }, 'win32');
+      assert.strictEqual(p.sign, false, 'даже HM_WIN_SIGN=1 не подписывает чужое: ' + f);
+      assert.strictEqual(p.foreign, true);
+      assert(/не из списка своих файлов/.test(p.why), 'причина пропуска названа: ' + p.why);
+    }
+  });
+
+  ok('sign-win: имена из списка своих сверены с package.json (productName, artifactName win/portable, lite-артефакт build-lite.js) и с путями verify-signature', () => {
+    const pkg = pkgJson();
+    assert.strictEqual(sw.PRODUCT_EXE, pkg.build.productName + '.exe', 'переименовали продукт, а список своих файлов остался прежним — exe приложения остался бы без подписи');
+    for (const tpl of [pkg.build.win.artifactName, pkg.build.portable.artifactName]) {
+      const f = String(tpl).replace('${ext}', 'exe');
+      assert(sw.OWN_ARTIFACT_RE.test(f), 'итоговый portable «' + f + '» не входит в список своих файлов');
+    }
+    const lite = (/artifactFile: '([^']+\.exe)'/.exec(fs.readFileSync(T('build-lite.js'), 'utf8')) || [])[1];
+    assert(lite && sw.OWN_ARTIFACT_RE.test(lite), 'lite-артефакт «' + lite + '» не входит в список своих файлов');
+    const vs = require(T('verify-signature.js'));
+    const rels = vs.defaultFiles().map((f) => path.relative(ROOT, f).split(path.sep).join('/'));
+    assert.deepStrictEqual(rels, [pkg.build.directories.output + '/' + String(pkg.build.win.artifactName).replace('${ext}', 'exe'),
+      pkg.build.directories.output + '/win-unpacked/' + sw.PRODUCT_EXE, pkg.build.directories.output + '/win-unpacked/resources/elevate.exe'],
+    'verify-signature по умолчанию проверяет те же три файла, что подписывает хук');
+    for (const f of vs.defaultFiles()) assert.strictEqual(sw.isOwn(f), true, 'проверяем то, что хук и правда подписывает: ' + f);
+  });
+
+  ok('sign-win: sign() на файле вне списка, но НЕ под resources\\ (смена раскладки) возвращается молча — ни SimplySign, ни signtool', () => {
+    const r = cp.spawnSync(process.execPath, ['-e',
+      "const sw=require(process.argv[1]);" +
+      "sw({path:'D:\\\\r\\\\release\\\\win-unpacked\\\\vendor\\\\apps\\\\git-setup.exe'}).then(()=>process.exit(0),(e)=>{console.error(e.message);process.exit(7);});",
+      T('sign-win.js')],
+    { encoding: 'utf8', env: cleanEnv({ HM_WIN_SIGN: '1', HM_SIMPLYSIGN_CONNECT: 'exit 9', HM_SIGNTOOL: 'C:\\нет\\signtool.exe' }) });
+    assert.strictEqual(r.status, 0, 'sign() полез подписывать вендорский файл: ' + text(r));
+    assert(/ПРОПУСК подписи .*git-setup\.exe/.test(r.stdout) && /не из списка своих файлов/.test(r.stdout), 'пропуск виден в логе: ' + r.stdout);
+  });
+
+  ok('verify-signature: решение — Valid + НАШ отпечаток + метка времени; нет файла, чужая подпись, не Valid, без метки времени, без сертификата — отказ', () => {
+    const vs = require(T('verify-signature.js'));
+    const OURS = sw.certSha1({});
+    const f = 'D:\\r\\release\\Hamidun-Setup-Windows.exe';
+    const good = { file: f, exists: true, status: 'Valid', thumbprint: OURS.toLowerCase(), timestamped: true, error: '' };
+    assert.strictEqual(vs.evaluate([good], OURS).ok, true, 'отпечаток сравнивается без учёта регистра');
+    const fail = (patch, re) => {
+      const v = vs.evaluate([Object.assign({}, good, patch)], OURS);
+      assert.strictEqual(v.ok, false, JSON.stringify(patch)); assert(v.failures.some((x) => re.test(x)), JSON.stringify(patch) + ' → ' + v.failures.join('|'));
+    };
+    fail({ exists: false }, /не найден/);
+    fail({ status: 'NotSigned' }, /Status=NotSigned/);
+    fail({ status: 'HashMismatch' }, /Status=HashMismatch/);
+    fail({ status: 'UnknownError' }, /Status=UnknownError/);
+    fail({ status: 'NotTrusted' }, /Status=NotTrusted/);
+    fail({ status: '' }, /Status=нет/);
+    fail({ thumbprint: 'D8FB0CC66A08061B42D46D03546F0D42CBC49B7C' }, /НЕ нашим сертификатом/);
+    fail({ thumbprint: '' }, /сертификата подписанта нет/);
+    fail({ timestamped: false }, /без метки времени/);
+    fail({ error: 'доступ запрещён' }, /не прочиталась/);
+    assert.strictEqual(vs.evaluate([good, Object.assign({}, good, { status: 'NotSigned' })], OURS).ok, false, 'один неподписанный файл из двух краснит всё');
+    assert.strictEqual(vs.evaluate([], OURS).ok, false, 'ноль файлов — не успех');
+    // Один источник отпечатка: sign-win.js (CERT_SHA1 / HM_WIN_CERT_SHA1), в verify-signature копии нет.
+    assert.strictEqual(OURS, sw.CERT_SHA1);
+    assert.strictEqual(sw.certSha1({ HM_WIN_CERT_SHA1: ' ab cd ' }), 'ABCD');
+    assert(!/\b[0-9A-Fa-f]{40}\b/.test(fs.readFileSync(T('verify-signature.js'), 'utf8')), 'в verify-signature.js нет своей копии отпечатка');
+  });
+
+  ok('verify-signature: пропуск ТОЛЬКО по HM_WIN_SIGN=0 и громко; CI и не-Windows без него не пропускают; нет файла и неподписанный файл — код 1', () => {
+    const vs = require(T('verify-signature.js'));
+    const logs = []; const errs = [];
+    const real = { log: console.log, error: console.error };
+    console.log = (m) => logs.push(String(m)); console.error = (m) => errs.push(String(m));
+    let rc0, rcCi, rcLinux, rcLinuxSkip, rcNoPs;
+    try {
+      const boom = () => { throw new Error('проверка не должна была читать подписи'); };
+      rc0 = vs.main(['x.exe'], { HM_WIN_SIGN: '0' }, 'win32', { readSignatures: boom });
+      rcLinuxSkip = vs.main(['x.exe'], { HM_WIN_SIGN: '0' }, 'linux', { readSignatures: boom });
+      rcCi = vs.main(['x.exe'], { CI: 'true', GITHUB_ACTIONS: 'true' }, 'win32', { readSignatures: (files) => files.map((file) => ({ file, exists: true, status: 'NotSigned', thumbprint: '', timestamped: false })) });
+      rcLinux = vs.main(['x.exe'], {}, 'linux', { readSignatures: boom });
+      rcNoPs = vs.main(['x.exe'], {}, 'win32', { readSignatures: () => { throw new Error('powershell.exe не запустился'); } });
+    } finally { console.log = real.log; console.error = real.error; }
+    assert.strictEqual(rcNoPs, 2, 'сама проверка не смогла запуститься — код 2, а не молчаливый успех');
+    assert(errs.some((e) => /не удалось запустить проверку подписи/.test(e)), 'причина названа: ' + errs.join('|'));
+    assert.strictEqual(rc0, 0); assert.strictEqual(rcLinuxSkip, 0);
+    assert(logs.some((l) => /ПРОПУЩЕНО: HM_WIN_SIGN=0/.test(l) && /НЕ проверена/.test(l)), 'пропуск громкий: ' + logs.join('|'));
+    assert.strictEqual(rcCi, 1, 'CI без HM_WIN_SIGN=0 — не повод считать неподписанное готовым');
+    assert.strictEqual(rcLinux, 1, 'не Windows без HM_WIN_SIGN=0 — проверить нельзя, значит отказ');
+    assert(errs.some((e) => /только на Windows/.test(e) && /HM_WIN_SIGN=0/.test(e)), 'отказ объясняет выход: ' + errs.join('|'));
+    if (!onWin) return; // дальше — настоящий Get-AuthenticodeSignature
+    const base = tmp('hm-u8-vsig-');
+    try {
+      const unsigned = put(base, 'unsigned.exe', Buffer.from('MZ\u0000\u0000не-PE'));
+      const r1 = runNode([T('verify-signature.js'), unsigned]);
+      assert.strictEqual(r1.status, 1, 'неподписанный файл: ' + text(r1)); assert(/Status=/.test(text(r1)));
+      const r2 = runNode([T('verify-signature.js'), path.join(base, 'нет-такого.exe')]);
+      assert.strictEqual(r2.status, 1, text(r2)); assert(/не найден/.test(text(r2)));
+      const r3 = runNode([T('verify-signature.js'), unsigned], { env: cleanEnv({ HM_WIN_SIGN: '0' }) });
+      assert.strictEqual(r3.status, 0, text(r3)); assert(/ПРОПУЩЕНО: HM_WIN_SIGN=0/.test(text(r3)));
+    } finally { rmrf(base); }
+  });
+
+  ok('verify-signature: НАСТОЯЩИЕ подписи — файл, подписанный нашим сертификатом, принимается; тот же файл при другом HM_WIN_CERT_SHA1 и чужая действительная подпись Microsoft отвергаются', () => {
+    if (!onWin) SKIP('нужен Windows PowerShell 5.1');
+    const vs = require(T('verify-signature.js'));
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const ms = path.join(sysRoot, 'System32', 'attrib.exe');
+    if (fs.existsSync(ms)) {
+      const r = runNode([T('verify-signature.js'), ms]);
+      assert.strictEqual(r.status, 1, 'Status=Valid чужой подписью (Microsoft) — не наша подпись: ' + text(r));
+      assert(/НЕ нашим сертификатом/.test(text(r)), text(r));
+    }
+    const cands = [process.env.HM_TEST_SIGNED_EXE, path.join(ROOT, 'release', 'Hamidun-Setup-Windows-Lite.exe'), path.join(ROOT, 'release', 'Hamidun-Setup-Windows.exe')]
+      .filter((p) => p && fs.existsSync(p) && fs.statSync(p).size < 200 * 1024 * 1024);
+    let signed = null;
+    if (cands.length) {
+      const sigs = vs.readSignatures(cands, process.env);
+      const hit = sigs.find((s) => s.status === 'Valid' && String(s.thumbprint).toUpperCase() === sw.CERT_SHA1);
+      signed = hit ? hit.file : null;
+    }
+    if (!signed) SKIP('нет exe, подписанного нашим сертификатом (задай HM_TEST_SIGNED_EXE=путь); чужая подпись проверена выше');
+    const good = runNode([T('verify-signature.js'), signed]);
+    assert.strictEqual(good.status, 0, 'настоящая подпись Certum должна приниматься: ' + text(good));
+    const wrong = runNode([T('verify-signature.js'), signed], { env: cleanEnv({ HM_WIN_CERT_SHA1: '0'.repeat(40) }) });
+    assert.strictEqual(wrong.status, 1, 'тот же файл при другом ожидаемом отпечатке обязан краснеть: ' + text(wrong));
+  });
+
+  ok('verify-signature: настоящий путь PowerShell → JSON → решение исполняется на ЛЮБОЙ Windows — системный exe Microsoft (Valid, с меткой времени) принимается со своим отпечатком и отвергается с чужим, два файла разом', () => {
+    if (!onWin) SKIP('нужен Windows PowerShell 5.1');
+    const vs = require(T('verify-signature.js'));
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const cands = ['where.exe', 'attrib.exe', 'choice.exe', 'hostname.exe', 'whoami.exe', 'cmd.exe']
+      .map((n) => path.join(sysRoot, 'System32', n)).filter((p) => fs.existsSync(p));
+    if (!cands.length) SKIP('в System32 нет ни одного образца для проверки');
+    const sigs = vs.readSignatures(cands, process.env);
+    const validStatus = sigs.filter((s) => s.status === 'Valid');
+    if (!validStatus.length) SKIP('у системных exe нет действительной подписи — принимать нечего');
+    // Без файла, подписанного нашим сертификатом (его нет ни на CI, ни на машине без релизной сборки), принятие
+    // раньше не исполнялось вовсе: потеря отпечатка, метки времени или статуса в PS-части молча красила бы каждую
+    // релизную сборку (или прятала дефект) при зелёном наборе. Системные файлы Microsoft подписаны каталогом с меткой
+    // времени. Пропуск тут разрешён ТОЛЬКО когда подписей Valid нет вовсе; если они есть, а отпечаток или метка
+    // времени не прочитались, — это провал, а не SKIP.
+    const valid = validStatus.filter((s) => s.thumbprint);
+    assert(valid.length > 0, 'у ' + validStatus.length + ' системных exe Status=Valid, но отпечаток подписанта не прочитался (PS-часть verify-signature)');
+    const hit = valid.find((s) => s.timestamped === true);
+    assert(hit, 'ни у одного из ' + valid.length + ' системных exe со Status=Valid не прочиталась метка времени: ' + JSON.stringify(valid.map((s) => [path.basename(s.file), s.timestamped])));
+    const acc = runNode([T('verify-signature.js'), hit.file], { env: cleanEnv({ HM_WIN_CERT_SHA1: hit.thumbprint }) });
+    assert.strictEqual(acc.status, 0, 'системный exe со своим отпечатком обязан приниматься: ' + text(acc));
+    assert(/OK: 1 файл\(ов\) подписаны сертификатом/.test(text(acc)), text(acc));
+    const rej = runNode([T('verify-signature.js'), hit.file], { env: cleanEnv({ HM_WIN_CERT_SHA1: '0'.repeat(40) }) });
+    assert.strictEqual(rej.status, 1, 'тот же файл при чужом ожидаемом отпечатке обязан краснеть: ' + text(rej));
+    assert(/НЕ нашим сертификатом/.test(text(rej)), text(rej));
+    // Два файла в одном вызове PS: Windows PowerShell 5.1 отдаёт массив из ConvertFrom-Json одним элементом — разворот держит этот случай.
+    const same = valid.filter((s) => s.timestamped === true && s.thumbprint === hit.thumbprint);
+    if (same.length >= 2) {
+      const two = runNode([T('verify-signature.js'), same[0].file, same[1].file], { env: cleanEnv({ HM_WIN_CERT_SHA1: hit.thumbprint }) });
+      assert.strictEqual(two.status, 0, 'два файла с одним отпечатком: ' + text(two));
+      assert(/OK: 2 файл\(ов\) подписаны сертификатом/.test(text(two)), text(two));
+    }
+  });
+
+  ok('verify-signature: файл с подписью нужного издателя, но подменённым содержимым (HashMismatch) не принимается — решает статус, а совпавший отпечаток и метка времени не спасают', () => {
+    if (!onWin) SKIP('нужен Windows PowerShell 5.1');
+    const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+    const psExe = path.join(sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    // НЕЗАВИСИМЫЙ оракул: статус и отпечаток спрашиваем у Get-AuthenticodeSignature напрямую, а не у readSignatures
+    // проверяемого инструмента. Иначе поломка его PS-части («статус всегда Valid») отсеяла бы образец как «подмена
+    // не дала HashMismatch», и тест ушёл бы в SKIP вместо провала: мутант выживал бы под видом пропуска.
+    const oracle = (file) => {
+      const cmd = "$s = Get-AuthenticodeSignature -LiteralPath $env:HM_T_FILE; $t = ''; " +
+        "if ($s.SignerCertificate) { $t = [string]$s.SignerCertificate.Thumbprint }; Write-Output ([string]$s.Status + '|' + $t)";
+      const r = cp.spawnSync(psExe, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', cmd],
+        { encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { HM_T_FILE: file }) });
+      const parts = String(r.stdout || '').trim().split('|');
+      return { status: parts[0], thumbprint: parts[1] || '' };
+    };
+    // Нужен файл со ВСТРОЕННОЙ подписью Authenticode: у каталожных (большинство exe в System32) подмена байта даёт
+    // NotSigned, а не HashMismatch. curl.exe и tar.exe встроенную подпись несут (Windows 10 1803+).
+    const cands = ['curl.exe', 'tar.exe'].map((n) => path.join(sysRoot, 'System32', n)).filter((p) => fs.existsSync(p));
+    if (!cands.length) SKIP('в System32 нет curl.exe/tar.exe со встроенной подписью — подменять нечего');
+    const base = tmp('hm-u8-vtam-');
+    try {
+      let checked = 0;
+      for (const src of cands) {
+        const buf = fs.readFileSync(src);
+        buf[Math.floor(buf.length / 3)] = (buf[Math.floor(buf.length / 3)] + 1) & 0xFF;
+        const copy = path.join(base, 'tampered-' + path.basename(src));
+        fs.writeFileSync(copy, buf);
+        const sig = oracle(copy);
+        if (sig.status !== 'HashMismatch' || !sig.thumbprint) continue; // подмена ушла в область, где статус иной, — этот образец не годится
+        checked++;
+        // Отпечаток ожидаем ровно тот, что у подменённого файла: единственное, что его не пускает, — статус.
+        const r = runNode([T('verify-signature.js'), copy], { env: cleanEnv({ HM_WIN_CERT_SHA1: sig.thumbprint }) });
+        assert.strictEqual(r.status, 1, 'подменённый файл с «правильным» подписантом принят: ' + text(r));
+        assert(/Status=HashMismatch/.test(text(r)), 'причина — статус подписи: ' + text(r));
+      }
+      if (!checked) SKIP('подмена байта не дала HashMismatch ни у одного образца — проверять нечем');
+    } finally { rmrf(base); }
+  });
+
+  ok('сборка: dist и dist:win кончаются verify-signature ПОСЛЕ verify-packed-vendor; build-lite зовёт его в Windows-ветке после упакованного vendor; dist:mac его не зовёт', () => {
+    const pkg = pkgJson();
+    for (const k of ['dist', 'dist:win']) {
+      const s = pkg.scripts[k];
+      assertOrder(s, 'electron-builder', 'node tools/verify-packed-vendor.js', k + ': сначала сборка');
+      assertOrder(s, 'node tools/verify-packed-vendor.js', 'node tools/verify-signature.js', k + ': подпись проверяется после vendor');
+      assert(s.trim().endsWith('node tools/verify-signature.js'), k + ': проверка подписи — самый конец цепочки');
+    }
+    assert(!/verify-signature/.test(pkg.scripts['dist:mac']) && !/verify-signature/.test(pkg.scripts['dist:mac:lite']), 'на macOS подпись Authenticode не проверяется');
+    const lite = jsNoComments(fs.readFileSync(T('build-lite.js'), 'utf8'));
+    assertOrder(lite, "['electron-builder'].concat(t.builderArgs)", 'verify-packed-vendor.js', 'build-lite: vendor после сборки');
+    assertOrder(lite, 'verify-packed-vendor.js', 'verify-signature.js', 'build-lite: подпись после vendor');
+    const win = lite.slice(lite.indexOf("if (target !== 'mac') {"), lite.indexOf('const art = findLiteArtifact(t);'));
+    assert(/verify-packed-vendor\.js/.test(win) && /verify-signature\.js/.test(win) && /'--source', VENDOR_LITE/.test(win), 'обе проверки — внутри Windows-ветки, vendor — с --source');
+    assert(/release', t\.artifactFile/.test(win), 'итоговый lite-exe проверяется по имени из профиля цели');
+    // Структурно, а не по тексту: оба вызова — отдельные выражения верхнего уровня Windows-ветки, начинающиеся с
+    // execFileSync(process.execPath, [ … ]. «if (false) execFileSync(…)», «void (execFileSync(…))» и вызов в
+    // подставном блоке «if (false) { … }» по тексту выглядели бы так же, но тут уже не пройдут.
+    const splitStatements = (code) => {
+      const out = []; let depth = 0; let cur = ''; let q = null;
+      for (let i = 0; i < code.length; i++) {
+        const c = code[i];
+        if (q) { cur += c; if (c === '\\') { cur += code[++i] || ''; } else if (c === q) q = null; continue; }
+        if (c === "'" || c === '"' || c === '`') { q = c; cur += c; continue; }
+        if ('([{'.includes(c)) depth++;
+        if (')]}'.includes(c)) depth--;
+        if (c === ';' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+        cur += c;
+      }
+      if (cur.trim()) out.push(cur.trim());
+      return out;
+    };
+    const branchOpen = "if (target !== 'mac') {";
+    const inside = lite.slice(lite.indexOf(branchOpen) + branchOpen.length, lite.indexOf('const art = findLiteArtifact(t);'));
+    const stmts = splitStatements(inside);
+    for (const tool of ['verify-packed-vendor.js', 'verify-signature.js']) {
+      const calls = stmts.filter((x) => x.includes(tool));
+      assert.strictEqual(calls.length, 1, 'build-lite: ' + tool + ' — ровно одно выражение верхнего уровня Windows-ветки, а найдено ' + calls.length);
+      assert(calls[0].startsWith('execFileSync(process.execPath, ['), 'build-lite: ' + tool + ' вызывается безусловно: ' + calls[0].slice(0, 90));
+    }
+    // Контроль к контролю: разборщик отличает подставное условие от настоящего вызова.
+    assert(splitStatements("if (false) execFileSync(process.execPath, ['verify-signature.js']);")[0].startsWith('if ('), 'разбор ловит «if (false) execFileSync(…)»');
+    assert(splitStatements("void (execFileSync(process.execPath, ['verify-signature.js']));")[0].startsWith('void'), 'разбор ловит «void (…)»');
+    assert.throws(() => assertOrder('verify-signature.js … verify-packed-vendor.js', 'verify-packed-vendor.js', 'verify-signature.js'), 'сторож порядка краснеет на перестановке');
+  });
+
+  // ---- D. CI (S-9) -----------------------------------------------------------------------------------------------
+  const WFDIR = path.join(ROOT, '.github', 'workflows');
+  const WF = (n) => fs.readFileSync(path.join(WFDIR, n), 'utf8').replace(/\r\n/g, '\n');
+  const WFS = fs.readdirSync(WFDIR).filter((f) => /\.ya?ml$/.test(f)).sort();
+  ok('workflows: у unit-tests, e2e-win, staging-primitive и probe-handy-teamid права токена по умолчанию — только чтение (верхний уровень, не в джобе)', () => {
+    for (const n of ['unit-tests.yml', 'e2e-win.yml', 'staging-primitive.yml', 'probe-handy-teamid.yml']) {
+      assert(/^permissions:\n  contents: read\n/m.test(WF(n)), n + ': нет верхнеуровневого permissions: contents: read');
+      assert(!/^\s{2,}permissions:\s*\n\s+contents: write/m.test(WF(n)), n + ': записи в репозиторий здесь никто не просил');
+    }
+    for (const n of ['build-mac.yml', 'build-mac-lite.yml']) assert(/^\s{4}permissions:\n\s{6}contents: write/m.test(WF(n)), n + ': запись нужна и осталась на уровне джоба (Release/коммит реестра)');
+  });
+
+  ok('workflows: каждый uses: закреплён на полный SHA коммита с комментарием версии (checkout, setup-node, upload-artifact)', () => {
+    let n = 0;
+    for (const f of WFS) {
+      for (const line of WF(f).split('\n')) {
+        const m = /^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/.exec(line);
+        if (!m) continue;
+        n++;
+        assert(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/.test(m[1]), f + ': действие не закреплено на SHA: ' + line.trim());
+        assert(/^\s+#\s*v\d+\.\d+\.\d+/.test(m[2]), f + ': у пина нет комментария версии: ' + line.trim());
+      }
+    }
+    assert(n >= 25, 'нашли все uses: (' + n + ')');
+    const pins = {};
+    for (const f of WFS) for (const m of WF(f).matchAll(/uses:\s*(actions\/[\w-]+)@([0-9a-f]{40})\s+#\s*(v[\d.]+)/g)) (pins[m[1]] = pins[m[1]] || new Set()).add(m[2] + ' ' + m[3]);
+    for (const [a, set] of Object.entries(pins)) assert.strictEqual(set.size, 1, a + ': во всех файлах один и тот же пин, а тут ' + [...set].join(' / '));
+  });
+
+  ok('workflows: джобы с секретами (build-mac, build-mac-lite) ставят зависимости через npm ci; package.json и package-lock.json согласованы', () => {
+    for (const n of ['build-mac.yml', 'build-mac-lite.yml']) {
+      const runs = WF(n).split('\n').filter((l) => /^\s*run:/.test(l));
+      assert(runs.some((l) => /run: npm ci --no-audit --no-fund/.test(l)), n + ': нет npm ci');
+      assert(!runs.some((l) => /\bnpm install\b/.test(l)), n + ': остался npm install');
+    }
+    const pkg = pkgJson();
+    const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
+    const root = lock.packages[''];
+    for (const sec of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+      assert.deepStrictEqual(root[sec] || {}, pkg[sec] || {}, 'lock и package.json расходятся в ' + sec + ' — npm ci упал бы');
+    }
+    for (const [name, range] of Object.entries(Object.assign({}, pkg.dependencies, pkg.devDependencies))) {
+      const v = (lock.packages['node_modules/' + name] || {}).version;
+      assert(v, name + ' отсутствует в lock');
+      if (/^\d+\.\d+\.\d+$/.test(range)) assert.strictEqual(v, range, name + ': точный пин расходится с lock');
+      else if (/^\^\d+\.\d+\.\d+$/.test(range)) {
+        const [a, b, c] = range.slice(1).split('.').map(Number); const [x, y, z] = v.split('.').map(Number);
+        assert(x === a && (y > b || (y === b && z >= c)), name + ': ' + v + ' не удовлетворяет ' + range);
+      }
+    }
+  });
+
+  ok('workflows: github.ref_name не подставляется в run-скрипты (только в env), секрет маяка не висит на уровне джоба, а стоит на шаге beacon:stamp', () => {
+    for (const f of WFS) {
+      for (const line of WF(f).split('\n')) {
+        if (!/github\.ref_name/.test(line) || /^\s*#/.test(line)) continue;
+        assert(/^\s+[A-Z][A-Z0-9_]*: \$\{\{ github\.ref_name \}\}\s*$/.test(line), f + ': ref_name подставлен не в env, а в текст: ' + line.trim());
+      }
+    }
+    assert(/HM_REF_NAME: \$\{\{ github\.ref_name \}\}/.test(WF('build-mac-lite.yml')) && /"HEAD:\$\{HM_REF_NAME\}"/.test(WF('build-mac-lite.yml')), 'push берёт имя ветки из окружения');
+    const mac = WF('build-mac.yml').split('\n');
+    const idx = mac.map((l, i) => (/HM_COURSE_BEACON_SECRET: \$\{\{ secrets\./.test(l) ? i : -1)).filter((i) => i >= 0);
+    assert.strictEqual(idx.length, 1, 'секрет маяка назначается ровно в одном месте');
+    assert(/^ {10}HM_COURSE_BEACON_SECRET:/.test(mac[idx[0]]), 'секрет — в env шага (отступ 10), а не джоба (6)');
+    const stepAt = mac.map((l, i) => (/- name: Stamp beacon secret/.test(l) ? i : -1)).filter((i) => i >= 0)[0];
+    const nextStep = mac.findIndex((l, i) => i > stepAt && /^ {6}- name:/.test(l));
+    assert(stepAt >= 0 && idx[0] > stepAt && idx[0] < nextStep, 'секрет стоит внутри шага «Stamp beacon secret»');
+    assert(/run: npm run beacon:stamp/.test(mac.slice(stepAt, nextStep).join('\n')), 'и шаг запускает именно beacon:stamp');
+  });
+
+  ok('workflows: checkout в джобах с секретами не оставляет токен в .git/config (persist-credentials: false); токен для push реестра дан ТОЛЬКО шагу коммита, окружением, а не подстановкой в текст', () => {
+    const stepBlock = (text, head) => {
+      const lines = text.split('\n');
+      const i = lines.findIndex((l) => head.test(l));
+      assert(i >= 0, 'нет шага ' + head);
+      let j = i + 1;
+      while (j < lines.length && !/^ {6}- (uses|name):/.test(lines[j])) j++;
+      return lines.slice(i, j).join('\n');
+    };
+    for (const n of ['build-mac.yml', 'build-mac-lite.yml']) {
+      const co = stepBlock(WF(n), /^ {6}- uses: actions\/checkout@/);
+      assert(/^ {8}with:\s*$/m.test(co) && /^ {10}persist-credentials: false\s*$/m.test(co), n + ': checkout без persist-credentials: false — токен с contents: write остаётся в .git/config на время npm ci');
+      for (const line of WF(n).split('\n')) {
+        if (!/github\.token|secrets\.GITHUB_TOKEN/.test(line) || /^\s*#/.test(line)) continue;
+        assert(/^\s+[A-Z][A-Z0-9_]*: \$\{\{ (github\.token|secrets\.GITHUB_TOKEN) \}\}\s*$/.test(line), n + ': токен подставлен не в env шага, а в текст: ' + line.trim());
+      }
+    }
+    const lite = WF('build-mac-lite.yml');
+    const push = stepBlock(lite, /^ {6}- name: Commit updated remote-components\.json back to branch/);
+    assert(/^ {10}HM_GIT_TOKEN: \$\{\{ github\.token \}\}\s*$/m.test(push), 'токен для push — в env шага коммита');
+    assert(/GIT_CONFIG_KEY_0="http\.https:\/\/github\.com\/\.extraheader"/.test(push) && /git push origin "HEAD:\$\{HM_REF_NAME\}"/.test(push), 'push авторизуется заголовком через окружение git');
+    assert(/::add-mask::\$\{HM_GIT_AUTH\}/.test(push), 'производное значение токена маскируется в логе');
+    const noComments = (t) => t.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    assert.strictEqual((noComments(lite).match(/HM_GIT_TOKEN/g) || []).length, (noComments(push).match(/HM_GIT_TOKEN/g) || []).length, 'HM_GIT_TOKEN в коде встречается только в шаге коммита');
+    assert(!/git push/.test(WF('build-mac.yml').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n')), 'build-mac.yml ничего не пушит (иначе ему нужен свой токен)');
+  });
+
+  // Личный список паттернов экспорт-фильтра nomad-src (спека «Обслуживание vendor», п. 17): релизная сборка без него не
+  // идёт, а CI получает его секретом HM_LEAK_PATTERNS_JSON. Решение вынесено в функцию, чтобы прогнать её и на заведомо
+  // плохих текстах (отрицательные контроли ниже), а не только на настоящих файлах.
+  const leakStepProblems = (yaml) => {
+    const out = [];
+    const lines = yaml.split('\n');
+    const codeLines = lines.filter((l) => !/^\s*#/.test(l));
+    const assigns = codeLines.filter((l) => /secrets\.HM_LEAK_PATTERNS_JSON/.test(l));
+    if (assigns.length !== 1) out.push('секрет назначается в ' + assigns.length + ' местах, а не в одном');
+    else if (!/^ {10}HM_LEAK_PATTERNS_JSON: \$\{\{ secrets\.HM_LEAK_PATTERNS_JSON \}\}\s*$/.test(assigns[0])) out.push('секрет не в env шага (отступ 10): ' + assigns[0].trim());
+    if (codeLines.some((l) => /^\s+HM_LEAK_PATTERNS:/.test(l))) out.push('JSON целиком отдан переменной HM_LEAK_PATTERNS — её унаследуют все дочерние процессы');
+    const at = (re) => lines.findIndex((l) => re.test(l));
+    const iStage = at(/^ {6}- name: Stage private leak-pattern list/);
+    const iFetch = at(/^ {6}- name: Fetch macOS vendor/);
+    const iDrop = at(/^ {6}- name: Drop private leak-pattern list/);
+    if (iStage < 0 || iFetch < 0 || iDrop < 0) return out.concat('нет одного из шагов: запись списка / загрузка vendor / удаление списка');
+    if (iStage > iFetch) out.push('запись списка стоит ПОСЛЕ загрузки vendor');
+    if (iDrop < iFetch) out.push('удаление списка стоит ДО загрузки vendor');
+    // Тело шага без заголовка и без комментариев: имя шага и комментарии называют секрет словами, это не использование.
+    const body = (i) => {
+      let j = i + 1;
+      while (j < lines.length && !/^ {6}- (uses|name):/.test(lines[j])) j++;
+      return lines.slice(i + 1, j).filter((l) => !/^\s*#/.test(l)).join('\n');
+    };
+    const stage = body(iStage);
+    // Разворачивание значения ($VAR / ${VAR}) допустимо ровно в двух местах: проверка на пустоту и запись файлом.
+    const expansions = stage.match(/\$\{?HM_LEAK_PATTERNS_JSON/g) || [];
+    const allowed = [/-z "\$\{HM_LEAK_PATTERNS_JSON:-\}"/, /printf '%s' "\$HM_LEAK_PATTERNS_JSON" > "\$LP"/];
+    if (expansions.length !== allowed.length || !allowed.every((re) => re.test(stage))) out.push('значение секрета используется не только для проверки на пустоту и записи файлом');
+    if (/<</.test(stage)) out.push('запись через heredoc: значение оказалось бы в тексте скрипта');
+    if (/\bset\s+(-[A-Za-z]*x|-o\s+xtrace)/.test(stage)) out.push('включена трассировка команд (set -x): значение попало бы в лог');
+    if (!/LP="\$RUNNER_TEMP\/[\w.-]+"/.test(stage)) out.push('файл лежит не под $RUNNER_TEMP');
+    if (stage.indexOf('umask 077') < 0 || stage.indexOf('umask 077') > stage.indexOf('printf')) out.push('файл пишется без umask 077');
+    if (!/echo "HM_LEAK_PATTERNS_FILE=\$LP" >> "\$GITHUB_ENV"/.test(stage)) out.push('путь не отдан дальше через GITHUB_ENV');
+    const fetch = body(iFetch);
+    if (/HM_LEAK_PATTERNS/.test(fetch)) out.push('шаг загрузки vendor получает список в своём окружении');
+    if (!/run: bash tools\/fetch-vendor-mac\.sh/.test(fetch)) out.push('шаг загрузки vendor не вызывает fetch-vendor-mac.sh');
+    const drop = body(iDrop);
+    if (!/^\s+if: always\(\)\s*$/m.test(drop)) out.push('удаление списка не стоит под always()');
+    if (!/rm -f "\$HM_LEAK_PATTERNS_FILE"/.test(drop) || !/echo "HM_LEAK_PATTERNS_FILE=" >> "\$GITHUB_ENV"/.test(drop)) out.push('удаление списка не удаляет файл или не обнуляет переменную');
+    return out;
+  };
+
+  ok('workflows: личный список паттернов экспорт-фильтра — секрет HM_LEAK_PATTERNS_JSON читает один шаг, пишет файлом под RUNNER_TEMP и отдаёт путь в HM_LEAK_PATTERNS_FILE ДО загрузки vendor; значение не печатается и не попадает в окружение шага загрузки, файл удаляется после', () => {
+    for (const n of ['build-mac.yml', 'build-mac-lite.yml']) {
+      const probs = leakStepProblems(WF(n));
+      assert.deepStrictEqual(probs, [], n + ': ' + probs.join('; '));
+    }
+    // Отрицательные контроли: каждая ошибка, ради которой проверка написана, обязана её краснить.
+    const base = WF('build-mac.yml');
+    const mutate = (what, from, to, expect) => {
+      assert(base.includes(from), 'образец мутации «' + what + '» не найден в воркфлоу — контроль ничего не доказывает');
+      const probs = leakStepProblems(base.replace(from, () => to));
+      assert(probs.some((p) => expect.test(p)), 'мутация «' + what + '» не замечена: ' + JSON.stringify(probs));
+    };
+    mutate('секрет на уровне джоба', '    env:\n      HM_CONFIG_REF: ${{ inputs.config_ref }}\n',
+      '    env:\n      HM_CONFIG_REF: ${{ inputs.config_ref }}\n      HM_LEAK_PATTERNS_JSON: ${{ secrets.HM_LEAK_PATTERNS_JSON }}\n', /местах/);
+    mutate('секрет подставлен в текст скрипта', 'printf \'%s\' "$HM_LEAK_PATTERNS_JSON" > "$LP"',
+      'printf \'%s\' "${{ secrets.HM_LEAK_PATTERNS_JSON }}" > "$LP"', /местах/);
+    mutate('значение печатается в лог', 'echo "HM_LEAK_PATTERNS_FILE=$LP" >> "$GITHUB_ENV"',
+      'echo "$HM_LEAK_PATTERNS_JSON"\n          echo "HM_LEAK_PATTERNS_FILE=$LP" >> "$GITHUB_ENV"', /не только для проверки/);
+    mutate('запись через heredoc', 'printf \'%s\' "$HM_LEAK_PATTERNS_JSON" > "$LP"',
+      'cat > "$LP" <<EOF\n$HM_LEAK_PATTERNS_JSON\nEOF', /heredoc/);
+    mutate('трассировка команд', '          set -e\n          if [ -z "${HM_LEAK_PATTERNS_JSON:-}" ]',
+      '          set -ex\n          if [ -z "${HM_LEAK_PATTERNS_JSON:-}" ]', /set -x/);
+    mutate('путь не отдан дальше', '          echo "HM_LEAK_PATTERNS_FILE=$LP" >> "$GITHUB_ENV"\n', '', /GITHUB_ENV/);
+    mutate('файл не под RUNNER_TEMP', 'LP="$RUNNER_TEMP/hm-leak-patterns.json"', 'LP="$HOME/hm-leak-patterns.json"', /RUNNER_TEMP/);
+    mutate('файл читаем всем', '          umask 077\n', '          umask 022\n', /umask 077/);
+    mutate('JSON в окружении шага загрузки', '          GITHUB_TOKEN: ${{ github.token }}\n        run: bash tools/fetch-vendor-mac.sh',
+      '          GITHUB_TOKEN: ${{ github.token }}\n          HM_LEAK_PATTERNS: ${{ env.X }}\n        run: bash tools/fetch-vendor-mac.sh', /HM_LEAK_PATTERNS/);
+    mutate('файл не удаляется', 'rm -f "$HM_LEAK_PATTERNS_FILE"', 'true', /удаление списка/);
+    mutate('удаление не под always()', '        if: always()\n        run: |\n          if [ -n "${HM_LEAK_PATTERNS_FILE:-}" ]',
+      '        run: |\n          if [ -n "${HM_LEAK_PATTERNS_FILE:-}" ]', /always/);
+    // Порядок: шаг записи, перенесённый за загрузку vendor, краснится (файл появился бы после того, как он нужен).
+    const L = base.split('\n');
+    const s0 = L.findIndex((l) => /^ {6}- name: Stage private leak-pattern list/.test(l));
+    let s1 = s0 + 1;
+    while (s1 < L.length && !/^ {6}- (uses|name):/.test(L[s1])) s1++;
+    const moved = L.splice(s0, s1 - s0);
+    const f0 = L.findIndex((l) => /^ {6}- name: Fetch macOS vendor/.test(l));
+    let f1 = f0 + 1;
+    while (f1 < L.length && !/^ {6}- (uses|name):/.test(L[f1])) f1++;
+    L.splice(f1, 0, ...moved);
+    assert(leakStepProblems(L.join('\n')).some((p) => /ПОСЛЕ загрузки/.test(p)), 'запись списка после загрузки vendor не замечена');
+  });
+
+  // ---- E. Мелочи (S-10) ---------------------------------------------------------------------------------------------
+  ok('.gitignore: секреты и ключи (файлы .env, pfx, p12, p8, pem, key) и vendor-lite/ игнорируются, шаблоны .env.example — нет, отслеживаемые файлы не затронуты', () => {
+    const probe = cp.spawnSync('git', ['--version'], { encoding: 'utf8' });
+    if (probe.error || probe.status !== 0) SKIP('git не запустился');
+    const ign = (f) => cp.spawnSync('git', ['check-ignore', '-q', f], { cwd: ROOT }).status === 0;
+    // Образцы под vendor-lite/ — НЕ .exe: правило *.exe было и раньше, и тест не увидел бы пропажу строки vendor-lite/.
+    for (const f of ['.env', '.env.local', '.env.production', 'x/secret.pfx', 'cert.p12', 'AuthKey.p8', 'server.pem', 'private.key',
+      'vendor-lite/checksums.json', 'vendor-lite/course/vibecoding-course.zip', 'vendor-lite/apps/uv/readme.txt']) {
+      assert(ign(f), f + ' должен игнорироваться');
+    }
+    for (const f of ['templates/ai-agent/.env.example', 'tools/sign-win.js', 'package.json', 'config.json']) assert(!ign(f), f + ' игнорироваться не должен');
+    const r = cp.spawnSync('git', ['ls-files', '-i', '-c', '--exclude-standard'], { cwd: ROOT, encoding: 'utf8' });
+    if (r.status === 0) assert.strictEqual(r.stdout.trim(), '', 'новые правила игнора не должны задевать отслеживаемые файлы: ' + r.stdout);
+  });
+
+  ok('MAC-SIGNING.md говорит, что Windows подписан Certum (а не «не подписан»); комментарии о закреплении macos-15 называют версию electron-builder из lock-файла', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'MAC-SIGNING.md'), 'utf8');
+    assert(!/не подписан/i.test(m), 'устаревшее «Windows не подписан» осталось');
+    assert(/Windows-сборки \*\*подписаны\*\* код-сертификатом Certum/.test(m) && /WIN-SIGNING\.md/.test(m), 'Windows назван подписанным, ссылка на WIN-SIGNING.md');
+    const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
+    const ebVersion = lock.packages['node_modules/electron-builder'].version;
+    for (const n of ['build-mac.yml', 'build-mac-lite.yml']) {
+      const y = WF(n);
+      assert(y.includes('electron-builder до 26.16.0'), n + ': причина закрепления на месте');
+      assert(new RegExp('lock-файле сейчас electron-builder\\s+' + ebVersion.replace(/\./g, '\\.')).test(y.replace(/\n\s*#\s*/g, ' ')), n + ': комментарий называет версию из lock-файла (' + ebVersion + ')');
+    }
   });
 })();

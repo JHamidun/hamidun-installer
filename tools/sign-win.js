@@ -15,7 +15,8 @@
 //   4. signtool verify /pa — неподписанный или битый результат роняет сборку.
 //
 // Пропуск подписи печатается в лог, а не случается молча: неподписанный exe потом
-// не пропустит tools/publish-dist.py (он проверяет подпись перед заливкой).
+// не пропустит ни tools/verify-signature.js (последний шаг npm run dist / dist:win /
+// build-lite), ни tools/publish-dist.py (он проверяет подпись перед заливкой).
 
 const { execFileSync, execSync } = require('child_process');
 const fs = require('fs');
@@ -42,32 +43,68 @@ function decide(env, platform) {
   return { sign: true, why: '' };
 }
 
-// Чужие файлы НЕ подписываем. electron-builder отдаёт хуку каждый .exe, попавший в
-// resources\ через extraResources, то есть и вшитые установщики Git, VS Code, Cursor,
-// Python, Handy, и uv, и скрепку (проверено мини-сборкой 09.10: хук получил
-// resources\vendor\apps\*.exe). SHA-256 этих файлов закреплён в vendor\checksums.json,
-// и Confirm-HmArtifact (scripts/windows/_verify.ps1) останавливает установку при любом
-// расхождении («файл подменён»). Подпись меняет байты, поэтому после неё отказал бы
+// Подписываем ТОЛЬКО своё — по списку (allow-list), а не «всё, кроме чужого» (S-8).
+// electron-builder отдаёт хуку каждый .exe, попавший в resources\ через extraResources, то есть
+// и вшитые установщики Git, VS Code, Cursor, Python, Handy, и uv, и скрепку (проверено мини-сборкой
+// 09.10: хук получил resources\vendor\apps\*.exe). SHA-256 этих файлов закреплён в
+// vendor\checksums.json, и Confirm-HmArtifact (scripts/windows/_verify.ps1) останавливает установку
+// при любом расхождении («файл подменён»). Подпись меняет байты, поэтому после неё отказал бы
 // КАЖДЫЙ вшитый компонент (в Lite — uv и uvx). Подписи вендоров остаются нетронутыми.
-// Своё — только exe приложения, resources\elevate.exe от electron-builder и итоговый
-// portable: они лежат вне resources\ либо называются elevate.exe. Привязка к
-// win-*unpacked нужна, чтобы папка «resources» в пути к репозиторию не сделала чужим всё.
-const FOREIGN_RE = /[\\/]win-[\w.-]*unpacked[\\/]resources[\\/](?!elevate\.exe$)/i;
+//
+// Прежняя версия держала ЧЁРНЫЙ список по пути (win-*unpacked\resources\…): сменилась раскладка,
+// например win-unpacked\vendor\apps\git-setup.exe мимо resources\, — и хук молча возвращал подпись
+// вендорским файлам. Теперь подписывается ровно то, что названо здесь; всё прочее пропускается со
+// строкой в логе. Названо три файла — столько подписей и тратит сборка (WIN-SIGNING.md):
+//   1. exe приложения: прямо в win-*unpacked, имя = build.productName + .exe;
+//   2. elevate.exe от electron-builder: прямо в каталоге resources (win-unpacked\resources\elevate.exe),
+//      но не внутри vendor (проверяется только то, что НИЖЕ win-*unpacked);
+//   3. итоговый portable: <output>\Hamidun-Setup-Windows.exe (lite — …-Lite.exe), не внутри win-*unpacked.
+// Привязка к win-*unpacked нужна, чтобы папка «resources» в пути к репозиторию не сделала чужим всё.
+// Имена сверяет тест с package.json: переименование продукта краснит тест, а не молча оставляет exe
+// без подписи (а если и пройдёт мимо — tools/verify-signature.js остановит сборку на неподписанном файле).
+const PRODUCT_EXE = 'Hamidun Setup.exe';
+const OWN_ARTIFACT_RE = /^Hamidun-Setup-Windows(-Lite)?\.exe$/i;
+const UNPACKED_DIR_RE = /^win-[\w.-]*unpacked$/i;
+function isOwn(file) {
+  const parts = String(file || '').split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const name = parts[parts.length - 1];
+  const parent = parts[parts.length - 2];
+  const ancestors = parts.slice(0, -1);
+  // «vendor» ищем только НИЖЕ каталога win-*unpacked: папка с таким именем выше в пути к репозиторию
+  // (D:\vendor\repo\release\…) не делает свой elevate.exe чужим — иначе он остался бы без подписи, а сборку
+  // остановил бы verify-signature. Если win-*unpacked в пути нет (рабочий каталог electron-builder), смотрим
+  // только два ближайших звена: резать по всему пути к временной папке нечего.
+  const unpackedAt = ancestors.map((a) => UNPACKED_DIR_RE.test(a)).lastIndexOf(true);
+  const below = unpackedAt >= 0 ? ancestors.slice(unpackedAt + 1) : ancestors.slice(-2);
+  if (name.toLowerCase() === PRODUCT_EXE.toLowerCase() && UNPACKED_DIR_RE.test(parent)) return true;
+  if (name.toLowerCase() === 'elevate.exe' && parent.toLowerCase() === 'resources'
+      && !below.some((a) => a.toLowerCase() === 'vendor')) return true;
+  if (OWN_ARTIFACT_RE.test(name) && !ancestors.some((a) => UNPACKED_DIR_RE.test(a))) return true;
+  return false;
+}
+// Для совместимости со старым именем: «чужой» = не из списка своих.
 function isForeign(file) {
-  return FOREIGN_RE.test(String(file || ''));
+  return !isOwn(file);
 }
 
 // Решение по одному файлу — чистая функция (тестируется без signtool и SimplySign).
 function plan(file, env, platform) {
-  if (isForeign(file)) {
+  if (!isOwn(file)) {
     return {
       sign: false,
       foreign: true,
-      why: 'чужой файл: его SHA-256 закреплён в vendor\\checksums.json, подпись сломала бы проверку целостности',
+      why: 'не из списка своих файлов (подписываем exe приложения, elevate.exe и итоговый portable); ' +
+        'у вшитых вендорских файлов SHA-256 закреплён в vendor\\checksums.json, подпись сломала бы проверку целостности',
     };
   }
   const d = decide(env, platform);
   return { sign: d.sign, foreign: false, why: d.why };
+}
+
+// Отпечаток, которым подписываем и который проверяет tools/verify-signature.js: один источник на двоих.
+function certSha1(env) {
+  return String((env && env.HM_WIN_CERT_SHA1) || CERT_SHA1).replace(/\s+/g, '').toUpperCase();
 }
 
 function signtoolArgs(file, sha1, tsa) {
@@ -111,14 +148,19 @@ async function sign(configuration) {
   const env = process.env;
   const d = plan(file, env, process.platform);
   if (!d.sign) {
-    // Для чужого файла печатаем путь от resources\, чтобы в логе было видно, какой именно.
-    const shown = d.foreign ? String(file).replace(/^.*?[\\/](resources[\\/])/i, '$1') : path.basename(file);
+    // Для чужого файла печатаем путь от resources\ (или три последних звена), чтобы в логе было видно, какой именно.
+    let shown = path.basename(file);
+    if (d.foreign) {
+      shown = /[\\/]resources[\\/]/i.test(String(file))
+        ? String(file).replace(/^.*?[\\/](resources[\\/])/i, '$1')
+        : String(file).split(/[\\/]+/).slice(-3).join('\\');
+    }
     console.log('  • sign-win: ПРОПУСК подписи ' + shown + ' — ' + d.why);
     return;
   }
   connectOnce(env);
   const tool = findSigntool(env);
-  const sha1 = (env.HM_WIN_CERT_SHA1 || CERT_SHA1).toUpperCase();
+  const sha1 = certSha1(env);
   let last = null;
   for (let i = 0; i < TSA.length; i++) {
     try {
@@ -143,6 +185,10 @@ module.exports = sign;
 module.exports.default = sign;
 module.exports.decide = decide;
 module.exports.plan = plan;
+module.exports.isOwn = isOwn;
 module.exports.isForeign = isForeign;
 module.exports.signtoolArgs = signtoolArgs;
+module.exports.certSha1 = certSha1;
 module.exports.CERT_SHA1 = CERT_SHA1;
+module.exports.PRODUCT_EXE = PRODUCT_EXE;
+module.exports.OWN_ARTIFACT_RE = OWN_ARTIFACT_RE;

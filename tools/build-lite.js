@@ -385,9 +385,19 @@ function main() {
     // 4b. Упакованный vendor-lite побайтно равен своему checksums.json. Подписанная сборка
     // переписала бы uv/uvx, и на машине человека Confirm-HmArtifact остановил бы их как
     // «подменённые» (хук подписи теперь обходит чужие файлы — это страховка от возврата).
+    // Манифест здесь ПОЛНЫЙ, а вшиты только uv и курс — поэтому --source: обязательны записи, чьи файлы
+    // лежат в vendor-lite (иначе проверка требовала бы Git, Cursor и прочее, которых в lite нет).
     if (target !== 'mac') {
       execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-packed-vendor.js'),
-        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'vendor')], { cwd: ROOT, stdio: 'inherit' });
+        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'vendor'), '--source', VENDOR_LITE],
+      { cwd: ROOT, stdio: 'inherit' });
+      // 4c. Итоговые exe подписаны НАШИМ сертификатом (S-8): хук подписи в CI, не на Windows и при
+      // HM_WIN_SIGN=0 молча пропускает подпись, а electron-builder всё равно рапортует успех. Последним
+      // шагом цепочки, после проверки vendor. HM_WIN_SIGN=0 — единственный осознанный пропуск (громкий).
+      execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-signature.js'),
+        path.join(ROOT, 'release', 'win-unpacked', require('./sign-win.js').PRODUCT_EXE),
+        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'elevate.exe'),
+        path.join(ROOT, 'release', t.artifactFile)], { cwd: ROOT, stdio: 'inherit' });
     }
 
     // 5. size-assert — страховка от случайного вшивания полного vendor

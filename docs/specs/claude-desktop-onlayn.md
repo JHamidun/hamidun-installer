@@ -17,8 +17,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 
 Обещание, за которое можно спросить: чужой установщик не будет запущен, пока его
 подпись не подтверждена. На Windows проверяется Authenticode — цепочка сертификатов
-до корня в машинном сторе, точное поле `O=Anthropic, PBC` и EKU Code Signing
-(`scripts/windows/claude-desktop.ps1:76-134`). На macOS — Developer ID с Team ID
+до корня в машинном сторе, точное поле `O=Anthropic, PBC` и EKU Code Signing (общая функция `Test-HmTrustedSigner`, `scripts/windows/_deelev.ps1:465-544`; вызывается из `scripts/windows/claude-desktop.ps1:206`). На macOS — Developer ID с Team ID
 `Q6L2SF6YDW`, bundle id `com.anthropic.claudefordesktop` и обязательная нотаризация
 (`scripts/macos/claude-desktop.sh:88-111`). Любая невыполненная проверка означает, что
 компонент будет пропущен, а не поставлен «на авось». Второе обещание: пропуск не
@@ -42,9 +41,8 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 
 **Windows (`scripts/windows/claude-desktop.ps1`).**
 
-1. Скрипт подключает `_deelev.ps1` (строка 60) ради `New-HmSecureStagingDir` и
-   `Remove-HmSecureStagingDir`.
-2. `Test-ClaudeDesktopInstalled` (строки 137-157) ищет `claude.exe` в
+1. Скрипт подключает `_deelev.ps1` (строка 62) ради `New-HmSecureStagingDir`, `Remove-HmSecureStagingDir` и общей проверки подписи `Test-HmTrustedSigner`.
+2. `Test-ClaudeDesktopInstalled` (строки 85-105) ищет `claude.exe` в
    `%LOCALAPPDATA%\AnthropicClaude` и `%LOCALAPPDATA%\Microsoft\WindowsApps`, затем
    рекурсивно внутри `AnthropicClaude`, затем спрашивает `Get-AppxPackage` про пакет с
    именем, содержащим `Claude`, и издателем, содержащим `Anthropic`. Нашлось — печать
@@ -69,30 +67,32 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    компьютер; другой HTTP-код — «сервер ответил ошибкой HTTP N»; ответа нет вовсе — «нет
    соединения с сервером». Раньше на всё печаталось «(нет сети?)», и в живом журнале
    «(403) Запрещено» от Anthropic выглядело как обрыв интернета.
-8. Санити размера (строки 238-242): меньше 20 МБ или больше 900 МБ → `exit 120`.
-9. Гейт подписи (строки 244-250) — `Test-HmSignerTrusted -Path $installer
-   -ExpectedOrg $PUBLISHER_O -PinnedThumbprint $LEAF_THUMBPRINT`. Внутри функции
-   (76-134) по порядку: `Get-AuthenticodeSignature` со `Status -eq 'Valid'`; построение
-   `X509Chain` с обязательным `ApplicationPolicy` Code Signing и
-   `RevocationMode = NoCheck`; поиск отпечатка корня цепочки в сторе
-   `StoreName::Root` / `StoreLocation::LocalMachine`; разбор RDN `O=` из
-   `SubjectName.Format($true)` и точное сравнение с `Anthropic, PBC`; проверка EKU
-   `1.3.6.1.5.5.7.3.3`; необязательный пин отпечатка leaf, включаемый только если
-   `$LEAF_THUMBPRINT` непуст (по умолчанию строка 70 — пустая). Функция возвращает
-   пустую строку при успехе и текст причины при отказе; непустая причина → `exit 120`.
-10. Запуск (строки 262-268): `Start-Process -FilePath $installer -WorkingDirectory
-    $cache -PassThru`, намеренно **без** `-Wait` (объяснение в комментарии 253-261:
+8. Санити размера (строки 197-202): меньше 20 МБ или больше 900 МБ → `exit 120`.
+9. Гейт подписи (строки 204-210) — `Test-HmTrustedSigner -Path $installer
+   -ExpectedOrg $PUBLISHER_O -ExpectedThumbprint $LEAF_THUMBPRINT`. Своей копии проверки в
+   скрипте больше нет (до 10.10.2026 здесь жила локальная `Test-HmSignerTrusted`): гейт —
+   общая функция примитива (`scripts/windows/_deelev.ps1:465-544`). Внутри по порядку:
+   `Get-AuthenticodeSignature` со `Status -eq 'Valid'`; цепочка листа через
+   `Get-HmSignerChainRoot` (`_deelev.ps1:399-429`: `IgnoreNotTimeValid`, `ApplicationPolicy`
+   Code Signing, `RevocationMode = NoCheck`; срок КАЖДОГО звена считается отдельно —
+   `OutOfWindow`); отпечаток корня обязан лежать в списке `Get-HmMachineRootThumbprints`
+   (`_deelev.ps1:373-381`, только `StoreLocation::LocalMachine`); для цепочки со звеном
+   вне срока — метка времени, чья цепочка (EKU Time Stamping) тоже кончается в
+   `LocalMachine\Root`; EKU `1.3.6.1.5.5.7.3.3`; разбор RDN `O=` из
+   `SubjectName.Format($true)` со снятием кавычек, которые .NET ставит вокруг значения с
+   запятой, и точное сравнение с `Anthropic, PBC`; необязательный пин отпечатка листа,
+   включаемый только если `$LEAF_THUMBPRINT` непуст (по умолчанию строка 72 — пустая).
+   Функция возвращает пустую строку при успехе и текст причины при отказе; непустая
+   причина → `exit 120`.
+10. Запуск (строки 222-228): `Start-Process -FilePath $installer -WorkingDirectory $cache -PassThru`, намеренно **без** `-Wait` (объяснение в комментарии 213-221:
     `-Wait` ждёт всё дерево потомков, а Claude уходит в трей и живёт). Рабочий каталог
     процесса — защищённый кэш.
-11. Вердикт (строка 274) — `Wait-HmClaudeDesktopVerdict -Proc $cdProc -CapSec 300
-    -GraceSec 90` (функция 168-184). Цикл раз в секунду: маркер найден → `$true`
+11. Вердикт (строка 234) — `Wait-HmClaudeDesktopVerdict -Proc $cdProc -CapSec 300 -GraceSec 90` (функция 116-132). Цикл раз в секунду: маркер найден → `$true`
     немедленно; процесс ещё жив → ждём; процесс вышел → расходуется грейс 90 секунд;
     исчерпан потолок 300 секунд → последняя проверка маркера.
 12. Успех: печать `OK: Claude Desktop установлен.`, при наличии каталога —
-    `HM-RECEIPT path <%LOCALAPPDATA%\AnthropicClaude>`, `$rc = 0` (275-280). Неуспех
-    разводится на два разных текста — установщик ещё работает (285) или уже вышел
-    (287), `$rc = 120`.
-13. `finally` (291-299): ограниченное ожидание процесса `Wait-Process -Timeout 120`,
+    `HM-RECEIPT path <%LOCALAPPDATA%\AnthropicClaude>`, `$rc = 0` (235-240). Неуспех разводится на два разных текста — установщик ещё работает (245) или уже вышел (247), `$rc = 120`.
+13. `finally` (251-259): ограниченное ожидание процесса `Wait-Process -Timeout 120`,
     затем `Remove-HmSecureStagingDir -Path $cache`. Помощник поднимается от подкаталога
     `w` к внешнему каталогу и удаляет только имя строго вида `HmDeElev-<32 hex>`
     (`scripts/windows/_deelev.ps1:113-125`).
@@ -144,25 +144,18 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 ## Инварианты
 
 1. **Скачанный установщик не запускается, пока подпись не подтверждена.** На Windows
-   `Test-HmSignerTrusted` вызывается на строке 246, `Start-Process` — на 264, между
-   ними только `exit 120` при непустой причине отказа
-   (`scripts/windows/claude-desktop.ps1:244-268`). Порядок закреплён двумя
+   `Test-HmTrustedSigner` вызывается на строке 206, `Start-Process` — на 224, между ними только `exit 120` при непустой причине отказа (`scripts/windows/claude-desktop.ps1:204-228`). Порядок закреплён двумя
    `assertOrder` в тестах.
 2. **Доверие подписи не строится на подстроке.** Требуются одновременно: цепочка,
    корень которой лежит в `LocalMachine\Root`, точное значение RDN `O=` = `Anthropic,
-   PBC` и EKU Code Signing (`scripts/windows/claude-desktop.ps1:88-127`). Корни из
-   `CurrentUser\Root` не принимаются.
+   PBC` и EKU Code Signing (общая функция `scripts/windows/_deelev.ps1:465-544`, вызов — `scripts/windows/claude-desktop.ps1:206`). Корни из `CurrentUser\Root` не принимаются: список машинных корней читает только `Get-HmMachineRootThumbprints` (`scripts/windows/_deelev.ps1:373-381`) и только из `LocalMachine\Root`.
 3. **Загрузка идёт не в user-writable каталог.** Файл лежит в
    `$cache\ClaudeSetup.exe`, где `$cache` — результат `New-HmSecureStagingDir`
    (`scripts/windows/claude-desktop.ps1:211,217`); ни одного `-OutFile` в `%TEMP%`/
    `%TMP%` в файле нет.
 4. **Установщик запускается из того же защищённого каталога.**
-   `Start-Process -FilePath $installer -WorkingDirectory $cache`
-   (`scripts/windows/claude-desktop.ps1:264`).
-5. **Ни одно ожидание не бесконечно.** `Start-Process` без `-Wait` (264);
-   `Wait-HmClaudeDesktopVerdict` ограничен `$CapSec = 300` через `$deadline` (169-171);
-   `Wait-Process -Timeout 120` в `finally` (296); `Invoke-WebRequest -TimeoutSec 600`
-   (228).
+   `Start-Process -FilePath $installer -WorkingDirectory $cache` (`scripts/windows/claude-desktop.ps1:224`).
+5. **Ни одно ожидание не бесконечно.** `Start-Process` без `-Wait` (224); `Wait-HmClaudeDesktopVerdict` ограничен `$CapSec = 300` через `$deadline` (117-119); `Wait-Process -Timeout 120` в `finally` (256); `Invoke-WebRequest -TimeoutSec 600` (176).
 6. **«Установлено» печатается только после фактической проверки маркера.** Строка
    `OK: Claude Desktop установлен.` стоит внутри ветки `if ($installed)`, где
    `$installed` — результат `Wait-HmClaudeDesktopVerdict`
@@ -171,7 +164,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    в обоих скриптах выходят с 120; `main.js` трактует 120 как «пропущен» и не пишет
    маркер установки (`src/main.js:1332`, `src/install-receipts.js:33-37`).
 8. **Защищённый кэш убирается ровно одним помощником.** `Remove-HmSecureStagingDir` в
-   `finally` (`scripts/windows/claude-desktop.ps1:298`), который поднимается от `w` к
+   `finally` (`scripts/windows/claude-desktop.ps1:251,258`), который поднимается от `w` к
    внешнему каталогу и удаляет только имя вида `HmDeElev-<32 hex>`
    (`scripts/windows/_deelev.ps1:117-123`).
 9. **macOS: отсутствие инструмента проверки — отказ, а не пропуск проверки.**
@@ -254,7 +247,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
   распаковывает бутстрап в пользовательский `%TEMP%`) принят и вынесен в
   `THREAT-MODEL.md`.
 - Windows: отзыв сертификата отдельно не проверяется —
-  `ChainPolicy.RevocationMode = NoCheck` (строка 91), с расчётом на то, что отзыв уже
+  `ChainPolicy.RevocationMode = NoCheck` (`scripts/windows/_deelev.ps1:407`, `Get-HmSignerChainRoot`), с расчётом на то, что отзыв уже
   проверил WinVerifyTrust при `Status = Valid`.
 - macOS: установка идёт в `~/Applications`, а не в `/Applications` (строка 41), то есть
   приложение ставится только текущему пользователю.
@@ -269,16 +262,22 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 
 1. **`THREAT-MODEL.md:85` расходится с кодом.** Там написано, что в
    `claude-desktop.ps1` есть «пин отпечатка leaf». В коде пин по умолчанию выключен:
-   `$LEAF_THUMBPRINT = ''` (`scripts/windows/claude-desktop.ps1:70`), а комментарий
-   53-58 прямо помечает его как опциональное усиление. Читатель модели угроз
+   `$LEAF_THUMBPRINT = ''` (`scripts/windows/claude-desktop.ps1:72`), а комментарий 55-60 прямо помечает его как опциональное усиление. Читатель модели угроз
    пересчитает защиту на один вентиль больше, чем есть.
-2. **`THREAT-MODEL.md:83-84` называет не ту функцию.** Гейтом для `claude-desktop`
-   назван `Test-HmTrustedSigner` из `_deelev.ps1:375`, но скрипт объявляет и
-   использует собственную `Test-HmSignerTrusted`
-   (`scripts/windows/claude-desktop.ps1:76,246`) — при том что `_deelev.ps1`
-   подключается (строка 60). Та же функция продублирована в
-   `scripts/windows/chatgpt-desktop.ps1:52`: две копии проверки подписи, которые
-   придётся править синхронно.
+2. **Две копии проверки подписи (закрыто 10.10.2026).** Раньше `claude-desktop.ps1` и
+   `chatgpt-desktop.ps1` объявляли каждый свою `Test-HmSignerTrusted`, а
+   `THREAT-MODEL.md:83-84` называл гейтом `Test-HmTrustedSigner` из `_deelev.ps1`, которую
+   скрипт не вызывал. Копии разошлись с общей функцией и держали два дефекта: цепочка
+   «на сегодня» отвергала подписанта с истёкшим коротким листом, а пин `O=Anthropic, PBC`
+   не совпадал НИКОГДА — .NET берёт значение с запятой в кавычки, и сравнивалось
+   `"Anthropic, PBC"` (проверено на установленном Claude Desktop: лист
+   `CN="Anthropic, PBC", O="Anthropic, PBC"`). Теперь оба скрипта зовут
+   `Test-HmTrustedSigner` (`scripts/windows/claude-desktop.ps1:206`,
+   `scripts/windows/chatgpt-desktop.ps1:117`), текст модели угроз совпадает с кодом.
+   Следствие, о котором стоит знать: до правки онлайн-установка Claude Desktop на
+   Windows при ЛЮБОМ установщике уходила в `exit 120` на гейте подписи; теперь при
+   действительной подписи Anthropic установщик реально запускается (повышенно, из
+   защищённого кэша — как и задумано в шапке скрипта).
 3. **Два незакрытых TODO-verify в самих скриптах.**
    `scripts/windows/claude-desktop.ps1:53-58` — снять и вписать реальный отпечаток
    leaf-серта; `scripts/macos/claude-desktop.sh:26-29` — подтвердить Team ID и bundle
@@ -290,8 +289,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    (`src/main.js:2410`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
    каталога MSIX-пакета с этим шаблоном — **кодом не подтверждено**; если нет, карточка
    может показывать «не установлено» там, где скрипт корректно выйдет с 0.
-5. **Развилка архитектуры на Windows читает только `PROCESSOR_ARCHITECTURE`**
-   (строка 192). Переменная `PROCESSOR_ARCHITEW6432` в скрипте не используется, хотя в
+5. **Развилка архитектуры на Windows читает только `PROCESSOR_ARCHITECTURE`** (строка 140). Переменная `PROCESSOR_ARCHITEW6432` в скрипте не используется, хотя в
    allowlist окружения она есть (`src/main.js` — список `WIN_SYS_ENV_KEYS`). Поведение
    на ARM64-машине при запуске скрипта в x86-хосте **кодом не подтверждено**; при
    ошибке будет скачан x64-установщик.

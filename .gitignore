@@ -28,3 +28,17 @@ _bak-*/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Секреты и ключи (S-10): репозиторий ПУБЛИЧНЫЙ, и «git add -A» не должен уметь их подхватить. Сертификат
+# подписи Windows облачный (файла .pfx у него нет), но .env, ключи и сертификаты появляются у соавторов,
+# в CI и при перевыпусках. Это последняя страховка поверх tools/assert-clean.js, а не замена ему.
+# Шаблоны .env.example в templates/ остаются в репозитории.
+.env*
+!.env.example
+*.pfx
+*.p12
+*.p8
+*.pem
+*.key
+# Временный набор vendor, который tools/build-lite.js собирает для lite-издания и убирает в finally.
+vendor-lite/

@@ -40,8 +40,9 @@ jobs:
     # от 07.09 начал проверять пароль в `security set-key-partition-list`, а
     # electron-builder до 26.16.0 передаёт туда пароль сертификата вместо пароля
     # своей временной связки ключей — подпись падала с «SecKeychainUnlock: The user
-    # name or passphrase you entered is not correct». Снять закрепление, когда
-    # electron-builder в lock-файле станет ≥ 26.16.1 (electron-userland/electron-builder#10172).
+    # name or passphrase you entered is not correct». В lock-файле сейчас electron-builder
+    # 25.1.8 (точный пин в package.json), то есть мы ПОД этим багом, и закрепление нужно.
+    # Снять его, когда electron-builder в lock-файле станет ≥ 26.16.1 (electron-userland/electron-builder#10172).
     runs-on: macos-15
     # Переменная стоит на джобе, а не на отдельных шагах. Прошлый заход
     # закрепил только fetch:config и release-check — и полная сборка Mac
@@ -51,26 +52,17 @@ jobs:
     # как закрепление, а ведёт себя как его отсутствие.
     env:
       HM_CONFIG_REF: ${{ inputs.config_ref }}
-      # Секрет подписи маяка завершения курса. Читает его `npm run beacon:stamp`
-      # (tools/stamp-beacon-secret.js) и кладёт в config.json НА ВРЕМЯ СБОРКИ; в
-      # репозитории поле остаётся пустым, это сторожит тест.
-      #
-      # Задан на уровне job-а, а не одного шага, СОЗНАТЕЛЬНО: сборка dmg зовёт
-      # electron-builder напрямую (не через `npm run dist:mac`), и пропущенная
-      # строка env в нужном шаге дала бы Windows-сборку с подписью, а mac — без.
-      # Половина защиты читается как целая: у одного ученика маяк доказан, у
-      # другого нет, и разницу никто не заметит.
-      #
-      # Нет секрета — маяк уйдёт неподписанным, сборка НЕ падает (см. комментарий
-      # в config.json). Истина живёт в CC_BEACON_SECRET контейнера academy-funnel;
-      # менять надо обе стороны разом.
-      HM_COURSE_BEACON_SECRET: ${{ secrets.HM_COURSE_BEACON_SECRET }}
     permissions:
       contents: write   # публикация dmg в Release (не artifact — квота)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Токен НЕ остаётся в .git/config (S-9, ревью): ниже `npm ci` исполняет install-скрипты ~390 пакетов
+          # в этом же рабочем каталоге, и любой из них прочитал бы токен с правом contents: write. Шагам,
+          # которым токен нужен, он передаётся окружением самого шага (GH_TOKEN у `gh release`).
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -85,17 +77,47 @@ jobs:
       # дерево остаётся грязным). Опаснее половина с config.json: застрявшее edition:'lite' МОЛЧА
       # выключает предполётные гейты (preflight решает «для этого издания проверять нечего»),
       # и офлайн-dmg уехал бы без проверки свежести конфиг-пака, а по логу выглядел бы нормально.
-      # Проверка на секунду и без зависимостей — поэтому стоит ДО npm install и до фетчей.
+      # Проверка на секунду и без зависимостей — поэтому стоит ДО npm ci и до фетчей.
       - name: Assert clean tree (собираем офлайн-издание, а не остатки lite)
         run: npm run assert:clean
 
+      # `npm ci`, а не `npm install` (S-9): этот джоб держит секреты Apple и Reg.ru S3, а `npm install` вправе
+      # переписать lock-файл и подтянуть иную версию зависимости, чем проверенная ревью. `npm ci` ставит РОВНО
+      # то, что в package-lock.json (там версии и integrity всех 388 пакетов), и падает, если lock и package.json
+      # разошлись. Согласованность проверена сухим прогоном `npm ci --dry-run --offline --ignore-scripts`.
       - name: Install deps
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       # Одна переменная закрепляет всю цепочку: fetch-config, гейт config-fresh
       # в preflight и release-check читают её же.
       - name: Fetch config (bundle into installer)
         run: npm run fetch:config
+
+      # Личный список паттернов экспорт-фильтра nomad-src (имена, адреса и домены владельца) в публичном
+      # репозитории не лежит, а РЕЛИЗНАЯ сборка без него не идёт: tools/fetch-vendor-mac.sh при CI=true
+      # останавливается (FATAL), если списка нет, он битый или пустой (docs/specs/obsluzhivanie-vendor.md, п. 17).
+      # Секрет HM_LEAK_PATTERNS_JSON — тот же JSON, что лежит в tools/leak-patterns.local.json на машине владельца.
+      # Шаг записывает его ФАЙЛОМ под $RUNNER_TEMP и дальше отдаёт только ПУТЬ (HM_LEAK_PATTERNS_FILE): само значение
+      # в переменной окружения унаследовали бы все дочерние процессы шага загрузки (pip, playwright, git).
+      # Секрет приходит окружением шага, а не подстановкой в текст скрипта, и нигде не печатается: GitHub маскирует
+      # структурированные секреты (JSON) в логе ненадёжно, надёжнее всего не выводить значение вовсе, поэтому и
+      # ::add-mask:: тут нечему — ни одно производное значение не вычисляется и не печатается.
+      # Секрета нет — шаг только предупреждает: решение «стоп» принимает сам fetch-vendor-mac.sh (одно место, где
+      # живёт и осознанный обход HM_ALLOW_NO_PRIVATE_LEAK_LIST), а не копия этой логики в YAML.
+      - name: Stage private leak-pattern list (секрет HM_LEAK_PATTERNS_JSON → файл)
+        env:
+          HM_LEAK_PATTERNS_JSON: ${{ secrets.HM_LEAK_PATTERNS_JSON }}
+        run: |
+          set -e
+          if [ -z "${HM_LEAK_PATTERNS_JSON:-}" ]; then
+            echo "::warning::секрет HM_LEAK_PATTERNS_JSON не задан или пуст — fetch-vendor-mac.sh остановит релизную сборку: личного списка паттернов нет."
+            exit 0
+          fi
+          umask 077
+          LP="$RUNNER_TEMP/hm-leak-patterns.json"
+          printf '%s' "$HM_LEAK_PATTERNS_JSON" > "$LP"
+          echo "HM_LEAK_PATTERNS_FILE=$LP" >> "$GITHUB_ENV"
+          echo "личный список паттернов записан файлом ($(wc -c < "$LP" | tr -d ' ') байт); значения в лог не выводятся."
 
       - name: Fetch macOS vendor (full offline — apps, wheels, Chromium)
         env:
@@ -107,6 +129,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash tools/fetch-vendor-mac.sh
 
+      # Список нужен только загрузке vendor. Сборка ниже исполняет стороннее (electron-builder и его зависимости)
+      # в том же джобе, и читать личные паттерны владельца им незачем: файл удаляется сразу, а переменная
+      # обнуляется для всех следующих шагов. always() — чтобы он не остался и после падения загрузки.
+      - name: Drop private leak-pattern list from the runner
+        if: always()
+        run: |
+          if [ -n "${HM_LEAK_PATTERNS_FILE:-}" ]; then rm -f "$HM_LEAK_PATTERNS_FILE"; fi
+          echo "HM_LEAK_PATTERNS_FILE=" >> "$GITHUB_ENV"
+
       # ПОСЛЕ fetch-vendor-mac.sh и ДО сборки — порядок обязателен, а не косметика.
       # Тот скрипт переписывает корневой config.json целиком (пишет туда
       # `offlineEdition`, см. tools/fetch-vendor-mac.sh:714-722). Подстановка секрета
@@ -117,7 +148,18 @@ jobs:
       # проверено обходом tools/fetch-config.js, единственный writeFileSync там на
       # `.hamidun-config-pack.json`. Первая редакция этого комментария утверждала
       # обратное — исправлено до вливания.)
+      # Секрет подписи маяка завершения курса. Читает его ТОЛЬКО этот шаг (`npm run beacon:stamp`,
+      # tools/stamp-beacon-secret.js) и кладёт в config.json НА ВРЕМЯ СБОРКИ; в репозитории поле
+      # остаётся пустым, это сторожит тест. Дальше electron-builder берёт готовый config.json с диска
+      # и самого секрета из окружения не читает — поэтому он задан здесь, на шаге, а не на джобе (S-9).
+      # Раньше он висел на уровне джоба и был виден `npm install` и скриптам установки всех зависимостей,
+      # то есть любой пакет в дереве зависимостей мог его прочитать и унести.
+      #
+      # Нет секрета — маяк уйдёт неподписанным, сборка НЕ падает (см. комментарий в config.json).
+      # Истина живёт в CC_BEACON_SECRET контейнера academy-funnel; менять надо обе стороны разом.
       - name: Stamp beacon secret (подпись маяка; в репозиторий не коммитится)
+        env:
+          HM_COURSE_BEACON_SECRET: ${{ secrets.HM_COURSE_BEACON_SECRET }}
         run: npm run beacon:stamp
 
       - name: Validate bundled git (dugite)

@@ -14,6 +14,10 @@ on:
       - 'test/staging-primitive.ps1'
       - '.github/workflows/staging-primitive.yml'
 
+# Права токена по умолчанию — только чтение: гейт лишь проверяет примитив и ничего не пишет.
+permissions:
+  contents: read
+
 # Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
 # бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
 concurrency:
@@ -26,7 +30,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Кто мы и с какими привилегиями
         shell: pwsh
