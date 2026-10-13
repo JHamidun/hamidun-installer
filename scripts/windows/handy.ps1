@@ -20,6 +20,7 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # Write-HmFileSafe: запись настроек не идёт сквозь ссылку на каталоге данных
 
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -218,9 +219,13 @@ if (Test-Path -LiteralPath $store) {
                 recording_retention_period = 'months3'
             }
         }
-        $tmp = "$store.tmp"
-        ($seed | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $tmp -Destination $store -Force -ErrorAction Stop
+        # Запись — через Write-HmFileSafe: случайный CreateNew-файл рядом и проверка ссылки впритык к
+        # замене. Прежний «$store.tmp + Move-Item -Force» не проверял ссылку вовсе, а каталог данных лежит
+        # в профиле, и процесс обычного пользователя подменил бы его ссылкой на чужую папку. Байты файла
+        # прежние (UTF-8 с BOM и перевод строки в конце, как у Set-Content -Encoding UTF8).
+        $seedJson = ($seed | ConvertTo-Json -Depth 6)
+        $seedBytes = ConvertTo-HmBomLineBytes $seedJson
+        Write-HmFileSafe -Path $store -Bytes $seedBytes
         Write-Host "  Пред-настроено: язык распознавания «русский», горячая клавиша Ctrl+Alt+Space"
         Write-Host "  (Ctrl+Space не берём — он у многих переключает раскладку.)"
     } catch {

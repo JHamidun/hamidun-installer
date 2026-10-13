@@ -814,7 +814,8 @@ ok('config.ps1/config.sh: стартовый проект дополняется
     const name = rel[rel.length - 1];
     const at = s.indexOf('HamidunStart');
     assert(at !== -1, name + ': блок стартового проекта на месте');
-    const blk = s.slice(Math.max(0, at - 1500), at + 3500);
+    // (окно +5500: в блок Windows добавились проверки ссылок на пути — u3 — и отчёт о добавленных ушёл дальше)
+    const blk = s.slice(Math.max(0, at - 1500), at + 5500);
 
     // Главное: НЕТ раннего выхода «папка есть — ничего не делаю».
     assert(!/уже есть:.*не перезаписываю/.test(blk),
@@ -3361,7 +3362,7 @@ ok('install-гигиена (scripts): Nomad — VENDOR-ONLY (только вши
   assert(!/--force/.test(nps), 'nomad.ps1: НЕТ --force');
   assert(!/использую как есть/.test(nps), 'nomad.ps1: старой ветки «использую как есть» нет');
   assert(/if \(-not \$DRY -and -not \$srcTrusted\) \{/.test(nps), 'nomad.ps1: гейт $srcTrusted');
-  assertOrder(nps, '-not $srcTrusted) {', 'tool install --python 3.12 "$srcForInstall"',
+  assertOrder(nps, '-not $srcTrusted) {', '& $uv tool install --python 3.12 "$($build.Path)"',
     'nomad.ps1: skip-гейт (exit 120) ПЕРЕД uv tool install');
 });
 
@@ -3409,7 +3410,7 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
   assert(!/--force/.test(nps), 'nomad.ps1: НИ ОДНОГО --force');
   // Ставим из КОПИИ проверенного дерева (uv/setuptools собирают IN-TREE и портят vendor,
   // из-за чего повторный запуск падал на гейте целостности), но по-прежнему без --force.
-  assert(/& \$uv tool install --python 3\.12 "\$srcForInstall"/.test(nps), 'nomad.ps1: uv tool install без --force');
+  assert(/& \$uv tool install --python 3\.12 "\$\(\$build\.Path\)"/.test(nps), 'nomad.ps1: uv tool install без --force, из КОПИИ в защищённой папке');
   // Как и в nomad.sh: признаком чужой установки считается ИСПОЛНЯЕМЫЙ ФАЙЛ внутри тула.
   // Подстрочный /uv\\tools\\nomad-agent/ проходил и на голом каталоге — то есть закреплял
   // ровно тот дефект, из-за которого повторный запуск вечно печатал «уже установлено».
@@ -3440,7 +3441,7 @@ ok('Codex P0 (scripts): uv tool install БЕЗ --force + guard существу�
   const guardPs = nps.slice(gStart, gMatch ? gStart + gMatch.index : nps.length);
   assert(guardPs.length < 2000, 'nomad.ps1: граница guard-блока найдена, а не уехала на весь файл');
   assert(/exit 120/.test(guardPs), 'nomad.ps1: существующий тул/шим → exit 120');
-  assertOrder(nps, '$existingNomad = @(', 'tool install --python 3.12 "$srcForInstall"',
+  assertOrder(nps, '$existingNomad = @(', '& $uv tool install --python 3.12 "$($build.Path)"',
     'nomad.ps1: guard ПЕРЕД uv tool install');
 });
 
@@ -6084,10 +6085,11 @@ ok('Nomad собирается из КОПИИ — иначе повторная
   const ps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
   const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
   assertOrder(ps, 'Get-HmTreeSha256', 'uv tool install', 'Windows: сверка целостности ДО установки');
-  assert(/hm-nomad-build-/.test(ps), 'Windows: сборка идёт из временной копии');
-  assert(/tool install --python 3\.12 "\$srcForInstall"/.test(ps),
+  // Копия — в ЗАЩИЩЁННОЙ папке (New-HmSecureStagingDir), а не в %TEMP%: u3-D (разбор безопасности 09.10.2026).
+  assert(/New-HmNomadBuildCopy -Src \$src/.test(ps) && /New-HmSecureStagingDir/.test(ps), 'Windows: сборка идёт из копии в защищённой папке');
+  assert(/tool install --python 3\.12 "\$\(\$build\.Path\)"/.test(ps),
     'Windows: uv получает КОПИЮ, а не путь в vendor');
-  assert(/Remove-Item -LiteralPath \$buildSrc/.test(ps), 'Windows: копия убирается');
+  assert(/Remove-HmSecureStagingDir -Path \$build\.Stage/.test(ps), 'Windows: копия убирается');
   assert(/BUILD_SRC=/.test(sh) && /uv tool install --python 3\.12 "\$BUILD_SRC"/.test(sh),
     'macOS: тот же приём на месте');
 });
@@ -7262,7 +7264,14 @@ asyncTests()
     // Windows: robocopy-бэкап с /XF — авторитетный список (переносим РОВНО его).
     const m = CONFIG_PS.match(/robocopy \$claudeHome \$backupDir[^|\n]*\/XF([^|\n]*)/);
     assert(m, 'в config.ps1 есть robocopy-бэкап с /XF');
-    const winList = (m[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1)).sort();
+    const winAll = (m[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1));
+    // Закрепка ~/.claude (.hm-pin-*) — механизм ТОЛЬКО Windows: открытый без разделения файл не даёт переименовать папку;
+    // в POSIX переименование папки с открытыми файлами разрешено, закрепки там нет и исключать нечего. Это не секрет, а
+    // служебный файл, который robocopy не смог бы открыть (код 8 и «копия неполная»), поэтому он в Windows-списке и
+    // сверяется отдельно, а список СЕКРЕТОВ по-прежнему обязан совпадать с mac ровно.
+    const WIN_ONLY = ['.hm-pin-*'];
+    assert(WIN_ONLY.every((n) => winAll.includes(n)), 'закрепка исключена из копии бэкапа в Windows: ' + winAll.join(', '));
+    const winList = winAll.filter((n) => !WIN_ONLY.includes(n)).sort();
     assert(winList.length >= 3, 'в /XF есть исключения: ' + winList.join(', '));
     const bm = CONFIG_SH.match(/BACKUP_EXCLUDES="([^"]+)"/);
     assert(bm, 'в config.sh есть BACKUP_EXCLUDES');
@@ -7655,16 +7664,16 @@ asyncTests()
   // и Nomad не ставился на Windows НИКОГДА.
   ok('Nomad: копия исходников без подстановок + проверка факта копирования', () => {
     const n = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
-    const i = n.indexOf('$buildSrc = Join-Path');
+    const i = n.indexOf('function New-HmNomadBuildCopy');
     assert(i > 0, 'блок подготовки копии найден');
-    const blk = n.slice(i, i + 1200);
+    const blk = codeOnly(n.slice(i, i + 4000));
     assert(!/Copy-Item[^\n]*\*/.test(blk),
       'в копировании нет подстановок — в PS 5.1 они молча копируют ноль файлов');
-    assert(/Copy-Item -LiteralPath \$src -Destination \$buildSrc/.test(blk),
+    assert(/Copy-Item -LiteralPath \$Src -Destination \$dst/.test(blk),
       'копируется каталог целиком в ещё не существующий путь');
     assert(/pyproject\.toml/.test(blk), 'факт копирования проверяется по контрольному файлу');
     const chk = blk.indexOf('pyproject.toml');
-    const use = blk.indexOf('$srcForInstall = $buildSrc');
+    const use = blk.indexOf('return [pscustomobject]');
     assert(chk > 0 && use > chk, 'проверка стоит ДО того, как копия объявлена пригодной');
   });
 
@@ -13394,7 +13403,12 @@ ok('config.json в репозитории без сборочных маркер
     assert(!/function Add-ToUserPath/.test(c), 'старый помощник (только существующий каталог, без рассылки) убран');
     const u = codeOnly(readWin('_userpath.ps1'));
     assert(!/\$env:Path\s*=/.test(u), 'помощник не трогает PATH процесса');
-    assert(/SendMessageTimeout/.test(u) && /0x1A/.test(u), 'WM_SETTINGCHANGE рассылается');
+    // Рассылка WM_SETTINGCHANGE — вызовом SendMessageTimeoutW, описанным В ПАМЯТИ (Reflection.Emit, флаги SMTO_ABORTIFHUNG и
+    // 5 секунд, как до правки), запасной путь — SetEnvironmentVariable для области User; Add-Type нет. Что сообщение
+    // «Environment» реально доходит до окна верхнего уровня, проверяет тест u3-A (окно-шпион).
+    assert(/function Send-HmEnvBroadcast/.test(u) && /SendMessageTimeoutW\(\[IntPtr\]0xFFFF, \[UInt32\]0x1A, \[UIntPtr\]::Zero, 'Environment', \[UInt32\]2, \[UInt32\]5000/.test(u)
+      && /SetEnvironmentVariable\('HM_PATH_TOUCH', \$null, 'User'\)/.test(u), 'WM_SETTINGCHANGE рассылается: ABORTIFHUNG и 5 с на окно, запасной путь .NET');
+    assert(!/Add-Type/.test(u) && /AssemblyBuilderAccess\]::Run\b/.test(u), 'без компиляции на лету: P/Invoke описан в памяти (Reflection.Emit, Run)');
     assert(/DoNotExpandEnvironmentNames/.test(u) && /ExpandString/.test(u), 'REG_EXPAND_SZ и %VAR% сохраняются');
   });
 
@@ -14181,12 +14195,13 @@ ok('config.json в репозитории без сборочных маркер
         assert.strictEqual(fs.readFileSync(file2, 'utf8'), 'OLD', 'старое содержимое цело');
         assert(!fs.readdirSync(base).some((n) => n.indexOf('.hamidun-tmp-') !== -1), 'временный файл убран');
         // Отрицательный контроль: без повторов (как в первой редакции) тот же замок на 1,2 с даёт отказ.
-        const libSrc = fs.readFileSync(MIG_LIB, 'utf8');
+        // Write-HmFileSafe живёт в _userpath.ps1 (u3-B): мутируем её там, библиотека миграции подтягивает соседа.
+        const libSrc = fs.readFileSync(path.join(WIN, '_userpath.ps1'), 'utf8');
         const mutText = libSrc.replace('$try -ge 8', '$try -ge 1');
         assert(mutText !== libSrc, 'мутация применилась');
         const mdir = path.join(base, 'mut'); fs.mkdirSync(mdir);
-        fs.writeFileSync(path.join(mdir, '_cfgmigrate.ps1'), mutText);
-        fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(mdir, '_userpath.ps1'));
+        fs.copyFileSync(MIG_LIB, path.join(mdir, '_cfgmigrate.ps1'));
+        fs.writeFileSync(path.join(mdir, '_userpath.ps1'), mutText);
         o = lockedWrite(path.join(mdir, '_cfgmigrate.ps1'), path.join(base, 'mutated.json'), 1200);
         assert(/RESULT=fail/.test(o.out), 'без повторов замок на 1,2 с ломает запись — тест различает: ' + o.out);
       } finally { dropDir(base); }
@@ -18394,3 +18409,2082 @@ ok('config.json в репозитории без сборочных маркер
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   });
 }());
+
+// ===========================================================================
+// u3 — укрепление PowerShell-скриптов, которые идут под администратором (разбор безопасности 09.10.2026,
+// находки F6, F7, F10, F11). Раздел самодостаточен: его можно гонять отдельно (run_section.js).
+//
+//   A. Ни одного Add-Type: csc.exe пишет исходник, .cmdline и dll в %TEMP%, малварь того же пользователя
+//      подменяет их до загрузки — код под администратором. Рассылка WM_SETTINGCHANGE идёт средствами .NET.
+//   B. Записи checks.json и settings_store.json — через Write-HmFileSafe (случайный CreateNew-файл рядом,
+//      проверка ссылки перед каждой заменой), а не «предсказуемое .tmp + Move-Item».
+//   C. config.ps1 не идёт за junction в корне ~/.claude (robocopy /XJ пропускает ссылки ВНУТРИ дерева, но не
+//      сам корневой аргумент) и за file-symlink, подложенной на имя записываемого файла (Copy-Item и
+//      File.Copy(…, $false) создают по битой ссылке файл-цель; перенос по имени — нет).
+//   D. nomad.ps1 собирает из копии в защищённой папке (атомарно, только Администраторы), а не из %TEMP%.
+//
+// Тесты исполняют код (PS 5.1, настоящие junction, окно-шпион), а не ищут слова в тексте. У каждого стража
+// есть отрицательный контроль: прежнее поведение, которое тест обязан отвергнуть.
+// ===========================================================================
+(function () {
+  console.log('\n== Укрепление PowerShell (u3): без Add-Type, записи через CreateNew, ссылка в корне ~/.claude, сборка Nomad в защищённой папке ==');
+  const { spawnSync } = require('child_process');
+  const WIN = path.join(ROOT, 'scripts', 'windows');
+  const PS = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const havePs = process.platform === 'win32' && fs.existsSync(PS);
+  const BOM = '\uFEFF';
+  const rawWin = (f) => fs.readFileSync(path.join(WIN, f), 'utf8').replace(/^\uFEFF/, '');
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const mkTmp = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u3-' + tag + '-'));
+  const junction = (target, link) => fs.symlinkSync(target, link, 'junction');
+  const needPs = () => { if (!havePs) SKIP('нужен Windows PowerShell 5.1'); };
+
+  // Вырезание PS-функции: от «function Имя» до первой строки «}» в нулевой колонке.
+  const cutFn = (src, name) => {
+    const m = src.match(new RegExp('function ' + name + '\\b[\\s\\S]*?\\r?\\n\\}'));
+    assert(m, name + ' извлекается из скрипта');
+    return m[0];
+  };
+
+  // Текст PS без комментариев (однострочные «#», блочные «<# #>»); строки и here-string остаются как есть.
+  // Сверено с настоящим токенизатором PSParser на всех scripts/windows/*.ps1: после удаления пробелов
+  // результат совпал побайтно.
+  function stripPsComments(src) {
+    const out = [];
+    const lines = String(src).replace(/^\uFEFF/, '').split(/\r?\n/);
+    let inBlock = false;
+    let here = null;
+    for (const raw of lines) {
+      if (here) {
+        out.push(raw);
+        if (raw.startsWith(here)) here = null;
+        continue;
+      }
+      let line = '';
+      let quote = null;
+      let i = 0;
+      while (i < raw.length) {
+        const c = raw[i];
+        const n = raw[i + 1];
+        if (inBlock) {
+          if (c === '#' && n === '>') { inBlock = false; i += 2; } else { i += 1; }
+          continue;
+        }
+        if (quote) {
+          line += c;
+          if (quote === "'") {
+            if (c === "'") { if (n === "'") { line += n; i += 2; continue; } quote = null; }
+          } else if (c === '`') {
+            if (n !== undefined) { line += n; i += 2; continue; }
+          } else if (c === '"') {
+            if (n === '"') { line += n; i += 2; continue; }
+            quote = null;
+          }
+          i += 1;
+          continue;
+        }
+        if (c === '<' && n === '#') { inBlock = true; i += 2; continue; }
+        if (c === '#' && (i === 0 || /[\s;]/.test(raw[i - 1]))) break;
+        if (c === "'" || c === '"') { quote = c; line += c; i += 1; continue; }
+        if (c === '@' && (n === "'" || n === '"') && /^\s*$/.test(raw.slice(i + 2))) {
+          here = n + '@'; line += raw.slice(i); i = raw.length; break;
+        }
+        line += c;
+        i += 1;
+      }
+      out.push(line);
+    }
+    return out.join('\n');
+  }
+
+  // Текст PS -> временный .ps1 (BOM + CRLF, как у боевых) -> powershell.exe 5.1.
+  function runPs(text, env, o) {
+    const dir = mkTmp('ps');
+    const f = path.join(dir, 'h.ps1');
+    fs.writeFileSync(f, BOM + '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n' + String(text).replace(/\r?\n/g, '\r\n'));
+    try {
+      const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: (o && o.timeout) || 240000, env: Object.assign({}, process.env, env || {}) });
+      return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+    } finally { drop(dir); }
+  }
+
+  // ---- прежний код (e5ee946), как отрицательные контроли --------------------------------------------------
+  const OLD_BROADCAST = String.raw`function Send-HmEnvBroadcast {
+    try {
+        if (-not ('Hm.EnvBroadcast' -as [type])) {
+            Add-Type -Namespace Hm -Name EnvBroadcast -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam,
+    string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@ -ErrorAction Stop
+        }
+        $res = [UIntPtr]::Zero
+        [void][Hm.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero,
+            'Environment', 0x0002, 5000, [ref]$res)
+        return $true
+    } catch { return $false }
+}`;
+  const OLD_WRITE_HMCHECK = String.raw`function Write-HmCheck($name, $verdict) {
+    try {
+        $dir = Join-Path $env:USERPROFILE '.hamidun-setup'
+        if (Test-HmIsReparse $dir) { return }
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
+        $file = Join-Path $dir 'checks.json'
+        $data = $null
+        if (Test-Path -LiteralPath $file) {
+            try { $data = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json) } catch { $data = New-Object psobject }
+        }
+        $entry = @{ verdict = $verdict; at = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds }
+        $obj = @{}
+        if ($data) { foreach ($p in $data.PSObject.Properties) { $obj[$p.Name] = $p.Value } }
+        $obj[$name] = $entry
+        $tmp = "$file.tmp"
+        if ((Test-HmIsReparse $dir) -or (Test-HmIsReparse $tmp) -or (Test-HmIsReparse $file)) { return }
+        ($obj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $file -Force
+    } catch { }
+}`;
+  const OLD_HANDY_WRITE = [
+    '        $tmp = "$store.tmp"',
+    '        ($seed | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop',
+    '        Move-Item -LiteralPath $tmp -Destination $store -Force -ErrorAction Stop',
+    '',
+  ].join('\r\n');
+
+  // ==========================================================================================================
+  // A. Компиляция на лету
+  // ==========================================================================================================
+  const COMPILE_PATTERNS = [
+    [/\bAdd-Type\b/i, 'Add-Type'],
+    [/\bcsc(?:\.exe)?\b/i, 'csc.exe'],
+    [/System\.CodeDom|CodeDomProvider|CSharpCodeProvider|VBCodeProvider/i, 'CodeDom'],
+    [/\[\s*(?:System\.)?Reflection\.Assembly\s*\]\s*::\s*(?:Load\w*|UnsafeLoad\w*)/i, 'Assembly.Load*'],
+    [/AssemblyBuilderAccess\s*\]\s*::\s*(?:RunAndSave|Save)\b/i, 'AssemblyBuilderAccess.Save'],
+  ];
+  // Список исключений ПУСТ намеренно: всякая компиляция или загрузка сборки под администратором
+  // обязана пройти ревью отдельно. In-memory Reflection.Emit (Get-HmNativeApi в _deelev.ps1) сюда не попадает.
+  const compileHits = (text) => {
+    const code = stripPsComments(text);
+    return COMPILE_PATTERNS.filter((p) => p[0].test(code)).map((p) => p[1]);
+  };
+
+  ok('u3-A: в scripts/windows/*.ps1 нет компиляции на лету (Add-Type, csc.exe, CodeDom, Assembly.Load*); сторож видит нарушение и не путает комментарий с кодом', () => {
+    const files = fs.readdirSync(WIN).filter((n) => n.endsWith('.ps1'));
+    assert(files.length >= 20, 'просмотрены все скрипты, а не пустой список: ' + files.length);
+    const offenders = [];
+    for (const f of files) {
+      const hits = compileHits(fs.readFileSync(path.join(WIN, f), 'utf8'));
+      if (hits.length) offenders.push(f + ' [' + hits.join(', ') + ']');
+    }
+    assert.deepStrictEqual(offenders, [],
+      'компиляция под администратором (csc.exe кладёт исходник и dll в %TEMP%, малварь того же пользователя подменяет их до загрузки): ' + offenders.join('; '));
+    // Отрицательные контроли: сторож обязан видеть прежний код и не обязан ругаться на комментарии.
+    assert.deepStrictEqual(compileHits(OLD_BROADCAST), ['Add-Type'], 'прежняя Send-HmEnvBroadcast — нарушение');
+    assert.deepStrictEqual(compileHits('# Add-Type -TypeDefinition x\nGet-Item .'), [], 'строка-комментарий — не код');
+    assert.deepStrictEqual(compileHits("Write-Host 'ok'  # Add-Type и csc.exe зовёт прежний код"), [], 'хвостовой комментарий — не код');
+    assert.deepStrictEqual(compileHits('<# Add-Type\ncsc.exe #>\nGet-Item .'), [], 'блочный комментарий — не код');
+    assert.deepStrictEqual(compileHits('$s = "Add-Type -Path a.dll"'), ['Add-Type'], 'текст команды в строке — подозрителен');
+    assert.deepStrictEqual(compileHits("[Reflection.Assembly]::LoadFrom('C:\\x.dll')"), ['Assembly.Load*']);
+    assert.deepStrictEqual(compileHits('$c = New-Object Microsoft.CSharp.CSharpCodeProvider'), ['CodeDom']);
+    assert.deepStrictEqual(compileHits('[System.Reflection.Emit.AssemblyBuilderAccess]::RunAndSave'), ['AssemblyBuilderAccess.Save']);
+    assert.deepStrictEqual(compileHits('[System.Reflection.Emit.AssemblyBuilderAccess]::Run'), [], 'in-memory Run — разрешён (Get-HmNativeApi)');
+    assert.deepStrictEqual(compileHits("$x = @'\nAdd-Type\n'@"), ['Add-Type'], 'here-string — не комментарий');
+    // То же для PowerShell, зашитого в строки src/*.js: загрузка сборки из GAC по имени (-AssemblyName) компиляции не делает
+    // и файлов не пишет — допустима; компиляция и загрузка по пути — нет.
+    const JS_COMPILE = /Add-Type\s+-(?:TypeDefinition|MemberDefinition|Path|LiteralPath|Language|CompilerParameters|ReferencedAssemblies|OutputAssembly)\b|\bcsc\.exe\b|CSharpCodeProvider/i;
+    const jsOffenders = fs.readdirSync(path.join(ROOT, 'src')).filter((n) => n.endsWith('.js'))
+      .filter((n) => JS_COMPILE.test(fs.readFileSync(path.join(ROOT, 'src', n), 'utf8')));
+    assert.deepStrictEqual(jsOffenders, [], 'в src/*.js нет PowerShell с компиляцией на лету: ' + jsOffenders.join(', '));
+    assert(JS_COMPILE.test("'Add-Type -TypeDefinition @\"...\"@'") && JS_COMPILE.test('Add-Type -Path C:\\\\x.dll') && !JS_COMPILE.test("'Add-Type -AssemblyName System.IO.Compression.FileSystem; '"), 'контроль: сторож src/*.js различает компиляцию и загрузку по имени');
+  });
+
+  // Окно-шпион: скрытое окно верхнего уровня в отдельном STA-потоке принимает WM_SETTINGCHANGE и пишет
+  // строку lParam. Ссылку на NativeWindow держим в статическом поле: иначе сборщик мусора уничтожает окно
+  // и «рассылка не дошла» оказывается ложной (проверено: 3 из 12 прогонов без ссылки).
+  const SPY_HARNESS = String.raw`$ErrorActionPreference = 'Stop'
+$Scratch = $env:HM_TEST_SCRATCH
+$Variants = $env:HM_TEST_VARIANTS
+Add-Type -ReferencedAssemblies 'System.Windows.Forms' -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows.Forms;
+
+public sealed class HmSpyWindow : NativeWindow
+{
+    public static readonly List<string> Seen = new List<string>();
+    public static HmSpyWindow Keep;
+    private static Thread _t;
+    private static readonly ManualResetEvent _ready = new ManualResetEvent(false);
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x1A)
+        {
+            string s = (m.LParam == IntPtr.Zero) ? "<null>" : Marshal.PtrToStringUni(m.LParam);
+            lock (Seen) { Seen.Add(s); }
+        }
+        base.WndProc(ref m);
+    }
+
+    public static void Start()
+    {
+        _t = new Thread(() =>
+        {
+            var w = new HmSpyWindow();
+            Keep = w;
+            var cp = new CreateParams();
+            cp.Caption = "HmSpy";
+            w.CreateHandle(cp);
+            Application.Idle += delegate(object so, EventArgs ea) { _ready.Set(); };
+            Application.Run();
+        });
+        _t.SetApartmentState(ApartmentState.STA);
+        _t.IsBackground = true;
+        _t.Start();
+        _ready.WaitOne();
+    }
+
+    public static string[] Take() { lock (Seen) { var a = Seen.ToArray(); Seen.Clear(); return a; } }
+}
+'@
+[HmSpyWindow]::Start()
+
+function Start-TempPoller([string]$Dir) {
+    $flag = [pscustomobject]@{ Stop = $false }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+        param($dir, $flag)
+        $seen = New-Object 'System.Collections.Generic.List[string]'
+        while (-not $flag.Stop) {
+            foreach ($f in [IO.Directory]::GetFileSystemEntries($dir)) {
+                $n = [IO.Path]::GetFileName($f)
+                if (-not $seen.Contains($n)) { $seen.Add($n) }
+            }
+            Start-Sleep -Milliseconds 5
+        }
+        foreach ($n in $seen) { $n }
+    }).AddArgument($Dir).AddArgument($flag)
+    return [pscustomobject]@{ Ps = $ps; Async = $ps.BeginInvoke(); Flag = $flag }
+}
+function Stop-TempPoller($p) {
+    Start-Sleep -Milliseconds 300
+    $p.Flag.Stop = $true
+    $r = $p.Ps.EndInvoke($p.Async)
+    $p.Ps.Dispose()
+    return @($r)
+}
+
+foreach ($pair in ($Variants -split '\|')) {
+    $label, $file = $pair -split '=', 2
+    $tmp = Join-Path $Scratch $label
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $env:TEMP = $tmp
+    $env:TMP = $tmp
+    $poller = Start-TempPoller $tmp
+    [void][HmSpyWindow]::Take()
+    $calls = 0
+    $res = $null
+    $got = @()
+    while ($calls -lt 4 -and @($got).Count -eq 0) {
+        $calls++
+        $res = & { . $file; Send-HmEnvBroadcast }
+        $got = @([HmSpyWindow]::Take())
+    }
+    $seen = Stop-TempPoller $poller
+    Write-Output ('VARIANT=' + $label + ' RESULT=' + $res + ' CALLS=' + $calls + ' SPY=' + (@($got) -join ',') + ' TEMPSEEN=' + (@($seen) -join ','))
+}
+`;
+
+  ok('u3-A: Send-HmEnvBroadcast рассылает WM_SETTINGCHANGE «Environment» окну-шпиону и не оставляет файлов в TEMP (прежняя версия с Add-Type их оставляла)', () => {
+    needPs();
+    const base = mkTmp('spy');
+    try {
+      const noop = path.join(base, 'noop.ps1');
+      const old = path.join(base, 'old.ps1');
+      fs.writeFileSync(noop, BOM + 'function Send-HmEnvBroadcast { return $true }\r\n');
+      fs.writeFileSync(old, BOM + OLD_BROADCAST.replace(/\r?\n/g, '\r\n') + '\r\n');
+      const variants = ['real=' + path.join(WIN, '_userpath.ps1'), 'noop=' + noop, 'old=' + old].join('|');
+      const r = runPs(SPY_HARNESS, { HM_TEST_SCRATCH: path.join(base, 'scratch'), HM_TEST_VARIANTS: variants }, { timeout: 420000 });
+      const got = {};
+      r.out.split(/\r?\n/).forEach((l) => {
+        const m = /^VARIANT=(\S+) RESULT=(\S*) CALLS=(\d+) SPY=(.*?) TEMPSEEN=(.*)$/.exec(l);
+        if (m) got[m[1]] = { result: m[2], calls: Number(m[3]), spy: m[4] ? m[4].split(',') : [], temp: m[5] ? m[5].split(',') : [] };
+      });
+      const dump = r.out + r.err;
+      assert(got.real && got.noop && got.old, 'харнес отработал для всех трёх вариантов: ' + dump);
+      // Настоящая функция: возвращает $true, окно получило «Environment», в TEMP за всё время не появилось ничего.
+      assert.strictEqual(got.real.result, 'True', 'контракт: $true, не бросает: ' + dump);
+      assert(got.real.spy.length >= 1 && got.real.spy.every((s) => s === 'Environment'), 'окно верхнего уровня получило WM_SETTINGCHANGE с lParam «Environment»: ' + dump);
+      assert.deepStrictEqual(got.real.temp, [], 'в TEMP не появлялось файлов (ни .cs, ни .cmdline, ни .dll): ' + dump);
+      // Отрицательный контроль 1: функция без рассылки не даёт шпиону ничего — проверка рассылки различает.
+      assert.deepStrictEqual(got.noop.spy, [], 'функция-пустышка окну ничего не шлёт: ' + dump);
+      // Отрицательный контроль 2: прежний код с Add-Type — рассылает, но оставляет следы компиляции в TEMP:
+      // значит, наблюдатель за TEMP видит дыру, а пустой список выше что-то значит.
+      assert(got.old.spy.length >= 1, 'прежний код тоже рассылал: ' + dump);
+      assert(got.old.temp.some((n) => /\.cs$/i.test(n)) && got.old.temp.some((n) => /\.dll$/i.test(n)),
+        'прежний код оставлял в TEMP исходник и dll (окно подмены): ' + got.old.temp.join(','));
+    } finally { drop(base); }
+  });
+
+  ok('u3-A: node.ps1 — рассылка после записи системного PATH идёт через общий Send-HmEnvBroadcast; Add-Type и ложная проверка типа ушли', () => {
+    const raw = rawWin('node.ps1');
+    const code = stripPsComments(raw);
+    assert(/^\s*\.\s+\(Join-Path \$PSScriptRoot '_userpath\.ps1'\)/m.test(code), 'node.ps1 подключает _userpath.ps1 (там живёт единственная рассылка)');
+    const fn = stripPsComments(cutFn(raw, 'Add-HmMachinePath'));
+    assert(!/Add-Type|SendMessageTimeout|DllImport|MemberDefinition|'HmEnvBroadcast'|Hm\.EnvBroadcast/.test(fn), 'в Add-HmMachinePath нет своей рассылки на P/Invoke');
+    assert(/Send-HmEnvBroadcast/.test(fn), 'рассылка зовёт общий помощник');
+    assertOrder(fn, "SetValue('Path'", 'Send-HmEnvBroadcast', 'сначала запись PATH, потом рассылка');
+    // не критично: сбой рассылки не ломает установку (помощник не бросает, вызов обёрнут)
+    assert(/try \{[^}]*Send-HmEnvBroadcast[^}]*\} catch/.test(fn.replace(/\r?\n/g, ' ')), 'сбой рассылки не критичен');
+    assert.deepStrictEqual(compileHits(raw), [], 'node.ps1 не компилирует на лету');
+  });
+
+  // ==========================================================================================================
+  // B. Слабые записи «временный файл с предсказуемым именем + Move-Item»
+  // ==========================================================================================================
+  const dotSourced = (code) => Array.from(code.matchAll(/^\s*\.\s+\(Join-Path \$PSScriptRoot '([^']+\.ps1)'\)/gm)).map((m) => m[1]);
+  // Все файлы, чьи функции видны скрипту после дот-сорсинга (транзитивно).
+  function sourceClosure(file, texts) {
+    const seen = new Set();
+    const walk = (f) => {
+      if (seen.has(f)) return;
+      seen.add(f);
+      if (texts[f] == null) return;
+      dotSourced(stripPsComments(texts[f])).forEach(walk);
+    };
+    walk(file);
+    return seen;
+  }
+  const FILESAFE_USE = /\bWrite-HmFileSafe\b/;
+  const FILESAFE_DEF = /function Write-HmFileSafe\b/;
+
+  ok('u3-B: Write-HmFileSafe определён один раз, в _userpath.ps1, и подключён у каждого скрипта, который его зовёт', () => {
+    const texts = {};
+    fs.readdirSync(WIN).filter((n) => n.endsWith('.ps1')).forEach((n) => { texts[n] = fs.readFileSync(path.join(WIN, n), 'utf8'); });
+    const defs = Object.keys(texts).filter((n) => FILESAFE_DEF.test(stripPsComments(texts[n])));
+    assert.deepStrictEqual(defs, ['_userpath.ps1'], 'функция определена ровно в одном месте — в общей библиотеке');
+    const users = Object.keys(texts).filter((n) => FILESAFE_USE.test(stripPsComments(texts[n])) && !FILESAFE_DEF.test(stripPsComments(texts[n])));
+    ['_cfgmigrate.ps1', '_claudeenv.ps1', 'handy.ps1', 'mascot.ps1', 'config.ps1'].forEach((n) => assert(users.includes(n), n + ' пишет через Write-HmFileSafe'));
+    users.forEach((n) => assert(sourceClosure(n, texts).has('_userpath.ps1'), n + ': путь дот-сорсинга до _userpath.ps1 есть — функция определена к моменту вызова'));
+    // Отрицательный контроль: скрипт без пути до библиотеки сторож обязан отвергнуть.
+    const fake = { 'a.ps1': 'Write-HmFileSafe -Path x -Bytes y', 'b.ps1': ". (Join-Path $PSScriptRoot '_userpath.ps1')\nWrite-HmFileSafe", '_userpath.ps1': 'function Write-HmFileSafe {}' };
+    assert(!sourceClosure('a.ps1', fake).has('_userpath.ps1'), 'контроль: a.ps1 функцию не получает');
+    assert(sourceClosure('b.ps1', fake).has('_userpath.ps1'), 'контроль: b.ps1 получает');
+  });
+
+  // Харнес Write-HmCheck. HM_TEST_SWAP=1: пока идёт сериализация JSON (между проверкой ссылки и записью в
+  // прежнем коде), «малварь» подменяет ~/.hamidun-setup junction'ом на чужую папку.
+  // HM_TEST_FIXED_DATE=1: время подменено, чтобы файлы прежнего и нового кода сравнивались побайтно.
+  const CHECK_HARNESS = String.raw`. $env:HM_TEST_LIB
+if ($env:HM_TEST_OVERRIDE) { . $env:HM_TEST_OVERRIDE }
+if ($env:HM_TEST_FIXED_DATE -eq '1') {
+    function Get-Date {
+        param([string]$Date, [string]$Format)
+        if ($Date) { return Microsoft.PowerShell.Utility\Get-Date $Date }
+        if ($Format) { return Microsoft.PowerShell.Utility\Get-Date -Format $Format }
+        return [datetime]::SpecifyKind([datetime]'2026-10-09T12:00:00', 'Utc')
+    }
+}
+$global:HmSwapped = $false
+if ($env:HM_TEST_SWAP -eq '1') {
+    function ConvertTo-Json {
+        [CmdletBinding()]
+        param([Parameter(ValueFromPipeline = $true)]$InputObject, [int]$Depth = 2)
+        begin { $items = New-Object System.Collections.ArrayList }
+        process { [void]$items.Add($InputObject) }
+        end {
+            if (-not $global:HmSwapped) {
+                $global:HmSwapped = $true
+                $d = Join-Path $env:USERPROFILE '.hamidun-setup'
+                Rename-Item -LiteralPath $d -NewName '.hamidun-setup-real'
+                New-Item -ItemType Junction -Path $d -Value $env:HM_TEST_VICTIM | Out-Null
+            }
+            Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $items[0] -Depth $Depth
+        }
+    }
+}
+Write-HmCheck 'claude' 'works'
+Write-Output ('SWAPPED=' + $global:HmSwapped)
+`;
+
+  ok('u3-B: Write-HmCheck пишет checks.json через случайный CreateNew-файл: подмена каталога ссылкой во время сериализации не пишет сквозь неё, байты прежние', () => {
+    needPs();
+    const base = mkTmp('chk');
+    try {
+      const overridePath = path.join(base, 'old-write-hmcheck.ps1');
+      fs.writeFileSync(overridePath, BOM + OLD_WRITE_HMCHECK.replace(/\r?\n/g, '\r\n') + '\r\n');
+      const lib = path.join(WIN, '_claudeenv.ps1');
+      const seedHome = (name) => {
+        const home = path.join(base, name);
+        const dir = path.join(home, '.hamidun-setup');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'checks.json'), BOM + '{"claude-ps":{"verdict":"blocked","at":1}}');
+        fs.writeFileSync(path.join(dir, 'checks.json.tmp'), 'SENTINEL');   // предсказуемое имя прежнего кода
+        return { home, dir };
+      };
+      const run = (h, extra) => runPs(CHECK_HARNESS, Object.assign({ USERPROFILE: h.home, HM_TEST_LIB: lib }, extra || {}));
+      // 1) обычный путь: прежний и новый код дают ОДИНАКОВЫЕ байты (UTF-8 с BOM, CRLF в конце, те же ключи)
+      const nw = seedHome('new'); const od = seedHome('old');
+      const r1 = run(nw, { HM_TEST_FIXED_DATE: '1' });
+      const r2 = run(od, { HM_TEST_FIXED_DATE: '1', HM_TEST_OVERRIDE: overridePath });
+      const bNew = fs.readFileSync(path.join(nw.dir, 'checks.json'));
+      const bOld = fs.readFileSync(path.join(od.dir, 'checks.json'));
+      assert(bNew[0] === 0xEF && bNew[1] === 0xBB && bNew[2] === 0xBF && bNew[bNew.length - 2] === 0x0D && bNew[bNew.length - 1] === 0x0A, 'BOM в начале и CRLF в конце: ' + r1.err);
+      assert(bNew.equals(bOld), 'байты прежнего и нового кода совпадают:\n' + bNew.toString('utf8') + '\n--- прежний:\n' + bOld.toString('utf8') + r1.err + r2.err);
+      const parsed = JSON.parse(bNew.toString('utf8').replace(/^\uFEFF/, ''));
+      assert.deepStrictEqual(Object.keys(parsed).sort(), ['claude', 'claude-ps'], 'прежняя запись сохранена, новая добавлена');
+      // 2) предсказуемое имя .tmp больше не используется: чужой файл с этим именем остаётся нетронутым
+      assert(fs.existsSync(path.join(nw.dir, 'checks.json.tmp')) && fs.readFileSync(path.join(nw.dir, 'checks.json.tmp'), 'utf8') === 'SENTINEL',
+        'новый код не использует предсказуемое имя: чужой checks.json.tmp остался как был');
+      assert(!fs.existsSync(path.join(od.dir, 'checks.json.tmp')), 'контроль: прежний код затирал и переносил checks.json.tmp');
+      assert.deepStrictEqual(fs.readdirSync(nw.dir).filter((n) => /hamidun-tmp/.test(n)), [], 'временных файлов не осталось');
+      // 3) подмена каталога ссылкой в окне «проверил -> записал»
+      const sNew = seedHome('swap-new'); const sOld = seedHome('swap-old');
+      const victimNew = path.join(base, 'victim-new'); const victimOld = path.join(base, 'victim-old');
+      fs.mkdirSync(victimNew); fs.mkdirSync(victimOld);
+      const r3 = run(sNew, { HM_TEST_SWAP: '1', HM_TEST_VICTIM: victimNew });
+      assert(/SWAPPED=True/.test(r3.out), 'харнес подменил каталог во время сериализации: ' + r3.out + r3.err);
+      assert.deepStrictEqual(fs.readdirSync(victimNew), [], 'сквозь ссылку ничего не записано (новый код)');
+      const r4 = run(sOld, { HM_TEST_SWAP: '1', HM_TEST_VICTIM: victimOld, HM_TEST_OVERRIDE: overridePath });
+      assert(/SWAPPED=True/.test(r4.out), 'контроль: подмена состоялась и в прежнем коде: ' + r4.out + r4.err);
+      assert(fs.existsSync(path.join(victimOld, 'checks.json')), 'контроль: прежний код писал сквозь подложенную ссылку (дыра воспроизведена)');
+    } finally { drop(base); }
+  });
+
+  // checks.json — НАШ файл, и «только чтение» на нём (антивирус, синхронизация, человек) прежний Move-Item -Force
+  // перебивал: File.Replace на таком файле отказывает (UnauthorizedAccessException — не IOException, поэтому повторы не
+  // помогают), и вердикт не записывался бы на каждом прогоне. Write-HmCheck снимает атрибут сама (-ClearReadOnly).
+  ok('u3-B: Write-HmCheck — checks.json с атрибутом только чтение перезаписывается, как прежним Move-Item -Force; без снятия атрибута перенос отказывает и вердикт не пишется', () => {
+    needPs();
+    const base = mkTmp('chkro');
+    const files = [];
+    try {
+      const lib = path.join(WIN, '_claudeenv.ps1');
+      const seed = (name) => {
+        const home = path.join(base, name); const dir = path.join(home, '.hamidun-setup');
+        fs.mkdirSync(dir, { recursive: true });
+        const f = path.join(dir, 'checks.json');
+        fs.writeFileSync(f, BOM + '{"claude-ps":{"verdict":"blocked","at":1}}');
+        fs.chmodSync(f, 0o444);
+        files.push(f);
+        return { home, dir, f };
+      };
+      const inside = (p) => path.resolve(p).toLowerCase().startsWith(path.resolve(base).toLowerCase() + path.sep);
+      const run = (h, extra) => {
+        assert(inside(h.home), 'USERPROFILE песочницы внутри каталога теста: ' + h.home);   // первым делом: настоящий профиль не затрагивается
+        return runPs(CHECK_HARNESS, Object.assign({ USERPROFILE: h.home, HM_TEST_LIB: lib }, extra || {}));
+      };
+      const keys = (f) => Object.keys(JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, ''))).sort();
+      const nw = seed('ro-new');
+      const r1 = run(nw);
+      assert.deepStrictEqual(keys(nw.f), ['claude', 'claude-ps'], 'вердикт записан поверх файла «только чтение»: ' + r1.out + r1.err);
+      assert(!/не записан/.test(r1.out), 'в журнале нет отказа записи: ' + r1.out);
+      assert.deepStrictEqual(fs.readdirSync(nw.dir).filter((n) => /hamidun-tmp/.test(n)), [], 'временных файлов не осталось');
+      // Контроль: тот же Write-HmCheck без -ClearReadOnly — перенос отказывает, файл остался прежним.
+      const fn = cutFn(rawWin('_claudeenv.ps1'), 'Write-HmCheck');
+      // (в комментарии над вызовом переключатель тоже назван — режем именно вызов)
+      const noClear = fn.replace('ConvertTo-Json -Depth 6)) -ClearReadOnly', 'ConvertTo-Json -Depth 6))');
+      assert(noClear !== fn && !/\) -ClearReadOnly/.test(noClear), 'мутация применилась: переключатель вырезан из вызова');
+      const overridePath = path.join(base, 'noclear.ps1');
+      fs.writeFileSync(overridePath, BOM + noClear.replace(/\r?\n/g, '\r\n') + '\r\n');
+      const ctl = seed('ro-ctl');
+      const r2 = run(ctl, { HM_TEST_OVERRIDE: overridePath });
+      assert(/не записан/.test(r2.out), 'контроль: без снятия атрибута перенос отказывает: ' + r2.out + r2.err);
+      assert.deepStrictEqual(keys(ctl.f), ['claude-ps'], 'контроль: файл остался прежним');
+      // Файлы человека переключатель не получают: Write-HmFileSafe без него «только чтение» уважает (отказ с причиной).
+      const h = path.join(base, 'human'); fs.mkdirSync(h);
+      const hf = path.join(h, 'settings.json'); fs.writeFileSync(hf, 'MINE'); fs.chmodSync(hf, 0o444); files.push(hf);
+      const r3 = runPs('. ' + q(path.join(WIN, '_userpath.ps1')) + '\r\ntry { Write-HmFileSafe -Path ' + q(hf) + " -Bytes ([Text.Encoding]::UTF8.GetBytes('NEW')); Write-Output 'RESULT=ok' } catch { Write-Output 'RESULT=fail' }");
+      assert(/RESULT=fail/.test(r3.out) && fs.readFileSync(hf, 'utf8') === 'MINE', 'файл человека с «только чтение» без переключателя не перезаписывается: ' + r3.out + r3.err);
+    } finally {
+      files.forEach((f) => { try { fs.chmodSync(f, 0o666); } catch (e) { /* ignore */ } });
+      drop(base);
+    }
+  });
+
+  // Повторная проверка ссылки ВНУТРИ цикла повторов: пауза между попытками — окно для подмены каталога. На месте файла
+  // стоит каталог, поэтому File.Move падает IOException и цикл крутится; хук Start-Sleep подменяет каталог ссылкой в первой
+  // паузе. Сквозь ссылку записать всё равно нельзя (временный файл остался в унесённом каталоге), поэтому наблюдаемое
+  // свойство — другое: с проверкой отказ быстрый и называет ссылку, без неё — отказ после всех восьми попыток и по иной причине.
+  ok('u3-B: Write-HmFileSafe — каталог подменили ссылкой в паузе между попытками переноса: проверка внутри цикла отказывает сразу и называет ссылку; без неё цикл крутится до конца', () => {
+    needPs();
+    const base = mkTmp('loop');
+    try {
+      const victim = path.join(base, 'victim'); fs.mkdirSync(victim);
+      fs.writeFileSync(path.join(victim, 'keep.txt'), 'VICTIM');
+      const run = (libDir, tag) => {
+        const data = path.join(base, 'data-' + tag);
+        fs.mkdirSync(path.join(data, 'f.json'), { recursive: true });
+        const body = [
+          '. ' + q(path.join(libDir, '_userpath.ps1')),
+          '$dir = ' + q(data),
+          '$victim = ' + q(victim),
+          '$global:HmSwapped = $false',
+          'function Start-Sleep {',
+          '  param([int]$Milliseconds)',
+          '  if (-not $global:HmSwapped) {',
+          '    $global:HmSwapped = $true',
+          "    Rename-Item -LiteralPath $dir -NewName 'swapped-away'",
+          '    New-Item -ItemType Junction -Path $dir -Value $victim | Out-Null',
+          '  }',
+          '  Microsoft.PowerShell.Utility\\Start-Sleep -Milliseconds $Milliseconds',
+          '}',
+          '$t0 = Get-Date',
+          "try { Write-HmFileSafe -Path (Join-Path $dir 'f.json') -Bytes ([Text.Encoding]::UTF8.GetBytes('NEW')); Write-Output 'RESULT=ok' }",
+          "catch { Write-Output ('RESULT=fail MSG=' + $_.Exception.Message) }",
+          "Write-Output ('SWAPPED=' + $global:HmSwapped)",
+          "Write-Output ('WAITED=' + [int]((Get-Date) - $t0).TotalMilliseconds)",
+        ].join('\r\n');
+        const r = runPs(body);
+        const g = (k) => ((new RegExp('^' + k + '=(.*)$', 'm')).exec(r.out) || [])[1] || '';
+        return { out: r.out + r.err, result: g('RESULT'), swapped: g('SWAPPED'), waited: Number(g('WAITED')) };
+      };
+      const a = run(WIN, 'real');
+      assert.strictEqual(a.swapped, 'True', 'подмена в паузе состоялась: ' + a.out);
+      assert(/^fail MSG=.*стал ссылкой/.test(a.result), 'отказ называет ссылку (проверка внутри цикла): ' + a.out);
+      assert.deepStrictEqual(fs.readdirSync(victim), ['keep.txt'], 'в чужую папку ничего не записано');
+      // Контроль: проверка внутри цикла вырезана — отказ приходит только после всех попыток и по другой причине.
+      const lib = fs.readFileSync(path.join(WIN, '_userpath.ps1'), 'utf8');
+      const mut = lib.replace(/^[ \t]*if \(\(Test-HmIsReparse \$dir\) -or \(Test-HmIsReparse \$Path\)\) \{ throw "каталог или файл стал ссылкой[^\n]*\n/m, '');
+      assert(mut !== lib, 'мутация применилась: проверка внутри цикла вырезана');
+      const mdir = path.join(base, 'mut'); fs.mkdirSync(mdir);
+      fs.writeFileSync(path.join(mdir, '_userpath.ps1'), mut);
+      const b = run(mdir, 'mut');
+      assert.strictEqual(b.swapped, 'True', 'контроль: подмена состоялась: ' + b.out);
+      assert(/^fail/.test(b.result) && !/стал ссылкой/.test(b.result), 'контроль: без проверки отказ по иной причине: ' + b.out);
+      assert(b.waited >= 3000 && a.waited + 1000 < b.waited, 'контроль: цикл отработал все попытки (около 4,2 с), а с проверкой отказ пришёл заметно раньше: ' + a.waited + ' мс против ' + b.waited + ' мс\n' + b.out);
+    } finally { drop(base); }
+  });
+
+  // Поведение ОС, на котором держится Write-HmFileSafe и которое запись в комментариях называет «проверено запуском»:
+  // перенос по имени (File.Replace / File.Move) работает с записью каталога и на file-symlink отказывает, а
+  // Copy-Item и File.Copy(…, $false) открывают само имя на запись и по БИТОЙ ссылке создают файл-цель. Если на
+  // какой-то сборке Windows это изменится, тест покраснеет раньше, чем защита станет дырой. Без права на
+  // файловые ссылки (режим разработчика) — пропуск.
+  ok('u3-B: основа Write-HmFileSafe — File.Replace/File.Move на file-symlink цель не трогают и отказывают; Copy-Item и File.Copy(…, $false) по битой ссылке создают файл-цель', () => {
+    needPs();
+    const base = mkTmp('symsem');
+    try {
+      try { fs.symlinkSync(path.join(base, 'nope.txt'), path.join(base, 'probe.txt'), 'file'); fs.rmSync(path.join(base, 'probe.txt'), { force: true }); }
+      catch (e) { SKIP('нет права создавать file-symlink (режим разработчика выключен): ' + e.code); }
+      fs.writeFileSync(path.join(base, 'victim-existing.txt'), 'VICTIM');
+      fs.symlinkSync(path.join(base, 'victim-existing.txt'), path.join(base, 'link-existing.txt'), 'file');
+      fs.symlinkSync(path.join(base, 'victim-missing.txt'), path.join(base, 'link-dangling.txt'), 'file');
+      ['a', 'b', 'c', 'd', 'e'].forEach((n) => fs.writeFileSync(path.join(base, 'src-' + n + '.txt'), 'NEW-' + n));
+      const body = [
+        '$b = ' + q(base),
+        "function Try-Op($label, [scriptblock]$op) { try { & $op; Write-Output ($label + '=ok') } catch { Write-Output ($label + '=refused') } }",
+        "function P($n) { Join-Path $b $n }",
+        "Try-Op 'replace_existing' { [IO.File]::Replace((P 'src-a.txt'), (P 'link-existing.txt'), [NullString]::Value) }",
+        "Try-Op 'move_existing' { [IO.File]::Move((P 'src-b.txt'), (P 'link-existing.txt')) }",
+        "Try-Op 'move_dangling' { [IO.File]::Move((P 'src-c.txt'), (P 'link-dangling.txt')) }",
+        "Write-Output ('victim_existing=' + (Get-Content -LiteralPath (P 'victim-existing.txt') -Raw))",
+        "Write-Output ('victim_missing_created=' + [IO.File]::Exists((P 'victim-missing.txt')))",
+        "Try-Op 'copyitem_dangling' { Copy-Item -LiteralPath (P 'src-d.txt') -Destination (P 'link-dangling.txt') -ErrorAction Stop }",
+        "Write-Output ('created_by_copyitem=' + [IO.File]::Exists((P 'victim-missing.txt')))",
+        "Remove-Item -LiteralPath (P 'victim-missing.txt') -Force -ErrorAction SilentlyContinue",
+        "Try-Op 'filecopy_dangling' { [IO.File]::Copy((P 'src-e.txt'), (P 'link-dangling.txt'), $false) }",
+        "Write-Output ('created_by_filecopy=' + [IO.File]::Exists((P 'victim-missing.txt')))",
+      ].join('\r\n');
+      const r = runPs(body);
+      const o = {};
+      r.out.split(/\r?\n/).forEach((l) => { const m = /^(\w+)=(.*)$/.exec(l); if (m) o[m[1]] = m[2].trim(); });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(o.replace_existing, 'refused', 'File.Replace на file-symlink отказывает' + dump);
+      assert.strictEqual(o.move_existing, 'refused', 'File.Move на file-symlink отказывает' + dump);
+      assert.strictEqual(o.move_dangling, 'refused', 'File.Move на битую file-symlink отказывает' + dump);
+      assert.strictEqual(o.victim_existing, 'VICTIM', 'цель ссылки не тронута' + dump);
+      assert.strictEqual(o.victim_missing_created, 'False', 'по битой ссылке файл-цель не создан' + dump);
+      // контроли: именно эти два способа пишут сквозь битую ссылку
+      assert.strictEqual(o.copyitem_dangling, 'ok', 'контроль: Copy-Item по битой ссылке отрабатывает' + dump);
+      assert.strictEqual(o.created_by_copyitem, 'True', 'контроль: Copy-Item создал файл-цель в чужом месте' + dump);
+      assert.strictEqual(o.filecopy_dangling, 'ok', 'контроль: File.Copy(…, $false) по битой ссылке отрабатывает' + dump);
+      assert.strictEqual(o.created_by_filecopy, 'True', 'контроль: File.Copy(…, $false) тоже создал файл-цель — «не перезаписывать» от ссылки не защищает' + dump);
+    } finally { drop(base); }
+  });
+
+  // Блок пред-настройки Handy (между «$store = Join-Path» и блоком про микрофон) исполняется как есть.
+  const handyBlock = () => {
+    const src = rawWin('handy.ps1');
+    const i0 = src.indexOf("$store = Join-Path $dataDir 'settings_store.json'");
+    const i1 = src.indexOf('# Согласие на микрофон');
+    assert(i0 > 0 && i1 > i0, 'в handy.ps1 найден блок пред-настройки');
+    return src.slice(i0, i1);
+  };
+  const HANDY_HARNESS_HEAD = String.raw`. $env:HM_TEST_LIB
+$DRY = $false
+$dataDir = $env:HM_TEST_DATADIR
+if ($env:HM_TEST_SWAP -eq '1') {
+    $global:HmSwapped = $false
+    function ConvertTo-Json {
+        [CmdletBinding()]
+        param([Parameter(ValueFromPipeline = $true)]$InputObject, [int]$Depth = 2)
+        begin { $items = New-Object System.Collections.ArrayList }
+        process { [void]$items.Add($InputObject) }
+        end {
+            if (-not $global:HmSwapped) {
+                $global:HmSwapped = $true
+                Rename-Item -LiteralPath $dataDir -NewName 'com.pais.handy-real'
+                New-Item -ItemType Junction -Path $dataDir -Value $env:HM_TEST_VICTIM | Out-Null
+            }
+            Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $items[0] -Depth $Depth
+        }
+    }
+}
+`;
+
+  ok('u3-B: handy.ps1 — settings_store.json пишется безопасно: ссылка на каталоге данных и подмена во время сериализации не дают записи сквозь, байты прежние', () => {
+    needPs();
+    const block = handyBlock();
+    const oldBlock = block.replace(/ {8}\$seedJson = [\s\S]*?Write-HmFileSafe -Path \$store -Bytes \$seedBytes\r?\n/, () => OLD_HANDY_WRITE);
+    assert(oldBlock !== block, 'мутация применилась: прежняя запись вернулась на место');
+    assert(!/Write-HmFileSafe/.test(stripPsComments(oldBlock)) && /Move-Item/.test(oldBlock), 'мутант — прежний «.tmp + Move-Item»');
+    const base = mkTmp('handy');
+    try {
+      const lib = path.join(WIN, '_userpath.ps1');
+      const run = (text, dataDir, extra) => runPs(HANDY_HARNESS_HEAD + text, Object.assign({ HM_TEST_LIB: lib, HM_TEST_DATADIR: dataDir }, extra || {}));
+      // 1) обычный путь: те же байты, что давал Set-Content -Encoding UTF8 (BOM, CRLF в конце); чужое «.tmp» не тронуто
+      const dNew = path.join(base, 'new'); const dOld = path.join(base, 'old');
+      [dNew, dOld].forEach((d) => { fs.mkdirSync(d); fs.writeFileSync(path.join(d, 'settings_store.json.tmp'), 'SENTINEL'); });
+      const r1 = run(block, dNew); const r2 = run(oldBlock, dOld);
+      const bNew = fs.readFileSync(path.join(dNew, 'settings_store.json'));
+      const bOld = fs.readFileSync(path.join(dOld, 'settings_store.json'));
+      assert(bNew[0] === 0xEF && bNew[1] === 0xBB && bNew[2] === 0xBF && bNew[bNew.length - 1] === 0x0A && bNew[bNew.length - 2] === 0x0D, 'BOM и CRLF: ' + r1.out + r1.err);
+      assert(bNew.equals(bOld), 'байты совпали с прежним кодом: ' + r1.err + r2.err);
+      const seed = JSON.parse(bNew.toString('utf8').replace(/^\uFEFF/, ''));
+      assert.strictEqual(seed.settings.selected_language, 'ru');
+      assert.strictEqual(seed.settings.bindings.transcribe.current_binding, 'ctrl+alt+space');
+      assert.strictEqual(fs.readFileSync(path.join(dNew, 'settings_store.json.tmp'), 'utf8'), 'SENTINEL', 'предсказуемое .tmp новый код не трогает');
+      assert(!fs.existsSync(path.join(dOld, 'settings_store.json.tmp')), 'контроль: прежний код использовал предсказуемое .tmp');
+      // 2) каталог данных уже подложен ссылкой на чужую папку
+      const victimA = path.join(base, 'victim-a'); const victimB = path.join(base, 'victim-b');
+      fs.mkdirSync(victimA); fs.mkdirSync(victimB);
+      junction(victimA, path.join(base, 'linked-new')); junction(victimB, path.join(base, 'linked-old'));
+      const r3 = run(block, path.join(base, 'linked-new'));
+      assert.deepStrictEqual(fs.readdirSync(victimA), [], 'в цель ссылки ничего не записано: ' + r3.out + r3.err);
+      assert(/Пред-настройку записать не удалось/.test(r3.out), 'отказ назван в журнале: ' + r3.out);
+      run(oldBlock, path.join(base, 'linked-old'));
+      assert(fs.existsSync(path.join(victimB, 'settings_store.json')), 'контроль: прежний код писал сквозь ссылку');
+      // 3) подмена каталога ссылкой во время сериализации
+      const sNew = path.join(base, 'swap-new'); const sOld = path.join(base, 'swap-old');
+      const vC = path.join(base, 'victim-c'); const vD = path.join(base, 'victim-d');
+      [sNew, sOld, vC, vD].forEach((d) => fs.mkdirSync(d));
+      const r5 = run(block, sNew, { HM_TEST_SWAP: '1', HM_TEST_VICTIM: vC });
+      assert.deepStrictEqual(fs.readdirSync(vC), [], 'подмена во время сериализации: запись сквозь ссылку отвергнута: ' + r5.out + r5.err);
+      run(oldBlock, sOld, { HM_TEST_SWAP: '1', HM_TEST_VICTIM: vD });
+      assert(fs.existsSync(path.join(vD, 'settings_store.json')), 'контроль: прежний код при той же подмене писал сквозь ссылку');
+      // 4) файл уже есть — блок его не трогает (поведение не изменилось)
+      const dKeep = path.join(base, 'keep'); fs.mkdirSync(dKeep);
+      fs.writeFileSync(path.join(dKeep, 'settings_store.json'), 'MINE');
+      run(block, dKeep);
+      assert.strictEqual(fs.readFileSync(path.join(dKeep, 'settings_store.json'), 'utf8'), 'MINE', 'существующие настройки человека целы');
+    } finally { drop(base); }
+  });
+
+  // mascot.ps1: подстановка порта скрепки в хуки ~/.claude/settings.json (блок от «$settingsPath = …» до «if (-not $keepMarker)»
+  // исполняется как есть). Прежний код: «Copy-Item -Force … .hm-bak» и «settings.json.hm-tmp + Move-Item -Force» — без проверки
+  // ссылок и по предсказуемому имени; тот же приём, что у checks.json (F7), поэтому и тот же тест.
+  const mascotBlock = () => {
+    const src = rawWin('mascot.ps1');
+    const i0 = src.indexOf("$settingsPath = Join-Path $env:USERPROFILE '.claude\\settings.json'");
+    const i1 = src.indexOf('if (-not $keepMarker) {');
+    assert(i0 > 0 && i1 > i0, 'в mascot.ps1 найден блок правки settings.json');
+    return src.slice(i0, i1);
+  };
+  const OLD_MASCOT_WRITE = [
+    '                $tmpPath = "$settingsPath.hm-tmp"',
+    '                    Copy-Item $settingsPath "$settingsPath.hm-bak" -Force -ErrorAction Stop',
+    '                    [IO.File]::WriteAllText($tmpPath, $newSettings, [Text.UTF8Encoding]::new($false))',
+    '                    $null = [IO.File]::ReadAllText($tmpPath) | ConvertFrom-Json',
+    '                    Move-Item -Force $tmpPath $settingsPath -ErrorAction Stop',
+    '',
+  ].join('\r\n');
+
+  ok('u3-B: mascot.ps1 — settings.json правится через Write-HmFileSafe: бэкап побайтно, чужое .hm-tmp не трогается, ссылка (junction на ~/.claude, file-symlink на .hm-bak) запись не пускает; прежний код писал сквозь', () => {
+    needPs();
+    const block = mascotBlock();
+    const oldBlock = block.replace(/ {20}Write-HmFileSafe -Path "\$settingsPath\.hm-bak"[^\n]*\n {20}Write-HmFileSafe -Path \$settingsPath[^\n]*\n/, () => OLD_MASCOT_WRITE);
+    assert(oldBlock !== block && /Move-Item -Force \$tmpPath/.test(oldBlock) && !/Write-HmFileSafe/.test(stripPsComments(oldBlock)), 'мутант — прежний «Copy-Item + .hm-tmp + Move-Item»');
+    assert(/^\s*\.\s+\(Join-Path \$PSScriptRoot '_userpath\.ps1'\)/m.test(stripPsComments(rawWin('mascot.ps1'))), 'mascot.ps1 подключает _userpath.ps1 (там Write-HmFileSafe)');
+    const base = mkTmp('mascot');
+    try {
+      const lib = path.join(WIN, '_userpath.ps1');
+      const PLACEHOLDER = '{"hooks":{"PreToolUse":[{"hooks":[{"type":"http","url":"http://127.0.0.1:VSCODE_PORT/hook"}]}]},"keep":1}';
+      const run = (text, home) => {
+        assert(path.resolve(home).toLowerCase().startsWith(path.resolve(base).toLowerCase() + path.sep), 'USERPROFILE песочницы внутри каталога теста: ' + home);   // первым делом
+        return runPs('. ' + q(lib) + '\r\n' + text + '\r\nWrite-Output (\'KEEPMARKER=\' + $keepMarker)', { USERPROFILE: home });
+      };
+      const seed = (name, withPlaceholder) => {
+        const home = path.join(base, name); const claude = path.join(home, '.claude');
+        fs.mkdirSync(claude, { recursive: true });
+        fs.writeFileSync(path.join(claude, 'settings.json'), withPlaceholder === false ? '{"keep":1}' : PLACEHOLDER);
+        return { home, claude, file: path.join(claude, 'settings.json') };
+      };
+      // 1) обычный путь: хук направлен на скрепку, бэкап — побайтно прежнее содержимое, чужое .hm-tmp не использовано
+      const nw = seed('new'); const od = seed('old');
+      [nw, od].forEach((h) => fs.writeFileSync(path.join(h.claude, 'settings.json.hm-tmp'), 'SENTINEL'));
+      const r1 = run(block, nw.home); const r2 = run(oldBlock, od.home);
+      const done = fs.readFileSync(nw.file, 'utf8');
+      assert(done.includes('127.0.0.1:45832/hook') && !done.includes('VSCODE_PORT') && JSON.parse(done).keep === 1, 'хук направлен на скрепку, остальное цело: ' + r1.out + r1.err);
+      assert.strictEqual(fs.readFileSync(path.join(nw.claude, 'settings.json.hm-bak'), 'utf8'), PLACEHOLDER, 'бэкап — прежнее содержимое побайтно');
+      assert.strictEqual(fs.readFileSync(path.join(nw.claude, 'settings.json.hm-tmp'), 'utf8'), 'SENTINEL', 'предсказуемое .hm-tmp новый код не трогает');
+      assert.deepStrictEqual(fs.readdirSync(nw.claude).filter((n) => /hamidun-tmp/.test(n)), [], 'временных файлов не осталось');
+      assert(/KEEPMARKER=False/.test(r1.out), 'правка прошла — маркер сбрасывается: ' + r1.out);
+      assert(!fs.existsSync(path.join(od.claude, 'settings.json.hm-tmp')), 'контроль: прежний код использовал предсказуемое .hm-tmp (' + r2.err + ')');
+      assert.strictEqual(fs.readFileSync(od.file, 'utf8').includes('45832'), true, 'контроль: прежний код тоже правил файл');
+      // 2) ~/.claude — junction на чужую папку, где лежит файл с таким же хуком
+      const vNew = path.join(base, 'victim-new'); const vOld = path.join(base, 'victim-old');
+      [vNew, vOld].forEach((v) => { fs.mkdirSync(v); fs.writeFileSync(path.join(v, 'settings.json'), PLACEHOLDER); });
+      const jn = path.join(base, 'jnew'); const jo = path.join(base, 'jold');
+      [jn, jo].forEach((h) => fs.mkdirSync(h));
+      junction(vNew, path.join(jn, '.claude')); junction(vOld, path.join(jo, '.claude'));
+      const r3 = run(block, jn);
+      assert.strictEqual(fs.readFileSync(path.join(vNew, 'settings.json'), 'utf8'), PLACEHOLDER, 'файл за ссылкой не тронут: ' + r3.out + r3.err);
+      assert.deepStrictEqual(fs.readdirSync(vNew).sort(), ['settings.json'], 'бэкап и временные файлы за ссылку не легли');
+      assert(/не удалось безопасно обновить settings\.json/.test(r3.out) && /KEEPMARKER=True/.test(r3.out), 'отказ назван, маркер оставлен: ' + r3.out);
+      run(oldBlock, jo);
+      assert(fs.readdirSync(vOld).includes('settings.json.hm-bak') && fs.readFileSync(path.join(vOld, 'settings.json'), 'utf8').includes('45832'),
+        'контроль: прежний код правил и бэкапил файл ЗА ссылкой');
+      // 3) предсказанное имя бэкапа — file-symlink на чужой файл (нужно право на file-symlink: режим разработчика)
+      let canLink = true;
+      try { fs.symlinkSync(path.join(base, 'nope.txt'), path.join(base, 'probe.lnk'), 'file'); fs.rmSync(path.join(base, 'probe.lnk'), { force: true }); } catch (e) { canLink = false; }
+      if (canLink) {
+        const sNew = seed('sym-new'); const sOld = seed('sym-old');
+        const pNew = path.join(base, 'precious-new.txt'); const pOld = path.join(base, 'precious-old.txt');
+        fs.writeFileSync(pNew, 'PRECIOUS'); fs.writeFileSync(pOld, 'PRECIOUS');
+        fs.symlinkSync(pNew, path.join(sNew.claude, 'settings.json.hm-bak'), 'file');
+        fs.symlinkSync(pOld, path.join(sOld.claude, 'settings.json.hm-bak'), 'file');
+        const r4 = run(block, sNew.home);
+        assert.strictEqual(fs.readFileSync(pNew, 'utf8'), 'PRECIOUS', 'файл за file-symlink не затёрт: ' + r4.out + r4.err);
+        assert.strictEqual(fs.readFileSync(sNew.file, 'utf8'), PLACEHOLDER, 'settings.json не тронут при отказе бэкапа');
+        assert(/KEEPMARKER=True/.test(r4.out), 'маркер оставлен: ' + r4.out);
+        run(oldBlock, sOld.home);
+        assert.strictEqual(fs.readFileSync(pOld, 'utf8'), PLACEHOLDER, 'контроль: прежний Copy-Item -Force затёр чужой файл содержимым settings.json');
+      }
+    } finally { drop(base); }
+  });
+
+  // ==========================================================================================================
+  // C. config.ps1: ссылка в корне ~/.claude
+  // ==========================================================================================================
+  ok('u3-C: Get-HmLinkOnChain — первое звено-ссылка от корня вниз; сам корень доверенный; путь вне корня отвергается', () => {
+    needPs();
+    const base = mkTmp('chain');
+    try {
+      const root = path.join(base, 'profile'); const victim = path.join(base, 'victim');
+      fs.mkdirSync(path.join(root, 'plain', 'sub'), { recursive: true });
+      fs.mkdirSync(path.join(victim, 'deep'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'a'));
+      junction(victim, path.join(root, 'lnk'));
+      junction(victim, path.join(root, 'a', 'j'));
+      const rootLink = path.join(base, 'profile-link'); junction(root, rootLink);
+      const body = [
+        '. ' + q(path.join(WIN, '_userpath.ps1')),
+        '$root = ' + q(root),
+        "function Show($label, $r) { Write-Output ($label + '=' + $(if ($null -eq $r) { '<null>' } else { $r })) }",
+        "Show 'clean' (Get-HmLinkOnChain -Path (Join-Path $root 'plain\\sub') -Root $root)",
+        "Show 'missing' (Get-HmLinkOnChain -Path (Join-Path $root 'plain\\nope\\deeper') -Root $root)",
+        "Show 'direct' (Get-HmLinkOnChain -Path (Join-Path $root 'lnk') -Root $root)",
+        "Show 'below' (Get-HmLinkOnChain -Path (Join-Path $root 'lnk\\deep') -Root $root)",
+        "Show 'nested' (Get-HmLinkOnChain -Path (Join-Path $root 'a\\j\\deep') -Root $root)",
+        "Show 'slash' (Get-HmLinkOnChain -Path ((Join-Path $root 'LNK') + '\\\\') -Root ($root + '\\'))",
+        "Show 'anchorlink' (Get-HmLinkOnChain -Path (Join-Path " + q(rootLink) + " 'plain\\sub') -Root " + q(rootLink) + ')',
+        "Show 'outside' (Get-HmLinkOnChain -Path " + q(victim) + ' -Root $root)',
+        "Show 'self' (Get-HmLinkOnChain -Path $root -Root $root)",
+      ].join('\r\n');
+      const r = runPs(body);
+      const got = {};
+      r.out.split(/\r?\n/).forEach((l) => { const m = /^(\w+)=(.*)$/.exec(l); if (m) got[m[1]] = m[2].trim(); });
+      const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+      assert.strictEqual(got.clean, '<null>', 'обычная цепочка чиста: ' + r.out + r.err);
+      assert.strictEqual(got.missing, '<null>', 'несуществующие звенья — не ссылка');
+      assert(same(got.direct, path.join(root, 'lnk')), 'прямая ссылка названа: ' + got.direct);
+      assert(same(got.below, path.join(root, 'lnk')), 'ниже ссылки называется САМА ссылка, а не звено за ней: ' + got.below);
+      assert(same(got.nested, path.join(root, 'a', 'j')), 'вложенная ссылка в середине пути: ' + got.nested);
+      assert(same(got.slash, path.join(root, 'lnk')), 'регистр и хвостовые слэши не мешают: ' + got.slash);
+      assert.strictEqual(got.anchorlink, '<null>', 'сам корень (профиль) доверенный, даже если он junction: ' + got.anchorlink);
+      assert(got.outside && got.outside !== '<null>', 'путь вне корня проверить нельзя — отвергается: ' + got.outside);
+      assert.strictEqual(got.self, '<null>', 'корень сам по себе — не нарушение');
+    } finally { drop(base); }
+  });
+
+  // Песочница config.ps1: поддельный пак, пустой профиль, «чужая» папка victim с секретом.
+  function mkCfg(tag, homeName) {
+    const base = mkTmp(tag);
+    const home = path.join(base, homeName || 'home'); const clone = path.join(base, 'pack');
+    const victim = path.join(base, 'victim'); const assets = path.join(base, 'assets');
+    [home, victim].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+    fs.mkdirSync(path.join(clone, '.claude', 'skills', 'our-skill'), { recursive: true });
+    fs.writeFileSync(path.join(clone, '.claude', 'skills', 'our-skill', 'SKILL.md'), 'ours');
+    fs.mkdirSync(path.join(clone, '.claude', 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(clone, '.claude', 'rules', 'new-rule.md'), 'fresh rule');
+    fs.writeFileSync(path.join(clone, '.claude', 'settings.json'), '{"fresh":"base"}');
+    fs.writeFileSync(path.join(clone, 'install.ps1'), 'exit 0\r\n');
+    fs.writeFileSync(path.join(clone, 'CLAUDE.md'), 'fresh claude md');
+    fs.writeFileSync(path.join(clone, '.credentials.template.env'), 'TEMPLATE=1');
+    fs.mkdirSync(path.join(assets, 'starter-project'), { recursive: true });
+    fs.writeFileSync(path.join(assets, 'starter-project', 'PROMPTS.md'), 'prompts');
+    fs.writeFileSync(path.join(assets, 'starter-project', '.keep'), '');   // пустой файл (0 байт) — тоже законное содержимое
+    fs.writeFileSync(path.join(victim, 'secret.txt'), 'TOP SECRET');
+    return { base, home, clone, victim, assets };
+  }
+  const seedClaude = (home) => {
+    fs.mkdirSync(path.join(home, '.claude', 'skills', 'user-skill'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'skills', 'user-skill', 'SKILL.md'), 'user skill');
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), '{"user":"custom"}');
+  };
+  function runCfg(sb, o) {
+    o = o || {};
+    // Первое утверждение: профиль песочницы лежит внутри каталога теста — настоящий профиль не затрагивается ни одним путём.
+    assert(path.resolve(sb.home).toLowerCase().startsWith(path.resolve(sb.base).toLowerCase() + path.sep), 'USERPROFILE песочницы внутри каталога теста: ' + sb.home);
+    const driver = path.join(sb.base, 'driver.ps1');
+    fs.writeFileSync(driver, BOM + ["$ErrorActionPreference = 'Continue'", '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8']
+      .concat(o.driver || [])
+      .concat(['& ' + q(path.join(o.scriptsDir || WIN, 'config.ps1')), 'exit $LASTEXITCODE']).join('\r\n'));
+    // Остальные пути профиля — тоже в песочницу (раньше APPDATA/LOCALAPPDATA/TEMP оставались настоящими: config.ps1 их только
+    // читает, но правило «ни один тест не достаёт до профиля владельца» не должно зависеть от того, что скрипт читает сегодня).
+    const tmpDir = path.join(sb.base, 'tmp'); fs.mkdirSync(tmpDir, { recursive: true });
+    const env = Object.assign({}, process.env, { USERPROFILE: sb.home, HOME: sb.home,
+      APPDATA: path.join(sb.base, 'appdata'), LOCALAPPDATA: path.join(sb.base, 'localappdata'), HERMES_HOME: path.join(sb.base, 'hermes'),
+      TEMP: tmpDir, TMP: tmpDir,
+      HM_BUNDLED_CONFIG: sb.clone, HM_ASSETS: sb.assets, HM_TEST_VICTIM: sb.victim });
+    ['HM_DRY_RUN', 'HM_KEEP_SKILLS', 'HM_ALL_PACK_SKILLS', 'HM_ADDITIVE'].forEach((k) => { delete env[k]; });
+    Object.assign(env, o.env || {});
+    const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver], { encoding: 'utf8', timeout: 300000, env });
+    return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+  }
+  // Три записи, которые в config.ps1 идут переносом по имени (Write-HmFileSafe), и их прежние формы: Copy-Item -Force
+  // (так было до правки). Нужны отрицательным контролям: Write-HmFileSafe сама отказывает на ссылке в соседней папке, и
+  // без возврата прежней формы «скрипт до правки» воспроизводился бы не целиком.
+  const NEW_MD = 'try { Write-HmFileSafe -Path $profileClaudeMd -Bytes ([System.IO.File]::ReadAllBytes($srcClaudeMd)) }';
+  const NEW_ENV = 'try { Write-HmFileSafe -Path $dstEnv -Bytes ([System.IO.File]::ReadAllBytes($srcEnvTpl)) }';
+  const NEW_START = 'Write-HmFileSafe -Path $dstFile -Bytes ([System.IO.File]::ReadAllBytes($_.FullName))';
+  const oldCopyEdit = (t) => t
+    .replace(NEW_MD, () => 'try { Copy-Item -Force $srcClaudeMd $profileClaudeMd -ErrorAction Stop }')
+    .replace(NEW_ENV, () => 'try { Copy-Item -Force $srcEnvTpl $dstEnv -ErrorAction Stop }')
+    .replace(NEW_START, () => 'Copy-Item -LiteralPath $_.FullName -Destination $dstFile -ErrorAction Stop');
+  // «Слепой» сторож для отрицательных контролей: копия скриптов, где Get-HmLinkOnChain всегда отвечает «ссылок нет»
+  // и записи файлов вернулись к прежнему Copy-Item — то есть config.ps1 в части защиты от ссылок таков, каким был до правки.
+  function blindScripts(sb, opts) {
+    const dir = path.join(sb.base, 'blind');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(WIN, '_cfgmigrate.ps1'), path.join(dir, '_cfgmigrate.ps1'));
+    const cfgNew = rawWin('config.ps1');
+    let cfgOld = oldCopyEdit(cfgNew);
+    if (opts && opts.noPin) {   // и закрепки нет: config.ps1 в части защиты от ссылок таков, каким был до обеих правок
+      const noPin = NOPIN(cfgOld);
+      assert(noPin !== cfgOld, 'закрепка отключена');
+      cfgOld = noPin;
+    }
+    [NEW_MD, NEW_ENV, NEW_START].forEach((s) => assert(cfgNew.includes(s), 'в config.ps1 есть запись переносом: ' + s));
+    assert(cfgOld !== cfgNew && !cfgOld.includes('ReadAllBytes($srcClaudeMd)'), 'прежний Copy-Item возвращён на место');
+    fs.writeFileSync(path.join(dir, 'config.ps1'), BOM + cfgOld);
+    const lib = fs.readFileSync(path.join(WIN, '_userpath.ps1'), 'utf8');
+    const renamed = lib.replace(/function Get-HmLinkOnChain\b/, 'function Get-HmLinkOnChainReal');
+    assert(renamed !== lib, 'Get-HmLinkOnChain найден в _userpath.ps1');
+    fs.writeFileSync(path.join(dir, '_userpath.ps1'), renamed + '\r\nfunction Get-HmLinkOnChain { param($Path, $Root) return $null }\r\n');
+    return dir;
+  }
+  const listBackups = (home) => fs.readdirSync(home).filter((n) => /^\.claude\.backup\./.test(n));
+  // Хуки для драйвера: «малварь» подменяет ~/.claude ссылкой в нужный момент.
+  const SWAP_FN = [
+    '$global:HmSwapped = $false',
+    'function Swap-Claude {',
+    '  if ($global:HmSwapped) { return }',
+    '  $global:HmSwapped = $true',
+    "  $c = Join-Path $env:USERPROFILE '.claude'",
+    "  Rename-Item -LiteralPath $c -NewName '.claude-real'",
+    '  New-Item -ItemType Junction -Path $c -Value $env:HM_TEST_VICTIM | Out-Null',
+    '}',
+  ];
+  const HOOK_STAMP = SWAP_FN.concat([
+    'function Get-Date {',
+    "  if ($args -contains 'yyyyMMdd-HHmmss') { Swap-Claude }",
+    '  Microsoft.PowerShell.Utility\\Get-Date @args',
+    '}',
+  ]);
+  const victimNames = (sb) => fs.readdirSync(sb.victim).sort();
+
+  // ---- Закрепление ~/.claude (рецензия 10.10: «повтор проверки впритык» оставлял окно в десятки миллисекунд) ----------
+  // Что воспроизводилось на сборке без закрепки: наблюдатель за профилем (ReadDirectoryChangesW) ждёт появления папки
+  // .claude.backup.*, которую config.ps1 создаёт ПОСЛЕ проверки ссылки и ДО запуска robocopy, и за 20–30 мс переименовывает
+  // настоящую ~/.claude, ставя на её место заготовленный junction на закрытую папку: robocopy под администратором открывает
+  // корневой аргумент как есть, и содержимое закрытой папки уезжает в доступную пользователю копию (3 прогона из 3). Скрытный
+  // вариант после копирования возвращает всё на место — шаг кончается кодом 0 и чистым журналом. Хуки ниже делают такую же
+  // подмену детерминированно в нужной точке сценария (настоящие rename/junction, не имитация).
+  const SWAP_LOGGED = [
+    '$global:HmSwapped = $false',
+    'function Swap-ClaudeLogged {',
+    '  if ($global:HmSwapped) { return }',
+    '  $global:HmSwapped = $true',
+    "  $c = Join-Path $env:USERPROFILE '.claude'",
+    "  $r = 'MOVED'",
+    '  try {',
+    "    Rename-Item -LiteralPath $c -NewName '.claude-real' -ErrorAction Stop",
+    '    New-Item -ItemType Junction -Path $c -Value $env:HM_TEST_VICTIM -ErrorAction Stop | Out-Null',
+    "  } catch { $r = 'BLOCKED' }",
+    "  Add-Content -LiteralPath $env:HM_TEST_SWAPLOG -Value ('SWAP=' + $r)",
+    '}',
+    // «Скрытный» вариант: после копирования ссылка убирается и настоящая папка возвращается — установщик ничего не замечает.
+    'function Unswap-Claude {',
+    "  $c = Join-Path $env:USERPROFILE '.claude'",
+    "  $real = Join-Path $env:USERPROFILE '.claude-real'",
+    '  if (-not (Test-Path -LiteralPath $real)) { return }',
+    '  [System.IO.Directory]::Delete($c, $false)',
+    "  Rename-Item -LiteralPath $real -NewName '.claude'",
+    '}',
+  ];
+  // Подмена в миг вызова ПЕРВОГО robocopy: после проверки ссылки и создания папки копии, до открытия источника
+  // (при наличии ~/.claude это бэкап, на чистой машине — раскладка).
+  const HOOK_ROBO_FIRST = SWAP_LOGGED.concat([
+    '$global:HmRoboN = 0',
+    'function robocopy {',
+    '  $global:HmRoboN++',
+    '  if ($global:HmRoboN -eq 1) { Swap-ClaudeLogged }',
+    "  & (Join-Path $env:SystemRoot 'System32\\robocopy.exe') @args",
+    "  if ($global:HmRoboN -eq 1 -and $env:HM_TEST_STEALTH -eq '1') { Unswap-Claude }",
+    '}',
+  ]);
+  // Подмена сразу ПОСЛЕ бэкапа: между последней проверкой ссылки и раскладкой (merge-robocopy).
+  const HOOK_AFTER_BACKUP = SWAP_LOGGED.concat([
+    '$global:HmRoboN = 0',
+    'function robocopy {',
+    '  $global:HmRoboN++',
+    "  & (Join-Path $env:SystemRoot 'System32\\robocopy.exe') @args",
+    '  if ($global:HmRoboN -eq 1) { Swap-ClaudeLogged }',
+    '}',
+  ]);
+  // Подмена в миг, когда прунинг начинает перечислять ~/.claude/skills (это последняя проверка ссылки позади: корень
+  // ~/.claude после неё никто не проверял). В середине самого перечисления переименовать корень нельзя — его держит
+  // открытый дескриптор перечисления, поэтому и событийный наблюдатель в рецензии промахивался; подмена перед началом
+  // перечисления (между раскладкой и прунингом проходят миграция settings.json, запись списка скиллов) — возможна.
+  const HOOK_AT_PRUNE = SWAP_LOGGED.concat([
+    'function Get-ChildItem {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [switch]$Directory, [switch]$Force, [switch]$Recurse)',
+    "  if ($Directory -and $Path -and -not $LiteralPath -and ([string]$Path[0]) -like '*skills') { Swap-ClaudeLogged }",
+    '  Microsoft.PowerShell.Management\\Get-ChildItem @PSBoundParameters',
+    '}',
+  ]);
+  // Закрепка создаётся — и в тот же миг папку подменяют ссылкой, а сразу после создания возвращают: закрепка легла
+  // в чужую папку, а по имени ~/.claude снова настоящая папка. Проверка «не ссылка» это не видит.
+  const HOOK_PIN_SWAPBACK = SWAP_LOGGED.concat([
+    'function New-Object {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string]$TypeName, [Parameter(Position = 1)][object[]]$ArgumentList)',
+    "  $isPin = ($TypeName -eq 'System.IO.FileStream' -and $ArgumentList -and ([string]$ArgumentList[0]) -like '*.hm-pin-*')",
+    '  if ($isPin) { Swap-ClaudeLogged }',
+    '  $o = Microsoft.PowerShell.Utility\\New-Object @PSBoundParameters',
+    '  if ($isPin) { Unswap-Claude }',
+    '  return $o',
+    '}',
+  ]);
+  // Закрепку создать нельзя (например, антивирус или права): New-Object на файл-закрепку падает.
+  const HOOK_PIN_REFUSED = [
+    'function New-Object {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string]$TypeName, [Parameter(Position = 1)][object[]]$ArgumentList)',
+    "  if ($TypeName -eq 'System.IO.FileStream' -and $ArgumentList -and ([string]$ArgumentList[0]) -like '*.hm-pin-*') { throw 'simulated pin failure' }",
+    '  Microsoft.PowerShell.Utility\\New-Object @PSBoundParameters',
+    '}',
+  ];
+  const swapLog = (sb) => { try { return fs.readFileSync(path.join(sb.base, 'swap.log'), 'utf8').split(/\r?\n/).filter(Boolean); } catch (e) { return []; } };
+  const runSwap = (sb, hook, env, scriptsDir) => {
+    fs.writeFileSync(path.join(sb.base, 'swap.log'), '');
+    return runCfg(sb, { driver: hook, scriptsDir, env: Object.assign({ HM_TEST_SWAPLOG: path.join(sb.base, 'swap.log') }, env || {}) });
+  };
+  // Копия config.ps1 с правкой текста (и библиотеки рядом) — для отрицательных контролей «как до …».
+  const variantDir = (sb, name, edit) => {
+    const dir = path.join(sb.base, name);
+    fs.mkdirSync(dir, { recursive: true });
+    ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+    const src = rawWin('config.ps1');
+    const edited = edit(src);
+    assert(edited !== src, 'мутация применилась: ' + name);
+    fs.writeFileSync(path.join(dir, 'config.ps1'), BOM + edited);
+    return dir;
+  };
+  // config.ps1 «как до закрепки»: функция закрепки ничего не делает (всё остальное — проверки ссылок — на месте).
+  // Якорь — первая строка тела Lock-HmDir после блока param (return перед param сломал бы разбор скрипта).
+  const NOPIN_ANCHOR = 'if ($script:hmPins.ContainsKey($key)) { return }';
+  const NOPIN = (t) => { assert(t.includes(NOPIN_ANCHOR), 'якорь отключения закрепки на месте'); return t.replace(NOPIN_ANCHOR, () => 'return'); };
+  const noPinScripts = (sb) => variantDir(sb, 'nopin', NOPIN);
+  const pinsIn = (dir) => { try { return fs.readdirSync(dir).filter((n) => /^\.hm-pin-/.test(n)); } catch (e) { return []; } };
+  // Процесс уже завершился, но ОС закрывает его дескрипторы (и удаляет файл DeleteOnClose) чуть позже: ждём до 3 секунд.
+  const waitNoPins = (dir, keep) => {
+    const left = () => pinsIn(dir).filter((n) => !(keep || []).includes(n));
+    for (let i = 0; i < 30 && left().length; i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    return left();
+  };
+
+  ok('u3-C: ~/.claude — ссылка (junction): config.ps1 отказывает до копии и записи, цель цела; контроль без сторожа воспроизводит дыру', () => {
+    needPs();
+    const sb = mkCfg('c1');
+    try {
+      junction(sb.victim, path.join(sb.home, '.claude'));
+      for (const additive of ['', '1']) {
+        const r = runCfg(sb, { env: additive ? { HM_ADDITIVE: additive } : {} });
+        const mode = additive ? 'add-missing' : 'repair';
+        assert.notStrictEqual(r.status, 0, mode + ': шаг остановлен (код не 0): ' + r.out + r.err);
+        assert.deepStrictEqual(victimNames(sb), ['secret.txt'], mode + ': в цель ссылки ничего не записано: ' + victimNames(sb).join(','));
+        assert.deepStrictEqual(listBackups(sb.home), [], mode + ': копии-бэкапа нет (раньше robocopy копировал цель ссылки в доступную пользователю папку)');
+        assert(/ссылк/.test(r.out) && /\.claude/.test(r.out), mode + ': причина названа: ' + r.out);
+        assert(/rmdir/.test(r.out) && /повтор/i.test(r.out), mode + ': сказано, что делать (не тупик): ' + r.out);
+        assert(!/БЕЗОПАСНОСТЬ:/.test(r.out) && !/отказано в доступе|доступ запрещ/i.test(r.out), mode + ': слова не путают разбор причины в main.js (failure-explain)');
+        assert(fs.lstatSync(path.join(sb.home, '.claude')).isSymbolicLink(), mode + ': саму ссылку не трогали');
+      }
+      // Отрицательный контроль: сторож ослеплён — картина прежней дыры (F10): копия цели в бэкап и запись пака в цель.
+      const r2 = runCfg(sb, { scriptsDir: blindScripts(sb) });
+      assert.strictEqual(r2.status, 0, 'контроль: без сторожа шаг проходит: ' + r2.out + r2.err);
+      assert(victimNames(sb).includes('rules') || victimNames(sb).includes('settings.json'), 'контроль: пак записан в чужую папку: ' + victimNames(sb).join(','));
+      const bk = listBackups(sb.home);
+      assert(bk.length >= 1 && fs.existsSync(path.join(sb.home, bk[0], 'secret.txt')), 'контроль: содержимое чужой папки скопировано в бэкап, доступный пользователю');
+    } finally { drop(sb.base); }
+  });
+
+  ok('u3-C: ~/.hamidun-setup — ссылка: config.ps1 отказывает, ~/.claude не тронут', () => {
+    needPs();
+    const sb = mkCfg('c2');
+    try {
+      seedClaude(sb.home);
+      junction(sb.victim, path.join(sb.home, '.hamidun-setup'));
+      const r = runCfg(sb);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: ' + r.out + r.err);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'цель ссылки цела');
+      assert(/\.hamidun-setup/.test(r.out) && /ссылк/.test(r.out) && /rmdir/.test(r.out), 'причина и выход названы: ' + r.out);
+      assert.deepStrictEqual(listBackups(sb.home), [], 'до проверки ничего не копировалось');
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'skills', 'our-skill')), '~/.claude не менялся');
+    } finally { drop(sb.base); }
+  });
+
+  ok('u3-C: обычные папки — config.ps1 работает как раньше (раскладка, бэкап с неугадываемым именем, маркер и список скиллов теми же байтами)', () => {
+    needPs();
+    const sb = mkCfg('c3');
+    try {
+      seedClaude(sb.home);
+      const r = runCfg(sb, { env: { HM_ADDITIVE: '1' } });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + r.out + r.err);
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md'), 'utf8'), 'fresh rule', 'недостающее доложено');
+      assert(fs.existsSync(path.join(sb.home, '.claude', 'skills', 'our-skill', 'SKILL.md')), 'наш скилл доложен');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', 'skills', 'user-skill', 'SKILL.md'), 'utf8'), 'user skill', 'скилл человека цел');
+      const bk = listBackups(sb.home);
+      assert.strictEqual(bk.length, 1, 'ровно одна копия: ' + bk.join(','));
+      assert(/^\.claude\.backup\.\d{8}-\d{6}-[0-9a-f]{8}$/.test(bk[0]), 'имя копии: время и случайный хвост (заранее подложить ссылку под такое имя нельзя): ' + bk[0]);
+      assert(!fs.lstatSync(path.join(sb.home, bk[0])).isSymbolicLink(), 'копия — настоящая папка');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, bk[0], 'settings.json'), 'utf8'), '{"user":"custom"}', 'копия = исходное состояние');
+      // маркер завершённости: те же два байта «ok», без BOM и перевода строки (как писал Set-Content -NoNewline)
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', '.hamidun-config-complete')).toString('hex'), '6f6b', 'маркер «ok»');
+      // список «наших» скиллов: UTF-8 с BOM и CRLF после каждой строки (как писал Set-Content -Encoding UTF8)
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', '.hamidun-skills.txt')).toString('hex'),
+        'efbbbf' + Buffer.from('our-skill\r\n').toString('hex'), 'список скиллов теми же байтами');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, 'HamidunStart', 'PROMPTS.md'), 'utf8'), 'prompts', 'стартовый проект создан');
+      assert(fs.existsSync(path.join(sb.home, 'HamidunStart', '.keep')) && fs.statSync(path.join(sb.home, 'HamidunStart', '.keep')).size === 0, 'пустой файл стартового проекта (0 байт) доложен');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, 'CLAUDE.md'), 'utf8'), 'fresh claude md', '~/CLAUDE.md положен');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', '.credentials.master.env'), 'utf8'), 'TEMPLATE=1', 'шаблон credentials положен тем же содержимым');
+      const leftovers = [sb.home, path.join(sb.home, '.claude'), path.join(sb.home, 'HamidunStart')]
+        .reduce((a, d) => a.concat(fs.readdirSync(d).filter((n) => /hamidun-tmp-/.test(n))), []);
+      assert.deepStrictEqual(leftovers, [], 'временных файлов переноса (CLAUDE.md, шаблон, стартовый проект) не осталось');
+      assert.deepStrictEqual(waitNoPins(path.join(sb.home, '.claude')), [], 'закрепка ~/.claude исчезла вместе с процессом (в корне папки её нет)');
+      assert.deepStrictEqual(fs.readdirSync(path.join(sb.home, bk[0])).filter((n) => /^\.hm-pin-/.test(n)), [], 'закрепка в копию не попала');
+      // повторный запуск поверх готовой установки
+      const r2 = runCfg(sb, { env: { HM_ADDITIVE: '1' } });
+      assert.strictEqual(r2.status, 0, 'повтор: exit 0: ' + r2.out + r2.err);
+      assert.strictEqual(listBackups(sb.home).length, 2, 'повтор делает вторую копию');
+    } finally { drop(sb.base); }
+  });
+
+  // Допустимые настоящие имена профилей: пробел, кириллица, апостроф-типограф (U+2019). Проверка цепочки, замок на папке
+  // копии, перенос по имени и robocopy обязаны работать с такими путями, а ссылка в них — по-прежнему отвергаться.
+  ok('u3-C: профиль с пробелом, кириллицей и ’ в имени: обычная раскладка проходит (бэкап, перенос по имени, маркер), ссылка на ~/.claude по-прежнему отвергается', () => {
+    needPs();
+    const name = 'Иван Петров’s профиль';
+    const sb = mkCfg('c9', name);
+    try {
+      seedClaude(sb.home);
+      const r = runCfg(sb, { env: { HM_ADDITIVE: '1' } });
+      assert.strictEqual(r.status, 0, 'exit 0: ' + r.out + r.err);
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md'), 'utf8'), 'fresh rule', 'недостающее доложено');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, 'CLAUDE.md'), 'utf8'), 'fresh claude md', '~/CLAUDE.md положен переносом по имени');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', '.credentials.master.env'), 'utf8'), 'TEMPLATE=1', 'шаблон credentials положен');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, 'HamidunStart', 'PROMPTS.md'), 'utf8'), 'prompts', 'стартовый проект создан');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', '.hamidun-config-complete')).toString('hex'), '6f6b', 'маркер завершённости записан');
+      const bk = listBackups(sb.home);
+      assert.strictEqual(bk.length, 1, 'ровно одна копия: ' + bk.join(','));
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, bk[0], 'settings.json'), 'utf8'), '{"user":"custom"}', 'копия = исходное состояние');
+      assert(!fs.existsSync(path.join(sb.home, bk[0], '.hm-lock')), 'файл-замок после копирования исчез');
+    } finally { drop(sb.base); }
+    const sb2 = mkCfg('c9b', name);
+    try {
+      junction(sb2.victim, path.join(sb2.home, '.claude'));
+      const r2 = runCfg(sb2);
+      assert.notStrictEqual(r2.status, 0, 'ссылка на ~/.claude отвергнута и в таком профиле: ' + r2.out + r2.err);
+      assert.deepStrictEqual(victimNames(sb2), ['secret.txt'], 'цель ссылки цела: ' + victimNames(sb2).join(','));
+      assert(/ссылк/.test(r2.out) && /rmdir/.test(r2.out), 'причина и выход названы: ' + r2.out);
+    } finally { drop(sb2.base); }
+  });
+
+  ok('u3-C: ~/.claude подменили ссылкой МЕЖДУ проверкой и копией-бэкапом: повторная проверка перед robocopy останавливает шаг', () => {
+    needPs();
+    const sb = mkCfg('c4');
+    try {
+      seedClaude(sb.home);
+      const r = runCfg(sb, { driver: HOOK_STAMP });
+      assert(/SWAPPED|./.test(r.out), 'прогон состоялся');
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: ' + r.out + r.err);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'robocopy не пошёл по подложенной ссылке: ' + victimNames(sb).join(','));
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копия не начиналась');
+      assert(/появил|стал|подмен/i.test(r.out) && /ссылк/.test(r.out), 'сказано, что папку подменили во время установки: ' + r.out);
+      assert(/перед закреплением/.test(r.out), 'ссылку увидела проверка перед закреплением (файл-закрепка не легла в чужую папку): ' + r.out);
+    } finally { drop(sb.base); }
+    // Контроль (свежая песочница): без сторожа та же подмена даёт утечку цели в бэкап и запись пака в цель.
+    const sb2 = mkCfg('c4b');
+    try {
+      seedClaude(sb2.home);
+      const r2 = runCfg(sb2, { driver: HOOK_STAMP, scriptsDir: blindScripts(sb2) });
+      assert.strictEqual(r2.status, 0, 'контроль: без сторожа шаг проходит: ' + r2.out + r2.err);
+      assert(victimNames(sb2).length > 1, 'контроль: подмена между проверкой и копией привела бы к записи в чужую папку: ' + victimNames(sb2).join(','));
+    } finally { drop(sb2.base); }
+  });
+
+  ok('u3-C: ~/.claude подменяют после бэкапа, перед раскладкой: переименование отвергнуто закрепкой; без неё второй рубеж (проверка перед merge-robocopy) останавливает шаг, а без обоих пак пишется в чужую папку', () => {
+    needPs();
+    const sb = mkCfg('c5');
+    try {
+      seedClaude(sb.home);
+      const r = runSwap(sb, HOOK_AFTER_BACKUP, { HM_ADDITIVE: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=BLOCKED'], 'переименование настоящей ~/.claude отвергнуто: папка закреплена открытым файлом' + dump);
+      assert.strictEqual(r.status, 0, 'шаг прошёл — подмена не состоялась' + dump);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'в чужую папку ничего не записано: ' + victimNames(sb).join(','));
+      assert(!fs.lstatSync(path.join(sb.home, '.claude')).isSymbolicLink(), '~/.claude осталась настоящей папкой');
+      assert(fs.existsSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md')), 'пак разложен в настоящую папку');
+      assert.strictEqual(listBackups(sb.home).length, 1, 'бэкап (первый robocopy) успел: ' + r.out);
+    } finally { drop(sb.base); }
+    // Второй рубеж: закрепка отключена (config.ps1 как до рецензии) — подмена удаётся, но проверка ссылки перед merge
+    // останавливает шаг.
+    const sb2 = mkCfg('c5b');
+    try {
+      seedClaude(sb2.home);
+      const r2 = runSwap(sb2, HOOK_AFTER_BACKUP, { HM_ADDITIVE: '1' }, noPinScripts(sb2));
+      assert.deepStrictEqual(swapLog(sb2), ['SWAP=MOVED'], 'контроль: без закрепки подмена удаётся' + '\n' + r2.out + r2.err);
+      assert.notStrictEqual(r2.status, 0, 'без закрепки шаг останавливает проверка перед раскладкой: ' + r2.out + r2.err);
+      assert.deepStrictEqual(victimNames(sb2), ['secret.txt'], 'и в этом случае в чужую папку ничего не записано');
+    } finally { drop(sb2.base); }
+    // Контроль: ни закрепки, ни проверки — merge-robocopy пишет пак в чужую папку.
+    const sb3 = mkCfg('c5c');
+    try {
+      seedClaude(sb3.home);
+      const r3 = runSwap(sb3, HOOK_AFTER_BACKUP, { HM_ADDITIVE: '1' }, blindScripts(sb3, { noPin: true }));
+      assert(victimNames(sb3).includes('rules') || victimNames(sb3).includes('skills'), 'контроль: пак записан сквозь подложенную ссылку: ' + victimNames(sb3).join(',') + r3.out);
+    } finally { drop(sb3.base); }
+  });
+
+  ok('u3-C: закрепление ~/.claude: подмена в окне перед robocopy бэкапа (переименование + junction на закрытую папку) отвергнута ОС, утечки в копию нет; без закрепки та же подмена утекает — в том числе скрытно, с кодом 0', () => {
+    needPs();
+    const seed = (sb) => { seedClaude(sb.home); fs.writeFileSync(path.join(sb.victim, 'other.txt'), 'OTHER'); };
+    for (const stealth of [false, true]) {
+      const label = stealth ? 'скрытный вариант (подмена и возврат): ' : 'явный вариант: ';
+      const sb = mkCfg('p1' + (stealth ? 's' : 'n'));
+      try {
+        seed(sb);
+        const r = runSwap(sb, HOOK_ROBO_FIRST, { HM_ADDITIVE: '1', HM_TEST_STEALTH: stealth ? '1' : undefined });
+        const dump = '\n' + r.out + r.err;
+        assert.deepStrictEqual(swapLog(sb), ['SWAP=BLOCKED'], label + 'переименование настоящей ~/.claude отвергнуто: папка закреплена открытым файлом' + dump);
+        assert.strictEqual(r.status, 0, label + 'шаг прошёл' + dump);
+        const bk = listBackups(sb.home);
+        assert.strictEqual(bk.length, 1, label + 'одна копия: ' + bk.join(','));
+        assert.deepStrictEqual(fs.readdirSync(path.join(sb.home, bk[0])).filter((n) => /secret|other/.test(n)), [], label + 'в копии нет файлов чужой папки' + dump);
+        assert.strictEqual(fs.readFileSync(path.join(sb.home, bk[0], 'settings.json'), 'utf8'), '{"user":"custom"}', label + 'копия — это настоящая ~/.claude');
+        assert.deepStrictEqual(victimNames(sb), ['other.txt', 'secret.txt'], label + 'чужая папка не тронута');
+        assert(!fs.lstatSync(path.join(sb.home, '.claude')).isSymbolicLink(), label + '~/.claude осталась настоящей папкой');
+        assert(fs.existsSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md')), label + 'пак разложен в настоящую папку');
+        assert.deepStrictEqual(waitNoPins(path.join(sb.home, '.claude')), [], label + 'закрепка исчезла вместе с процессом');
+      } finally { drop(sb.base); }
+      // Контроль: закрепка отключена — та же подмена удаётся, и содержимое закрытой папки лежит в копии, доступной пользователю.
+      const sc = mkCfg('p1c' + (stealth ? 's' : 'n'));
+      try {
+        seed(sc);
+        const r = runSwap(sc, HOOK_ROBO_FIRST, { HM_ADDITIVE: '1', HM_TEST_STEALTH: stealth ? '1' : undefined }, noPinScripts(sc));
+        const dump = '\n' + r.out + r.err;
+        assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль, ' + label + 'без закрепки подмена удаётся' + dump);
+        const bk = listBackups(sc.home);
+        assert(bk.length === 1 && fs.existsSync(path.join(sc.home, bk[0], 'secret.txt')), 'контроль, ' + label + 'содержимое чужой папки скопировано в доступную пользователю копию (F10)' + dump);
+        if (stealth) assert.strictEqual(r.status, 0, 'контроль: скрытный вариант кончается кодом 0 и чистым журналом — установщик подмены не видит' + dump);
+        else assert.notStrictEqual(r.status, 0, 'контроль: явный вариант останавливает проверка перед раскладкой, но копия уже утекла' + dump);
+      } finally { drop(sc.base); }
+    }
+  });
+
+  ok('u3-C: закрепление ~/.claude на чистой машине (папки ещё нет): подмена в окне перед первой раскладкой отвергнута; без закрепки пак пишется в чужую папку', () => {
+    needPs();
+    const sb = mkCfg('p2');
+    try {
+      assert(!fs.existsSync(path.join(sb.home, '.claude')), 'чистая машина: ~/.claude нет');
+      const r = runSwap(sb, HOOK_ROBO_FIRST, { HM_ADDITIVE: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=BLOCKED'], 'переименование только что созданной ~/.claude отвергнуто' + dump);
+      assert.strictEqual(r.status, 0, 'шаг прошёл' + dump);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'чужая папка не тронута: ' + victimNames(sb).join(','));
+      assert(fs.existsSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md')), 'пак разложен в настоящую папку');
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копии на чистой машине нет');
+    } finally { drop(sb.base); }
+    const sc = mkCfg('p2c');
+    try {
+      const r = runSwap(sc, HOOK_ROBO_FIRST, { HM_ADDITIVE: '1' }, noPinScripts(sc));
+      assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: без закрепки подмена удаётся' + '\n' + r.out + r.err);
+      assert(victimNames(sc).includes('rules'), 'контроль: пак записан в чужую папку: ' + victimNames(sc).join(','));
+    } finally { drop(sc.base); }
+  });
+
+  ok('u3-C: закрепка держится до конца процесса: прунинг скиллов после раскладки не уходит за подменённую ~/.claude (раньше удалялся каталог в чужой папке)', () => {
+    needPs();
+    const env = { HM_ADDITIVE: '1', HM_KEEP_SKILLS: 'user-skill', HM_ALL_PACK_SKILLS: 'our-skill' };
+    const prep = (sb) => {
+      seedClaude(sb.home);
+      fs.mkdirSync(path.join(sb.victim, 'skills', 'our-skill'), { recursive: true });
+      fs.writeFileSync(path.join(sb.victim, 'skills', 'our-skill', 'precious.txt'), 'PRECIOUS');
+    };
+    const sb = mkCfg('p3');
+    try {
+      prep(sb);
+      const r = runSwap(sb, HOOK_AT_PRUNE, env);
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=BLOCKED'], 'подмена в момент удаления отвергнута' + dump);
+      assert.strictEqual(r.status, 0, 'шаг прошёл' + dump);
+      assert(fs.existsSync(path.join(sb.victim, 'skills', 'our-skill', 'precious.txt')), 'каталог в чужой папке цел' + dump);
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'skills', 'our-skill')), 'снятый набор убран из настоящей ~/.claude' + dump);
+      assert(fs.existsSync(path.join(sb.home, '.claude', 'skills', 'user-skill', 'SKILL.md')), 'скилл человека цел');
+      assert(/убрано: 1/.test(r.out), 'прунинг отработал: ' + r.out);
+    } finally { drop(sb.base); }
+    // Контроль: закрепки нет — подмена после последней проверки ссылки удаётся, и прунинг сносит каталог в чужой папке.
+    const sc = mkCfg('p3c');
+    try {
+      prep(sc);
+      const r = runSwap(sc, HOOK_AT_PRUNE, env, noPinScripts(sc));
+      assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: без закрепки подмена удаётся' + '\n' + r.out + r.err);
+      assert(!fs.existsSync(path.join(sc.victim, 'skills', 'our-skill', 'precious.txt')), 'контроль: прунинг удалил каталог в чужой папке (после последней проверки корень ~/.claude не проверялся)');
+    } finally { drop(sc.base); }
+  });
+
+  // Свежая проверка корня ПЕРЕД прунингом — второй рубеж за закрепкой. Подмена делается в миг, когда скрипт строит список
+  // «наших» скиллов по каталогу ПАКА (после раскладки, до блока прунинга), то есть раньше, чем прунинг начнёт перечислять
+  // ~/.claude/skills. Закреплённую папку так не подменить (первый прогон); без закрепки подмену ловит проверка перед
+  // прунингом (второй прогон); без обеих прунинг сносит каталог в чужой папке (контроль).
+  const HOOK_AT_PACKSKILLS = SWAP_LOGGED.concat([
+    'function Get-ChildItem {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$Filter, [switch]$Directory, [switch]$Force, [switch]$Recurse)',
+    "  if ($Directory -and $LiteralPath -and ([string]$LiteralPath[0]) -like '*pack*skills') { Swap-ClaudeLogged }",
+    '  Microsoft.PowerShell.Management\\Get-ChildItem @PSBoundParameters',
+    '}',
+  ]);
+
+  ok('u3-C: свежая проверка корня перед прунингом: подмена между раскладкой и прунингом отвергнута закрепкой, а без неё останавливает шаг; без обеих прунинг сносит каталог в чужой папке', () => {
+    needPs();
+    const env = { HM_ADDITIVE: '1', HM_KEEP_SKILLS: 'user-skill', HM_ALL_PACK_SKILLS: 'our-skill' };
+    const prep = (sb) => {
+      seedClaude(sb.home);
+      fs.mkdirSync(path.join(sb.victim, 'skills', 'our-skill'), { recursive: true });
+      fs.writeFileSync(path.join(sb.victim, 'skills', 'our-skill', 'precious.txt'), 'PRECIOUS');
+    };
+    const precious = (sb) => path.join(sb.victim, 'skills', 'our-skill', 'precious.txt');
+    const s1 = mkCfg('q1');
+    try {
+      prep(s1);
+      const r = runSwap(s1, HOOK_AT_PACKSKILLS, env);
+      assert.deepStrictEqual(swapLog(s1), ['SWAP=BLOCKED'], 'закреплённую папку подменить нельзя' + '\n' + r.out + r.err);
+      assert.strictEqual(r.status, 0, 'шаг прошёл: ' + r.out + r.err);
+      assert(fs.existsSync(precious(s1)), 'каталог в чужой папке цел');
+      assert(/убрано: 1/.test(r.out), 'прунинг отработал в настоящей папке: ' + r.out);
+    } finally { drop(s1.base); }
+    // без закрепки: подмену (она удалась) останавливает проверка перед прунингом
+    const s2 = mkCfg('q2');
+    try {
+      prep(s2);
+      const r = runSwap(s2, HOOK_AT_PACKSKILLS, env, noPinScripts(s2));
+      assert.deepStrictEqual(swapLog(s2), ['SWAP=MOVED'], 'контроль: без закрепки подмена удаётся' + '\n' + r.out + r.err);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: ' + r.out + r.err);
+      assert(/перед удалением скиллов/.test(r.out), 'остановила именно свежая проверка перед прунингом: ' + r.out);
+      assert(fs.existsSync(precious(s2)), 'каталог в чужой папке цел');
+    } finally { drop(s2.base); }
+    // контроль: ни закрепки, ни проверки перед прунингом — каталог в чужой папке снесён
+    const s3 = mkCfg('q3');
+    try {
+      prep(s3);
+      const dir = variantDir(s3, 'noprunecheck', (t) => NOPIN(t).replace("        Assert-HmConfigNoLink -When 'перед удалением скиллов'\r\n", ''));
+      const r = runSwap(s3, HOOK_AT_PACKSKILLS, env, dir);
+      assert.deepStrictEqual(swapLog(s3), ['SWAP=MOVED'], 'контроль: подмена удалась' + '\n' + r.out + r.err);
+      assert(!fs.existsSync(precious(s3)), 'контроль: без обеих защит прунинг удалил каталог в чужой папке: ' + r.out + r.err);
+    } finally { drop(s3.base); }
+  });
+
+  ok('u3-C: закрепка не мешает законным установкам: остаток .hm-pin-* от оборванного прогона не ломает и не копируется, файлы только для чтения, повтор; своя закрепка видна на время копирования и исчезает после', () => {
+    needPs();
+    const sb = mkCfg('p4');
+    const claude = path.join(sb.home, '.claude');
+    const ro = path.join(claude, 'readonly.txt');
+    try {
+      seedClaude(sb.home);
+      const stale = '.hm-pin-' + '0'.repeat(32);
+      fs.writeFileSync(path.join(claude, stale), '');          // остаток после аварийного выключения (сам по себе не исчез)
+      fs.writeFileSync(ro, 'RO'); fs.chmodSync(ro, 0o444);     // атрибут «только чтение»
+      const log = path.join(sb.base, 'robo.log'); fs.writeFileSync(log, '');
+      const rec = [
+        '$global:HmRoboN = 0',
+        'function robocopy {',
+        '  $global:HmRoboN++',
+        "  $names = @(Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE '.claude') -Force | ForEach-Object { $_.Name }) -join ','",
+        "  Add-Content -LiteralPath $env:HM_TEST_ROBOLOG -Value ('CALL' + $global:HmRoboN + ' ' + $names)",
+        "  & (Join-Path $env:SystemRoot 'System32\\robocopy.exe') @args",
+        '}',
+      ];
+      const r = runCfg(sb, { driver: rec, env: { HM_ADDITIVE: '1', HM_TEST_ROBOLOG: log } });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'exit 0' + dump);
+      const calls = fs.readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean);
+      assert(calls.length >= 2, 'robocopy вызывался дважды (бэкап и раскладка): ' + calls.join(' | '));
+      calls.slice(0, 2).forEach((c, i) => {
+        const pins = c.match(/\.hm-pin-[0-9a-f]{32}/g) || [];
+        assert.strictEqual(pins.length, 2, 'во время вызова ' + (i + 1) + ' в корне ~/.claude остаток и ровно одна своя закрепка: ' + c);
+        assert(pins.includes(stale), 'остаток на месте');
+      });
+      const bk = listBackups(sb.home);
+      assert.strictEqual(bk.length, 1, 'одна копия: ' + bk.join(','));
+      assert.deepStrictEqual(fs.readdirSync(path.join(sb.home, bk[0])).filter((n) => /^\.hm-pin-/.test(n)), [], 'закрепки (ни остаток, ни своя) в копию не попали');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, bk[0], 'readonly.txt'), 'utf8'), 'RO', 'файл только для чтения скопирован');
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, bk[0], 'settings.json'), 'utf8'), '{"user":"custom"}', 'копия = исходное состояние');
+      assert.deepStrictEqual(waitNoPins(claude, [stale]), [], 'своя закрепка исчезла вместе с процессом; чужой остаток не тронут (мы его не удаляем)');
+      assert(fs.existsSync(path.join(claude, stale)), 'остаток прежнего прогона на месте');
+      assert.strictEqual(fs.readFileSync(path.join(claude, '.hamidun-config-complete')).toString('hex'), '6f6b', 'маркер завершённости записан (запись в закреплённую папку работает)');
+      // повтор поверх того же состояния (остаток, файл только для чтения, готовая установка)
+      const r2 = runCfg(sb, { env: { HM_ADDITIVE: '1' } });
+      assert.strictEqual(r2.status, 0, 'повтор: exit 0: ' + r2.out + r2.err);
+      assert.strictEqual(listBackups(sb.home).length, 2, 'повтор делает вторую копию');
+    } finally { try { fs.chmodSync(ro, 0o666); } catch (e) { /* ignore */ } drop(sb.base); }
+  });
+
+  ok('u3-C: закрепить ~/.claude не вышло — отказ до любой копии и записи с названной причиной и выходом, а не продолжение без закрепки', () => {
+    needPs();
+    const sb = mkCfg('p5');
+    try {
+      seedClaude(sb.home);
+      const r = runCfg(sb, { driver: HOOK_PIN_REFUSED, env: { HM_ADDITIVE: '1' } });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'шаг остановлен кодом 1' + dump);
+      assert(/закреп/.test(r.out) && /\.claude/.test(r.out) && /повтор/i.test(r.out), 'причина и выход названы по-русски' + dump);
+      assert(!/БЕЗОПАСНОСТЬ:/.test(r.out), 'слова не путают разбор причины в main.js (failure-explain)');
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копия не снималась');
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'rules')), 'раскладка не начиналась');
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'чужая папка не тронута');
+    } finally { drop(sb.base); }
+  });
+
+  ok('u3-C: закрепка легла не туда (папку подменили ссылкой в миг создания закрепки и тут же вернули назад): отказ — по имени настоящая папка, но закреплена не она; без этой сверки шаг шёл бы незакреплённым', () => {
+    needPs();
+    const sb = mkCfg('p6');
+    try {
+      seedClaude(sb.home);
+      const r = runSwap(sb, HOOK_PIN_SWAPBACK, { HM_ADDITIVE: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=MOVED'], 'подмена в миг закрепки состоялась (закрепка ляжет в чужую папку)' + dump);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен' + dump);
+      assert(/закреп/.test(r.out) && /подмен/.test(r.out), 'причина названа: ' + r.out);
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копия не снималась');
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'rules')), 'раскладка не начиналась');
+      assert.deepStrictEqual(waitNoPins(sb.victim), [], 'закрепка в чужой папке исчезла вместе с процессом');
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'чужая папка не тронута');
+    } finally { drop(sb.base); }
+    // Контроль: сверка закрепки вырезана (и по имени, и по удержанию) — настоящая ~/.claude проходит обе проверки
+    // ссылки, и шаг идёт НЕзакреплённым.
+    const sc = mkCfg('p6c');
+    try {
+      seedClaude(sc.home);
+      const dir = variantDir(sc, 'noident', (t) => t.replace('if (-not (Test-Path -LiteralPath $PinPath)) { return $false }', 'return $true'));
+      const r = runSwap(sc, HOOK_PIN_SWAPBACK, { HM_ADDITIVE: '1' }, dir);
+      assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: подмена состоялась' + '\n' + r.out + r.err);
+      assert.strictEqual(r.status, 0, 'контроль: без сверки шаг проходит незакреплённым — тест её различает: ' + r.out + r.err);
+    } finally { drop(sc.base); }
+  });
+
+  // Папку подменили ссылкой в миг создания закрепки и ссылку НЕ убрали: закрепка легла внутрь чужой папки (по имени она там
+  // есть и удерживается нашим дескриптором), поэтому поймать это может только повторная проверка ссылки сразу после неё.
+  const HOOK_PIN_SWAPSTAY = SWAP_LOGGED.concat([
+    'function New-Object {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string]$TypeName, [Parameter(Position = 1)][object[]]$ArgumentList)',
+    "  $isPin = ($TypeName -eq 'System.IO.FileStream' -and $ArgumentList -and ([string]$ArgumentList[0]) -like '*.hm-pin-*')",
+    '  if ($isPin) { Swap-ClaudeLogged }',
+    '  Microsoft.PowerShell.Utility\\New-Object @PSBoundParameters',
+    '}',
+  ]);
+
+  ok('u3-C: папку подменили ссылкой в миг создания закрепки и ссылку оставили: отказ повторной проверкой сразу после закрепления (а не одной из следующих), в чужую папку ничего не пишется', () => {
+    needPs();
+    const sb = mkCfg('p6s');
+    try {
+      seedClaude(sb.home);
+      const r = runSwap(sb, HOOK_PIN_SWAPSTAY, { HM_ADDITIVE: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=MOVED'], 'подмена в миг закрепки состоялась' + dump);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен' + dump);
+      assert(/сразу после закрепления/.test(r.out) && /ссылк/.test(r.out), 'остановила именно проверка после закрепления: ' + r.out);
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копия не снималась');
+      assert.deepStrictEqual(waitNoPins(sb.victim), [], 'закрепка в чужой папке исчезла вместе с процессом');
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'чужая папка не тронута');
+    } finally { drop(sb.base); }
+    // Контроль: проверка сразу после закрепления вырезана — тот же сценарий останавливает уже следующая («перед копией-бэкапом»).
+    const sc = mkCfg('p6sc');
+    try {
+      seedClaude(sc.home);
+      const dir = variantDir(sc, 'nopostassert', (t) => t.replace("    Assert-HmConfigNoLink -When 'сразу после закрепления'\r\n", ''));
+      const r = runSwap(sc, HOOK_PIN_SWAPSTAY, { HM_ADDITIVE: '1' }, dir);
+      assert(!/сразу после закрепления/.test(r.out) && /перед копией-бэкапом/.test(r.out), 'контроль: без этой проверки отказ приходит позже, с другой причиной: ' + r.out + r.err);
+    } finally { drop(sc.base); }
+  });
+
+  // Подделка закрепки: под её случайное имя в настоящей папке лежит чужой файл, который никто не удерживает (если чужая
+  // папка читаема, имя можно подсмотреть по её списку файлов). Сверка «файл есть по имени» его принимала бы.
+  const HOOK_PIN_SPOOF = SWAP_LOGGED.concat([
+    'function New-Object {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string]$TypeName, [Parameter(Position = 1)][object[]]$ArgumentList)',
+    "  $isPin = ($TypeName -eq 'System.IO.FileStream' -and $ArgumentList -and ([string]$ArgumentList[0]) -like '*.hm-pin-*')",
+    '  if ($isPin) { Swap-ClaudeLogged }',
+    '  $o = Microsoft.PowerShell.Utility\\New-Object @PSBoundParameters',
+    '  if ($isPin) {',
+    '    Unswap-Claude',
+    "    [System.IO.File]::WriteAllText([string]$ArgumentList[0], '')",
+    '  }',
+    '  return $o',
+    '}',
+  ]);
+
+  ok('u3-C: закрепка-подделка (под её имя в настоящей папке положили пустой файл, который никто не держит): отказ — настоящая закрепка лежит в чужой папке; без проверки удержания шаг шёл бы незакреплённым', () => {
+    needPs();
+    const sb = mkCfg('p7');
+    try {
+      seedClaude(sb.home);
+      const r = runSwap(sb, HOOK_PIN_SPOOF, { HM_ADDITIVE: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=MOVED'], 'подмена в миг закрепки состоялась' + dump);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: файл под именем закрепки никто не удерживает' + dump);
+      assert(/закреп/.test(r.out) && /подмен/.test(r.out), 'причина названа: ' + r.out);
+      assert.deepStrictEqual(listBackups(sb.home), [], 'копия не снималась');
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'rules')), 'раскладка не начиналась');
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'чужая папка не тронута (закрепка исчезла вместе с процессом)');
+    } finally { drop(sb.base); }
+    // Контроль: проверка удержания выключена (остаётся «файл есть по имени») — подделка проходит, шаг идёт незакреплённым.
+    const sc = mkCfg('p7c');
+    try {
+      seedClaude(sc.home);
+      const dir = variantDir(sc, 'noheld', (t) => t.replace('if (-not (Test-Path -LiteralPath $PinPath)) { return $false }', 'return $true'));
+      const r = runSwap(sc, HOOK_PIN_SPOOF, { HM_ADDITIVE: '1' }, dir);
+      assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: подмена состоялась' + '\n' + r.out + r.err);
+      assert.strictEqual(r.status, 0, 'контроль: без проверки удержания подделка принята — тест её различает: ' + r.out + r.err);
+    } finally { drop(sc.base); }
+  });
+
+  // ---- онлайн-ветка (git подменён функцией; сеть и настоящий clone в тестах не нужны) ------------------------------
+  // Поддельный git: пишет вызов в журнал и создаёт клон — обычный либо с .claude-ссылкой на закрытую папку.
+  const FAKE_GIT = [
+    'function git {',
+    "  Add-Content -LiteralPath $env:HM_TEST_GITLOG -Value ('GIT ' + ($args -join ' '))",
+    '  $dest = [string]$args[$args.Count - 1]',
+    '  New-Item -ItemType Directory -Force -Path $dest | Out-Null',
+    "  if ($env:HM_TEST_CLONE_LINK -eq '1') {",
+    "    New-Item -ItemType Junction -Path (Join-Path $dest '.claude') -Value $env:HM_TEST_VICTIM | Out-Null",
+    '  } else {',
+    "    $s = Join-Path $dest '.claude\\rules'",
+    '    New-Item -ItemType Directory -Force -Path $s | Out-Null',
+    "    [System.IO.File]::WriteAllText((Join-Path $s 'new-rule.md'), 'fresh rule')",
+    "    [System.IO.File]::WriteAllText((Join-Path $dest '.claude\\settings.json'), '{\"fresh\":\"base\"}')",
+    '  }',
+    '  $global:LASTEXITCODE = 0',
+    '}',
+  ];
+  const runOnline = (sb, extraEnv, scriptsDir, hook) => {
+    const gitLog = path.join(sb.base, 'git.log'); fs.writeFileSync(gitLog, '');
+    const swapLogFile = path.join(sb.base, 'swap.log'); fs.writeFileSync(swapLogFile, '');
+    const r = runCfg(sb, { driver: FAKE_GIT.concat(hook || []), scriptsDir,
+      env: Object.assign({ HM_ADDITIVE: '1', HM_BUNDLED_CONFIG: undefined, HM_TEST_GITLOG: gitLog, HM_TEST_SWAPLOG: swapLogFile }, extraEnv || {}) });
+    r.git = fs.readFileSync(gitLog, 'utf8').split(/\r?\n/).filter(Boolean);
+    return r;
+  };
+
+  ok('u3-C: онлайн-ветка — ссылка на ~/.hamidun-setup отвергается ДО clone (git не вызывается, в чужую папку ничего не пишется); обычные папки — клон ложится в профиль и раскладывается', () => {
+    needPs();
+    const sb = mkCfg('o1');
+    try {
+      seedClaude(sb.home);
+      junction(sb.victim, path.join(sb.home, '.hamidun-setup'));
+      const r = runOnline(sb);
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: ' + r.out + r.err);
+      assert.deepStrictEqual(r.git, [], 'git не вызывался — проверка раньше clone (иначе клон лёг бы в чужую папку): ' + r.git.join(' | '));
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'в цель ссылки ничего не записано: ' + victimNames(sb).join(','));
+      assert(/\.hamidun-setup/.test(r.out) && /ссылк/.test(r.out) && /rmdir/.test(r.out), 'причина и выход названы: ' + r.out);
+    } finally { drop(sb.base); }
+    const sc = mkCfg('o1c');
+    try {
+      seedClaude(sc.home);
+      const r = runOnline(sc);
+      assert.strictEqual(r.status, 0, 'обычные папки: exit 0: ' + r.out + r.err);
+      assert.strictEqual(r.git.length, 1, 'git вызван один раз: ' + r.git.join(' | '));
+      assert(fs.existsSync(path.join(sc.home, '.hamidun-setup', 'config-repo', '.claude', 'rules', 'new-rule.md')), 'клон лёг в профиль');
+      assert.strictEqual(fs.readFileSync(path.join(sc.home, '.claude', 'rules', 'new-rule.md'), 'utf8'), 'fresh rule', 'недостающее доложено из клона');
+    } finally { drop(sc.base); }
+  });
+
+  ok('u3-C: онлайн-ветка — .claude внутри клона оказалась ссылкой на закрытую папку: раскладка не читает сквозь неё (источник robocopy проверяется после clone)', () => {
+    needPs();
+    const sb = mkCfg('o2');
+    try {
+      seedClaude(sb.home);
+      const r = runOnline(sb, { HM_TEST_CLONE_LINK: '1' });
+      assert.notStrictEqual(r.status, 0, 'шаг остановлен: ' + r.out + r.err);
+      assert.strictEqual(r.git.length, 1, 'clone состоялся (ссылка появилась именно после него)');
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'secret.txt')), 'содержимое закрытой папки не попало в доступную пользователю ~/.claude: ' + fs.readdirSync(path.join(sb.home, '.claude')).join(','));
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'закрытая папка не тронута');
+      assert(/ссылк/.test(r.out) && /config-repo/.test(r.out), 'причина названа: ' + r.out);
+    } finally { drop(sb.base); }
+    // Контроль: проверка клона вырезана (прежний config.ps1) — раскладка читает сквозь ссылку и кладёт секрет в ~/.claude.
+    const sc = mkCfg('o2c');
+    try {
+      seedClaude(sc.home);
+      const dir = variantDir(sc, 'noclonecheck', (t) => t
+        .replace("$cfgCloneCheck = Join-Path $clone '.claude'", '$cfgCloneCheck = $null')
+        .replace("    Lock-HmDir -Dir $cfgCloneCheck -Role 'клон пака (.claude в ~/.hamidun-setup/config-repo)'\r\n", ''));
+      const r2 = runOnline(sc, { HM_TEST_CLONE_LINK: '1' }, dir);
+      assert(fs.existsSync(path.join(sc.home, '.claude', 'secret.txt')), 'контроль: без проверки клона секрет закрытой папки лёг в ~/.claude: ' + r2.out + r2.err);
+    } finally { drop(sc.base); }
+  });
+
+  // Подмена .claude КЛОНА (источник раскладки) в миг вызова merge-robocopy — после последней проверки ссылки: переименование
+  // настоящего .claude клона и заготовленный junction на закрытую папку на его месте.
+  const HOOK_CLONE_SWAP = [
+    '$global:HmSwapped = $false',
+    '$global:HmRoboN = 0',
+    'function Swap-CloneLogged {',
+    '  if ($global:HmSwapped) { return }',
+    '  $global:HmSwapped = $true',
+    "  $c = Join-Path $env:USERPROFILE '.hamidun-setup\\config-repo\\.claude'",
+    "  $r = 'MOVED'",
+    '  try {',
+    "    Rename-Item -LiteralPath $c -NewName '.claude-real' -ErrorAction Stop",
+    '    New-Item -ItemType Junction -Path $c -Value $env:HM_TEST_VICTIM -ErrorAction Stop | Out-Null',
+    "  } catch { $r = 'BLOCKED' }",
+    "  Add-Content -LiteralPath $env:HM_TEST_SWAPLOG -Value ('SWAP=' + $r)",
+    '}',
+    'function robocopy {',
+    '  $global:HmRoboN++',
+    '  if ($global:HmRoboN -eq 2) { Swap-CloneLogged }',
+    "  & (Join-Path $env:SystemRoot 'System32\\robocopy.exe') @args",
+    '}',
+  ];
+
+  ok('u3-C: онлайн-ветка — .claude клона (источник раскладки) подменяют на лету перед merge-robocopy: переименование отвергнуто закрепкой, секрет закрытой папки в ~/.claude не попадает; без закрепки раскладка читает сквозь подмену', () => {
+    needPs();
+    const sb = mkCfg('o3');
+    try {
+      seedClaude(sb.home);
+      const r = runOnline(sb, {}, undefined, HOOK_CLONE_SWAP);
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(swapLog(sb), ['SWAP=BLOCKED'], 'переименование .claude клона отвергнуто: источник закреплён открытым файлом' + dump);
+      assert.strictEqual(r.status, 0, 'шаг прошёл' + dump);
+      assert(!fs.existsSync(path.join(sb.home, '.claude', 'secret.txt')), 'содержимое закрытой папки не попало в ~/.claude: ' + fs.readdirSync(path.join(sb.home, '.claude')).join(','));
+      assert.strictEqual(fs.readFileSync(path.join(sb.home, '.claude', 'rules', 'new-rule.md'), 'utf8'), 'fresh rule', 'пак разложен из настоящего клона');
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'закрытая папка не тронута');
+      assert.deepStrictEqual(waitNoPins(path.join(sb.home, '.claude')), [], 'закрепка клона в ~/.claude не попала, своя закрепка исчезла');
+      assert.deepStrictEqual(waitNoPins(path.join(sb.home, '.hamidun-setup', 'config-repo', '.claude')), [], 'закрепка клона исчезла вместе с процессом');
+    } finally { drop(sb.base); }
+    // Контроль: закрепки нет — подмена удаётся, раскладка читает закрытую папку и кладёт её файлы в ~/.claude (F10 через клон).
+    const sc = mkCfg('o3c');
+    try {
+      seedClaude(sc.home);
+      const r = runOnline(sc, {}, noPinScripts(sc), HOOK_CLONE_SWAP);
+      assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: без закрепки подмена клона удаётся' + '\n' + r.out + r.err);
+      assert(fs.existsSync(path.join(sc.home, '.claude', 'secret.txt')), 'контроль: файл закрытой папки лёг в доступную пользователю ~/.claude: ' + r.out + r.err);
+    } finally { drop(sc.base); }
+  });
+
+  ok('u3-C: HamidunStart — ссылка: стартовый проект пропущен с причиной, цель цела, конфиг разложен', () => {
+    needPs();
+    const sb = mkCfg('c6');
+    try {
+      junction(sb.victim, path.join(sb.home, 'HamidunStart'));
+      const r = runCfg(sb);
+      assert.strictEqual(r.status, 0, 'конфиг разложен, шаг не красный: ' + r.out + r.err);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'в цель ссылки ничего не записано: ' + victimNames(sb).join(','));
+      assert(fs.existsSync(path.join(sb.home, '.claude', 'skills', 'our-skill', 'SKILL.md')), 'конфиг разложен');
+      assert(/HamidunStart/.test(r.out) && /ссылк/.test(r.out) && /Стартовый проект НЕ создан/.test(r.out), 'пропуск назван в журнале: ' + r.out);
+      // вложенная подпапка-ссылка внутри настоящего HamidunStart. Файл лежит и прямо в ней (docs), и на два уровня
+      // глубже (docs/deep): запись переносом сама отказывает, когда ссылка — ближайший каталог файла, но на
+      // глубокой подпапке ссылка стоит выше неё, и каталог рядом с файлом — самый обычный (он уже внутри чужой папки);
+      // там держит только проверка всей цепочки.
+      const sb2 = mkCfg('c6b');
+      try {
+        fs.mkdirSync(path.join(sb2.assets, 'starter-project', 'docs', 'deep'), { recursive: true });
+        fs.writeFileSync(path.join(sb2.assets, 'starter-project', 'docs', 'GUIDE.md'), 'guide');
+        fs.writeFileSync(path.join(sb2.assets, 'starter-project', 'docs', 'deep', 'NOTES.md'), 'notes');
+        fs.mkdirSync(path.join(sb2.home, 'HamidunStart'));
+        junction(sb2.victim, path.join(sb2.home, 'HamidunStart', 'docs'));
+        const r3 = runCfg(sb2);
+        assert.strictEqual(r3.status, 0, 'шаг не красный: ' + r3.out + r3.err);
+        assert.deepStrictEqual(victimNames(sb2), ['secret.txt'], 'подпапка-ссылка внутри HamidunStart: запись в цель не идёт, в том числе на глубину: ' + victimNames(sb2).join(','));
+        assert.strictEqual(fs.readFileSync(path.join(sb2.home, 'HamidunStart', 'PROMPTS.md'), 'utf8'), 'prompts', 'остальные файлы стартового проекта доложены');
+        assert(/NOTES\.md пропущен/.test(r3.out) && /GUIDE\.md пропущен/.test(r3.out), 'оба пропуска названы в журнале: ' + r3.out);
+        // Контроль: без сторожа (прежняя проверка цепочки и прежний Copy-Item) файлы подпапки ложатся в чужую папку.
+        runCfg(sb2, { scriptsDir: blindScripts(sb2) });
+        assert(fs.existsSync(path.join(sb2.victim, 'GUIDE.md')), 'контроль: без сторожа GUIDE.md лёг в чужую папку');
+        assert(fs.existsSync(path.join(sb2.victim, 'deep', 'NOTES.md')), 'контроль: без сторожа и глубокий файл лёг в чужую папку');
+      } finally { drop(sb2.base); }
+    } finally { drop(sb.base); }
+  });
+
+  ok('u3-C: папка бэкапа — неугадываемое имя: заранее подложенные junction .claude.backup.<секунда> не принимают копию', () => {
+    needPs();
+    const sb = mkCfg('c7');
+    try {
+      seedClaude(sb.home);
+      // «Малварь» знает формат имени и подкладывает ссылки на каждую из ближайших двух минут.
+      const pad = (n) => String(n).padStart(2, '0');
+      const t0 = Date.now() - 2000;
+      for (let i = 0; i < 150; i++) {
+        const d = new Date(t0 + i * 1000);
+        const stamp = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+        try { junction(sb.victim, path.join(sb.home, '.claude.backup.' + stamp)); } catch (e) { /* то же имя в секунде уже занято */ }
+      }
+      // Записываем, КУДА и в каком состоянии уходит каждый вызов robocopy (первый — бэкап).
+      const log = path.join(sb.base, 'robo.log');
+      fs.writeFileSync(log, '');
+      // Кроме того, перед самым копированием «малварь» пробует убрать папку копии из-под ног: переименовать её
+      // (потом возвращаем имя). Пока внутри папки держится открытый без разделения файл-замок, это невозможно.
+      const recorder = [
+        'function robocopy {',
+        "  $dest = [string]$args[1]",
+        '  $flag = $false',
+        '  try { $flag = [bool](([IO.File]::GetAttributes($dest)) -band [IO.FileAttributes]::ReparsePoint) } catch { }',
+        "  $moved = 'n/a'",
+        "  if ($dest -like '*.claude.backup.*') {",
+        "    $leaf = Split-Path $dest -Leaf",
+        "    try { Rename-Item -LiteralPath $dest -NewName ($leaf + '-away') -ErrorAction Stop; $moved = 'MOVED'; Rename-Item -LiteralPath ($dest + '-away') -NewName $leaf -ErrorAction Stop } catch { if ($moved -ne 'MOVED') { $moved = 'BLOCKED' } }",
+        '  }',
+        "  Add-Content -LiteralPath $env:HM_TEST_ROBOLOG -Value ('DEST=' + $dest + ' LINK=' + $flag + ' RENAME=' + $moved)",
+        "  & (Join-Path $env:SystemRoot 'System32\\robocopy.exe') @args",
+        '}',
+      ];
+      const r = runCfg(sb, { env: { HM_ADDITIVE: '1', HM_TEST_ROBOLOG: log }, driver: recorder });
+      assert.strictEqual(r.status, 0, 'шаг прошёл: ' + r.out + r.err);
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'копия не ушла в подложенную ссылку: ' + victimNames(sb).join(','));
+      const calls = fs.readFileSync(log, 'utf8').split(/\r?\n/).filter(Boolean);
+      assert(calls.length >= 2, 'robocopy вызывался дважды (бэкап и раскладка): ' + calls.join(' | '));
+      const m = /^DEST=(.+) LINK=(\w+) RENAME=(\w+)$/.exec(calls[0]);
+      assert(m && /\.claude\.backup\.\d{8}-\d{6}-[0-9a-f]{8}$/.test(m[1]), 'бэкап идёт в папку с неугадываемым хвостом: ' + calls[0]);
+      assert.strictEqual(m[2], 'False', 'и эта папка в момент копирования — не ссылка');
+      assert.strictEqual(m[3], 'BLOCKED', 'и подменить её на лету нельзя: переименование занятой замком папки отвергнуто: ' + calls[0]);
+      // Контроль: без замка (его строку вырезали) ту же папку можно было бы унести из-под robocopy.
+      const sb2 = mkCfg('c7b');
+      try {
+        seedClaude(sb2.home);
+        const nolock = path.join(sb2.base, 'nolock');
+        fs.mkdirSync(nolock);
+        ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(nolock, f)));
+        const cfgSrc = rawWin('config.ps1');
+        const cfgNoLock = cfgSrc.replace(/^[ \t]*\$backupLock = New-Object[^\n]*\r?\n/m, '');
+        assert(cfgNoLock !== cfgSrc, 'мутация применилась: замок вырезан');
+        fs.writeFileSync(path.join(nolock, 'config.ps1'), BOM + cfgNoLock);
+        const log2 = path.join(sb2.base, 'robo.log'); fs.writeFileSync(log2, '');
+        runCfg(sb2, { env: { HM_ADDITIVE: '1', HM_TEST_ROBOLOG: log2 }, driver: recorder, scriptsDir: nolock });
+        const first = fs.readFileSync(log2, 'utf8').split(/\r?\n/).filter(Boolean)[0] || '';
+        assert(/RENAME=MOVED$/.test(first), 'контроль: без замка папку копии можно переименовать на лету (подменить ссылкой): ' + first);
+      } finally { drop(sb2.base); }
+      // Контроль: прежнее поведение — robocopy в предугаданное имя-ссылку — уносит копию в чужую папку.
+      const probe = path.join(sb.base, 'probe-src'); fs.mkdirSync(probe); fs.writeFileSync(path.join(probe, 'payload.dll'), 'x');
+      const planted = path.join(sb.base, 'planted'); junction(sb.victim, planted);
+      const rc = runPs("& (Join-Path $env:SystemRoot 'System32\\robocopy.exe') " + q(probe) + ' ' + q(planted) + ' /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null');
+      assert(fs.existsSync(path.join(sb.victim, 'payload.dll')), 'контроль: robocopy в подложенную ссылку пишет в её цель (прежний бэкап так и делал): ' + rc.err);
+    } finally { drop(sb.base); }
+  });
+
+  // file-symlink, подложенный на ИМЯ файла между проверкой «имени нет» и копией. Хук подменяет Test-Path: в миг, когда
+  // сценарий спросил про имя назначения и получил «нет», «малварь» создаёт на этом имени ссылку на ещё не существующий
+  // файл в чужой папке. Файловые ссылки без прав доступны только в режиме разработчика — без него тест пропускается
+  // (junction-варианты выше от этого права не зависят).
+  const PLANT_HOOK = [
+    '$global:HmPlant = @{}',
+    "if ($env:HM_TEST_PLANT) { foreach ($pair in ($env:HM_TEST_PLANT -split '\\|')) { $l, $t = $pair -split '=', 2; $global:HmPlant[$l.ToLowerInvariant()] = $t } }",
+    'function Test-Path {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$PathType, [switch]$IsValid)',
+    '  $r = Microsoft.PowerShell.Management\\Test-Path @PSBoundParameters',
+    '  $p = if ($LiteralPath) { $LiteralPath[0] } elseif ($Path) { $Path[0] } else { $null }',
+    '  if (-not $r -and $p -and $global:HmPlant.ContainsKey($p.ToLowerInvariant())) {',
+    '    $t = $global:HmPlant[$p.ToLowerInvariant()]',
+    '    $global:HmPlant.Remove($p.ToLowerInvariant())',
+    `    & cmd.exe /c ('mklink "' + $p + '" "' + $t + '"') | Out-Null`,
+    '  }',
+    '  return $r',
+    '}',
+  ];
+
+  ok('u3-C: file-symlink, подложенный на имя файла между проверкой и копией (~/CLAUDE.md, шаблон credentials, файл HamidunStart): запись переносом по имени в чужую папку не идёт; прежние Copy-Item и File.Copy(…, $false) создавали там файл', () => {
+    needPs();
+    const probe = mkTmp('symprobe');
+    try {
+      try { fs.symlinkSync(path.join(probe, 'nope.txt'), path.join(probe, 'l.txt'), 'file'); }
+      catch (e) { SKIP('нет права создавать file-symlink (режим разработчика выключен): ' + e.code); }
+    } finally { drop(probe); }
+    const plantFor = (sb) => {
+      const links = [
+        [path.join(sb.home, 'CLAUDE.md'), path.join(sb.victim, 'planted-claude-md.txt')],
+        [path.join(sb.home, '.claude', '.credentials.master.env'), path.join(sb.victim, 'planted-credentials.txt')],
+        [path.join(sb.home, 'HamidunStart', 'PROMPTS.md'), path.join(sb.victim, 'planted-prompts.txt')],
+      ];
+      return { links, spec: links.map((p) => p[0] + '=' + p[1]).join('|') };
+    };
+    const sb = mkCfg('c8');
+    try {
+      seedClaude(sb.home);
+      const pl = plantFor(sb);
+      const r = runCfg(sb, { driver: PLANT_HOOK, env: { HM_TEST_PLANT: pl.spec, HM_ADDITIVE: '1' } });
+      const dump = '\n' + r.out + r.err;
+      pl.links.forEach((p) => assert(fs.lstatSync(p[0]).isSymbolicLink(), 'ссылка подложена и осталась на месте (иначе тест ничего не доказывает): ' + p[0] + dump));
+      assert.deepStrictEqual(victimNames(sb), ['secret.txt'], 'через подложенные file-symlink в чужую папку ничего не записано: ' + victimNames(sb).join(',') + dump);
+      assert.notStrictEqual(r.status, 0, 'сбой копии ~/CLAUDE.md и шаблона credentials — честный провал шага, а не тихий успех' + dump);
+      assert(/не удалось скопировать ~\/CLAUDE\.md/.test(r.out) && /не удалось скопировать шаблон credentials/.test(r.out), 'обе причины названы в журнале' + dump);
+      assert(/не удалось скопировать файлов: 1/.test(r.out), 'файл стартового проекта пропущен с причиной в журнале' + dump);
+      // Отрицательные контроли: в тех же условиях прежний Copy-Item -Force, промежуточный File.Copy(…, $false) и Copy-Item
+      // стартового проекта ПИШУТ сквозь битую ссылку — создают файл-цель в чужой папке (проверено запуском на PS 5.1).
+      const variant = (tag, edit) => {
+        const s2 = mkCfg('c8' + tag);
+        try {
+          seedClaude(s2.home);
+          const dir = path.join(s2.base, 'variant'); fs.mkdirSync(dir);
+          ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+          const src = rawWin('config.ps1');
+          const mutated = edit(src);
+          assert(mutated !== src, 'мутация применилась: ' + tag);
+          fs.writeFileSync(path.join(dir, 'config.ps1'), BOM + mutated);
+          const p2 = plantFor(s2);
+          runCfg(s2, { driver: PLANT_HOOK, env: { HM_TEST_PLANT: p2.spec, HM_ADDITIVE: '1' }, scriptsDir: dir });
+          return victimNames(s2);
+        } finally { drop(s2.base); }
+      };
+      [NEW_MD, NEW_ENV, NEW_START].forEach((s) => assert(rawWin('config.ps1').includes(s), 'в config.ps1 есть запись переносом: ' + s));
+      const oldWay = variant('old', oldCopyEdit);
+      assert.deepStrictEqual(oldWay, ['planted-claude-md.txt', 'planted-credentials.txt', 'planted-prompts.txt', 'secret.txt'],
+        'контроль: прежние Copy-Item создали все три файла-цели в чужой папке: ' + oldWay.join(','));
+      const fileCopy = variant('fc', (t) => t.replace(NEW_MD, () => 'try { [System.IO.File]::Copy($srcClaudeMd, $profileClaudeMd, $false) }'));
+      assert(fileCopy.includes('planted-claude-md.txt'), 'контроль: File.Copy(…, $false) тоже идёт по битой ссылке — «не перезаписывать» от неё не защищает: ' + fileCopy.join(','));
+    } finally { drop(sb.base); }
+  });
+
+  ok('u3-C: config.ps1 — порядок: проверка ссылок до clone и до первого robocopy, повтор перед каждым robocopy, ссылка на пути записи не стирается рекурсивно', () => {
+    const code = stripPsComments(rawWin('config.ps1'));
+    const robo = Array.from(code.matchAll(/^[ \t]*robocopy \$/gm)).map((m) => m.index);
+    assert.strictEqual(robo.length, 3, 'три вызова robocopy: бэкап и два режима раскладки');
+    const checks = Array.from(code.matchAll(/^[ \t]*Assert-HmConfigNoLink\b/gm)).map((m) => m.index);
+    assert(checks.length >= 3, 'проверка вызывается не меньше трёх раз (старт, перед бэкапом, перед раскладкой): ' + checks.length);
+    assert(checks[0] < robo[0], 'проверка раньше первого robocopy');
+    const clone = code.indexOf('clone --depth 1');
+    assert(clone > 0 && checks[0] < clone, 'проверка раньше git clone в ~/.hamidun-setup');
+    // перед КАЖДЫМ robocopy стоит свежий вызов проверки: перед бэкапом — после выбора имени копии и впритык к
+    // вызову (иначе стартовая проверка в начале файла «покрывала» бы и бэкап, а между ними идут разбор клона,
+    // Get-Date и создание папки), перед раскладкой — между бэкапом и развилкой add-missing/repair (оба
+    // merge-вызова лежат в ветках одного if).
+    const nameAt = code.indexOf('$backupDir = "$claudeHome.backup.$stamp"');
+    assert(nameAt > 0 && nameAt < robo[0], 'имя копии выбирается раньше первого robocopy');
+    assert(checks.some((c) => c > nameAt && c < robo[0]), 'перед бэкапом есть СВЕЖАЯ проверка (после выбора имени копии), а не только стартовая');
+    const mergeIf = code.indexOf('if ($ADDITIVE) {\n    Write-Host "Добавляю');
+    assert(mergeIf > robo[0] && mergeIf < robo[1] && robo[1] < robo[2], 'оба merge-вызова — в ветках одного if после бэкапа');
+    assert(checks.some((c) => c > robo[0] && c < mergeIf), 'перед раскладкой (обеими ветками) есть свежая проверка, поставленная впритык к развилке');
+    // между последней проверкой и развилкой нет ничего, кроме комментариев: впритык, а не «где-то выше»
+    const lastCheck = Math.max.apply(null, checks.filter((c) => c < mergeIf));
+    assert(code.slice(lastCheck, mergeIf).split('\n').filter((l) => l.trim()).length === 1, 'проверка стоит строкой прямо перед развилкой');
+    // слова отказа не должны попадать в правила failure-explain (иначе человеку объяснят другую беду)
+    const fe = require(path.join(ROOT, 'src', 'failure-explain.js'));
+    const i0 = code.indexOf('function Stop-HmConfigOnLink');
+    const i1 = code.indexOf('function Assert-HmConfigNoLink');
+    assert(i0 > 0 && i1 > i0, 'обе функции на месте');
+    const msg = code.slice(i0, i1);
+    const lines = msg.split('\n').filter((l) => /Write-Host/.test(l)).map((l) => l.replace(/^\s*Write-Host\s*/, ''));
+    assert(lines.length >= 3, 'в Stop-HmConfigOnLink три-четыре строки по-русски: ' + lines.length);
+    assert.strictEqual(fe.explainScriptFailure(lines), null, 'разбор причины в main.js не подменяет эти строки чужим объяснением');
+    assert(/exit 1/.test(msg), 'остановка с кодом 1');
+
+    // --- ссылка на пути записи не стирается рекурсивно (клон пака в профиле) ---------------------------------
+    // Поведенчески это проверить нельзя: на Windows PowerShell 5.1.26100 Remove-Item -Recurse ссылку не обходит (ни сам
+    // корень, ни вложенную), так что результат на этой сборке одинаков; защита нужна там, где обходит.
+    const rmAt = code.indexOf('if (Test-Path $clone) {');
+    assert(rmAt > 0, 'удаление прежнего клона найдено');
+    const rmBlock = code.slice(rmAt, code.indexOf('Test-Path $clone', rmAt + 30));
+    assert(/Test-HmIsReparse \$clone/.test(rmBlock) && /\[System\.IO\.Directory\]::Delete\(\$clone, \$false\)/.test(rmBlock),
+      'ссылка на месте клона снимается как ссылка (Directory.Delete без рекурсии), а не Remove-Item -Recurse');
+    assert(/else \{ Remove-Item -Recurse -Force \$clone/.test(rmBlock), 'рекурсивное удаление — только для обычной папки');
+    assertOrder(code, "clone --depth 1", "$cfgCloneCheck = Join-Path $clone '.claude'", 'источник клона ставится на проверку после clone');
+    const cloneChk = code.indexOf("$cfgCloneCheck = Join-Path $clone '.claude'");
+    assert(/^[ \t]*Assert-HmConfigNoLink\b/m.test(code.slice(cloneChk, cloneChk + 160)), 'сразу за назначением $cfgCloneCheck идёт проверка: клон-источник под той же проверкой, что назначение');
+
+    // --- закрепка ~/.claude и клона ----------------------------------------------------------------------------
+    const lockFn = stripPsComments(cutFn(rawWin('config.ps1'), 'Lock-HmDir'));
+    assert(/\.hm-pin-/.test(lockFn) && /\[guid\]::NewGuid\(\)/.test(lockFn), 'имя закрепки случайное (GUID): заранее подложить занятое имя нельзя');
+    assert(/New-Object System\.IO\.FileStream/.test(lockFn) && /FileMode\]::CreateNew/.test(lockFn) && /FileShare\]::None/.test(lockFn) && /FileOptions\]::DeleteOnClose/.test(lockFn),
+      'закрепка — CreateNew, без разделения, DeleteOnClose (пустая и исчезает сама, в том числе при падении процесса)');
+    assert(/catch \{[\s\S]*exit 1/.test(lockFn), 'закрепить не вышло — отказ (exit 1), а не «продолжаю без неё»');
+    assertOrder(lockFn, 'Assert-HmConfigNoLink', 'New-Object System.IO.FileStream', 'до создания закрепки папка проверена: иначе файл лёг бы внутрь подложенной ссылки');
+    assertOrder(lockFn, 'New-Object System.IO.FileStream', "Assert-HmConfigNoLink -When 'сразу после закрепления'", 'после создания закрепки — повторная проверка');
+    assertOrder(lockFn, "Assert-HmConfigNoLink -When 'сразу после закрепления'", 'Test-HmPinHeld -PinPath $pinPath', 'и сверка: закрепка видна по имени папки и удерживается нашим дескриптором (подделку без хозяина отвергаем)');
+    const heldFn = stripPsComments(cutFn(rawWin('config.ps1'), 'Test-HmPinHeld'));
+    assert(/Test-Path -LiteralPath \$PinPath/.test(heldFn) && /FileShare\]::ReadWrite -bor \[System\.IO\.FileShare\]::Delete/.test(heldFn) && /-band 0xFFFF\) -eq 32/.test(heldFn),
+      'Test-HmPinHeld: файл есть по имени и попытка открыть его при полном разрешении делить упирается в нарушение общего доступа (код 32)');
+    assert(!/\$pin\.(Dispose|Close)\(/.test(code) && !/hmPins[^\n]*\.(Dispose|Close|Clear|Remove)\(/.test(code), 'закрепка не закрывается до конца процесса (она держит и раскладку, и прунинг, и записи в самом конце)');
+    assert((code.match(/\$hmPins\s*=/g) || []).length === 1, 'реестр закрепок заводится один раз и не пересоздаётся (иначе сборщик мусора закрыл бы файлы)');
+    const lockLines = lockFn.split('\n').filter((l) => /Write-Host/.test(l)).map((l) => l.replace(/^\s*Write-Host\s*/, ''));
+    assert(lockLines.length >= 4, 'в Lock-HmDir есть отказы по-русски: ' + lockLines.length);
+    assert.strictEqual(fe.explainScriptFailure(lockLines.map((l) => l.replace(/\$\([^)]*\)/g, ''))), null, 'слова отказов закрепки не подменяются чужим объяснением в main.js');
+    assert(!lockLines.some((l) => /БЕЗОПАСНОСТЬ:/.test(l)), 'слово БЕЗОПАСНОСТЬ: зарезервировано за гейтом целостности');
+    // вызовы: перед бэкапом (после имени копии, до создания папки копии и до robocopy) и после New-Item (чистая машина)
+    const lockCalls = Array.from(code.matchAll(/^[ \t]*Lock-HmDir -Dir \$claudeHome\b/gm)).map((m) => m.index);
+    assert(lockCalls.length >= 2, 'закрепка вызывается и перед бэкапом, и после создания ~/.claude: ' + lockCalls.length);
+    const mkBackup = code.indexOf('[System.IO.Directory]::CreateDirectory($backupDir)');
+    assert(lockCalls[0] > nameAt && lockCalls[0] < mkBackup && mkBackup < robo[0], 'первый вызов — внутри блока бэкапа, раньше создания папки копии и первого robocopy');
+    const newItemAt = code.indexOf('New-Item -ItemType Directory -Force $claudeHome');
+    assert(newItemAt > robo[0] && lockCalls[1] > newItemAt && lockCalls[1] < code.indexOf('$skillsDirNow = Join-Path'), 'второй вызов — сразу после создания ~/.claude, до разбора скиллов и раскладки');
+    assert(lockCalls[1] < mergeIf, 'закреплено раньше раскладки');
+    // бэкап не копирует закрепку (открыта без разделения — robocopy падал бы на ней кодом 8 и «копия неполная»)
+    const backupLine = code.slice(robo[0], code.indexOf('\n', robo[0]));
+    assert(/\/XF[^\n]*'\.hm-pin-\*'/.test(backupLine), 'в /XF бэкапа есть .hm-pin-*: ' + backupLine);
+    // клон пака (онлайн-ветка): его .claude закреплён сразу после проверки клона и до раскладки; закрепка лежит в ИСТОЧНИКЕ,
+    // поэтому оба merge-вызова её не берут (/XF $excludeNames, а в нём .hm-pin-*)
+    const cloneLock = code.indexOf('Lock-HmDir -Dir $cfgCloneCheck');
+    assert(cloneLock > cloneChk && cloneLock < code.indexOf('$srcClaude   = Join-Path'), 'закрепка клона — сразу после проверки клона, до раскладки');
+    assert(/\$excludeNames = @\([^)]*'\.hm-pin-\*'/.test(code), 'закрепка клона не уезжает в ~/.claude: .hm-pin-* в $excludeNames (/XF обоих merge-вызовов)');
+    // прунинг: перед Remove-Item -Recurse — свежая проверка корня ~/.claude (раньше гейтился только сам skills)
+    assertOrder(code, "Assert-HmConfigNoLink -When 'перед удалением скиллов'", '$keep = @{}; $env:HM_KEEP_SKILLS', 'перед прунингом — свежая проверка корня');
+    assert(code.indexOf("Assert-HmConfigNoLink -When 'перед удалением скиллов'") > mergeIf, 'проверка перед прунингом стоит после раскладки');
+  });
+
+  // ==========================================================================================================
+  // D. nomad.ps1: сборка из защищённой копии
+  // ==========================================================================================================
+  const NOMAD_HARNESS = String.raw`$ErrorActionPreference = 'Continue'
+. $env:HM_TEST_VERIFY
+. ([scriptblock]::Create($env:HM_TEST_REMOVE_FN))
+function New-HmSecureStagingDir {
+    param($ProgramData, $Icacls, [bool]$Elevated)
+    if ($env:HM_TEST_STAGE_FAIL -eq '1') { return $null }
+    $d = Join-Path $env:HM_TEST_STAGE ('HmDeElev-' + [guid]::NewGuid().ToString('N'))
+    $w = Join-Path $d 'w'
+    New-Item -ItemType Directory -Force -Path $w | Out-Null
+    return $w
+}
+if ($env:HM_TEST_TAMPER -eq '1') {
+    function Copy-Item {
+        param([string]$LiteralPath, [string]$Destination, [switch]$Recurse, [switch]$Force, $ErrorAction)
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Recurse -Force -ErrorAction Stop
+        Add-Content -LiteralPath (Join-Path $Destination 'pkg\mod.py') -Value '# evil'
+    }
+}
+. ([scriptblock]::Create($env:HM_TEST_HELPER_FN))
+$src = $env:HM_TEST_SRC
+$want = Get-HmTreeSha256 $src
+$underSecure = { param($p) [bool]($p -match '\\HmDeElev-[0-9a-f]{32}\\w\\') }
+$b = New-HmNomadBuildCopy -Src $src -TreeWant $want
+if ($null -eq $b) { Write-Output 'RESULT=null' }
+else {
+    Write-Output ('RESULT=ok PATH=' + $b.Path)
+    Write-Output ('SECURE=' + (& $underSecure $b.Path))
+    Write-Output ('SAMETREE=' + ((Get-HmTreeSha256 $b.Path) -eq $want))
+    Remove-HmSecureStagingDir -Path $b.Stage
+    Write-Output ('REMOVED=' + (-not (Test-Path -LiteralPath $b.Path)))
+}
+Write-Output ('LEFT=' + @(Get-ChildItem -LiteralPath $env:HM_TEST_STAGE -Force -ErrorAction SilentlyContinue).Count)
+if ($env:HM_TEST_OLDWAY -eq '1') {
+    $old = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
+    Microsoft.PowerShell.Management\Copy-Item -LiteralPath $src -Destination $old -Recurse -Force -ErrorAction Stop
+    Write-Output ('OLDWAY_SECURE=' + (& $underSecure $old))
+    Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue
+}
+`;
+
+  ok('u3-D: nomad.ps1 — копия исходников строится в защищённой папке (New-HmSecureStagingDir), fail-closed, копия сверяется с манифестом и убирается Remove-HmSecureStagingDir', () => {
+    needPs();
+    const nomad = rawWin('nomad.ps1');
+    const helperFn = cutFn(nomad, 'New-HmNomadBuildCopy');
+    const removeFn = cutFn(rawWin('_deelev.ps1'), 'Remove-HmSecureStagingDir');
+    const base = mkTmp('nomad');
+    try {
+      const src = path.join(base, 'vendor', 'nomad-src');
+      fs.mkdirSync(path.join(src, 'pkg'), { recursive: true }); fs.mkdirSync(path.join(src, 'branding'), { recursive: true });
+      fs.writeFileSync(path.join(src, 'pyproject.toml'), '[project]\nname = "nomad-agent"\n');
+      fs.writeFileSync(path.join(src, 'pkg', 'mod.py'), 'print("hi")\n');
+      fs.writeFileSync(path.join(src, 'branding', 'SOUL.md'), 'soul');
+      const stage = path.join(base, 'stage'); fs.mkdirSync(stage);
+      const run = (extra) => {
+        const r = runPs(NOMAD_HARNESS, Object.assign({ HM_TEST_VERIFY: path.join(WIN, '_verify.ps1'), HM_TEST_REMOVE_FN: removeFn,
+          HM_TEST_HELPER_FN: helperFn, HM_TEST_SRC: src, HM_TEST_STAGE: stage }, extra || {}));
+        const o = {}; r.out.split(/\r?\n/).forEach((l) => { const m = /^(\w+)=(.*)$/.exec(l); if (m) o[m[1]] = m[2].trim(); });
+        o.raw = r.out + r.err; return o;
+      };
+      // 1) успех: копия внутри HmDeElev-<hex>\w, дерево то же, исходник не тронут, после уборки ничего не осталось
+      const ok1 = run({ HM_TEST_OLDWAY: '1' });
+      assert(/^ok /.test(ok1.RESULT || '') && ok1.SECURE === 'True', 'копия лежит в защищённой папке: ' + ok1.raw);
+      assert.strictEqual(ok1.SAMETREE, 'True', 'дерево копии совпадает с манифестом');
+      assert.strictEqual(ok1.REMOVED, 'True', 'после Remove-HmSecureStagingDir копии нет');
+      assert.strictEqual(ok1.LEFT, '0', 'внешняя папка HmDeElev-<hex> убрана целиком');
+      assert.strictEqual(fs.readFileSync(path.join(src, 'pkg', 'mod.py'), 'utf8'), 'print("hi")\n', 'исходник не тронут');
+      // Отрицательный контроль: прежняя последовательность (копия в %TEMP%) защищённой не является.
+      assert.strictEqual(ok1.OLDWAY_SECURE, 'False', 'контроль: прежнее место копии под определение «защищённая папка» не подходит');
+      // 2) защищённую папку создать нельзя — fail-closed: копии нет нигде, причина по-русски, в %TEMP% ничего не собирается
+      const failed = run({ HM_TEST_STAGE_FAIL: '1' });
+      assert.strictEqual(failed.RESULT, 'null', 'папка не создана -> функция отказывает: ' + failed.raw);
+      assert(/защищённ/.test(failed.raw) && !/БЕЗОПАСНОСТЬ:/.test(failed.raw), 'причина названа: ' + failed.raw);
+      assert.strictEqual(failed.LEFT, '0', 'ничего не создано');
+      // 3) копию подменили сразу после копирования — сверка КОПИИ отказывает и убирает папку
+      const tampered = run({ HM_TEST_TAMPER: '1' });
+      assert.strictEqual(tampered.RESULT, 'null', 'подмена копии обнаружена: ' + tampered.raw);
+      assert(/НЕ СОВПАЛ SHA-256/.test(tampered.raw), 'сказано про несовпадение суммы: ' + tampered.raw);
+      assert.strictEqual(tampered.LEFT, '0', 'после отказа защищённая папка убрана');
+      assert.strictEqual(fs.readFileSync(path.join(src, 'pkg', 'mod.py'), 'utf8'), 'print("hi")\n', 'исходник и тут не тронут');
+    } finally { drop(base); }
+  });
+
+  ok('u3-D: nomad.ps1 — порядок: гейт дерева → защищённая папка → копия → сверка копии → uv tool install из копии; в %TEMP% ничего не собирается', () => {
+    const raw = rawWin('nomad.ps1');
+    const code = stripPsComments(raw);
+    assert(!/GetTempPath|hm-nomad-build|\$env:TEMP|\$env:TMP/i.test(code), 'сборка не лежит в пользовательском %TEMP%');
+    assert(/^\s*\.\s+\(Join-Path \$PSScriptRoot '_deelev\.ps1'\)/m.test(code), 'nomad.ps1 подключает _deelev.ps1 (New-HmSecureStagingDir / Remove-HmSecureStagingDir)');
+    const fn = stripPsComments(cutFn(raw, 'New-HmNomadBuildCopy'));
+    assert(/New-HmSecureStagingDir -ProgramData \$progData -Icacls \$icacls -Elevated \$true/.test(fn), 'папка создаётся тем же атомарным примитивом, что у git/node/pydeps');
+    assertOrder(fn, 'New-HmSecureStagingDir', 'Copy-Item', 'сначала защищённая папка, потом копия');
+    assertOrder(fn, 'Copy-Item', 'Get-HmTreeSha256', 'потом сверка уже КОПИИ (запускается то же дерево, что проверено)');
+    assert(/Remove-HmSecureStagingDir -Path \$stage/.test(fn), 'при отказе папка убирается безопасным удалителем');
+    const flow = code.slice(code.indexOf('Get-HmTreeSha256 $src'));
+    assertOrder(flow, 'Get-HmTreeSha256 $src', 'New-HmNomadBuildCopy -Src', 'гейт дерева исходника идёт раньше копии');
+    assertOrder(flow, 'New-HmNomadBuildCopy -Src', '& $uv tool install', 'копия готова до uv');
+    assert(/& \$uv tool install --python 3\.12 "\$\(\$build\.Path\)"/.test(flow), 'uv получает ПУТЬ КОПИИ в защищённой папке');
+    assert(/if \(-not \$build\) \{[\s\S]{0,120}exit 1/.test(flow), 'нет копии -> exit 1 (fail-closed), без запасного пути «из vendor напрямую»');
+    assert(/Remove-HmSecureStagingDir -Path \$build\.Stage/.test(flow), 'копия убирается после uv (и при его отказе)');
+    assertOrder(flow, 'Remove-HmSecureStagingDir -Path $build.Stage', 'uv tool install завершился с кодом', 'уборка раньше разбора кода возврата uv');
+    assert.deepStrictEqual(compileHits(raw), [], 'nomad.ps1 не компилирует на лету');
+  });
+
+  // Установочная часть nomad.ps1 целиком (от подключения _deelev.ps1 до разбора кода uv), с поддельным uv.cmd:
+  // настоящий Nomad в тестах не ставится, но порядок, пути и уборку исполняем, а не читаем.
+  ok('u3-D: nomad.ps1 — сборка исполняется: uv получает путь КОПИИ в защищённой папке, vendor не пачкается, папка убирается и после успеха, и после отказа uv, нет папки — нет uv', () => {
+    needPs();
+    const raw = rawWin('nomad.ps1');
+    const mStart = /^[ \t]*\. \(Join-Path \$PSScriptRoot '_deelev\.ps1'\).*$/m.exec(raw);
+    assert(mStart, 'в nomad.ps1 есть подключение _deelev.ps1 в установочной ветке');
+    const endMark = raw.indexOf('uv tool install завершился с кодом', mStart.index);
+    assert(endMark > 0, 'в nomad.ps1 есть разбор кода uv');
+    const flow = raw.slice(mStart.index, raw.indexOf('\n', endMark));
+    const helperFn = cutFn(raw, 'New-HmNomadBuildCopy');
+    const removeFn = cutFn(rawWin('_deelev.ps1'), 'Remove-HmSecureStagingDir');
+    const base = mkTmp('nflow');
+    try {
+      const src = path.join(base, 'vendor', 'nomad-src');
+      fs.mkdirSync(path.join(src, 'pkg'), { recursive: true });
+      fs.writeFileSync(path.join(src, 'pyproject.toml'), '[project]\nname = "nomad-agent"\n');
+      fs.writeFileSync(path.join(src, 'pkg', 'mod.py'), 'print("hi")\n');
+      const stage = path.join(base, 'stage'); fs.mkdirSync(stage);
+      const dir = path.join(base, 'scripts'); fs.mkdirSync(dir);
+      // _deelev.ps1 рядом с харнесом: настоящий при подключении трогает Планировщик задач, поэтому — подставной
+      fs.writeFileSync(path.join(dir, '_deelev.ps1'), BOM + [removeFn, String.raw`function New-HmSecureStagingDir {
+    param($ProgramData, $Icacls, [bool]$Elevated)
+    if ($env:HM_TEST_STAGE_FAIL -eq '1') { return $null }
+    $d = Join-Path $env:HM_TEST_STAGE ('HmDeElev-' + [guid]::NewGuid().ToString('N'))
+    $w = Join-Path $d 'w'
+    New-Item -ItemType Directory -Force -Path $w | Out-Null
+    return $w
+}`].join('\r\n').replace(/\r?\n/g, '\r\n') + '\r\n');
+      // поддельный uv: пишет аргументы, кладёт «артефакт сборки» рядом с исходником (как setuptools) и отвечает заданным кодом
+      const uv = path.join(base, 'uv.cmd');
+      fs.writeFileSync(uv, ['@echo off', 'echo ARGS=%*>> "%HM_TEST_UVLOG%"', 'echo built> "%~5\\build-artifact.txt"', 'exit /b %HM_TEST_UVRC%', ''].join('\r\n'));
+      const harness = path.join(dir, 'h.ps1');
+      const driver = (extra) => BOM + [
+        "$ErrorActionPreference = 'Continue'",
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. ' + q(path.join(WIN, '_verify.ps1')),
+        helperFn,
+        '$src = $env:HM_TEST_SRC',
+        '$uv = $env:HM_TEST_UV',
+        '$treeWant = Get-HmTreeSha256 $src',
+        extra || '',
+        flow,
+        "Write-Output 'AFTER-FLOW'",
+        'exit 0',
+      ].join('\r\n').replace(/\r?\n/g, '\r\n');
+      const run = (rc, o) => {
+        const log = path.join(base, 'uv.log'); fs.rmSync(log, { force: true });
+        fs.writeFileSync(harness, driver(o && o.extra));
+        const flowEnv = Object.assign({}, process.env, { HM_TEST_SRC: src, HM_TEST_UV: uv, HM_TEST_UVLOG: log, HM_TEST_UVRC: String(rc), HM_TEST_STAGE: stage });
+        if (o && o.stageFail) flowEnv.HM_TEST_STAGE_FAIL = '1';
+        const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', harness], { encoding: 'utf8', timeout: 240000, env: flowEnv });
+        return { status: r.status, out: String(r.stdout || '') + String(r.stderr || ''), log: fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '' };
+      };
+      const stageLeft = () => fs.readdirSync(stage).length;
+      const vendorNames = () => fs.readdirSync(src).sort().join(',');
+      // 1) uv доволен: путь копии — внутри HmDeElev-<hex>\w\nomad-src, артефакт сборки лёг в КОПИЮ, vendor чист, папка убрана
+      const a = run(0);
+      assert.strictEqual(a.status, 0, 'успех: ' + a.out);
+      assert(/AFTER-FLOW/.test(a.out), 'поток дошёл до конца: ' + a.out);
+      assert(/HmDeElev-[0-9a-f]{32}\\w\\nomad-src/.test(a.log), 'uv получил путь копии в защищённой папке: ' + a.log);
+      assert.strictEqual(vendorNames(), 'pkg,pyproject.toml', 'vendor не запачкан артефактами сборки: ' + vendorNames());
+      assert.strictEqual(stageLeft(), 0, 'защищённая папка убрана после успешной сборки');
+      // 2) uv отказал (код 7): шаг красный, причина названа, папка всё равно убрана
+      const b = run(7);
+      assert.strictEqual(b.status, 1, 'отказ uv -> exit 1: ' + b.out);
+      assert(/uv tool install завершился с кодом 7/.test(b.out) && !/AFTER-FLOW/.test(b.out), 'код uv назван: ' + b.out);
+      assert.strictEqual(stageLeft(), 0, 'после отказа uv защищённая папка убрана');
+      assert.strictEqual(vendorNames(), 'pkg,pyproject.toml', 'vendor цел и после отказа');
+      // 3) защищённую папку создать нельзя: uv не запускается вовсе, запасного пути «из vendor напрямую» нет
+      const c = run(0, { stageFail: true });
+      assert.strictEqual(c.status, 1, 'нет защищённой папки -> exit 1: ' + c.out);
+      assert.strictEqual(c.log, '', 'uv не вызывался: ' + c.log);
+      assert(/защищённ/.test(c.out) && !/AFTER-FLOW/.test(c.out), 'причина названа по-русски: ' + c.out);
+      assert.strictEqual(vendorNames(), 'pkg,pyproject.toml', 'vendor цел');
+      // Отрицательный контроль: прежнее поведение (uv собирает прямо из vendor) пачкает vendor — тест это видит.
+      const mutant = flow.replace('"$($build.Path)"', '"$src"');
+      assert(mutant !== flow, 'мутация применилась: uv снова получает путь в vendor');
+      fs.writeFileSync(harness, driver().replace(flow.replace(/\r?\n/g, '\r\n'), mutant.replace(/\r?\n/g, '\r\n')));
+      const log2 = path.join(base, 'uv.log'); fs.rmSync(log2, { force: true });
+      spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', harness], { encoding: 'utf8', timeout: 240000,
+        env: Object.assign({}, process.env, { HM_TEST_SRC: src, HM_TEST_UV: uv, HM_TEST_UVLOG: log2, HM_TEST_UVRC: '0', HM_TEST_STAGE: stage }) });
+      assert(fs.existsSync(path.join(src, 'build-artifact.txt')), 'контроль: сборка из vendor оставляет артефакт в vendor (дерево перестаёт сходиться с манифестом)');
+    } finally { drop(base); }
+  });
+
+  // ==========================================================================================================
+  // Разбор и кодировка
+  // ==========================================================================================================
+  ok('u3: изменённые PowerShell-скрипты — UTF-8 с BOM и CRLF, Windows PowerShell 5.1 их разбирает', () => {
+    const names = ['_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', 'config.ps1', 'handy.ps1', 'mascot.ps1', 'node.ps1', 'nomad.ps1'];
+    names.forEach((n) => {
+      const b = fs.readFileSync(path.join(WIN, n));
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, n + ': первые байты — UTF-8 BOM');
+      const s = b.toString('latin1');
+      assert.strictEqual(s.split('\n').length, s.split('\r\n').length, n + ': каждый LF — часть CRLF');
+    });
+    needPs();
+    const body = [
+      "$bad = 0",
+      'foreach ($f in $args) {',
+      '  $e = $null',
+      '  [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$e)',
+      '  if ($e -and $e.Count -gt 0) { $bad++; foreach ($x in $e) { Write-Output ("PARSE-ERR " + $f + ": " + $x.Message) } }',
+      '}',
+      "Write-Output ('BAD=' + $bad)",
+    ].join('\r\n');
+    const dir = mkTmp('parse');
+    try {
+      const f = path.join(dir, 'p.ps1');
+      fs.writeFileSync(f, BOM + body);
+      const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f].concat(names.map((n) => path.join(WIN, n))), { encoding: 'utf8', timeout: 120000 });
+      assert(/BAD=0/.test(r.stdout || ''), 'ParseFile без ошибок: ' + (r.stdout || '') + (r.stderr || ''));
+    } finally { drop(dir); }
+  });
+})();

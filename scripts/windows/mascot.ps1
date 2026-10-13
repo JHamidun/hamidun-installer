@@ -1,6 +1,7 @@
 ﻿# Скрепка Claude (маскот) — Windows: живой помощник поверх окон + кнопки разрешений
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1'); . (Join-Path $PSScriptRoot '_mascot.ps1')  # Confirm-HmArtifact (fail-closed SHA-256); общие функции скрепки (их же зовёт touchup-mascot.ps1)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # Write-HmFileSafe: правка settings.json не идёт сквозь ссылку и не использует предсказуемое имя
 $DRY = [bool]$env:HM_DRY_RUN
 
 # Вшитый артефакт (Windows-only; кладёт tools/fetch-vendor.ps1 из локальной сборки claude-mascot)
@@ -51,7 +52,10 @@ if (-not $copied -or -not (Test-Path $dest)) { Write-Host "Не удалось �
 # подставляем порт скрепки (45832). Безопасность (settings.json — ВЕСЬ конфиг пользователя):
 #   - правим ТОЛЬКО подстроку hook-url `127.0.0.1:VSCODE_PORT/hook` (чужой "VSCODE_PORT" в JSON не задеваем);
 #   - JSON валидируем до и после замены; битый файл НЕ трогаем;
-#   - запись атомарная: бэкап .hm-bak -> tmp в той же папке -> валидация tmp -> Move-Item поверх оригинала;
+#   - запись через Write-HmFileSafe: и бэкап .hm-bak, и сам файл — временный файл со СЛУЧАЙНЫМ именем рядом (CreateNew)
+#     и перенос поверх, ссылка на каталоге/файле (junction, file-symlink) проверяется перед созданием и перед
+#     КАЖДОЙ попыткой переноса. Прежнее «settings.json.hm-tmp + Move-Item -Force» шло по предсказуемому имени без
+#     проверки ссылок, а «Copy-Item -Force … .hm-bak» писал сквозь подложенную file-symlink в любой файл, доступный админу;
 #   - при любом сбое оригинал остаётся нетронутым, а маркер .installed НЕ сбрасываем.
 $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
 $HOOK_OLD = '127.0.0.1:VSCODE_PORT/hook'
@@ -74,15 +78,14 @@ if (-not (Test-Path $settingsPath)) {
             try { $null = $newSettings | ConvertFrom-Json; $newOk = $true }
             catch { Write-Host "  ВНИМАНИЕ: после замены hook-url JSON стал невалидным — откат, файл не тронут."; $keepMarker = $true }
             if ($newOk) {
-                $tmpPath = "$settingsPath.hm-tmp"
                 try {
-                    Copy-Item $settingsPath "$settingsPath.hm-bak" -Force -ErrorAction Stop
-                    [IO.File]::WriteAllText($tmpPath, $newSettings, [Text.UTF8Encoding]::new($false))
-                    $null = [IO.File]::ReadAllText($tmpPath) | ConvertFrom-Json   # tmp дописался целиком и валиден?
-                    Move-Item -Force $tmpPath $settingsPath -ErrorAction Stop     # атомарная замена в пределах тома
+                    # Бэкап — побайтно ТЕКУЩЕЕ содержимое (не пересериализованный текст); .hm-bak — наш файл, «только
+                    # чтение» на нём не повод отказывать. Потом сам файл: новый JSON уже проверен выше, а перенос
+                    # атомарный в пределах тома (File.Replace), так что половины файла не бывает.
+                    Write-HmFileSafe -Path "$settingsPath.hm-bak" -Bytes ([IO.File]::ReadAllBytes($settingsPath)) -ClearReadOnly
+                    Write-HmFileSafe -Path $settingsPath -Bytes ([Text.UTF8Encoding]::new($false).GetBytes($newSettings))
                     Write-Host "  Хуки Claude Code направлены на скрепку (порт 45832). Бэкап: settings.json.hm-bak."
                 } catch {
-                    Remove-Item $tmpPath -Force -ErrorAction SilentlyContinue
                     Write-Host "  ВНИМАНИЕ: не удалось безопасно обновить settings.json ($($_.Exception.Message)) — оригинал не тронут."
                     $keepMarker = $true
                 }
