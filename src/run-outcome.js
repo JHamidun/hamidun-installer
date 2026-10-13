@@ -86,6 +86,20 @@ function lastMeaningfulLine(tail, maxLen) {
 function skipReasonFrom(tail) { return lastMeaningfulLine(tail, 240); }
 
 /**
+ * Машинный маркер исхода запуска скрепки. mascot.ps1 после попытки запуска печатает
+ * «HM-MASCOT launched=1» (запуск принят: токен оболочки обычного уровня, процесс не упал за 3 с)
+ * или «HM-MASCOT launched=0». main убирает строку из журнала на экране (как «HM-RECEIPT …») и
+ * отдаёт признак ответом шага: финиш не пишет «установщик запустил её», когда запуска не было.
+ * @param {string} line
+ * @returns {boolean|null} true / false — маркер; null — это не маркер
+ */
+const MASCOT_LAUNCH_RE = /^HM-MASCOT\s+launched=([01])$/;
+function parseMascotLaunch(line) {
+  const m = MASCOT_LAUNCH_RE.exec(String(line == null ? '' : line).trim());
+  return m ? m[1] === '1' : null;
+}
+
+/**
  * Решение сторожа молчания на очередном тике.
  * @param {object} s
  * @param {number}  s.silentMs     сколько миллисекунд шаг не выдаёт вывод
@@ -124,6 +138,6 @@ function canSkipNow(s) {
 
 module.exports = {
   EXIT_SKIP, EXIT_PARTIAL, STALL_SKIP_MIN, STALL_WARN_EVERY_MIN,
-  isPartialExit, isSkipExit, childExited, lastMeaningfulLine, skipReasonFrom,
+  isPartialExit, isSkipExit, childExited, lastMeaningfulLine, skipReasonFrom, parseMascotLaunch,
   stallDecision, canSkipNow,
 };

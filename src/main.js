@@ -1349,10 +1349,16 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // с концом. 400 строк с запасом перекрывают финальный блок ошибки.
     const TAIL_MAX = 400;
     const outTail = [];
+    // Исход запуска скрепки: mascot.ps1 печатает «HM-MASCOT launched=0|1». Строка, как квитанция, в UI-лог и в
+    // хвост вывода не идёт; значение уезжает ответом шага (res.mascotLaunched) — по нему финиш решает, писать ли
+    // «установщик запустил её». Берём только у шага mascot; null — маркера не было (macOS, прежние сборки).
+    let mascotLaunched = null;
     const emitLine = (l) => {
       if (!l.length) return;
       const ri = receipts.parseReceiptLine(l);
       if (ri) { logLine(l); return; }
+      const ml = runOutcome.parseMascotLaunch(l);
+      if (ml !== null && id === 'mascot') { mascotLaunched = ml; logLine(l); return; }
       outTail.push(l);
       if (outTail.length > TAIL_MAX) outTail.shift();
       send(l);
@@ -1580,7 +1586,10 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // запятую, и «последней строкой» оказывалось НАЧАЛО вывода — на финише стояла
       // первая строка шага вместо причины. Разбор теперь в run-outcome.js под тестом.)
       const skipReason = skipped ? runOutcome.skipReasonFrom(outTail) : '';
-      resolve({ id, ok: okRun || skipped, code, skipped, skipReason });
+      const res = { id, ok: okRun || skipped, code, skipped, skipReason };
+      // Исход запуска скрепки (см. mascotLaunched выше): поле есть только у шага mascot и только если маркер был.
+      if (mascotLaunched !== null) res.mascotLaunched = mascotLaunched;
+      resolve(res);
     });
   });
   } finally {
@@ -2064,14 +2073,17 @@ async function winMakeSecureDir(opts) {
   } catch (e) { return null; }
 }
 
-// Запасной путь запуска редактора: тот же exe с ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же
-// пользователь — проверяется по самому токену ДО запуска) через вшитый _deelev.ps1
-// (Invoke-HmAsShellUser, CreateProcessWithTokenW). Нужен там, где одноразовая задача
-// планировщика отказывает целиком: у людей «Открыть VS Code» и «Открыть курс» открывали
-// только папку в Проводнике. НЕ «explorer.exe <exe>»: если оболочки в этот момент нет, наш
-// elevated explorer исполнил бы запуск сам, под админом, по ассоциациям из HKCU.
-// Promise<{ gate, code, reason }>: gate 'medium' и code 0 — редактор запущен.
-function winShellTokenLaunch(exe, folderArg, extraArgs) {
+// Запуск ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же пользователь — проверяется по самому токену
+// ДО запуска) через вшитый _deelev.ps1 (Invoke-HmAsShellUser, CreateProcessWithTokenW). Им идут
+// все запуски пользовательских файлов из повышенного процесса, которые нельзя отдать задаче
+// планировщика: запасной путь кнопок редактора и окно «Войти в Claude». НЕ «explorer.exe <файл>»:
+// если оболочки в этот момент нет (её может прибить малварь того же юзера), наш elevated
+// explorer исполнил бы запуск сам, под админом, по ассоциациям из HKCU.
+// spec: { exe, args } — программа с аргументами | { script } — готовый текст команды для cmd.exe
+// (deelevRoute.CLAUDE_TERMINAL_SCRIPT); cwd — рабочая папка (примитив проверит: внутри профиля,
+// без ссылок); label — метка журнала.
+// Promise<{ gate, code, reason }>: gate 'medium' и code 0 — процесс запущен и не упал за 3 с.
+function winShellTokenRun(spec) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -2081,17 +2093,13 @@ function winShellTokenLaunch(exe, folderArg, extraArgs) {
       return done({ gate: 'unavailable', code: -1, reason: 'нет powershell или _deelev.ps1' });
     }
     // Литералы — single-quoted с удвоением ВСЕХ пяти знаков-ограничителей (ASCII ' и U+2018/2019/
-    // 201A/201B, deelevRoute.psLit), ни одного значения из renderer.
+    // 201A/201B, deelevRoute.psLit внутри shellTokenInline), ни одного значения из renderer.
     // PSModulePath прибит литералом (тот же довод, что в winMakeSecureDir).
-    const lit = deelevRoute.psLit;
     const s32 = path.dirname(path.dirname(path.dirname(ps)));
-    const inline =
-      '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
-      '$env:PSModulePath=' + lit(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')) + ';' +
-      '. ' + lit(deelev) + ';' +
-      '$r=Invoke-HmAsShellUser -Exe ' + lit(exe) + ' -Arguments @(' + [folderArg].concat(extraArgs || []).map(lit).join(',') +
-      ") -NoWait -Label 'launch-editor';" +
-      "[Console]::Out.Write('HMSHELL::'+$r.Gate+'::'+$r.Code+'::'+([string]$r.Reason -replace '::',': ')+'::END')";
+    const inline = deelevRoute.shellTokenInline({
+      psModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'),
+      deelev, exe: spec.exe, args: spec.args, script: spec.script, cwd: spec.cwd, label: spec.label
+    });
     let so = '';
     let child;
     try {
@@ -2102,7 +2110,7 @@ function winShellTokenLaunch(exe, folderArg, extraArgs) {
     } catch (e) { return done({ gate: 'unavailable', code: -1, reason: String((e && e.message) || e) }); }
     const kill = setTimeout(() => {
       try { child.kill(); } catch (e) { /* */ }
-      done({ gate: 'unknown', code: -1, reason: 'запасной путь не ответил за 30 с' });
+      done({ gate: 'unknown', code: -1, reason: 'запуск токеном оболочки не ответил за 30 с' });
     }, 30000);
     child.stdout.on('data', (d) => { so += String(d); });
     child.stderr.on('data', () => { /* причина приезжает в маркере stdout */ });
@@ -2114,6 +2122,11 @@ function winShellTokenLaunch(exe, folderArg, extraArgs) {
       done({ gate: m[1], code: Number(m[2]), reason: m[3] });
     });
   });
+}
+
+// Запасной путь запуска редактора: тот же exe с токеном оболочки, папка и файлы-вкладки — аргументами.
+function winShellTokenLaunch(exe, folderArg, extraArgs) {
+  return winShellTokenRun({ exe, args: [folderArg].concat(extraArgs || []), label: 'launch-editor' });
 }
 
 // P0-D (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
@@ -2573,54 +2586,40 @@ function detectSpawnEnv() {
   return out;
 }
 
+// «Войти в Claude» на Windows. #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся
+// ПЕРВАЯ сессия Claude у новичка идёт с ПРАВАМИ АДМИНА (high integrity — тот же integrity-
+// escalation, что закрыт для Code.exe через winLaunchDeElevated), (2) cwd наследуется от
+// установщика = %TEMP%-распаковка portable-exe → «куда делись мои файлы» + claude просит доверие
+// к странной папке, (3) drag&drop файлов в elevated-окно не работает (UIPI).
+// Окно открывает ТОКЕН ОБОЛОЧКИ (winShellTokenRun → Invoke-HmAsShellUser: ровно medium и тот же
+// пользователь, проверяется до запуска) с фиксированной командой deelevRoute.CLAUDE_TERMINAL_SCRIPT
+// и рабочей папкой ~/HamidunStart. Раньше команда писалась файлом claude-start.cmd (запись по пути
+// из-под админа в пользовательскую папку: ссылка, подложенная заранее, уводила её) и отдавалась
+// explorer.exe, а тот без живой оболочки исполнял файл САМ, под админом, по ассоциациям из HKCU.
+// Теперь файла нет, explorer нет, и на любом отказе токена (нет оболочки, она не обычного уровня,
+// чужая учётка, отключена служба «Вторичный вход», рабочая папка — ссылка) окно НЕ открывается ни
+// другим способом, ни под админом: false → renderer покажет ручную инструкцию «открой обычный
+// терминал и набери claude». Причина — строкой в install.log.
+// Ответ приходит не сразу (токен оболочки ждёт до 3 с, не упало ли окно), и повторное нажатие за это время
+// открывало второе окно. Пока запуск идёт, новые нажатия получают ТОТ ЖЕ ответ — второго запуска нет.
+let _winTerminalBusy = null;
+async function winOpenClaudeTerminal() {
+  if (_winTerminalBusy) return _winTerminalBusy;
+  _winTerminalBusy = (async () => {
+    const startDir = path.join(os.homedir(), 'HamidunStart');
+    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
+    const sh = await winShellTokenRun({ script: deelevRoute.CLAUDE_TERMINAL_SCRIPT, cwd: startDir, label: 'claude-terminal' });
+    try {
+      logToFile('launch', 'Войти в Claude: токен оболочки — Gate=' + sh.gate + ', код ' + sh.code + (sh.reason ? ': ' + sh.reason : ''));
+    } catch (e) { /* журнал не роняет запуск */ }
+    return sh.gate === 'medium' && sh.code === 0;
+  })();
+  try { return await _winTerminalBusy; } finally { _winTerminalBusy = null; }
+}
+
 ipcMain.handle('open-claude-terminal', async () => {
   try {
-    if (IS_WIN) {
-      const startDir = path.join(os.homedir(), 'HamidunStart');
-      try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
-      // #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся ПЕРВАЯ сессия
-      // Claude у новичка идёт с ПРАВАМИ АДМИНА (high integrity — тот же integrity-
-      // escalation, что закрыт для Code.exe через winLaunchDeElevated), (2) cwd
-      // наследуется от установщика = %TEMP%-распаковка portable-exe → «куда делись
-      // мои файлы» + claude просит доверие к странной папке, (3) drag&drop файлов в
-      // elevated-окно не работает (UIPI). Решение: .cmd-лаунчер с фиксированным cwd,
-      // запущенный через explorer.exe — тот стартует цель medium-токеном shell
-      // (де-элевация), как folderFallback в winLaunchDeElevated.
-      const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-      const exp = path.join(sysRoot, 'explorer.exe');
-      const launcher = path.join(startDir, 'claude-start.cmd');
-      // cwd фиксируем в HamidunStart; canonical-локации claude (~/.local/bin,
-      // %APPDATA%\npm) префиксуем к PATH — %USERPROFILE% cmd раскроет в рантайме
-      // под ДЕ-элевированным (интерактивным) пользователем.
-      // %USERPROFILE%/%ProgramFiles% раскрываются в РАНТАЙМЕ под ДЕ-элевированным
-      // (интерактивным) юзером — не бейкаем абсолютные пути os.homedir() (в over-the-
-      // shoulder это был бы профиль АДМИНА). where claude — авторитетная проверка в
-      // контексте запуска: нет claude → сообщение + pause (окно НЕ схлопывается за долю
-      // секунды, как было бы с голым `claude`). nodejs в PATH — claude.cmd требует node.
-      // chcp 65001 — СРАЗУ после @echo off: файл пишется в UTF-8, а консоль по умолчанию
-      // в OEM-кодировке, и русский текст ниже выходил кракозябрами. До этой строки — только
-      // ASCII (cmd читает построчно в текущей кодировке). `call claude` обязателен: npm
-      // ставит claude.cmd, а переход в другой .cmd без call не возвращается — строка с
-      // pause после него не выполнялась, и окно с ошибкой Claude закрывалось мгновенно.
-      const cmdBody = '@echo off\r\n' +
-        'chcp 65001 >nul\r\n' +
-        'cd /d "%USERPROFILE%\\HamidunStart"\r\n' +
-        'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"\r\n' +
-        'title Claude Code\r\n' +
-        'where claude >nul 2>nul || (echo Claude Code не найден. Запусти установщик заново и отметь компонент "Claude Code". & echo. & pause & exit /b 1)\r\n' +
-        'call claude\r\n' +
-        'if errorlevel 1 pause\r\n';
-      try { fs.writeFileSync(launcher, cmdBody, 'utf8'); } catch (e) { return false; }
-      if (fs.existsSync(exp)) {
-        spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-        return true;
-      }
-      // Фолбэк (explorer недоступен, крайне редко): НЕ запускаем claude под elevated-
-      // токеном с user-writable PATH (freshPath несёт ~/.local/bin, %APPDATA%\npm →
-      // claude.cmd юзера выполнился бы под АДМИНОМ). Возвращаем false → renderer покажет
-      // ручную инструкцию «открой обычный терминал и набери claude».
-      return false;
-    }
+    if (IS_WIN) return await winOpenClaudeTerminal();
     if (IS_MAC) {
       // #3: НЕ fire-and-forget с вечным true. На hardened-runtime без Apple-Events-
       // entitlement (добавлен в build/entitlements.mac.plist) событие отклонилось бы

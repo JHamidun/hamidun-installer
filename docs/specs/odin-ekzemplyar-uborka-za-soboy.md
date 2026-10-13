@@ -286,11 +286,13 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 - **Не все дочерние процессы попадают в `CHILDREN` — и это осознанно.** `spawn(` в файле
   встречается семь раз (`src/main.js:1249, 1603, 1709, 1772, 2221, 2244, 3513`), а
   `CHILDREN.add` — ровно один (`src/main.js:1256`, дочерний процесс шага установки). Вне
-  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2181`), `osascript` для
+  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2181`; снят 09.10.2026 вместе
+  с самим `spawn`: окно «Войти в Claude» теперь открывает токен оболочки через `winShellTokenRun`,
+  у которого свой рабочий PowerShell с 30-секундным таймером), `osascript` для
   Терминала (`src/main.js:2204`), folder-fallback explorer (`src/main.js:1774`), запуск
   Cursor через `/usr/bin/open` (`src/main.js:1605`), помощник самолечения macOS
   (`src/main.js:3425`) и рабочий PowerShell внутри `winMakeSecureDir` (`src/main.js:1711`).
-  Два explorer-лаунчера на Windows (`2221`, `1772`) отцеплены ради де-элевации, запуск
+  Два explorer-лаунчера на Windows (`2221`, `1772`; первый снят 09.10.2026) отцеплены ради де-элевации, запуск
   Cursor (`1603`) — просто `detached: true` fire-and-forget на macOS; помощник самолечения
   обязан пережить наш выход. Два случая в этот перечень не укладываются: `osascript`
   спавнится с опциями ровно `{ stdio: 'ignore' }` (`src/main.js:2207`) — без `detached`, и

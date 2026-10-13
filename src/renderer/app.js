@@ -1799,6 +1799,8 @@ async function runComponents(ids, env) {
       // Ground-truth «реально встало» для финиша (nomad/course-карточки): не по
       // per-прогонным спискам, а по факту успеха. (Из skippedEver уже снят при запуске.)
       STATE.installedEver.add(id);
+      // Скрепка: false — установщик её НЕ запустил (mascot.ps1: HM-MASCOT launched=0); строка финиша не врёт.
+      if (id === 'mascot') STATE.mascotLaunched = res.mascotLaunched;
     }
     else {
       // Сетевой обрыв докачки (после авто-ретрая) — ОРАНЖЕВЫЙ error-net, не красный
@@ -2657,8 +2659,13 @@ function renderNextSteps(failed, depSkipped, gracefulSkipped, checkFailed, fetch
   // #3: не молчим на false — Терминал мог не открыться (TCC-отказ на macOS / нет cmd).
   const claudeBtnEl = $('#ns-claude');
   claudeBtnEl.addEventListener('click', async () => {
+    // Ответ main приходит через пару секунд (он ждёт, не упало ли окно): пока идёт — кнопка выключена,
+    // повторное нажатие не открывало бы второе окно.
+    if (claudeBtnEl.disabled) return;
+    claudeBtnEl.disabled = true;
     let ok = false;
     try { ok = await window.installer.openClaudeTerminal(); } catch (_) {}
+    claudeBtnEl.disabled = false;
     if (!ok) {
       let hint = claudeBtnEl.parentElement.querySelector('.ns-claude-err');
       if (!hint) {
@@ -2910,13 +2917,18 @@ function ruPlural(n, one, few, many) {
 // что в mascot.ps1 ($destDir = %LOCALAPPDATA%\Programs\ClaudeMascot).
 function mascotNoteText() {
   const again = STATE.platform === 'darwin'
-    ? 'Запустить снова: ⌘+Пробел → «Claude Mascot» (или Finder → домашняя папка → «Программы»).'
-    : 'Запустить снова: Пуск → «Claude Mascot» (или файл %LOCALAPPDATA%\\Programs\\ClaudeMascot\\claude-mascot.exe).';
+    ? '⌘+Пробел → «Claude Mascot» (или Finder → домашняя папка → «Программы»).'
+    : 'Пуск → «Claude Mascot» (или файл %LOCALAPPDATA%\\Programs\\ClaudeMascot\\claude-mascot.exe).';
+  // Установщик мог её НЕ запустить (нет оболочки обычного уровня, UAC выключен…): mascot.ps1 говорит об этом
+  // маркером HM-MASCOT launched=0 → STATE.mascotLaunched === false. Тогда ни «запустил», ни «на рабочем столе».
+  const notLaunched = STATE.mascotLaunched === false;
   // Как убрать — карточка «Скрепка Claude (маскот)» → «Удалить» (скрепка в REMOVABLE). И честно:
   // сама она больше не стартует, а хуки Claude Code к ней остаются в настройках, поэтому, пока
   // скрепка не запущена, они упираются в закрытый порт и притормаживают работу.
-  return 'Скрепка на рабочем столе — помощник Claude: показывает, что он сейчас делает, и даёт кнопки ' +
-    '«Разрешить / Отклонить» прямо на экране. Установщик запустил её один раз после установки. ' + again +
+  return 'Скрепка ' + (notLaunched ? '' : 'на рабочем столе ') + '— помощник Claude: показывает, что он сейчас делает, и даёт кнопки ' +
+    '«Разрешить / Отклонить» прямо на экране. ' +
+    (notLaunched ? 'Установщик не смог запустить её сам, поэтому на экране её пока нет. Запустить: '
+      : 'Установщик запустил её один раз после установки. Запустить снова: ') + again +
     ' Убрать совсем: карточка «Скрепка Claude (маскот)» в этом установщике → «Удалить». ' +
     'Пока скрепка не запущена, Claude Code напрасно обращается к ней и из-за этого может притормаживать: ' +
     'запусти её или удали.';

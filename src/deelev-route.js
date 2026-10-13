@@ -69,6 +69,57 @@ function psQuoteBody(value) {
 // Тот же литерал вместе с внешними кавычками.
 function psLit(value) { return "'" + psQuoteBody(value) + "'"; }
 
+// Текст PowerShell-команды запуска «токеном оболочки»: дот-сорс вшитого _deelev.ps1 и один вызов
+// Invoke-HmAsShellUser -NoWait (проверенный medium-токен оболочки, тот же пользователь). Чистая
+// функция: main.js лишь запускает powershell.exe с этим текстом, а тест прогоняет ту же строку
+// настоящим парсером PowerShell на враждебных значениях (кавычки, «%», кириллица, «’»).
+//   o.exe + o.args — запустить программу (кнопки редакторов: папка и файлы вкладками);
+//   o.script       — вместо них готовый текст команды для cmd.exe (окно терминала Claude БЕЗ
+//                    файла-лаунчера, см. CLAUDE_TERMINAL_SCRIPT);
+//   o.cwd          — рабочая папка процесса (примитив сам проверит: внутри профиля, без ссылок);
+//   o.label        — метка журнала; o.psModulePath, o.deelev — прибитый PSModulePath и путь к _deelev.ps1.
+// Каждое значение — одинарно-кавычный литерал со всеми пятью удвоениями (psLit); ни одно не идёт
+// в текст «голым». Ответ — маркер HMSHELL::<gate>::<код>::<причина>::END на stdout.
+function shellTokenInline(o) {
+  const lit = psLit;
+  const target = o.script
+    ? '-CmdScript ' + lit(o.script)
+    : '-Exe ' + lit(o.exe) + ' -Arguments @(' + (o.args || []).map(lit).join(',') + ')';
+  return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+    '$env:PSModulePath=' + lit(o.psModulePath) + ';' +
+    '. ' + lit(o.deelev) + ';' +
+    '$r=Invoke-HmAsShellUser ' + target + (o.cwd ? ' -WorkingDirectory ' + lit(o.cwd) : '') +
+    ' -NoWait -Label ' + lit(o.label || 'launch-editor') + ';' +
+    "[Console]::Out.Write('HMSHELL::'+$r.Gate+'::'+$r.Code+'::'+([string]$r.Reason -replace '::',': ')+'::END')";
+}
+
+// Команда окна «Войти в Claude» на Windows — ФИКСИРОВАННАЯ строка для cmd.exe /s /c "…", без
+// единого значения снаружи. Раньше то же самое писалось файлом ~/HamidunStart/claude-start.cmd
+// из-под администратора (запись по пути в пользовательскую папку — её подменяла ссылка) и
+// отдавалось explorer.exe. Теперь файла нет: строку исполняет cmd.exe под токеном оболочки, а
+// рабочая папка (~/HamidunStart) едет отдельным параметром запуска, а не «cd /d» внутри текста.
+// Порядок и смысл те же, что у прежнего файла:
+//  - chcp 65001 первой командой: кодовая страница окна — UTF-8 (текст ниже — по-русски);
+//  - PATH дополняется каталогами, куда ложится claude (~/.local/bin, %APPDATA%\npm) и node;
+//    %USERPROFILE% и %ProgramFiles% раскроет cmd у РЕБЁНКА — под пользователем окна, не под нами
+//    (в «чужой учётке» профиль администратора был бы другим);
+//  - where claude — проверка в контексте запуска: нет claude → сообщение и pause (окно не
+//    схлопывается за долю секунды), код 1;
+//  - call claude оставлен как в прежнем файле: там .cmd-шим npm без call не возвращал управление, и
+//    строка с pause после него не исполнялась. В одной строке /c это не так (проверено настоящим
+//    cmd.exe: без call тот же результат), call здесь безвреден и держит прежнюю форму;
+//    if errorlevel 1 pause — окно с ошибкой Claude не закрывается мгновенно, при штатном выходе
+//    окно закрывается.
+// «&» — разделитель команд cmd; «||» связывает where с группой скобок плотнее, чем «&».
+const CLAUDE_TERMINAL_SCRIPT = [
+  'chcp 65001 >nul',
+  'title Claude Code',
+  'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"',
+  'where claude >nul 2>nul || (echo Claude Code не найден. Запусти установщик заново и отметь компонент "Claude Code". & echo. & pause & exit /b 1)',
+  'call claude',
+  'if errorlevel 1 pause'
+].join(' & ');
+
 // Файл, который редактор откроет вкладкой рядом с папкой (code <папка> <файл>). Кнопка ✳
 // панели Claude в заголовке редактора видна только при ОТКРЫТОМ файле — без него новичок
 // её не находит. Отдаём путь, только если это реально существующий файл: несуществующий
@@ -101,4 +152,4 @@ function claudeTerminalOsaArgs(startDir) {
     String(startDir)];
 }
 
-module.exports = { taskVerdict, shellFallbackAllowed, psArgList, psQuoteBody, psLit, editorOpenFiles, claudeTerminalOsaArgs };
+module.exports = { taskVerdict, shellFallbackAllowed, psArgList, psQuoteBody, psLit, shellTokenInline, CLAUDE_TERMINAL_SCRIPT, editorOpenFiles, claudeTerminalOsaArgs };

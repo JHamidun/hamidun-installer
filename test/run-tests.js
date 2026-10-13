@@ -8936,6 +8936,12 @@ ok('config.json в репозитории без сборочных маркер
         '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("DEELEV " + ($ArgList -join " "))',
         '  if ($ArgList -contains "--selftest") { return [pscustomobject]@{ Gate = "medium"; Code = [int]$env:HM_TEST_SELFTEST_EXIT; Finished = $true; ShellReason = "" } }',
         '  return [pscustomobject]@{ Gate = "medium"; Code = 0; Finished = $true; ShellReason = "" }',
+        '}',
+        // Трей стартует токеном оболочки: заглушка записывает вызов (SHELL) и отдаёт Gate medium.
+        'function Invoke-HmAsShellUser {',
+        '  param([string]$Exe = "", [string[]]$Arguments = @(), [string]$Label = "", [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = "", [string]$WorkingDirectory = "")',
+        '  Add-Content -LiteralPath $env:HM_TEST_LOG -Value ("SHELL " + $Label + " nowait=" + [bool]$NoWait + " " + $Exe + " " + ($Arguments -join " "))',
+        '  return [pscustomobject]@{ Route = "shell-token"; Gate = "medium"; Code = 0; Reason = ""; ProcessId = 1; Logged = $false; LogNote = "" }',
         '}'
       ].join('\r\n'), 'utf8')
     ]));
@@ -9011,6 +9017,8 @@ ok('config.json в репозитории без сборочных маркер
         assert(/DEELEV [^\n]*--selftest/.test(log), 'selftest прогнан де-элевированно');
         assert(/REG-WRITE HKCU:[^\n]*\|HamidunBridge\|/.test(log), 'Run-ключ записан (перехвачен стабом, selftest прошёл)');
         assertOrder(log, '--selftest', 'REG-WRITE', 'selftest идёт ДО записи Run');
+        assertOrder(log, 'REG-WRITE', 'SHELL bridge-tray nowait=True', 'трей запускается токеном оболочки ПОСЛЕ записи Run');
+        assert(log.indexOf('START') === -1, 'Start-Process (повышенный и через explorer) не вызывался');
         assert(r.stdout.indexOf('OK: AI-мост установлен') >= 0, 'успех объявлен');
         assert(r.stdout.indexOf('Сервер настроен') >= 0, 'конфиг записан → «Сервер настроен»');
       } finally { fs.rmSync(sb.base, { recursive: true, force: true }); }
@@ -9028,7 +9036,7 @@ ok('config.json в репозитории без сборочных маркер
         const log = fs.readFileSync(sb.logPath, 'utf8');
         assert(/DEELEV [^\n]*--selftest/.test(log), 'selftest прогнан');
         assert(log.indexOf('REG-WRITE') === -1, 'ветка записи HKCU\\Run НЕ достигнута');
-        assert(log.indexOf('START') === -1, 'запуск «сейчас» тоже не делался (агент нерабочий)');
+        assert(log.indexOf('START') === -1 && log.indexOf('SHELL') === -1, 'запуск «сейчас» тоже не делался (агент нерабочий)');
         assert(r.stdout.indexOf('OK: AI-мост установлен') === -1, '«установлен» НЕ объявлен');
         assert(r.stdout.indexOf('распакован') >= 0, 'честное «распакован, автозапуск не ставился»');
         assert(r.stdout.indexOf('HM-RECEIPT path') >= 0, 'путь в квитанции остаётся (каталог создан)');
@@ -10537,13 +10545,15 @@ ok('config.json в репозитории без сборочных маркер
     const branches = s.split(/\r?\n/)
       .map((l) => l.trim())
       .filter((l) => /^(if|elseif|else)\b/.test(l) && /Write-Host|\{/.test(l));
-    const iHard = branches.findIndex((l) => /^elseif\s*\(\s*-not\s*\$wvOk\s*\)/.test(l));
+    // Диагноз «нет WebView2» ставится по ДВУМ фактам: реестр не нашёл рантайм И запуск принят, но скрепка не ответила.
+    // Когда запуска не было (токен оболочки отказал), проверки здоровья не было — один факт двусмыслен.
+    const iHard = branches.findIndex((l) => /^elseif\s*\(\s*-not\s*\$wvOk\s+-and\s+\$launched\s*\)/.test(l));
     const iSoft = branches.findIndex((l) => /^elseif\s*\(\s*\$launched\s*\)/.test(l));
-    assert(iHard !== -1, 'нет ветки elseif (-not $wvOk) — честного исхода не существует');
+    assert(iHard !== -1, 'нет ветки elseif (-not $wvOk -and $launched) — честного исхода не существует');
     assert(iSoft !== -1, 'не найдена утешительная ветка elseif ($launched) — форма изменилась');
     assert(iHard < iSoft, 'ветка WebView2 стоит ПОСЛЕ утешительной — она недостижима');
     // И она обязана возвращать НЕнулевой код: иначе финальный экран снова покажет зелёное.
-    const tail = s.slice(s.indexOf('elseif (-not $wvOk)'));
+    const tail = s.slice(s.indexOf('elseif (-not $wvOk -and $launched)'));
     assert(/exit 1/.test(tail.slice(0, tail.indexOf('elseif ($launched)') + 1 || undefined)),
       'ветка WebView2 не возвращает ненулевой код — галочка останется зелёной');
     // Совет обязан быть исполнимым: без ссылки человеку некуда идти.
@@ -12529,58 +12539,35 @@ ok('config.json в репозитории без сборочных маркер
     assert(/winLaunchDeElevated\(cexe, startDir, deelevRoute\.editorOpenFiles\(startDir, 'PROMPTS\.md'\)\)/.test(lc), 'кнопка Cursor: так же');
     assert(/launchVsCodeOn\(dir, \{ create: false \}\)/.test(m), 'курс открывается без файла (openFile не передаётся)');
     const ws = m.slice(m.indexOf('function winShellTokenLaunch'), m.indexOf('async function winLaunchDeElevated'));
-    assert(/\[folderArg\]\.concat\(extraArgs \|\| \[\]\)\.map\(lit\)/.test(ws), 'запасной путь (токен оболочки) передаёт и файл');
+    assert(/args: \[folderArg\]\.concat\(extraArgs \|\| \[\]\)/.test(ws), 'запасной путь (токен оболочки) передаёт и файл');
+    // Каждое значение идёт в команду отдельным литералом: сборка команды живёт в deelev-route.shellTokenInline.
+    assert(/\(o\.args \|\| \[\]\)\.map\(lit\)/.test(fs.readFileSync(path.join(ROOT, 'src', 'deelev-route.js'), 'utf8')), 'аргументы — по одному литералу на каждый');
     const wl = m.slice(m.indexOf('async function winLaunchDeElevated'), m.indexOf('function launchVsCodeOn'));
     const guard = wl.search(/if \(!argList\) \{ rmStagingTree\(dir\);[^\n]*return folderFallback\(\); \}/);
     assert(guard !== -1 && guard < wl.indexOf('-ArgumentList " + argList'),
       'папку не выразить аргументом — редактор не запускается, открывается только папка (до сборки обёртки)');
   });
 
-  // claude-start.cmd исполняется настоящим cmd.exe — текст берётся прямо из main.js.
-  const claudeStartBody = () => {
-    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-    const i = m.indexOf('const cmdBody = ');
-    const j = m.indexOf("'if errorlevel 1 pause\\r\\n';", i);
-    assert(i !== -1 && j !== -1, 'текст claude-start.cmd найден в main.js');
-    return new Function('return ' + m.slice(i + 'const cmdBody = '.length, j + "'if errorlevel 1 pause\\r\\n'".length))();
-  };
-  ok('claude-start.cmd: chcp 65001 — сразу после @echo off, до него только ASCII; claude вызывается через call', () => {
-    const lines = claudeStartBody().split('\r\n');
-    assert.strictEqual(lines[0], '@echo off');
-    assert.strictEqual(lines[1], 'chcp 65001 >nul', 'кодовая страница UTF-8 — второй строкой');
-    assert(/^[\x00-\x7f]*$/.test(lines.slice(0, 2).join('')), 'до chcp — только ASCII');
-    assert(lines.includes('call claude') && !lines.includes('claude'), 'claude — через call (иначе pause после него не исполняется)');
+  // Команда окна «Войти в Claude» — фиксированная строка в deelev-route.js (раньше — файл claude-start.cmd,
+  // который main.js писал из-под админа и отдавал Проводнику). Исполнение настоящим cmd.exe при враждебных
+  // именах профиля — в разделе U5 ниже; здесь — порядок и состав команды.
+  ok('окно Войти в Claude: в команде chcp 65001 первой (до неё только ASCII), claude вызывается через call, рабочая папка не зашита в текст, файла-лаунчера в main.js нет', () => {
+    const script = DR.CLAUDE_TERMINAL_SCRIPT;
+    const cmds = script.split(' & ');
+    assert.strictEqual(cmds[0], 'chcp 65001 >nul', 'кодовая страница UTF-8 — первой командой');
+    assert(/^[\x00-\x7f]*$/.test(cmds[0]), 'до chcp — только ASCII');
+    assert(cmds.includes('call claude') && !cmds.includes('claude'), 'claude — через call (как у прежнего лаунчера; в строке /c безвредно)');
+    assert(cmds.includes('title Claude Code'), 'окно называется «Claude Code»');
+    assert.strictEqual(cmds.find((c) => /^set "PATH=/.test(c)),
+      'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"',
+      'PATH: ~/.local/bin, npm, nodejs, затем прежний PATH — одной строкой в кавычках, пути от %USERPROFILE% (его раскроет cmd у ребёнка)');
+    assert(cmds[cmds.length - 1] === 'if errorlevel 1 pause', 'ошибка Claude не закрывает окно мгновенно');
+    assert(/where claude >nul 2>nul \|\| \(echo Claude Code не найден\./.test(script), 'нет claude — сообщение и pause, а не молчаливое закрытие');
+    assert(!/\bcd\b/i.test(script), 'рабочая папка едет полем запуска (lpCurrentDirectory), а не «cd /d» в тексте');
+    assert(script.length < 600, 'умещается в предел 1024 знаков CreateProcessWithTokenW с запасом: ' + script.length);
+    assert(!/claude-start|const cmdBody/.test(fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n')),
+      'в коде main.js нет файла claude-start.cmd');
   });
-
-  if (process.platform === 'win32') {
-    ok('claude-start.cmd (прогон cmd.exe): после ошибки Claude срабатывает pause; при успехе — нет; мутант без call — pause теряется', () => {
-      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1b-cs-'));
-      try {
-        fs.mkdirSync(path.join(base, 'HamidunStart'));
-        fs.mkdirSync(path.join(base, '.local', 'bin'), { recursive: true });
-        // Фейковый claude — .cmd, как у npm: без call управление в лаунчер не вернулось бы.
-        fs.writeFileSync(path.join(base, '.local', 'bin', 'claude.cmd'), '@echo HM-FAKE-CLAUDE\r\n@exit /b %HM_FAKE_RC%\r\n');
-        const run = (body, rc) => {
-          const f = path.join(base, 'claude-start-' + rnd() + '.cmd');
-          fs.writeFileSync(f, body, 'utf8');
-          const r = spawnSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'), ['/d', '/c', f],
-            // windowsHide: своя скрытая консоль — chcp 65001 внутри лаунчера не трогает консоль прогона.
-            { encoding: 'utf8', timeout: 60000, windowsHide: true, input: 'x\r\n',
-              env: Object.assign({}, process.env, { USERPROFILE: base, HM_FAKE_RC: String(rc) }) });
-          return String(r.stdout || '') + String(r.stderr || '');
-        };
-        const body = claudeStartBody();
-        const fail = run(body, 1);
-        assert(/HM-FAKE-CLAUDE/.test(fail), 'лаунчер нашёл claude в ~/.local/bin и запустил его: ' + fail);
-        assert(/\. \. \./.test(fail), 'claude упал — pause сработал, окно не закрылось: ' + fail);
-        const okRun = run(body, 0);
-        assert(/HM-FAKE-CLAUDE/.test(okRun) && !/\. \. \./.test(okRun), 'claude завершился штатно — pause нет: ' + okRun);
-        const mutant = run(body.replace('call claude\r\n', 'claude\r\n'), 1);
-        assert(/HM-FAKE-CLAUDE/.test(mutant) && !/\. \. \./.test(mutant),
-          'контроль: без call управление не вернулось и pause потерялся — проверка это видит: ' + mutant);
-      } finally { fs.rmSync(base, { recursive: true, force: true }); }
-    });
-  }
 })();
 
 // ===========================================================================
@@ -12684,10 +12671,15 @@ ok('config.json в репозитории без сборочных маркер
     const slice = (a, b) => { const i = m.indexOf(a); const j = m.indexOf(b, i + 1); assert(i !== -1 && j > i, 'опорные строки найдены: ' + a); return m.slice(i, j); };
     const run = slice('const psScript =', '"& \'" + psScript');
     assert(/deelevRoute\.psQuoteBody\(script\)/.test(run) && !bare.test(run), 'запуск скриптов компонентов (путь в профиле — O’Brien)');
-    const dir = slice('async function winMakeSecureDir', 'function winShellTokenLaunch');
+    const dir = slice('async function winMakeSecureDir', 'function winShellTokenRun');
     assert(!bare.test(dir) && (dir.match(/deelevRoute\.psQuoteBody\(/g) || []).length >= 4, 'защищённый каталог: четыре литерала через общую функцию');
-    const sh = slice('function winShellTokenLaunch', 'async function winLaunchDeElevated');
-    assert(!bare.test(sh) && /const lit = deelevRoute\.psLit;/.test(sh), 'запасной путь запуска редактора');
+    // Запуск токеном оболочки (редакторы и «Войти в Claude»): текст команды собирает deelevRoute.shellTokenInline,
+    // где КАЖДОЕ значение — psLit; сам main.js в текст команды ничего не подставляет.
+    const sh = slice('function winShellTokenRun', 'async function winLaunchDeElevated');
+    assert(!bare.test(sh) && /deelevRoute\.shellTokenInline\(\{/.test(sh) && !/'\$r=Invoke-HmAsShellUser/.test(sh), 'запуск токеном оболочки: текст собирает общая функция');
+    const routeSrc = fs.readFileSync(path.join(ROOT, 'src', 'deelev-route.js'), 'utf8');
+    const inl = routeSrc.slice(routeSrc.indexOf('function shellTokenInline'), routeSrc.indexOf('const CLAUDE_TERMINAL_SCRIPT'));
+    assert(/const lit = psLit;/.test(inl) && !bare.test(inl) && (inl.match(/lit\(/g) || []).length >= 6 && /\.map\(lit\)/.test(inl), 'shellTokenInline: все значения — через psLit');
     const wl = slice('async function winLaunchDeElevated', 'function launchVsCodeOn');
     assert(!bare.test(wl) && (wl.match(/deelevRoute\.psQuoteBody\(/g) || []).length >= 4, 'обёртка запуска редактора: четыре литерала');
     const ps = codeOnly(fs.readFileSync(DEELEV, 'utf8'));
@@ -13046,6 +13038,1169 @@ ok('config.json в репозитории без сборочных маркер
     assert(!/do script "claude"/.test(m), 'голого do script "claude" в main.js не осталось (он живёт в helper как запасной)');
   });
 
+})();
+
+// ===========================================================================
+// U5 (09.10.2026; находка F2 независимого ревью безопасности). Три запуска вида «файл →
+// explorer.exe» из ПОВЫШЕННОГО процесса — скрепка (mascot.ps1), трей моста (bridge.ps1) и
+// «Войти в Claude» (main.js) — держались на том, что Проводник перешлёт запрос оболочке
+// обычного уровня. Если оболочки в этот миг нет (её может прибить малварь того же
+// пользователя), повышенный explorer.exe исполняет файл САМ, под админом, и выбирает
+// обработчик по HKCU\Software\Classes. Теперь все три идут через Invoke-HmAsShellUser
+// (проверенный токен оболочки, ровно medium и тот же пользователь), а на отказе — ничего не
+// запускается: ни explorer, ни повышенный Start-Process, ни файл-лаунчер.
+// Прогоны исполняют настоящие скрипты (PS 5.1, cmd.exe, Node) в песочницах; у каждого
+// охранного теста — контроль на старом поведении.
+// ===========================================================================
+(function () {
+  console.log('\n== U5: скрепка, трей моста и «Войти в Claude» запускаются токеном оболочки, а не через explorer.exe ==');
+  const { spawnSync } = require('child_process');
+  const SYS = process.env.SystemRoot || 'C:\\Windows';
+  const PS51 = path.join(SYS, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const CMD_EXE = path.join(SYS, 'System32', 'cmd.exe');
+  const havePs = process.platform === 'win32' && fs.existsSync(PS51);
+  const WINDIR = path.join(ROOT, 'scripts', 'windows');
+  const readWin = (n) => fs.readFileSync(path.join(WINDIR, n), 'utf8');
+  const psFile = (lines) => '\uFEFF' + lines.join('\r\n') + '\r\n';
+  const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const psq = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+  const readLog = (f) => fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
+
+  // Заглушка примитива: записывает, КАК её позвали, и отдаёт заданный итог. Настоящий
+  // CreateProcessWithTokenW в тесте недоступен (нужен SeImpersonatePrivilege администратора).
+  const STUB_SHELL = [
+    'function Invoke-HmAsShellUser {',
+    '  param([string]$Exe = "", [string[]]$Arguments = @(), [string]$Label = "", [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = "", [string]$WorkingDirectory = "")',
+    '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("SHELL exe=" + $Exe + " args=" + ($Arguments -join "|") + " nowait=" + [bool]$NoWait + " label=" + $Label)',
+    // gate=throw — сам примитив бросает исключение (не отказ с причиной, а сбой): вызывающий обязан его поймать.
+    '  if ($env:HM_T_GATE -eq "throw") { throw $env:HM_T_REASON }',
+    '  return [pscustomobject]@{ Route = "shell-token"; Gate = $env:HM_T_GATE; Code = [int]$env:HM_T_CODE; Reason = $env:HM_T_REASON; ProcessId = 1; Logged = $false; LogNote = "" }',
+    '}'
+  ];
+
+  // --- песочница mascot.ps1 --------------------------------------------------------------
+  // Скрипт идёт ЦЕЛИКОМ; общие библиотеки — заглушки (реестр, меню «Пуск» и сеть машины не
+  // трогаются), а командлеты, которыми скрипт касается внешнего мира, закрыты функциями
+  // драйвера: функция в PowerShell сильнее командлета. Start-Process записывается как START —
+  // старый запуск через Проводник виден в журнале вызовов.
+  function runMascot(scriptText, sc) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-mascot-'));
+    try {
+      const scripts = path.join(base, 'scripts'); fs.mkdirSync(scripts);
+      const vendorExe = path.join(base, 'vendor', 'apps', 'claude-mascot', 'claude-mascot.exe');
+      fs.mkdirSync(path.dirname(vendorExe), { recursive: true });
+      // С заглушкой примитива «exe скрепки» — настоящая безобидная программа (whoami): запуск мимо примитива
+      // (& $dest и подобные) оставил бы в выводе строку «машина\пользователь». С НАСТОЯЩИМ примитивом (sc.real)
+      // остаётся текстовая заглушка: в повышенной сессии он запустил бы программу по-настоящему.
+      if (sc.real) fs.writeFileSync(vendorExe, 'MZ stub');
+      else fs.copyFileSync(path.join(SYS, 'System32', 'whoami.exe'), vendorExe);
+      fs.mkdirSync(path.join(base, 'localapp')); fs.mkdirSync(path.join(base, 'home'));
+      fs.writeFileSync(path.join(scripts, 'mascot.ps1'), scriptText);
+      fs.writeFileSync(path.join(scripts, '_verify.ps1'), psFile(['function Confirm-HmArtifact { param($Path) }']));
+      fs.writeFileSync(path.join(scripts, '_mascot.ps1'), psFile([
+        'function Remove-HmMascotOldAutorun([string]$RunKey, [string]$ExePath, [switch]$Quiet) { return "absent" }',
+        'function Get-HmMascotProgramsDir { return (Join-Path $env:HM_T_BASE "startmenu") }',
+        'function New-HmMascotShortcut([string]$Dir, [string]$Target, [scriptblock]$Recheck) { return (Join-Path $Dir "Claude Mascot.lnk") }'
+      ]));
+      // sc.real — НАСТОЯЩИЙ _deelev.ps1 (скрипт подключает его в свою область видимости целиком); иначе заглушка примитива.
+      if (sc.real) fs.copyFileSync(path.join(WINDIR, '_deelev.ps1'), path.join(scripts, '_deelev.ps1'));
+      else fs.writeFileSync(path.join(scripts, '_deelev.ps1'), psFile(STUB_SHELL));
+      const log = path.join(base, 'calls.log'); fs.writeFileSync(log, '');
+      const driver = path.join(base, 'driver.ps1');
+      fs.writeFileSync(driver, psFile([
+        "$ErrorActionPreference = 'Continue'",
+        'function Get-ItemProperty { param($Path, $Name, $ErrorAction) if ($env:HM_T_WV -eq "1") { return [pscustomobject]@{ pv = "120.0.0.0" } } return $null }',
+        'function Stop-Process { param($Name, [switch]$Force, $ErrorAction) Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("STOP " + $Name) }',
+        'function Start-Sleep { param($Seconds, $Milliseconds) }',
+        'function Invoke-WebRequest { param($Uri, [switch]$UseBasicParsing, $TimeoutSec, $ErrorAction)',
+        '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("HEALTH " + $Uri)',
+        '  if ($env:HM_T_HEALTH -eq "1") { return [pscustomobject]@{ StatusCode = 200 } }',
+        '  throw "нет ответа" }',
+        'function Start-Process { param($FilePath, $ArgumentList, $ErrorAction, [switch]$Wait, [switch]$PassThru)',
+        '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("START " + $FilePath + " " + ($ArgumentList -join " ")) }',
+        // COM-объекты (планировщик, который метёт _deelev.ps1 при подключении) не открываются вовсе: запрос
+        // записывается как COM, обращение к $null внутри уборки гасится её собственным try/catch. Прогон
+        // не трогает настоящий планировщик, а лишний запрос COM виден в журнале вызовов.
+        'function New-Object { param([string]$TypeName, [object[]]$ArgumentList, [string]$ComObject)',
+        '  if ($ComObject) { Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("COM " + $ComObject); return $null }',
+        '  if ($PSBoundParameters.ContainsKey("ArgumentList")) { return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName -ArgumentList $ArgumentList }',
+        '  return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName }',
+        '& (Join-Path $PSScriptRoot "scripts\\mascot.ps1")',
+        'exit $LASTEXITCODE'
+      ]));
+      const env = Object.assign({}, process.env, {
+        LOCALAPPDATA: path.join(base, 'localapp'), USERPROFILE: path.join(base, 'home'), HM_VENDOR: path.join(base, 'vendor'),
+        HM_T_BASE: base, HM_T_LOG: log, HM_T_GATE: sc.gate || '', HM_T_CODE: String(sc.code || 0), HM_T_REASON: sc.reason || '',
+        HM_T_WV: sc.wv === false ? '0' : '1', HM_T_HEALTH: sc.health ? '1' : '0'
+      });
+      delete env.HM_DRY_RUN;
+      const r = spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & ' + psq(driver) + '; exit $LASTEXITCODE'],
+      { encoding: 'utf8', timeout: 180000, env });
+      return { status: r.status, out: String(r.stdout || '') + String(r.stderr || ''), calls: readLog(log) };
+    } finally { rm(base); }
+  }
+
+  // Контракт запуска скрепки. Бросает на любом нарушении (его же используем на мутанте).
+  function checkMascot(r, sc) {
+    const shell = r.calls.filter((l) => /^SHELL /.test(l));
+    const starts = r.calls.filter((l) => /^START /.test(l));
+    assert.deepStrictEqual(starts, [], 'ни explorer.exe, ни Start-Process: ' + starts.join(' | '));
+    assert.strictEqual(shell.length, 1, 'скрепку запускают РОВНО раз — через Invoke-HmAsShellUser: ' + r.calls.join(' | '));
+    assert(/^SHELL exe=.*\\Programs\\ClaudeMascot\\claude-mascot\.exe args= nowait=True label=mascot$/.test(shell[0]),
+      'наш скопированный exe, -NoWait, метка mascot: ' + shell[0]);
+    assert(!/explorer/i.test(r.out), 'в выводе нет explorer: ' + r.out.slice(-400));
+    const health = r.calls.filter((l) => /^HEALTH /.test(l)).length;
+    // «Запуск принят» = токен оболочки medium и процесс не упал за 3 с (Code 0): только тогда ждём ответ :45832.
+    const started = sc.gate === 'medium' && !sc.code;
+    if (started) assert(health >= 1, 'после принятого запуска проверяется :45832/health');
+    else assert.strictEqual(health, 0, 'запуска не было — проверять нечего (ждать 10 с впустую)');
+    // Запуск мимо примитива (& $dest и подобное): whoami оставил бы в выводе строку «машина\пользователь».
+    assert.deepStrictEqual(r.out.split(/\r?\n/).filter((l) => /^[^\\\s:]+\\[^\\\s:]+\s*$/.test(l)), [],
+      'exe скрепки не запускался напрямую, мимо примитива: ' + r.out.slice(-400));
+    // Машинный маркер исхода запуска (его читает main, от него зависит финиш): ровно одна строка, «1» — только
+    // у принятого запуска (токен оболочки обычного уровня и процесс не упал за 3 с).
+    assert.deepStrictEqual(r.out.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^HM-MASCOT\b/.test(l)),
+      ['HM-MASCOT launched=' + (started ? '1' : '0')], 'маркер исхода запуска: ' + r.out.slice(-400));
+    if (sc.health) {
+      assert.strictEqual(r.status, 0, 'код выхода шага: ' + r.status + ' ' + r.out.slice(-400));
+      assert(/OK: Скрепка установлена и запущена/.test(r.out), 'исход «запущена»: ' + r.out.slice(-400));
+      return;
+    }
+    assert(!/Скрепка установлена и запущена/.test(r.out), 'успех запуска не объявляется: ' + r.out.slice(-400));
+    if (sc.wv === false && started) {
+      assert.strictEqual(r.status, 1, 'нет WebView2 и запущенная скрепка не ответила — прежний честный красный шаг');
+      assert(/СКРЕПКА НЕ ЗАРАБОТАЕТ/.test(r.out), 'диагноз WebView2 прежний');
+      return;
+    }
+    // Запуска не было: второго факта («не ответила на проверку») нет, значит и однозначного диагноза нет —
+    // шаг не красный, а про WebView2 остаётся предупреждение, напечатанное в начале.
+    assert(!/СКРЕПКА НЕ ЗАРАБОТАЕТ/.test(r.out), 'без запуска красный диагноз WebView2 не ставится: ' + r.out.slice(-500));
+    if (sc.wv === false) assert(/WebView2 Runtime не найден/.test(r.out), 'предупреждение про WebView2 осталось: ' + r.out.slice(0, 300));
+    assert.strictEqual(r.status, 0, 'запуск скрепки НЕ критичен — шаг не красный: ' + r.status);
+    if (started) {
+      assert(/OK: Скрепка установлена и запускается \(не успела ответить на проверку/.test(r.out), 'запущена, но не ответила — прежний мягкий исход: ' + r.out.slice(-400));
+      return;
+    }
+    assert(/открой её вручную: меню «Пуск» → Claude Mascot/.test(r.out), 'сказано, как запустить самой: ' + r.out.slice(-500));
+    if (sc.exited) {
+      assert(new RegExp('скрепка запустилась и сразу закрылась \\(код ' + sc.code + '\\)').test(r.out), 'названо, что она сразу закрылась, и с каким кодом: ' + r.out.slice(-500));
+    } else {
+      assert(/скрепку сейчас запустить не удалось/.test(r.out), 'названо, что запустить не удалось: ' + r.out.slice(-500));
+      assert(/Под правами администратора я её не запускаю/.test(r.out), 'сказано, что под админом не запускали: ' + r.out.slice(-500));
+      assert(r.out.includes(sc.reason || 'причина не определена'), 'причина из примитива дошла до человека: ' + (sc.reason || ''));
+    }
+  }
+
+  const MASCOT_CASES = [
+    { name: 'запущена и ответила', gate: 'medium', code: 0, health: true },
+    { name: 'запущена, на проверку не ответила', gate: 'medium', code: 0, health: false },
+    { name: 'оболочки нет', gate: 'unavailable', reason: 'оболочка Windows (Проводник) сейчас не запущена' },
+    { name: 'оболочка повышена', gate: 'refused', reason: 'оболочка Windows работает с правами администратора (S-1-16-12288), обычного уровня нет: похоже, выключен контроль учётных записей (UAC)' },
+    { name: 'итог неизвестен', gate: 'unknown', reason: 'сбой запасного пути: тест' },
+    { name: 'примитив бросил исключение', gate: 'throw', reason: 'сбой примитива: тест' },
+    { name: 'сразу закрылась', gate: 'medium', code: 1, exited: true },
+    { name: 'нет WebView2, не ответила', gate: 'medium', code: 0, health: false, wv: false },
+    // Запуска не было — «не ответила на проверку» не установлено, красного диагноза WebView2 нет (один факт двусмыслен).
+    { name: 'нет WebView2, оболочки нет', gate: 'unavailable', reason: 'оболочка Windows (Проводник) сейчас не запущена', wv: false },
+    { name: 'нет WebView2, оболочка повышена', gate: 'refused', reason: 'оболочка Windows работает с правами администратора (S-1-16-12288)', wv: false },
+    // Реестр не нашёл WebView2, но скрепка ответила: жива — значит, красить нечего.
+    { name: 'нет WebView2 в реестре, но ответила', gate: 'medium', code: 0, health: true, wv: false }
+  ];
+
+  if (havePs) {
+    ok('U5 (прогон PS 5.1): mascot.ps1 запускает скрепку токеном оболочки (Invoke-HmAsShellUser -NoWait), не через explorer.exe; при отказе не запускается ничего, названы причина и способ запуска, код шага прежний', () => {
+      MASCOT_CASES.forEach((sc) => {
+        const r = runMascot(readWin('mascot.ps1'), sc);
+        try { checkMascot(r, sc); } catch (e) { e.message = '[' + sc.name + '] ' + e.message; throw e; }
+      });
+    });
+  }
+
+  // Тот же скрипт с НАСТОЯЩИМ _deelev.ps1 (а не заглушкой): подключение в область видимости mascot.ps1 не затирает
+  // его переменные ($dest, $lnkPath, $wvOk…), а настоящий примитив в песочнице запуска не даёт: «exe» — текстовая
+  // заглушка (CreateProcessWithTokenW отвечает ошибкой формата), а у машины без оболочки обычного уровня отказ
+  // приходит ещё раньше. Любой из этих исходов — «не запущено»: причина доходит до человека, запуска нигде нет.
+  function checkMascotReal(r) {
+    assert.deepStrictEqual(r.calls.filter((l) => /^START /.test(l)), [], 'ни explorer.exe, ни Start-Process: ' + r.calls.join(' | '));
+    assert.deepStrictEqual(r.calls.filter((l) => /^HEALTH /.test(l)), [], 'запуска не было — :45832 не опрашивается');
+    assert.strictEqual(r.status, 0, 'запуск «сейчас» не критичен, шаг не красный: ' + r.status + ' ' + r.out.slice(-500));
+    assert(/скрепку сейчас запустить не удалось: \S[^\r\n]*\. Под правами администратора я её не запускаю\./.test(r.out),
+      'причина из настоящего примитива дошла до человека: ' + r.out.slice(-600));
+    assert(/Скрепка установлена, но не запустилась — открой её вручную: меню «Пуск» → Claude Mascot/.test(r.out),
+      'переменные скрепки целы после подключения примитива, итог прежний: ' + r.out.slice(-600));
+    assert(!/explorer/i.test(r.out), 'в выводе нет explorer: ' + r.out.slice(-400));
+    assert.deepStrictEqual(r.out.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^HM-MASCOT\b/.test(l)), ['HM-MASCOT launched=0'],
+      'запуска не было — маркер говорит launched=0: ' + r.out.slice(-400));
+    // Скрепке от примитива нужна одна функция: уборка осиротевших задач планировщика (COM) при подключении ей ни к чему.
+    assert.deepStrictEqual(r.calls.filter((l) => /^COM /.test(l)), [], 'шаг скрепки не открывает планировщик задач: ' + r.calls.join(' | '));
+  }
+  if (havePs) {
+    ok('U5 (прогон PS 5.1, настоящий _deelev.ps1): mascot.ps1 подключает примитив в свою область видимости, переменные скрепки целы; когда запуск токеном оболочки не вышел — запуска нет, причина дошла до человека', () => {
+      checkMascotReal(runMascot(readWin('mascot.ps1'), { real: true, wv: true, health: false }));
+    });
+
+    // Подметание осиротевших задач — последний блок _deelev.ps1, он открывает COM планировщика при КАЖДОМ
+    // подключении файла. Шагу скрепки от примитива нужен один запуск, подметание ему ни к чему:
+    // $script:HmSkipOrphanSweep = $true до подключения его выключает. Прогон hermetic: запрос COM
+    // записывается, а вместо объекта возвращается $null (настоящий планировщик не трогается).
+    function probeSweep(deelevPath, skip) {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-sweep-'));
+      try {
+        const log = path.join(base, 'calls.log'); fs.writeFileSync(log, '');
+        const f = path.join(base, 'probe.ps1');
+        fs.writeFileSync(f, psFile([
+          'function New-Object { param([string]$TypeName, [object[]]$ArgumentList, [string]$ComObject)',
+          '  if ($ComObject) { Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("COM " + $ComObject); return $null }',
+          '  return Microsoft.PowerShell.Utility\\New-Object -TypeName $TypeName }',
+          skip ? '$script:HmSkipOrphanSweep = $true' : '$script:HmSkipOrphanSweep = $null',
+          '$hmOrphanTags = "sentinel"',
+          '. ' + psq(deelevPath),
+          'Write-Output ("HMTAGS:" + (@($hmOrphanTags) -join ","))'
+        ]));
+        const r = spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f],
+          { encoding: 'utf8', timeout: 240000, windowsHide: true, env: Object.assign({}, process.env, { HM_T_LOG: log }) });
+        const line = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith('HMTAGS:'));
+        assert(line !== undefined, 'проба не вернула HMTAGS: ' + String(r.stderr || r.stdout).slice(0, 400));
+        return { com: readLog(log).filter((l) => /^COM /.test(l)), tags: line.slice('HMTAGS:'.length) };
+      } finally { rm(base); }
+    }
+    ok('U5 (прогон PS 5.1, настоящий _deelev.ps1): подметание осиротевших задач при подключении файла выключается $script:HmSkipOrphanSweep; без флага работает как раньше; шаг скрепки флаг ставит; мутант без проверки флага пойман', () => {
+      const real = path.join(WINDIR, '_deelev.ps1');
+      const withFlag = probeSweep(real, true);
+      assert.deepStrictEqual(withFlag.com, [], 'флаг стоит — COM планировщика не открывается: ' + withFlag.com.join(' | '));
+      assert.strictEqual(withFlag.tags, 'sentinel', 'флаг стоит — блок подметания не исполнялся');
+      const noFlag = probeSweep(real, false);
+      assert.deepStrictEqual(noFlag.com, ['COM Schedule.Service'], 'без флага подметание работает как раньше: ' + noFlag.com.join(' | '));
+      assert.strictEqual(noFlag.tags, '', 'без флага блок исполнился (результат — пустой список)');
+      // Мутант: проверка флага убрана из копии файла — флаг ничего не выключает, и проба это видит.
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-sweepmut-'));
+      try {
+        const src = fs.readFileSync(real, 'utf8');
+        const mut = src.replace('if (-not $script:HmSkipOrphanSweep) {', 'if ($true) {');
+        assert.notStrictEqual(mut, src, 'мутация применилась: проверка флага найдена в файле');
+        const f = path.join(tmp, '_deelev.ps1'); fs.writeFileSync(f, mut);
+        const m = probeSweep(f, true);
+        assert.deepStrictEqual(m.com, ['COM Schedule.Service'], 'контроль: без проверки флага подметание идёт, и проба это видит');
+      } finally { rm(tmp); }
+      // Скрепка: флаг ставится ДО подключения, и её шаг с настоящим примитивом COM не открывает; без строки флага — открывает.
+      const ms = readWin('mascot.ps1');
+      const noLine = ms.replace(/^\$script:HmSkipOrphanSweep = \$true\r?\n/m, '');
+      assert.notStrictEqual(noLine, ms, 'в mascot.ps1 есть строка флага');
+      const ctl = runMascot(noLine, { real: true, wv: true, health: false });
+      assert.deepStrictEqual(ctl.calls.filter((l) => /^COM /.test(l)), ['COM Schedule.Service'],
+        'контроль: без флага шаг скрепки подметает планировщик (проверка checkMascotReal это видит): ' + ctl.calls.join(' | '));
+    });
+  }
+
+  // --- песочница bridge.ps1 ---------------------------------------------------------------
+  function runBridge(scriptText, sc) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-bridge-'));
+    try {
+      const scripts = path.join(base, 'scripts'); fs.mkdirSync(scripts);
+      fs.writeFileSync(path.join(scripts, 'bridge.ps1'), scriptText);
+      fs.writeFileSync(path.join(scripts, '_deelev.ps1'), psFile(STUB_SHELL.concat([
+        'function Invoke-HmDeElevatedSafe {',
+        '  param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)',
+        '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("DEELEV " + $Label + " " + ($Arguments -join " "))',
+        '  $code = 0; if ($Arguments -contains "--selftest") { $code = [int]$env:HM_T_SELFTEST_EXIT }',
+        '  return [pscustomobject]@{ Gate = "medium"; Code = $code; Finished = $true; ShellReason = "" }',
+        '}'
+      ])));
+      const agentDir = path.join(base, 'agent'); fs.mkdirSync(agentDir);
+      fs.writeFileSync(path.join(agentDir, 'bridge_agent.py'), '# stub agent (never executed by test)\n');
+      const localApp = path.join(base, 'localapp'); fs.mkdirSync(localApp);
+      // pystray и PIL «на диске» (по ним мост решает, будет ли значок в трее): APPDATA — песочница, а не профиль
+      // машины, на которой идёт тест; sc.tray === false — пакетов нет.
+      const appData = path.join(base, 'appdata'); fs.mkdirSync(appData);
+      if (sc.tray !== false) {
+        const sp = path.join(appData, 'Python', 'Python311', 'site-packages');
+        fs.mkdirSync(path.join(sp, 'pystray'), { recursive: true }); fs.mkdirSync(path.join(sp, 'PIL'), { recursive: true });
+      }
+      const log = path.join(base, 'calls.log'); fs.writeFileSync(log, '');
+      const driver = path.join(base, 'driver.ps1');
+      fs.writeFileSync(driver, psFile([
+        "$ErrorActionPreference = 'Continue'",
+        'function Get-Command { param($Name, $ErrorAction)',
+        '  if ("$Name" -eq "python") { return [pscustomobject]@{ Source = "C:\\HmFakePy\\python.exe" } }',
+        '  return [pscustomobject]@{ Source = "$Name" } }',
+        'function New-ItemProperty { param($Path, $Name, $Value, $PropertyType, [switch]$Force)',
+        '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("REG-WRITE " + $Name + "|" + $Value) }',
+        'function Start-Process { param($FilePath, $ArgumentList, $ErrorAction, [switch]$Wait, [switch]$PassThru)',
+        '  Add-Content -LiteralPath $env:HM_T_LOG -Encoding UTF8 -Value ("START " + $FilePath + " " + ($ArgumentList -join " ")) }',
+        '& (Join-Path $PSScriptRoot "scripts\\bridge.ps1")',
+        'exit $LASTEXITCODE'
+      ]));
+      const env = Object.assign({}, process.env, {
+        LOCALAPPDATA: localApp, APPDATA: appData, HM_AGENT_DIR: agentDir, HM_T_LOG: log, HM_T_SELFTEST_EXIT: String(sc.selftest || 0),
+        HM_T_GATE: sc.gate || 'medium', HM_T_CODE: String(sc.code || 0), HM_T_REASON: sc.reason || ''
+      });
+      ['HM_DRY_RUN', 'HM_VENDOR', 'HM_BRIDGE_TOKEN', 'HM_BRIDGE_ENDPOINT', 'HM_BRIDGE_PACDOMAINS'].forEach((k) => delete env[k]);
+      const r = spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & ' + psq(driver) + '; exit $LASTEXITCODE'],
+      { encoding: 'utf8', timeout: 180000, env });
+      const dst = path.join(localApp, 'HamidunBridge');
+      return { status: r.status, out: String(r.stdout || '') + String(r.stderr || ''), calls: readLog(log),
+        dstFiles: fs.existsSync(dst) ? fs.readdirSync(dst) : [], agentPath: path.join(dst, 'bridge_agent.py') };
+    } finally { rm(base); }
+  }
+
+  function checkBridge(r, sc) {
+    const shell = r.calls.filter((l) => /^SHELL /.test(l));
+    const starts = r.calls.filter((l) => /^START /.test(l));
+    assert.deepStrictEqual(starts, [], 'ни explorer.exe, ни Start-Process: ' + starts.join(' | '));
+    assert(!/explorer/i.test(r.out), 'в выводе нет explorer: ' + r.out.slice(-400));
+    // Прямой запуск Python мимо примитива (& $run …): путь подставного python.exe не существует, и PowerShell
+    // назвал бы его в тексте ошибки; в штатном выводе этого пути нет.
+    assert(!/HmFakePy/.test(r.out), 'Python не запускался напрямую, мимо примитива: ' + r.out.slice(-400));
+    assert.deepStrictEqual(r.dstFiles.filter((f) => /\.(cmd|bat)$/i.test(f)), [], 'файла-лаунчера (.cmd) нет: ' + r.dstFiles.join(','));
+    assert.strictEqual(r.status, 0, 'неудача запуска трея НЕ критична: код шага ' + r.status + ' ' + r.out.slice(-400));
+    if (sc.selftest) {
+      assert.deepStrictEqual(shell, [], 'агент не прошёл самопроверку — трей не запускают вовсе');
+      assert(!r.calls.some((l) => /^REG-WRITE /.test(l)), 'автозапуск не прописан');
+      return;
+    }
+    assert(r.calls.some((l) => /^REG-WRITE HamidunBridge\|/.test(l)), 'автозапуск (Run) прописан независимо от исхода запуска сейчас');
+    assert.strictEqual(shell.length, 1, 'трей запускают РОВНО раз — через Invoke-HmAsShellUser: ' + r.calls.join(' | '));
+    const want = 'SHELL exe=C:\\HmFakePy\\python.exe args=' + r.agentPath + ' nowait=True label=bridge-tray';
+    assert.strictEqual(shell[0], want, 'Python и агент — отдельными аргументами, -NoWait, метка bridge-tray');
+    assert(/OK: AI-мост установлен/.test(r.out), 'итог установки прежний: ' + r.out.slice(-400));
+    // Последняя строка, которую читает человек, не обещает значок в трее, которого сейчас нет.
+    const okLine = r.out.split(/\r?\n/).map((l) => l.trim()).find((l) => /^OK: AI-мост установлен/.test(l)) || '';
+    if (sc.tray === false) {
+      assert(/^OK: AI-мост установлен \(фоновый режим без значка/.test(okLine), 'пакетов трея нет — «фоновый режим без значка»: ' + okLine);
+    } else if (sc.launched) {
+      assert(/^OK: AI-мост установлен \(значок в трее\)\./.test(okLine), 'трей запущен — «значок в трее»: ' + okLine);
+    } else {
+      assert(/^OK: AI-мост установлен \(значок в трее появится после следующего входа в Windows\)\./.test(okLine),
+        'трей сейчас не запущен — значок появится после следующего входа в Windows: ' + okLine);
+    }
+    if (sc.launched) {
+      assert(!/мост сейчас запустить не удалось|сразу закрылся/.test(r.out), 'при удаче предупреждений нет: ' + r.out.slice(-400));
+    } else {
+      assert(/при следующем входе в Windows \(автозапуск\)/.test(r.out), 'сказано, когда он стартует сам: ' + r.out.slice(-500));
+      if (sc.exited) {
+        assert(new RegExp('мост запустился и сразу закрылся \\(код ' + sc.code + '\\)').test(r.out), 'названо, что он сразу закрылся, и с каким кодом: ' + r.out.slice(-500));
+      } else {
+        assert(/мост сейчас запустить не удалось/.test(r.out), 'названо, что мост сейчас не запущен: ' + r.out.slice(-500));
+        assert(/Под правами администратора я его не запускаю/.test(r.out), 'сказано, что под админом не запускали: ' + r.out.slice(-500));
+        assert(r.out.includes(sc.reason || 'причина не определена'), 'причина из примитива дошла до человека');
+      }
+    }
+  }
+
+  const BRIDGE_CASES = [
+    { name: 'запущен', gate: 'medium', code: 0, launched: true },
+    { name: 'оболочки нет', gate: 'unavailable', reason: 'оболочка Windows (Проводник) сейчас не запущена', launched: false },
+    { name: 'оболочка повышена', gate: 'refused', reason: 'оболочка Windows работает с правами администратора (S-1-16-12288)', launched: false },
+    { name: 'итог неизвестен', gate: 'unknown', reason: 'сбой запасного пути: тест', launched: false },
+    { name: 'примитив бросил исключение', gate: 'throw', reason: 'сбой примитива: тест', launched: false },
+    { name: 'сразу закрылся', gate: 'medium', code: 3, launched: false, exited: true },
+    { name: 'запущен, пакетов трея нет', gate: 'medium', code: 0, launched: true, tray: false },
+    { name: 'самопроверка не прошла', gate: 'medium', code: 0, selftest: 1 }
+  ];
+
+  if (havePs) {
+    ok('U5 (прогон PS 5.1): bridge.ps1 запускает трей токеном оболочки без файла-лаунчера; при отказе автозапуск и итог установки прежние, explorer и повышенный запуск не используются', () => {
+      BRIDGE_CASES.forEach((sc) => {
+        const r = runBridge(readWin('bridge.ps1'), sc);
+        try { checkBridge(r, sc); } catch (e) { e.message = '[' + sc.name + '] ' + e.message; throw e; }
+      });
+    });
+  }
+
+  // --- «Войти в Claude» (main.js): обработчик исполняется с заглушками ---------------------
+  // Обработчик вынимается из ИСХОДНИКА main.js и исполняется в дочернем Node (асинхронный код в
+  // синхронном ok не ждётся): ipcMain — перехватчик, fs/os/path настоящие (домашняя папка —
+  // песочница), spawn и «токен оболочки» — записывающие заглушки. Работает и на новом коде, и на
+  // старом: старый обработчик пишет лаунчер и зовёт spawn(explorer.exe), новый — ни того ни другого.
+  function terminalRunnerMain() {
+    const fs = require('fs'), os = require('os'), path = require('path');
+    const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
+    const m = fs.readFileSync(cfg.mainJs, 'utf8');
+    const h = m.indexOf("ipcMain.handle('open-claude-terminal'");
+    const f0 = m.indexOf('async function winOpenClaudeTerminal');
+    const fb = m.indexOf('let _winTerminalBusy');   // состояние «запуск идёт» объявлено сразу перед функцией
+    const f = (fb !== -1 && fb < f0) ? fb : f0;
+    const start = (f !== -1 && f < h) ? f : h;
+    const end = m.indexOf('// ---- мини-визард ключей', h);
+    if (h === -1 || end === -1) { console.log('HMOUT:' + JSON.stringify({ fatal: 'обработчик не найден в main.js' })); return; }
+    const handlers = {};
+    const calls = { spawn: [], run: [], launch: [], log: [] };
+    const fakeOs = Object.assign({}, os, { homedir: () => cfg.home });
+    const stubs = {
+      ipcMain: { handle: (n, fn) => { handlers[n] = fn; } },
+      spawn: (exe, args) => { calls.spawn.push({ exe, args }); return { unref() { /* заглушка */ } }; },
+      remoteFetch: { winSystemRoot: () => cfg.winRoot },
+      deelevRoute: require(cfg.deelevRoute),
+      winShellTokenRun: async (spec) => {
+        calls.run.push(spec);
+        if (cfg.shellDelayMs) await new Promise((r) => setTimeout(r, cfg.shellDelayMs));   // токен оболочки отвечает не сразу
+        return cfg.shell;
+      },
+      winShellTokenLaunch: async (exe, a, b) => { calls.launch.push({ exe, a, b }); return cfg.shell; },
+      logToFile: (id, line) => { calls.log.push(id + ': ' + line); }
+    };
+    const names = ['ipcMain', 'IS_WIN', 'IS_MAC', 'fs', 'os', 'path', 'spawn', 'remoteFetch', 'deelevRoute', 'winShellTokenRun', 'winShellTokenLaunch', 'logToFile'];
+    new Function(names.join(','), m.slice(start, end))(stubs.ipcMain, true, false, fs, fakeOs, path, stubs.spawn, stubs.remoteFetch,
+      stubs.deelevRoute, stubs.winShellTokenRun, stubs.winShellTokenLaunch, stubs.logToFile);
+    (async () => {
+      let ret = null, err = '';
+      try {
+        if (cfg.parallel > 1) {
+          // Несколько нажатий, пока запуск не ответил; cfg.again — ещё одно уже ПОСЛЕ ответов.
+          ret = await Promise.all(Array.from({ length: cfg.parallel }, () => handlers['open-claude-terminal']()));
+          if (cfg.again) ret.push(await handlers['open-claude-terminal']());
+        } else ret = await handlers['open-claude-terminal']();
+      } catch (e) { err = String((e && e.message) || e); }
+      let files = null;
+      try { files = fs.readdirSync(path.join(cfg.home, 'HamidunStart')); } catch (e) { files = null; }
+      console.log('HMOUT:' + JSON.stringify({ ret, err, calls, files }));
+    })();
+  }
+
+  function runTerminalHandler(shell, opts) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-term-'));
+    try {
+      const home = path.join(base, (opts && opts.homeName) || 'home'); fs.mkdirSync(home, { recursive: true });
+      const winRoot = path.join(base, 'win'); fs.mkdirSync(winRoot);
+      fs.writeFileSync(path.join(winRoot, 'explorer.exe'), 'MZ stub');   // чтобы СТАРЫЙ код дошёл до spawn
+      const runner = path.join(base, 'runner.js');
+      fs.writeFileSync(runner, '(' + terminalRunnerMain.toString() + ')();\n');
+      const cfg = { mainJs: (opts && opts.mainJs) || path.join(ROOT, 'src', 'main.js'), deelevRoute: path.join(ROOT, 'src', 'deelev-route.js'), home, winRoot, shell,
+        parallel: (opts && opts.parallel) || 1, again: !!(opts && opts.again), shellDelayMs: (opts && opts.shellDelayMs) || 0 };
+      const r = spawnSync(process.execPath, [runner], { input: JSON.stringify(cfg), encoding: 'utf8', timeout: 60000 });
+      const line = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith('HMOUT:'));
+      assert(line, 'раннер не ответил: ' + String(r.stderr || r.stdout).slice(0, 600));
+      const o = JSON.parse(line.slice('HMOUT:'.length));
+      assert(!o.fatal, o.fatal);
+      o.home = home;
+      return o;
+    } finally { rm(base); }
+  }
+
+  function checkTerminal(o, expectOk) {
+    assert.strictEqual(o.err, '', 'обработчик не бросает: ' + o.err);
+    assert.deepStrictEqual(o.calls.spawn, [], 'прямых запусков процессов нет — ни explorer.exe, ни cmd: ' + JSON.stringify(o.calls.spawn));
+    assert.deepStrictEqual(o.calls.launch, [], 'запуска «exe + папка» (редакторный путь) нет');
+    assert.strictEqual(o.calls.run.length, 1, 'окно открывает РОВНО один запуск токеном оболочки: ' + JSON.stringify(o.calls.run));
+    const spec = o.calls.run[0];
+    assert.strictEqual(typeof spec.script, 'string', 'передан готовый текст команды: ' + JSON.stringify(spec));
+    assert(spec.script.length > 20 && !spec.exe, 'текст команды, а не exe: ' + JSON.stringify(spec));
+    assert.strictEqual(spec.cwd, path.join(o.home, 'HamidunStart'), 'рабочая папка — ~/HamidunStart');
+    assert.strictEqual(spec.label, 'claude-terminal');
+    assert.deepStrictEqual(o.files, [], 'папка проекта создана и в неё НИЧЕГО не записано (нет файла-лаунчера): ' + JSON.stringify(o.files));
+    assert.strictEqual(o.ret, expectOk, 'ответ кнопки: ' + JSON.stringify(o.ret));
+  }
+
+  const TERMINAL_CASES = [
+    { name: 'medium/0', shell: { gate: 'medium', code: 0, reason: '' }, ret: true },
+    { name: 'medium/код 1 (cmd не поднялся)', shell: { gate: 'medium', code: 1, reason: '' }, ret: false },
+    { name: 'refused', shell: { gate: 'refused', code: -1, reason: 'оболочка Windows работает с правами администратора' }, ret: false },
+    { name: 'unavailable', shell: { gate: 'unavailable', code: -1, reason: 'оболочка Windows (Проводник) сейчас не запущена' }, ret: false },
+    { name: 'unknown', shell: { gate: 'unknown', code: -1, reason: 'запуск токеном оболочки не ответил за 30 с' }, ret: false }
+  ];
+
+  ok('U5 (прогон main.js с заглушками): Войти в Claude на Windows — без файла-лаунчера и без spawn/explorer; окно открывает токен оболочки; при refused/unavailable/unknown/коде≠0 ответ false и запасного запуска нет', () => {
+    TERMINAL_CASES.forEach((sc) => {
+      const o = runTerminalHandler(sc.shell);
+      try { checkTerminal(o, sc.ret); } catch (e) { e.message = '[' + sc.name + '] ' + e.message; throw e; }
+    });
+    // Враждебное имя профиля доходит до рабочей папки без искажений (папка едет полем запуска, а не текстом команды).
+    const hostile = 'Анастасия O\u2019Brien (x86) & ^co %PATH%';
+    const o = runTerminalHandler(TERMINAL_CASES[0].shell, { homeName: hostile });
+    checkTerminal(o, true);
+    assert(o.home.endsWith(hostile), 'профиль песочницы — с враждебным именем');
+  });
+
+  // Ответ на клик приходит не сразу: токен оболочки ждёт до 3 с, не упало ли окно сразу. Нажатие за это время
+  // не должно открывать ВТОРОЕ окно: пока запуск идёт, повторные нажатия получают тот же ответ.
+  ok('U5 (прогон main.js с заглушками): Войти в Claude — повторные нажатия, пока окно открывается, второго окна не открывают и получают тот же ответ; после ответа запуск снова возможен; отказ — тоже одним запуском', () => {
+    const okRun = runTerminalHandler(TERMINAL_CASES[0].shell, { parallel: 3, again: true, shellDelayMs: 400 });
+    assert.strictEqual(okRun.err, '', 'обработчик не бросает: ' + okRun.err);
+    assert.strictEqual(okRun.calls.run.length, 2, 'три нажатия подряд — ОДИН запуск, нажатие после ответа — второй: запусков ' + okRun.calls.run.length);
+    assert.deepStrictEqual(okRun.ret, [true, true, true, true], 'все нажатия получили ответ запуска: ' + JSON.stringify(okRun.ret));
+    assert.deepStrictEqual(okRun.calls.spawn, [], 'ничего не запускалось мимо токена оболочки');
+    const refused = runTerminalHandler(TERMINAL_CASES[2].shell, { parallel: 2, again: true, shellDelayMs: 200 });
+    assert.strictEqual(refused.calls.run.length, 2, 'при отказе: два нажатия сразу — один запуск, потом ещё один: ' + refused.calls.run.length);
+    assert.deepStrictEqual(refused.ret, [false, false, false], 'отказ достаётся всем: ' + JSON.stringify(refused.ret));
+    // Состояние «запуск идёт» снимается на любом исходе — иначе после первого отказа кнопка не работала бы вовсе.
+    assert.deepStrictEqual(refused.calls.spawn, [], 'и при отказе запасного запуска нет');
+  });
+
+  // Кнопка «Запустить Claude в терминале» (app.js): обработчик вынимается из исходника и исполняется в дочернем
+  // Node с поддельным элементом — страница в тестовом окружении не разбирает разметку в узлы, нажать нечего.
+  function clickRunnerMain() {
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(0, 'utf8'));
+    const a = fs.readFileSync(cfg.appJs, 'utf8');
+    const s = a.indexOf("claudeBtnEl.addEventListener('click', async () => {");
+    const e = a.indexOf('// #7: не молчим на false', s);
+    if (s === -1 || e === -1) { console.log('HMOUT:' + JSON.stringify({ fatal: 'обработчик не найден в app.js' })); return; }
+    const hints = [];
+    const pending = []; let calls = 0;
+    const el = {
+      disabled: false, handler: null,
+      parentElement: { querySelector: () => null, appendChild: (n) => { hints.push(n); } },
+      addEventListener(t, fn) { this.handler = fn; }
+    };
+    const window = { installer: { openClaudeTerminal: () => { calls++; return new Promise((res) => { pending.push(res); }); } } };
+    const document = { createElement: () => ({ className: '', textContent: '' }) };
+    new Function('claudeBtnEl', 'STATE', 'window', 'document', a.slice(s, e))(el, { platform: 'win32' }, window, document);
+    const tick = () => new Promise((r) => setTimeout(r, 20));
+    const answer = () => pending.splice(0).forEach((res) => res(cfg.result));   // main отвечает всем ждущим запросам
+    (async () => {
+      const first = el.handler(); await tick();
+      const disabledWhilePending = el.disabled;
+      const second = el.handler(); await tick();         // нажали ещё раз, пока main не ответил
+      const callsBeforeAnswer = calls;
+      answer(); await first; await second;
+      const disabledAfter = el.disabled;
+      const hintAfterFirst = hints.map((h) => h.textContent);
+      const third = el.handler(); await tick();           // нажатие после ответа
+      answer(); await third;
+      console.log('HMOUT:' + JSON.stringify({ calls, callsBeforeAnswer, disabledWhilePending, disabledAfter, hintAfterFirst }));
+    })();
+  }
+  function runClick(result) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-click-'));
+    try {
+      const runner = path.join(base, 'runner.js');
+      fs.writeFileSync(runner, '(' + clickRunnerMain.toString() + ')();\n');
+      const r = spawnSync(process.execPath, [runner],
+        { input: JSON.stringify({ appJs: path.join(ROOT, 'src', 'renderer', 'app.js'), result }), encoding: 'utf8', timeout: 60000 });
+      const line = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith('HMOUT:'));
+      assert(line, 'раннер не ответил: ' + String(r.stderr || r.stdout).slice(0, 600));
+      const o = JSON.parse(line.slice('HMOUT:'.length));
+      assert(!o.fatal, o.fatal);
+      return o;
+    } finally { rm(base); }
+  }
+  ok('U5 (app.js, вынутый обработчик): «Запустить Claude в терминале» — кнопка выключена, пока идёт запуск; повторное нажатие main второй раз не зовёт; после ответа кнопка снова доступна; отказ — подсказка с ручной инструкцией', () => {
+    const good = runClick(true);
+    assert.strictEqual(good.disabledWhilePending, true, 'кнопка выключена, пока main не ответил');
+    assert.strictEqual(good.callsBeforeAnswer, 1, 'повторное нажатие до ответа main второй раз не зовёт: вызовов ' + good.callsBeforeAnswer);
+    assert.strictEqual(good.disabledAfter, false, 'после ответа кнопка снова доступна');
+    assert.strictEqual(good.calls, 2, 'нажатие после ответа работает: вызовов ' + good.calls);
+    assert.deepStrictEqual(good.hintAfterFirst, [], 'окно открылось — подсказки об ошибке нет');
+    const bad = runClick(false);
+    assert.strictEqual(bad.disabledAfter, false, 'после отказа кнопка тоже снова доступна');
+    assert(bad.hintAfterFirst.length === 1 && /набери claude/.test(bad.hintAfterFirst[0]), 'отказ — ручная инструкция: ' + JSON.stringify(bad.hintAfterFirst));
+  });
+
+  // --- Негативные контроли: ровно тот код, что был ДО правки, на месте нового ----------------
+  // Тот же проверяющий, что пропускает исправленный код, обязан на старом упасть: иначе тест
+  // ничего не стережёт. До правки (коммит e5ee946) все три проверки выше краснели на этом коде.
+  const OLD_MASCOT_LAUNCH = [
+    '$launched = $false',
+    'try { Start-Process -FilePath "$env:WINDIR\\explorer.exe" -ArgumentList "`"$dest`"" -ErrorAction Stop; $launched = $true }',
+    'catch { Write-Host "  ВНИМАНИЕ: скрепка не запустилась ($($_.Exception.Message))." }'
+  ].join('\r\n');
+  const OLD_BRIDGE_LAUNCH = [
+    '    $launchCmd = Join-Path $dst \'launch-bridge.cmd\'',
+    '    $cmdBody = "@echo off`r`nchcp 65001 >nul`r`ncd /d `"$dst`"`r`nstart `"`" `"$run`" `"$agentPath`"`r`n"',
+    '    try {',
+    '        [System.IO.File]::WriteAllText($launchCmd, $cmdBody, (New-Object System.Text.UTF8Encoding -ArgumentList $false))',
+    '        Start-Process -FilePath "$env:WINDIR\\explorer.exe" -ArgumentList "`"$launchCmd`"" -ErrorAction Stop',
+    '    } catch {',
+    '        Write-Host "  Не удалось запустить мост сейчас ($($_.Exception.Message)) — он стартует при следующем входе в Windows (автозапуск)."',
+    '    }'
+  ].join('\r\n');
+  const OLD_TERMINAL_BRANCH = [
+    '    if (IS_WIN) {',
+    "      const startDir = path.join(os.homedir(), 'HamidunStart');",
+    '      try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST */ }',
+    "      const exp = path.join(remoteFetch.winSystemRoot(), 'explorer.exe');",
+    "      const launcher = path.join(startDir, 'claude-start.cmd');",
+    "      try { fs.writeFileSync(launcher, '@echo off\\r\\n', 'utf8'); } catch (e) { return false; }",
+    "      if (fs.existsSync(exp)) { spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); return true; }",
+    '      return false;',
+    '    }'
+  ].join('\n');
+
+  if (havePs) {
+    ok('U5 (негативный контроль): прежний запуск через explorer.exe, вставленный на место нового, роняет проверки скрепки, трея и Войти в Claude', () => {
+      const ms = readWin('mascot.ps1');
+      const mm = /\$launched = \$false\r?\n\$shRes = \$null[\s\S]*?(?=\r?\n# 6\. Health-check)/.exec(ms);
+      assert(mm, 'блок запуска скрепки найден');
+      const mascotOld = ms.replace(mm[0], () => OLD_MASCOT_LAUNCH);
+      assert.notStrictEqual(mascotOld, ms, 'подмена применилась');
+      const scM = MASCOT_CASES[0];
+      assert.throws(() => checkMascot(runMascot(mascotOld, scM), scM), /explorer|Start-Process|SHELL/i, 'старый запуск скрепки пойман');
+      assert.throws(() => checkMascotReal(runMascot(mascotOld, { real: true, wv: true, health: false })), /explorer|Start-Process/i,
+        'и проверкой с настоящим примитивом');
+
+      const bs = readWin('bridge.ps1');
+      const bm = /    \$trayRes = \$null[\s\S]*?(?=\r?\n\} elseif \(\$null -eq \$stRes)/.exec(bs);
+      assert(bm, 'блок запуска трея найден');
+      const bridgeOld = bs.replace(bm[0], () => OLD_BRIDGE_LAUNCH);
+      assert.notStrictEqual(bridgeOld, bs, 'подмена применилась');
+      const scB = BRIDGE_CASES[0];
+      assert.throws(() => checkBridge(runBridge(bridgeOld, scB), scB), /explorer|Start-Process|лаунчер/i, 'старый запуск трея пойман');
+
+      const mj = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const branch = '    if (IS_WIN) return await winOpenClaudeTerminal();';
+      assert(mj.includes(branch), 'ветка Windows обработчика найдена');
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-oldmain-'));
+      try {
+        const oldMain = path.join(tmp, 'main-old.js');
+        fs.writeFileSync(oldMain, mj.replace(branch, () => OLD_TERMINAL_BRANCH));
+        const o = runTerminalHandler(TERMINAL_CASES[0].shell, { mainJs: oldMain });
+        assert.throws(() => checkTerminal(o, true), /spawn|explorer|лаунчер/i, 'старый обработчик «Войти в Claude» пойман');
+      } finally { rm(tmp); }
+    });
+  }
+
+  // --- Окно «Войти в Claude»: команда исполняется НАСТОЯЩИМ cmd.exe ---------------------------------
+  // Строка та же, что соберёт New-HmShellScriptLine (её равенство проверяет следующий тест), рабочая
+  // папка — поле запуска (как lpCurrentDirectory у CreateProcessWithTokenW), %USERPROFILE% раскрывает
+  // сам cmd. Фальшивый claude лежит в ~/.local/bin: печатает свою рабочую папку и выходит с кодом из окружения.
+  const HOSTILE_PROFILES = [
+    'plain', 'Анастасия Владимировна', 'O\u2019Brien', "O'Brien", 'a&b', 'a^b', 'a%b', 'a!b',
+    'John (x86)', 'a b c', 'x%PATH%y', 'x%USERPROFILE%y', 'a,b=c', '100% (тест) & ^co'
+  ];
+  function runTerminalScript(script, name, rc, opts) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-cmd-'));
+    try {
+      const prof = path.join(base, name);
+      const start = path.join(prof, 'HamidunStart');
+      fs.mkdirSync(start, { recursive: true });
+      fs.mkdirSync(path.join(prof, '.local', 'bin'), { recursive: true });
+      // Где лежит фальшивый claude: ~/.local/bin (по умолчанию), %USERPROFILE%\AppData\Roaming\npm или
+      // %ProgramFiles%\nodejs — три каталога, которые команда дописывает в начало PATH.
+      // Рабочую папку сверяет САМ cmd (ожидаемая — из окружения, оно UTF-16): вывод cmd.exe в пайп кодируется
+      // кодовой страницей консоли (866/437), и кириллицу из имени профиля в тексте ответа не прочитать — а
+      // страница зависит от того, что успел сделать прежний тест в общей консоли. В кавычках — потому что
+      // «&» и «^» в раскрытом %CD% иначе делят строку (ошибка фикстуры, не команды).
+      if (!(opts && opts.noClaude)) {
+        const where = (opts && opts.dir) || 'local';
+        const dir = where === 'npm' ? path.join(prof, 'AppData', 'Roaming', 'npm')
+          : where === 'node' ? path.join(base, 'pf', 'nodejs') : path.join(prof, '.local', 'bin');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'claude.cmd'),
+          '@echo HM-FAKE-CLAUDE\r\n@if /i "%CD%"=="%HM_EXPECT_CWD%" (echo HM-FAKE-CWD-OK) else (echo HM-FAKE-CWD-BAD)\r\n@exit /b %HM_FAKE_RC%\r\n');
+      }
+      const env = { SystemRoot: SYS, PATH: path.join(SYS, 'System32'), PATHEXT: '.COM;.EXE;.BAT;.CMD',
+        USERPROFILE: (opts && opts.trailing) ? prof + '\\' : prof, HM_FAKE_RC: String(rc), HM_EXPECT_CWD: start, ProgramFiles: path.join(base, 'pf') };
+      // windowsHide: своя скрытая консоль у каждого запуска — «chcp 65001» из команды не должен утекать в консоль
+      // прогона (раньше он её переключал, и следующие запуски читались только поэтому).
+      const r = spawnSync(CMD_EXE, ['/d /e:on /v:off /s /c "' + script + '"'],
+        { windowsVerbatimArguments: true, windowsHide: true, cwd: start, env, input: 'x\r\n', encoding: 'utf8', timeout: 90000 });
+      return { status: r.status, out: String(r.stdout || '') + String(r.stderr || ''), start };
+    } finally { rm(base); }
+  }
+  const PAUSE = /\. \. \./;   // «Press any key to continue . . .» на любом языке заканчивается так
+  // Проверяется ПОВЕДЕНИЕ по ASCII-маркерам и коду выхода, а не русский текст из пайпа: cmd.exe кодирует вывод
+  // кодовой страницей консоли, с которой стартовал, и «chcp 65001» внутри строки её для пайпа не меняет.
+  // Что русское сообщение и «chcp 65001» первой командой на месте — стережёт статический тест выше по файлу
+  // («окно Войти в Claude: в команде chcp 65001 первой…»); как оно выглядит на экране, прогон cmd.exe
+  // через пайп не показывает.
+  function checkTerminalScript(script, names) {
+    names.forEach((name) => {
+      const w = '[профиль ' + JSON.stringify(name) + '] ';
+      const good = runTerminalScript(script, name, 0);
+      assert(/^HM-FAKE-CLAUDE\s*$/m.test(good.out) && /^HM-FAKE-CWD-OK\s*$/m.test(good.out) && !/HM-FAKE-CWD-BAD/.test(good.out),
+        w + 'claude найден в ~/.local/bin и запущен в рабочей папке ~/HamidunStart: ' + JSON.stringify(good.out.slice(0, 300)));
+      assert.strictEqual(good.status, 0, w + 'штатный выход — код 0');
+      assert(!PAUSE.test(good.out), w + 'claude завершился штатно — pause нет, окно закроется: ' + good.out);
+      const bad = runTerminalScript(script, name, 1);
+      assert(/HM-FAKE-CLAUDE/.test(bad.out) && PAUSE.test(bad.out), w + 'claude упал — pause сработал, окно не схлопнулось: ' + JSON.stringify(bad.out.slice(0, 300)));
+      const none = runTerminalScript(script, name, 0, { noClaude: true });
+      assert(!/HM-FAKE-CLAUDE/.test(none.out), w + 'claude нет — запускать нечего: ' + JSON.stringify(none.out.slice(0, 300)));
+      assert(none.out.split(PAUSE)[0].trim().length > 0, w + 'claude нет — перед pause человеку что-то сказано: ' + JSON.stringify(none.out.slice(0, 300)));
+      assert(PAUSE.test(none.out) && none.status === 1, w + 'claude нет — pause и код 1 (а не код «команда не найдена»): status=' + none.status + ' ' + JSON.stringify(none.out.slice(0, 300)));
+    });
+  }
+  if (process.platform === 'win32') {
+    ok('U5 (прогон cmd.exe): команда окна Войти в Claude при враждебных именах профиля (пробел, &, ^, %, !, скобки, кириллица, ’) — claude находится, рабочая папка ~/HamidunStart, pause после ошибки, без claude — pause и код 1; PATH без кавычек, версия без pause и без проверки where ловятся', () => {
+      const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+      const found = (r) => /^HM-FAKE-CLAUDE\s*$/m.test(r.out) && /^HM-FAKE-CWD-OK\s*$/m.test(r.out) && !/HM-FAKE-CWD-BAD/.test(r.out);
+      checkTerminalScript(DR.CLAUDE_TERMINAL_SCRIPT, HOSTILE_PROFILES);
+      // Все три каталога в начале PATH рабочие: claude, поставленный npm (%USERPROFILE%\AppData\Roaming\npm)
+      // или лежащий рядом с node (%ProgramFiles%\nodejs), находится так же, как из ~/.local/bin.
+      ['plain', 'John (x86)', 'a&b'].forEach((name) => ['npm', 'node'].forEach((dir) => {
+        const r = runTerminalScript(DR.CLAUDE_TERMINAL_SCRIPT, name, 0, { dir });
+        assert(found(r) && r.status === 0,
+          '[профиль ' + JSON.stringify(name) + '] claude из каталога «' + dir + '» найден: ' + JSON.stringify(r.out.slice(0, 200)));
+      }));
+      // USERPROFILE с хвостовым «\» (так бывает) — двойной слэш в пути для cmd безвреден.
+      const tr = runTerminalScript(DR.CLAUDE_TERMINAL_SCRIPT, 'John (x86)', 0, { trailing: true });
+      assert(found(tr) && tr.status === 0,
+        'USERPROFILE с хвостовым обратным слэшем: ' + JSON.stringify(tr.out.slice(0, 200)));
+      // Мутанты. 1) PATH без кавычек и без пробела перед «&» — ломается ровно на «&» в имени профиля.
+      const noQuote = DR.CLAUDE_TERMINAL_SCRIPT.replace(/set "PATH=([^"]*)" & /, 'set PATH=$1& ');
+      assert.notStrictEqual(noQuote, DR.CLAUDE_TERMINAL_SCRIPT, 'мутация применилась');
+      checkTerminalScript(noQuote, ['plain', 'Анастасия Владимировна']);   // безобидные имена мутант переживает…
+      assert.throws(() => checkTerminalScript(noQuote, ['a&b']), /a&b/, '…а «&» в имени профиля — нет: мутант пойман');
+      // 2) без «if errorlevel 1 pause» окно с ошибкой Claude закрылось бы мгновенно.
+      const noPause = DR.CLAUDE_TERMINAL_SCRIPT.replace(' & if errorlevel 1 pause', '');
+      assert.notStrictEqual(noPause, DR.CLAUDE_TERMINAL_SCRIPT, 'мутация применилась');
+      assert.throws(() => checkTerminalScript(noPause, ['plain']), /pause/, 'мутант без pause пойман');
+      // 3) PATH без каталогов npm и nodejs: claude, поставленный npm, перестаёт находиться.
+      const noNpm = DR.CLAUDE_TERMINAL_SCRIPT.replace('%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;', '');
+      assert.notStrictEqual(noNpm, DR.CLAUDE_TERMINAL_SCRIPT, 'мутация применилась');
+      ['npm', 'node'].forEach((dir) => {
+        const lost = runTerminalScript(noNpm, 'plain', 0, { dir });
+        assert(!/HM-FAKE-CLAUDE/.test(lost.out) && lost.status === 1 && PAUSE.test(lost.out),
+          'контроль: без этих каталогов в PATH claude из «' + dir + '» не находится — проверка это видит: ' + JSON.stringify(lost.out.slice(0, 200)));
+      });
+      // 4) без проверки where: нет claude → «команда не найдена» от самого cmd и код 0 после pause вместо
+      // собственного сообщения и кода 1 (текст сообщения по пайпу не прочитать — различает код выхода).
+      const noWhere = DR.CLAUDE_TERMINAL_SCRIPT.replace(/where claude >nul 2>nul \|\| \(.*\) & call claude/, 'call claude');
+      assert.notStrictEqual(noWhere, DR.CLAUDE_TERMINAL_SCRIPT, 'мутация применилась');
+      assert.throws(() => checkTerminalScript(noWhere, ['plain']), /код 1/, 'мутант без проверки where пойман');
+    });
+  }
+
+  // --- Примитив (_deelev.ps1): текстовая команда, рабочая папка, план запуска ----------------------
+  const DEELEV = path.join(WINDIR, '_deelev.ps1');
+  function runDeelevPs(body, extraEnv) {
+    const f = path.join(os.tmpdir(), 'hm-u5-ps-' + Math.random().toString(36).slice(2, 10) + '.ps1');
+    // $script:HmSkipOrphanSweep: \u044D\u0442\u0438\u043C \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430\u043C \u043F\u043E\u0434\u043C\u0435\u0442\u0430\u043D\u0438\u0435 \u043E\u0441\u0438\u0440\u043E\u0442\u0435\u0432\u0448\u0438\u0445 \u0437\u0430\u0434\u0430\u0447 \u043F\u043B\u0430\u043D\u0438\u0440\u043E\u0432\u0449\u0438\u043A\u0430 (\u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u0431\u043B\u043E\u043A \u0444\u0430\u0439\u043B\u0430,
+    // \u043E\u043D \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0438\u0439 COM-\u043F\u043B\u0430\u043D\u0438\u0440\u043E\u0432\u0449\u0438\u043A \u043C\u0430\u0448\u0438\u043D\u044B) \u043D\u0438 \u043A \u0447\u0435\u043C\u0443 \u2014 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0430\u0435\u043C \u043F\u0440\u0438\u043C\u0438\u0442\u0438\u0432 \u0431\u0435\u0437 \u043D\u0435\u0433\u043E.
+    fs.writeFileSync(f, '\uFEFF[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n$script:HmSkipOrphanSweep = $true\r\n. ' + psq(DEELEV) + '\r\n' + body.replace(/\r?\n/g, '\r\n') + '\r\n');
+    try {
+      const r = spawnSync(PS51, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f],
+        { encoding: 'utf8', timeout: 240000, env: Object.assign({}, process.env, extraEnv || {}) });
+      const line = String(r.stdout || '').split(/\r?\n/).find((l) => l.startsWith('HMJSON:'));
+      assert(line, 'PowerShell не вернул HMJSON: ' + String(r.stderr || r.stdout || '').slice(0, 600));
+      return JSON.parse(line.slice('HMJSON:'.length));
+    } finally { try { fs.rmSync(f, { force: true }); } catch (e) { /* ignore */ } }
+  }
+  const arr = (v) => (Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]));
+
+  if (havePs) {
+    ok('U5 (прогон PS 5.1): New-HmShellScriptLine и план запуска -CmdScript — строка cmd /d /e:on /v:off /s /c "<текст>" с % и кавычками внутри; пустой текст, перевод строки и NUL отвергаются; предел 1024 знаков; журнала у такого запуска нет', () => {
+      const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+      const body = [
+        '$cmd = "$env:SystemRoot\\System32\\cmd.exe"',
+        '$s = $env:HM_T_SCRIPT',
+        '$line = New-HmShellScriptLine -CmdExe $cmd -Script $s',
+        '$plan = Get-HmShellLaunchPlan -CmdExe $cmd -CmdScript $s',
+        '$planLog = Get-HmShellLaunchPlan -CmdExe $cmd -CmdScript $s -LogPath "C:\\Users\\a\\.hamidun-setup\\deelev\\t.log" -Label "t"',
+        '$long = Get-HmShellLaunchPlan -CmdExe $cmd -CmdScript ("x" * 1100)',
+        '$cr = New-HmShellScriptLine -CmdExe $cmd -Script ("a" + [char]13 + [char]10 + "b")',
+        '$lf = Get-HmShellLaunchPlan -CmdExe $cmd -CmdScript ("a" + [char]10 + "b")',
+        '$nul = New-HmShellScriptLine -CmdExe $cmd -Script ("a" + [char]0 + "b")',
+        '$empty = New-HmShellScriptLine -CmdExe $cmd -Script ""',
+        '$badcmd = New-HmShellScriptLine -CmdExe ($cmd + [char]34) -Script "echo"',
+        '$old = New-HmShellCmdLine -CmdExe $cmd -Exe "C:\\x\\a.cmd" -Arguments @("100%")',
+        'Write-Output ("HMJSON:" + ([pscustomobject]@{ cmd = $cmd; line = $line; mode = $plan.Mode; app = $plan.App; main = $plan.Main; prep = $plan.Prep; note = $plan.Note; err = $plan.Error;',
+        '  logMode = $planLog.Mode; logMain = $planLog.Main; logPrep = $planLog.Prep; longMode = $long.Mode; longErr = $long.Error; cr = $cr; lfMode = $lf.Mode; lfErr = $lf.Error; nul = $nul; empty = $empty; badcmd = $badcmd; oldPct = $old } | ConvertTo-Json -Compress))'
+      ].join('\n');
+      const o = runDeelevPs(body, { HM_T_SCRIPT: DR.CLAUDE_TERMINAL_SCRIPT });
+      assert.strictEqual(o.line, '"' + o.cmd + '" /d /e:on /v:off /s /c "' + DR.CLAUDE_TERMINAL_SCRIPT + '"', 'строка запуска окна терминала');
+      assert.strictEqual(o.mode, 'direct'); assert.strictEqual(o.app, o.cmd); assert.strictEqual(o.main, o.line);
+      assert.strictEqual(o.err, ''); assert.strictEqual(o.prep, '');
+      assert(o.line.length < 700, 'строка окна терминала в пределе 1024 с запасом: ' + o.line.length);
+      assert(o.line.includes('%USERPROFILE%') && o.line.includes('"Claude Code"'), '«%» и кавычки внутри текста остаются как написаны');
+      assert.strictEqual(o.logMode, 'direct', 'с -CmdScript журнала нет, даже если путь журнала передан');
+      assert.strictEqual(o.logMain, o.line); assert.strictEqual(o.logPrep, '');
+      assert.strictEqual(o.longMode, ''); assert(/длиннее предела/.test(o.longErr), 'слишком длинный текст — отказ без запуска: ' + o.longErr);
+      assert.strictEqual(o.cr, '', 'CR/LF отвергаются'); assert.strictEqual(o.nul, '', 'NUL отвергается');
+      assert.strictEqual(o.lfMode, ''); assert(/текст команды/.test(o.lfErr), o.lfErr);
+      assert.strictEqual(o.empty, '', 'пустой текст отвергается'); assert.strictEqual(o.badcmd, '', 'кавычка в пути cmd отвергается');
+      assert.strictEqual(o.oldPct, '', 'контроль: для ДАННЫХ (путь .cmd) «%» по-прежнему отвергается — исключение только у фиксированного текста');
+    });
+
+    // Профиль-песочница: враждебное имя, настоящий junction, файл, профиль-ссылка.
+    function mkProfileSandbox() {
+      const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-prof-'));
+      const hostile = 'Анастасия O\u2019Brien (x86) & ^co';
+      const prof = path.join(base, hostile);
+      const start = path.join(prof, 'HamidunStart');
+      const other = path.join(base, 'other');
+      fs.mkdirSync(start, { recursive: true });
+      fs.mkdirSync(path.join(other, 'inner'), { recursive: true });
+      fs.mkdirSync(path.join(prof, 'real', 'deep'), { recursive: true });
+      fs.symlinkSync(other, path.join(prof, 'LinkToOther'), 'junction');
+      fs.symlinkSync(path.join(prof, 'real'), path.join(prof, 'LinkInside'), 'junction');
+      fs.writeFileSync(path.join(prof, 'file.txt'), 'x');
+      // Профиль, сам лежащий за ссылкой, — законная настройка (перенос профиля на другой диск).
+      const profLink = path.join(base, 'ProfileLink');
+      fs.symlinkSync(prof, profLink, 'junction');
+      return { base, prof, start, other, profLink };
+    }
+    const dropSandbox = (sb) => {
+      ['LinkToOther', 'LinkInside'].forEach((l) => { try { fs.rmdirSync(path.join(sb.prof, l)); } catch (e) { /* ignore */ } });
+      try { fs.rmdirSync(sb.profLink); } catch (e) { /* ignore */ }
+      rm(sb.base);
+    };
+    // mutate: false — настоящая функция из файла; true | 'reparse' — без проверки ссылок; 'case' — сравнение с границей
+    // профиля по регистру (оба OrdinalIgnoreCase заменены на Ordinal).
+    const resolveBody = (mutate) => {
+      let fn = '';
+      if (mutate) {
+        const src = fs.readFileSync(DEELEV, 'utf8');
+        const a = src.indexOf('function Resolve-HmShellWorkingDirectory');
+        const end = /\r?\n\}\r?\n/.exec(src.slice(a));
+        assert(a !== -1 && end, 'функция найдена целиком');
+        fn = src.slice(a, a + end.index + end[0].length);
+        if (mutate === 'case') {
+          const cased = fn.replace(/OrdinalIgnoreCase/g, 'Ordinal');
+          assert.strictEqual((fn.match(/OrdinalIgnoreCase/g) || []).length, 2, 'в функции два сравнения без учёта регистра (равенство с корнем и StartsWith)');
+          fn = cased;
+        } else {
+          const cut = fn.replace(/\s*if \(\(\$attr -band \[System\.IO\.FileAttributes\]::ReparsePoint\) -ne 0\) \{\s*\r?\n[^\r\n]*\r?\n\s*\}/, '');
+          assert.notStrictEqual(cut, fn, 'мутация (без проверки ссылок) применилась');
+          fn = cut;
+        }
+      }
+      return [
+        fn,
+        '$cases = ConvertFrom-Json $env:HM_T_CASES',
+        '$out = @()',
+        'foreach ($c in $cases) {',
+        '  $r = Resolve-HmShellWorkingDirectory -Path ([string]$c.path) -ProfileDir ([string]$c.profile)',
+        '  $out += [pscustomobject]@{ name = $c.name; path = [string]$r.Path; reason = [string]$r.Reason }',
+        '}',
+        'Write-Output ("HMJSON:" + (ConvertTo-Json -InputObject $out -Compress))'
+      ].join('\n');
+    };
+    function resolveCases(sb) {
+      const p = sb.prof, s = sb.start;
+      return [
+        { name: 'профиль сам', path: p, profile: p },
+        { name: 'HamidunStart', path: s, profile: p },
+        { name: 'хвостовой слэш', path: s + '\\', profile: p },
+        { name: 'прямые слэши', path: s.replace(/\\/g, '/'), profile: p },
+        // Регистр: профиль от системы и путь, пришедший к нам, могут различаться только им (NTFS его не различает).
+        // Сравнение с границей профиля — без учёта регистра в ОБЕИХ точках: равенство с корнем и префикс «корень\».
+        // Если регистр поменять в ОБЕИХ строках сразу, различия нет — поэтому по одной стороне.
+        { name: 'другой регистр', path: s.toUpperCase(), profile: p },
+        { name: 'профиль в другом регистре', path: p.toUpperCase(), profile: p },
+        { name: 'профиль в нижнем регистре', path: s, profile: p.toLowerCase() },
+        { name: 'нет такой папки', path: path.join(p, 'nope'), profile: p },
+        { name: 'вне профиля', path: sb.other, profile: p },
+        { name: 'побег через ..', path: path.join(s, '..', '..', 'other'), profile: p },
+        { name: 'junction в профиле', path: path.join(p, 'LinkToOther'), profile: p },
+        { name: 'внутри junction (наружу)', path: path.join(p, 'LinkToOther', 'inner'), profile: p },
+        { name: 'внутри junction (в пределах профиля)', path: path.join(p, 'LinkInside', 'deep'), profile: p },
+        { name: 'относительный', path: 'HamidunStart', profile: p },
+        { name: 'UNC', path: '\\\\server\\share\\x', profile: p },
+        { name: 'кавычка', path: s + '"', profile: p },
+        { name: 'звёздочка', path: path.join(p, 'H*'), profile: p },
+        { name: 'файл вместо папки', path: path.join(p, 'file.txt'), profile: p },
+        { name: 'пусто', path: '', profile: p },
+        { name: 'профиль не определён', path: s, profile: '' },
+        { name: 'профиль — ссылка, папка под ней обычная', path: path.join(sb.profLink, 'HamidunStart'), profile: sb.profLink }
+      ];
+    }
+    const REFUSED = ['нет такой папки', 'вне профиля', 'побег через ..', 'junction в профиле', 'внутри junction (наружу)',
+      'внутри junction (в пределах профиля)', 'относительный', 'UNC', 'кавычка', 'звёздочка', 'файл вместо папки', 'профиль не определён'];
+
+    ok('U5 (прогон PS 5.1): Resolve-HmShellWorkingDirectory — папка внутри профиля, без ссылок; враждебное имя, слэши и регистр принимаются; junction, выход из профиля, относительный и сетевой путь, кавычка, файл — отказ; мутант без проверки ссылок пропускает junction', () => {
+      const sb = mkProfileSandbox();
+      try {
+        const cases = resolveCases(sb);
+        const rows = arr(runDeelevPs(resolveBody(false), { HM_T_CASES: JSON.stringify(cases) }));
+        const by = {}; rows.forEach((r) => { by[r.name] = r; });
+        const same = (a, b) => path.normalize(a).toLowerCase() === path.normalize(b).toLowerCase();
+        assert.strictEqual(by['профиль сам'].reason, ''); assert(same(by['профиль сам'].path, sb.prof));
+        assert.strictEqual(by['HamidunStart'].reason, ''); assert(same(by['HamidunStart'].path, sb.start), by['HamidunStart'].path);
+        ['хвостовой слэш', 'прямые слэши', 'другой регистр', 'профиль в нижнем регистре'].forEach((n) => {
+          assert.strictEqual(by[n].reason, '', n + ': ' + by[n].reason); assert(same(by[n].path, sb.start), n + ' -> ' + by[n].path);
+          assert(!by[n].path.endsWith('\\') && !by[n].path.includes('/'), n + ': путь нормализован: ' + by[n].path);
+        });
+        assert.strictEqual(by['профиль в другом регистре'].reason, '', 'сам профиль в другом регистре — внутри профиля: ' + by['профиль в другом регистре'].reason);
+        assert(same(by['профиль в другом регистре'].path, sb.prof), 'и это сам профиль: ' + by['профиль в другом регистре'].path);
+        assert.strictEqual(by['пусто'].reason, ''); assert.strictEqual(by['пусто'].path, '', 'путь не задан — запуск из профиля, как раньше');
+        assert.strictEqual(by['профиль — ссылка, папка под ней обычная'].reason, '', 'профиль за ссылкой — законная настройка: ' + by['профиль — ссылка, папка под ней обычная'].reason);
+        REFUSED.forEach((n) => {
+          assert(by[n].reason, n + ': отказ с причиной'); assert.strictEqual(by[n].path, '', n + ': путь не отдаётся');
+        });
+        assert(/не найдена/.test(by['нет такой папки'].reason) && /вне профиля/.test(by['вне профиля'].reason) && /вне профиля/.test(by['побег через ..'].reason), 'причины названы');
+        assert(/ссылка/.test(by['junction в профиле'].reason) && /ссылка/.test(by['внутри junction (наружу)'].reason) && /ссылка/.test(by['внутри junction (в пределах профиля)'].reason), 'ссылка названа ссылкой');
+        assert(/не папка/.test(by['файл вместо папки'].reason), by['файл вместо папки'].reason);
+        // Контроль: тот же набор на функции БЕЗ проверки ссылок — junction проходит (и тест это видит).
+        const mrows = arr(runDeelevPs(resolveBody(true), { HM_T_CASES: JSON.stringify(cases) }));
+        const mby = {}; mrows.forEach((r) => { mby[r.name] = r; });
+        assert.strictEqual(mby['junction в профиле'].reason, '', 'контроль: без проверки ссылок junction принимается');
+        assert.strictEqual(mby['внутри junction (в пределах профиля)'].reason, '', 'контроль: и путь через него тоже');
+        // Контроль 2: сравнение с границей профиля с учётом регистра отказывает легальные пути — тест это видит.
+        const crows = arr(runDeelevPs(resolveBody('case'), { HM_T_CASES: JSON.stringify(cases) }));
+        const cby = {}; crows.forEach((r) => { cby[r.name] = r; });
+        ['другой регистр', 'профиль в другом регистре', 'профиль в нижнем регистре'].forEach((n) => {
+          assert(cby[n].reason, 'контроль: с учётом регистра «' + n + '» отказывается — проверка это видит');
+        });
+        assert.strictEqual(cby['HamidunStart'].reason, '', 'контроль: путь без разницы регистров мутант по-прежнему принимает');
+      } finally { dropSandbox(sb); }
+    });
+
+    // Профиль — от системы, а не из USERPROFILE: переменную берут из HKCU\Volatile Environment, куда пишет любая
+    // программа пользователя. Проба читает ТОЛЬКО путь (ничего не создаёт и не пишет); подложенное значение —
+    // папка внутри временного каталога теста, не профиль машины.
+    ok('U5 (прогон PS 5.1): Get-HmUserProfileDir берёт профиль у системы — подложенный USERPROFILE игнорируется; мутант на $env:USERPROFILE пойман', () => {
+      const poison = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-poison-'));
+      try {
+        const body = (mutant) => [
+          mutant || '',
+          'Write-Output ("HMJSON:" + ([pscustomobject]@{ fn = (Get-HmUserProfileDir); sys = [Environment]::GetFolderPath("UserProfile"); env = [string]$env:USERPROFILE } | ConvertTo-Json -Compress))'
+        ].join('\n');
+        const env = { USERPROFILE: poison, HOME: poison };
+        const o = runDeelevPs(body(''), env);
+        assert.strictEqual(o.env, poison, 'подложенное значение действительно стоит в окружении пробы (тест не касается настоящего профиля)');
+        assert(o.sys && o.sys.toLowerCase() !== poison.toLowerCase(), 'системный профиль — не подложенная папка: ' + o.sys);
+        assert.strictEqual(o.fn, o.sys, 'профиль взят у системы, а не из USERPROFILE: ' + o.fn);
+        // Контроль: функция, читающая переменную, вернула бы подложенное значение — тест это видит.
+        const src = fs.readFileSync(DEELEV, 'utf8');
+        const a = src.indexOf('function Get-HmUserProfileDir');
+        const end = /\r?\n\}\r?\n/.exec(src.slice(a));
+        assert(a !== -1 && end, 'функция найдена целиком');
+        const fnText = src.slice(a, a + end.index + end[0].length);
+        const mutFn = fnText.replace("[Environment]::GetFolderPath('UserProfile')", '$env:USERPROFILE');
+        assert.notStrictEqual(mutFn, fnText, 'мутация применилась');
+        const m = runDeelevPs(body(mutFn), env);
+        assert.strictEqual(m.fn, poison, 'контроль: мутант вернул подложенное значение: ' + m.fn);
+      } finally { rm(poison); }
+    });
+
+    // Invoke-HmAsShellUser на подменённом системном слое (как в A1c): настоящий CreateProcessWithTokenW
+    // в тесте недоступен, поэтому вызовы системы записывает C#-класс. Всё остальное — настоящее.
+    ok('U5 (прогон PS 5.1): Invoke-HmAsShellUser -CmdScript -WorkingDirectory на подменённом системном слое — ровно один запуск cmd.exe с проверенной папкой и видимым окном; политика токена и проверка папки идут ДО запуска; файл+текст и ни того ни другого — отказ', () => {
+      const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+      const cs = [
+        'using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;',
+        'public static class HmFakeNative2 {',
+        '  public static List<string> Lines = new List<string>(); public static List<string> Apps = new List<string>();',
+        '  public static List<string> Cwds = new List<string>(); public static List<uint> Flags = new List<uint>();',
+        '  public static uint WaitResult = 258; public static uint ExitCode = 0;',
+        '  public static bool DuplicateTokenEx(IntPtr h, uint access, IntPtr attrs, int imp, int type, ref IntPtr dup) { dup = (IntPtr)0x7700; return true; }',
+        '  public static bool CreateProcessWithTokenW(IntPtr tok, uint logon, string app, StringBuilder cmd, uint flags, IntPtr env, string cwd, IntPtr si, IntPtr pi) {',
+        '    Lines.Add(cmd.ToString()); Apps.Add(app); Cwds.Add(cwd); Flags.Add(flags);',
+        '    Marshal.WriteIntPtr(pi, 0, (IntPtr)(0x100 + Lines.Count)); Marshal.WriteIntPtr(pi, IntPtr.Size, (IntPtr)0x900); Marshal.WriteInt32(pi, 2 * IntPtr.Size, 4000 + Lines.Count);',
+        '    return true; }',
+        '  public static uint WaitForSingleObject(IntPtr h, uint ms) { return WaitResult; }',
+        '  public static bool GetExitCodeProcess(IntPtr h, ref uint code) { code = ExitCode; return true; }',
+        '  public static bool CloseHandle(IntPtr h) { return true; }',
+        '  public static void Reset() { Lines.Clear(); Apps.Clear(); Cwds.Clear(); Flags.Clear(); WaitResult = 258; ExitCode = 0; }',
+        '}'
+      ].join('\r\n');
+      const sb = mkProfileSandbox();
+      try {
+        const body = [
+          "Add-Type -TypeDefinition @'",
+          cs,
+          "'@",
+          '$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+          "$script:ShellIl = 'S-1-16-8192'; $script:DupIl = 'S-1-16-8192'; $script:ShellUser = $me",
+          'function Get-HmNativeApi { return [HmFakeNative2] }',
+          'function Get-HmUserProfileDir { return $env:HM_T_PROFILE }',
+          'function Open-HmShellToken { return [pscustomobject]@{ Handle = [IntPtr]0x55; ProcessId = 1; UserSid = $script:ShellUser; IntegritySid = $script:ShellIl; Reason = "" } }',
+          'function Get-HmTokenSid { param($Token, $Class) return $script:DupIl }',
+          '$script:Script = $env:HM_T_SCRIPT',
+          'function Run($name, [hashtable]$p, [hashtable]$o) {',
+          '  [HmFakeNative2]::Reset()',
+          '  $script:ShellIl = $(if ($o.shellIl) { $o.shellIl } else { "S-1-16-8192" }); $script:DupIl = "S-1-16-8192"; $script:ShellUser = $(if ($o.user) { $o.user } else { $me })',
+          '  if ($o.wait -ne $null) { [HmFakeNative2]::WaitResult = [uint32]$o.wait }; if ($o.exit -ne $null) { [HmFakeNative2]::ExitCode = [uint32]$o.exit }',
+          '  $r = Invoke-HmAsShellUser @p',
+          '  [pscustomobject]@{ name = $name; gate = $r.Gate; code = $r.Code; reason = [string]$r.Reason; lines = @([HmFakeNative2]::Lines.ToArray()); apps = @([HmFakeNative2]::Apps.ToArray()); cwds = @([HmFakeNative2]::Cwds.ToArray()); flags = @([HmFakeNative2]::Flags.ToArray()) }',
+          '}',
+          '$s = $env:HM_T_SCRIPT; $start = $env:HM_T_START; $junc = $env:HM_T_JUNC; $who = "$env:SystemRoot\\System32\\whoami.exe"',
+          '$rows = @()',
+          '$rows += Run "script-ok" @{ CmdScript = $s; WorkingDirectory = $start; NoWait = $true; Label = "claude-terminal" } @{}',
+          '$rows += Run "script-exited" @{ CmdScript = $s; WorkingDirectory = $start; NoWait = $true } @{ wait = 0; exit = 7 }',
+          '$rows += Run "cwd-junction" @{ CmdScript = $s; WorkingDirectory = $junc; NoWait = $true } @{}',
+          '$rows += Run "cwd-outside" @{ CmdScript = $s; WorkingDirectory = "C:\\Windows"; NoWait = $true } @{}',
+          '$rows += Run "shell-high" @{ CmdScript = $s; WorkingDirectory = $start; NoWait = $true } @{ shellIl = "S-1-16-12288" }',
+          '$rows += Run "other-user" @{ CmdScript = $s; WorkingDirectory = $start; NoWait = $true } @{ user = "S-1-5-21-1-2-3-1001" }',
+          '$rows += Run "both" @{ CmdScript = $s; Exe = $who; NoWait = $true } @{}',
+          '$rows += Run "neither" @{ NoWait = $true } @{}',
+          '$rows += Run "script-too-long" @{ CmdScript = ("x" * 1100); NoWait = $true } @{}',
+          '$rows += Run "script-lf" @{ CmdScript = ("a" + [char]10 + "b"); NoWait = $true } @{}',
+          '$rows += Run "exe-default-cwd" @{ Exe = $who; Arguments = @("/groups"); NoWait = $true } @{}',
+          '$rows += Run "exe-with-cwd" @{ Exe = $who; Arguments = @("/groups"); WorkingDirectory = $start; NoWait = $true } @{}',
+          'Write-Output ("HMJSON:" + (ConvertTo-Json -InputObject $rows -Compress -Depth 5))'
+        ].join('\r\n');
+        const rows = arr(runDeelevPs(body, { HM_T_PROFILE: sb.prof, HM_T_START: sb.start, HM_T_JUNC: path.join(sb.prof, 'LinkToOther'), HM_T_SCRIPT: DR.CLAUDE_TERMINAL_SCRIPT }));
+        const by = {}; rows.forEach((r) => { by[r.name] = r; });
+        const cmdPath = path.join(SYS, 'System32', 'cmd.exe');
+        const line = '"' + cmdPath + '" /d /e:on /v:off /s /c "' + DR.CLAUDE_TERMINAL_SCRIPT + '"';
+        const ok1 = by['script-ok'];
+        assert.strictEqual(ok1.gate, 'medium', ok1.reason); assert.strictEqual(ok1.code, 0, 'окно живёт — код 0');
+        assert.deepStrictEqual(arr(ok1.lines), [line], 'ровно ОДИН запуск (без подготовки журнала), строка — cmd /s /c "<текст>"');
+        assert.deepStrictEqual(arr(ok1.apps), [cmdPath], 'программа — системный cmd.exe');
+        assert.deepStrictEqual(arr(ok1.cwds), [sb.start], 'рабочая папка — проверенная ~/HamidunStart (враждебное имя без искажений)');
+        assert.strictEqual((arr(ok1.flags)[0] & 0x08000000), 0, 'CREATE_NO_WINDOW не задан — окно видимое (NoWait)');
+        assert.strictEqual(by['script-exited'].code, 7, 'мгновенное завершение cmd видно в коде');
+        ['cwd-junction', 'cwd-outside'].forEach((n) => {
+          assert.strictEqual(by[n].gate, 'unavailable', n + ': ' + by[n].reason);
+          assert(/рабочая папка не прошла проверку/.test(by[n].reason), n + ': причина названа: ' + by[n].reason);
+          assert.deepStrictEqual(arr(by[n].lines), [], n + ': ничего не запущено');
+        });
+        assert.strictEqual(by['shell-high'].gate, 'refused'); assert.strictEqual(by['other-user'].gate, 'refused');
+        assert.deepStrictEqual(arr(by['shell-high'].lines).concat(arr(by['other-user'].lines)), [], 'политика токена — до любого запуска');
+        ['both', 'neither', 'script-too-long', 'script-lf'].forEach((n) => {
+          assert.strictEqual(by[n].gate, 'unavailable', n + ': ' + by[n].reason); assert.deepStrictEqual(arr(by[n].lines), [], n + ': ничего не запущено');
+        });
+        assert(/какой из них запускать/.test(by['both'].reason) && /не указано/.test(by['neither'].reason) && /длиннее предела/.test(by['script-too-long'].reason), 'причины названы');
+        // Прежний вызов (редакторы): без папки — запуск из профиля (песочницы), с папкой — из неё.
+        assert.deepStrictEqual(arr(by['exe-default-cwd'].cwds), [sb.prof], 'прежнее поведение: рабочая папка — профиль');
+        assert.deepStrictEqual(arr(by['exe-with-cwd'].cwds), [sb.start], 'и явная папка работает для программ');
+        assert(/^"[^"]*whoami\.exe" "\/groups"$/i.test(by['exe-default-cwd'].lines[0]), 'строка программы прежняя: ' + by['exe-default-cwd'].lines[0]);
+      } finally { dropSandbox(sb); }
+    });
+  }
+
+  // --- shellTokenInline: значения доходят до примитива неискажёнными через границу командной строки ---
+  if (havePs) {
+    ok('U5 (прогон PS 5.1 + Node): shellTokenInline — текст команды, рабочая папка, программа и аргументы со всеми видами кавычек, % и кириллицей доходят до Invoke-HmAsShellUser без искажений (граница -Command, настоящий парсер); для редакторов строка побайтно прежняя; значение без литерала ломает разбор', () => {
+      const DR = require(path.join(ROOT, 'src', 'deelev-route.js'));
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-inl-'));
+      try {
+        const dir = path.join(tmp, 'O\u2019Brien & co (x86) Анастасия');
+        fs.mkdirSync(dir, { recursive: true });
+        const stub = path.join(dir, '_deelev.ps1');
+        fs.writeFileSync(stub, psFile([
+          'function Invoke-HmAsShellUser {',
+          '  param([string]$Exe = "", [string[]]$Arguments = @(), [string]$Label = "", [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = "", [string]$WorkingDirectory = "")',
+          '  $p = "EXE=" + $Exe + [char]1 + "ARGS=" + ($Arguments -join [string][char]2) + [char]1 + "LABEL=" + $Label + [char]1 + "NOWAIT=" + [bool]$NoWait + [char]1 + "SCRIPT=" + $CmdScript + [char]1 + "CWD=" + $WorkingDirectory',
+          '  return [pscustomobject]@{ Gate = "medium"; Code = 0; Reason = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($p)) }',
+          '}'
+        ]));
+        const modules = path.join(SYS, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+        const nasty = 'echo it\'s & echo O\u2019Brien \u201Cq\u201D "q" %X% ^ ! Привет \u2018a\u201A\u201B';
+        const specs = [
+          { script: DR.CLAUDE_TERMINAL_SCRIPT, cwd: 'C:\\Users\\Анастасия O\u2019Brien (x86) & ^co\\HamidunStart', label: 'claude-terminal' },
+          { script: nasty, cwd: "C:\\Users\\It's\\a b\\HamidunStart\\", label: 'x' },
+          { exe: 'C:\\Program Files\\Microsoft VS Code\\Code.exe', args: ['C:\\Users\\O\u2019Brien\\HamidunStart', "C:\\Users\\O'Brien (x86)\\PROMPTS.md", 'C:\\dir with space\\'], label: 'launch-editor' }
+        ];
+        specs.forEach((sp, i) => {
+          const inline = DR.shellTokenInline(Object.assign({ psModulePath: modules, deelev: stub }, sp));
+          const r = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+            { encoding: 'utf8', timeout: 120000, windowsHide: true });
+          const m = /HMSHELL::([a-z-]+)::(-?\d+)::([\s\S]*?)::END/.exec(String(r.stdout || ''));
+          assert(m, 'случай ' + i + ': маркер не пришёл: ' + String(r.stderr || r.stdout).slice(0, 500));
+          assert.strictEqual(m[1], 'medium'); assert.strictEqual(m[2], '0');
+          const f = {}; Buffer.from(m[3], 'base64').toString('utf8').split('\u0001').forEach((kv) => { const k = kv.indexOf('='); f[kv.slice(0, k)] = kv.slice(k + 1); });
+          assert.strictEqual(f.NOWAIT, 'True', 'всегда -NoWait'); assert.strictEqual(f.LABEL, sp.label);
+          if (sp.script) {
+            assert.strictEqual(f.SCRIPT, sp.script, 'случай ' + i + ': текст команды дошёл без искажений');
+            assert.strictEqual(f.CWD, sp.cwd, 'случай ' + i + ': рабочая папка дошла без искажений'); assert.strictEqual(f.EXE, '');
+          } else {
+            assert.strictEqual(f.EXE, sp.exe); assert.strictEqual(f.ARGS, sp.args.join('\u0002'), 'аргументы — отдельными, без искажений'); assert.strictEqual(f.SCRIPT, ''); assert.strictEqual(f.CWD, '');
+          }
+        });
+        // Для редакторов строка ПОБАЙТНО прежняя (так её собирал winShellTokenLaunch до правки).
+        const oldInline = (ps, deelev, exe, folderArg, extraArgs) => {
+          const lit = DR.psLit; const s32 = path.dirname(path.dirname(path.dirname(ps)));
+          return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' +
+            '$env:PSModulePath=' + lit(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules')) + ';' +
+            '. ' + lit(deelev) + ';' +
+            '$r=Invoke-HmAsShellUser -Exe ' + lit(exe) + ' -Arguments @(' + [folderArg].concat(extraArgs || []).map(lit).join(',') +
+            ") -NoWait -Label 'launch-editor';" +
+            "[Console]::Out.Write('HMSHELL::'+$r.Gate+'::'+$r.Code+'::'+([string]$r.Reason -replace '::',': ')+'::END')";
+        };
+        const ps = path.join(SYS, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        const ex = 'C:\\Users\\O\u2019Brien\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe';
+        assert.strictEqual(
+          DR.shellTokenInline({ psModulePath: path.join(SYS, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'), deelev: stub, exe: ex, args: ['C:\\dir', 'C:\\dir\\PROMPTS.md'], label: 'launch-editor' }),
+          oldInline(ps, stub, ex, 'C:\\dir', ['C:\\dir\\PROMPTS.md']), 'строка запуска редактора не изменилась');
+        // Контроль: значение, подставленное без литерала (удвоения кавычек), ломает разбор — тест это видит.
+        const broken = DR.shellTokenInline({ psModulePath: modules, deelev: stub, script: nasty, label: 'x' }).replace(DR.psLit(nasty), "'" + nasty + "'");
+        const rb = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', broken], { encoding: 'utf8', timeout: 120000, windowsHide: true });
+        const mb = /HMSHELL::medium::0::([\s\S]*?)::END/.exec(String(rb.stdout || ''));
+        const okValue = mb ? Buffer.from(mb[1], 'base64').toString('utf8').includes('SCRIPT=' + nasty + '\u0001') : false;
+        assert(!okValue, 'контроль: без литерала значение не доходит целым');
+      } finally { rm(tmp); }
+    });
+  }
+
+  // --- Статические охранники ----------------------------------------------------------------------
+  const codeOnlyJs = (s) => String(s).split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const psCode = (s) => String(s).split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+
+  ok('U5 (статика): скрепка и трей моста запускаются только через Invoke-HmAsShellUser -NoWait; в коде нет explorer.exe, Start-Process и файла-лаунчера; примитив подключается после холостого выхода и до запуска', () => {
+    const ms = psCode(readWin('mascot.ps1'));
+    assert(!/explorer/i.test(ms) && !/\bStart-Process\b/i.test(ms) && !/\bInvoke-Item\b/i.test(ms), 'mascot.ps1: explorer/Start-Process в коде');
+    assert(/Invoke-HmAsShellUser -Exe \$dest -NoWait -Label 'mascot'/.test(ms), 'mascot.ps1: запуск через токен оболочки, метка mascot');
+    assert(/\$shRes\.Gate -eq 'medium' -and \$shRes\.Code -eq 0\) \{ \$launched = \$true \}/.test(ms), 'mascot.ps1: запуск принят только при Gate medium и коде 0');
+    assertOrder(ms, 'if ($DRY) {', ". (Join-Path $PSScriptRoot '_deelev.ps1')", 'mascot.ps1: _deelev.ps1 подключается ПОСЛЕ холостого выхода (его загрузка подметает задачи планировщика)');
+    assertOrder(ms, ". (Join-Path $PSScriptRoot '_deelev.ps1')", 'Invoke-HmAsShellUser -Exe $dest', 'mascot.ps1: подключение — до запуска');
+    assertOrder(ms, 'Invoke-HmAsShellUser -Exe $dest', 'Invoke-WebRequest', 'mascot.ps1: health-check — после запуска');
+    assert(/if \(\$launched\) \{\s*\r?\n\s*foreach \(\$i in 1\.\.10\)/.test(ms), 'mascot.ps1: health-check только после принятого запуска');
+    assert((ms.match(/Invoke-HmAsShellUser/g) || []).length === 1, 'mascot.ps1: запуск один');
+    const br = psCode(readWin('bridge.ps1'));
+    assert(!/explorer/i.test(br) && !/\bStart-Process\b/i.test(br) && !/launch-bridge/i.test(br) && !/WriteAllText\(\$launch/.test(br), 'bridge.ps1: explorer/Start-Process/лаунчер в коде');
+    assert(/Invoke-HmAsShellUser -Exe \$run -Arguments @\(\$agentPath\) -NoWait -Label 'bridge-tray'/.test(br), 'bridge.ps1: трей — токеном оболочки, агент отдельным аргументом');
+    assertOrder(br, "New-ItemProperty -Path 'HKCU:", 'Invoke-HmAsShellUser -Exe $run', 'bridge.ps1: запуск сейчас — только после прописанного автозапуска, внутри гейта $agentOk');
+    assert(/if \(\$agentOk\) \{[\s\S]*Invoke-HmAsShellUser -Exe \$run[\s\S]*\} elseif \(\$null -eq \$stRes/.test(br), 'bridge.ps1: запуск трея — внутри ветки прошедшей самопроверки');
+    // Никакого прямого (повышенного) запуска после отказа токена оболочки: ни одного из способов, которыми
+    // PowerShell стартует программу мимо Start-Process, в коде этих двух скриптов нет.
+    [
+      [/&\s*\$(?:run|py|pyw|dest|exe)\b/i, 'оператор вызова «&» над путём программы'],
+      [/\[(?:System\.)?Diagnostics\.Process\]::Start/i, '[Process]::Start'],
+      [/\bcmd(?:\.exe)?\s+\/[ck]\b/i, 'cmd /c'],
+      [/\bInvoke-Expression\b|\biex\b/i, 'Invoke-Expression'],
+      [/\bStart-Job\b|\bInvoke-Command\b|\bStart-ThreadJob\b/i, 'Start-Job / Invoke-Command'],
+      [/\bShell\.Application\b|\bShellExecute\b/i, 'ShellExecute'],
+    ].forEach(([re, what]) => {
+      assert(!re.test(ms), 'mascot.ps1: прямой запуск мимо примитива — ' + what);
+      assert(!re.test(br), 'bridge.ps1: прямой запуск мимо примитива — ' + what);
+    });
+    // Исход запуска скрепки — машинным маркером (main убирает строку из лога и отдаёт её признак экрану финиша).
+    assert((ms.match(/HM-MASCOT launched=/g) || []).length === 1, 'mascot.ps1: маркер исхода запуска печатается один раз');
+    assert(/Write-Host "HM-MASCOT launched=\$\(if \(\$launched\) \{ 1 \} else \{ 0 \}\)"/.test(ms), 'mascot.ps1: маркер — по $launched (запуск принят: токен medium и код 0)');
+    assertOrder(ms, 'Invoke-HmAsShellUser -Exe $dest', 'HM-MASCOT launched=', 'mascot.ps1: маркер — после попытки запуска');
+    assertOrder(ms, 'HM-MASCOT launched=', 'Invoke-WebRequest', 'mascot.ps1: маркер — до ожидания ответа скрепки');
+    // Подметание осиротевших задач (COM планировщика) шагу скрепки ни к чему — выключается до подключения примитива.
+    assertOrder(ms, '$script:HmSkipOrphanSweep = $true', ". (Join-Path $PSScriptRoot '_deelev.ps1')", 'mascot.ps1: подметание выключается ДО подключения примитива');
+    // Красный диагноз WebView2 — только когда запуск был принят и скрепка не ответила (два факта, а не один).
+    assert(/elseif \(-not \$wvOk -and \$launched\) \{/.test(ms), 'mascot.ps1: диагноз «нет WebView2» — только после принятого запуска');
+    // Итог моста про значок в трее учитывает, запущен ли трей сейчас.
+    assert(/\$trayStarted = \$false/.test(br) && /\$trayStarted = \$true/.test(br), 'bridge.ps1: флаг «трей запущен сейчас»');
+    assertOrder(br, 'Invoke-HmAsShellUser -Exe $run', '$trayStarted = $true', 'bridge.ps1: флаг ставится после принятого запуска');
+    assert(/\$trayMsg = [\s\S]*\$trayStarted[\s\S]*появится после следующего входа в Windows/.test(br), 'bridge.ps1: итоговая строка называет, когда появится значок');
+    // Ни один скрипт установщика не отдаёт файл Проводнику.
+    fs.readdirSync(WINDIR).filter((f) => /\.ps1$/i.test(f)).forEach((f) => {
+      assert(!/explorer\.exe/i.test(psCode(readWin(f))), f + ': в коде explorer.exe — файл отдают Проводнику, который без оболочки исполнит его под админом');
+    });
+  });
+
+  ok('U5 (статика): main.js — Войти в Claude на Windows без spawn/записи файла/explorer, через winShellTokenRun; explorer.exe остаётся только в четырёх известных местах (проба владельца, фильтр, открытие ПАПКИ)', () => {
+    const m = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const code = codeOnlyJs(m);
+    const a = code.indexOf('async function winOpenClaudeTerminal');
+    const b = code.indexOf("ipcMain.handle('open-claude-terminal'");
+    assert(a !== -1 && b > a, 'функция и обработчик найдены');
+    const fn = code.slice(a, b);
+    assert(!/spawn|execFile|writeFileSync|appendFileSync|createWriteStream|explorer|\.cmd\b/i.test(fn), 'winOpenClaudeTerminal: нет запуска процессов, записи файлов и explorer: ' + (fn.match(/spawn|execFile|writeFileSync|explorer|\.cmd\b/i) || [''])[0]);
+    assert(/winShellTokenRun\(\{ script: deelevRoute\.CLAUDE_TERMINAL_SCRIPT, cwd: startDir, label: 'claude-terminal' \}\)/.test(fn), 'окно — токеном оболочки с фиксированной командой и папкой ~/HamidunStart');
+    assert(/return sh\.gate === 'medium' && sh\.code === 0;/.test(fn), 'успех — только Gate medium и код 0');
+    assert(/if \(IS_WIN\) return await winOpenClaudeTerminal\(\);/.test(code.slice(b, b + 200)), 'обработчик на Windows зовёт только её');
+    assert(/let _winTerminalBusy = null;/.test(code) && /if \(_winTerminalBusy\) return _winTerminalBusy;/.test(fn) && /finally \{ _winTerminalBusy = null; \}/.test(fn),
+      'повторное нажатие, пока окно открывается, получает идущий запуск; состояние снимается на любом исходе');
+    assert(!/claude-start\.cmd|const cmdBody/.test(code), 'файла claude-start.cmd в main.js нет');
+    // explorer.exe в коде main.js — только известные места; новый запуск через Проводник сюда не пролезет молча.
+    const hits = code.split('\n').filter((l) => /explorer\\?\.exe/.test(l)).map((l) => l.trim());
+    assert.strictEqual(hits.length, 4, 'explorer.exe в коде main.js: ожидали 4 известных места, а есть ' + hits.length + ': ' + hits.join(' | '));
+    assert(hits.some((l) => /imagename eq explorer\.exe/.test(l)) && hits.some((l) => /\/explorer\\\.exe\/i\.test/.test(l)), 'проба владельца оболочки (tasklist) и её фильтр');
+    assert(hits.some((l) => /path\.join\(sysRoot, 'explorer\.exe'\)/.test(l)), 'folderFallback: абсолютный explorer на ПАПКУ');
+    assert(hits.some((l) => /spawnSync\('explorer\.exe', \[dir\]/.test(l)), 'launchVsCodeOn: открыть ПАПКУ, если редакторов нет');
+    // winShellTokenRun — единственный путь «токен оболочки» в main.js; обёртка редакторов тонкая.
+    const wl = code.slice(code.indexOf('function winShellTokenLaunch'), code.indexOf('async function winLaunchDeElevated'));
+    assert(/return winShellTokenRun\(\{ exe, args: \[folderArg\]\.concat\(extraArgs \|\| \[\]\), label: 'launch-editor' \}\);/.test(wl), 'запасной путь редакторов идёт через общую функцию');
+  });
+
+  ok('U5 (статика): _deelev.ps1 — рабочая папка проверяется ПОСЛЕ токена и ДО первого запуска; профиль берётся от системы; -CmdScript не пишет журнал; Exe больше не обязателен, но ничего или файл вместе с текстом — отказ', () => {
+    const d = psCode(fs.readFileSync(DEELEV, 'utf8'));
+    const fn = d.slice(d.indexOf('function Invoke-HmAsShellUser'), d.indexOf('function Merge-HmDeElevResult'));
+    assertOrder(fn, "$dupIl -ne 'S-1-16-8192'", 'Resolve-HmShellWorkingDirectory -Path $WorkingDirectory', 'папка — после проверки токена');
+    assertOrder(fn, 'Resolve-HmShellWorkingDirectory -Path $WorkingDirectory', 'Start-HmTokenProcess -Token', 'папка — до первого запуска');
+    assert(/\$cwd = \$wd\.Path/.test(fn) && /\$profDir = Get-HmUserProfileDir/.test(fn), 'используется нормализованный путь из проверки; профиль — от системы');
+    assert(!/GetFolderPath\('UserProfile'\)/.test(fn), 'профиль не читается мимо Get-HmUserProfileDir');
+    assert(/\$logPath = if \(\$NoWait -or \$CmdScript\) \{ '' \}/.test(fn), 'у текстовой команды журнала нет');
+    assert(/if \(\$CmdScript -and \$Exe\)/.test(fn) && /if \(-not \$CmdScript -and -not \$Exe\)/.test(fn), 'файл+текст и ничего — отказ');
+    const rf = d.slice(d.indexOf('function Resolve-HmShellWorkingDirectory'), d.indexOf('function Invoke-HmAsShellUser'));
+    assert(/ReparsePoint/.test(rf) && /StartsWith\(\$root \+ '\\', \[StringComparison\]::OrdinalIgnoreCase\)/.test(rf), 'проверка ссылок и границы профиля на месте');
+    assert(/\.Equals\(\$root, \[StringComparison\]::OrdinalIgnoreCase\)/.test(rf), 'равенство с корнем профиля — тоже без учёта регистра');
+    const pf = d.slice(d.indexOf('function Get-HmUserProfileDir'), d.indexOf('function Resolve-HmShellWorkingDirectory'));
+    assert(/GetFolderPath\('UserProfile'\)/.test(pf) && !/\$env:USERPROFILE|\$env:HOME\b|GetEnvironmentVariable/i.test(pf),
+      'профиль — от системы (SHGetFolderPath), а не из переменной среды, которую пишет любая программа пользователя');
+    assert(/if \(-not \$script:HmSkipOrphanSweep\) \{\s*\r?\n\s*try \{\s*\r?\n\s*\$hmOrphanTags = @\(Remove-HmOrphanTasks\)/.test(d),
+      'подметание осиротевших задач — под проверкой флага $script:HmSkipOrphanSweep (по умолчанию работает)');
+    assert((d.match(/\$N::CreateProcessWithTokenW\(/g) || []).length === 1, 'системный запуск с токеном — по-прежнему в одном месте');
+  });
 })();
 
 // ===========================================================================
@@ -17205,7 +18360,9 @@ ok('config.json в репозитории без сборочных маркер
         lbl[id] = H.ctx.__labels[id] || '';
       });
       return { res, cls, lbl, sent, ns: H.ctx.__ns, title: H.document.getElementById('progress-title').textContent,
-        sub: H.document.getElementById('progress-sub').textContent };
+        sub: H.document.getElementById('progress-sub').textContent,
+        // Исход запуска скрепки, как его сохранил renderer, и строка про неё на финише.
+        mascotLaunched: H.run('STATE.mascotLaunched'), mascotNote: H.run('mascotNoteText()') };
     } finally { H.dispose(); }
   };
 
@@ -18101,6 +19258,97 @@ ok('config.json в репозитории без сборочных маркер
       assert(/ns-mascot/.test(renderNsHtml(H, '[], [], [], false, [], [], [], []')), 'поставил этот прогон — строка есть');
     } finally { H.dispose(); }
   });
+
+  // ---- U5 (круг 3): строка про скрепку не обещает запуск, которого не было ----------------------------
+  // Запуск скрепки идёт токеном оболочки и честно отказывается там, где оболочки обычного уровня нет (UAC выключен,
+  // встроенный «Администратор», нет Проводника, отключена служба «Вторичный вход»). Шаг при этом зелёный, а
+  // раньше финиш всё равно писал «Скрепка на рабочем столе… Установщик запустил её один раз».
+  ok('скрепка: маркер «HM-MASCOT launched=0|1» разбирает одна функция; main убирает строку из UI-лога и берёт её только у шага mascot; сводка провала строку не показывает; признак едет ответом шага', () => {
+    assert.strictEqual(RO.parseMascotLaunch('HM-MASCOT launched=1'), true);
+    assert.strictEqual(RO.parseMascotLaunch('HM-MASCOT launched=0'), false);
+    assert.strictEqual(RO.parseMascotLaunch('  HM-MASCOT launched=1\r'), true, 'пробелы и CR по краям не мешают');
+    ['HM-MASCOT launched=2', 'HM-MASCOT launched=', 'HM-MASCOT', 'xHM-MASCOT launched=1', 'HM-MASCOT launched=1 x',
+      'hm-mascot launched=1', 'Скрепка запущена', '', null, undefined, 1].forEach((v) => {
+      assert.strictEqual(RO.parseMascotLaunch(v), null, 'не маркер: ' + JSON.stringify(v));
+    });
+    // emitLine — настоящий текст из main.js, исполняется со строками вывода.
+    const m = MAIN();
+    const a = m.indexOf('const emitLine = (l) => {');
+    const b = m.indexOf('\n    };', a);
+    assert(a !== -1 && b !== -1, 'emitLine найдена в main.js');
+    const receipts = require(path.join(ROOT, 'src', 'install-receipts.js'));
+    const feed = (id, lines) => {
+      const sent = []; const logged = []; const outTail = [];
+      const make = new Function('receipts', 'runOutcome', 'outTail', 'TAIL_MAX', 'send', 'logLine', 'id',
+        'let mascotLaunched = null;\n' + m.slice(a, b + 7) + '\nreturn { emit: emitLine, launched: () => mascotLaunched };');
+      const h = make(receipts, RO, outTail, 400, (l) => sent.push(l), (l) => logged.push(l), id);
+      lines.forEach((l) => h.emit(l));
+      return { sent, logged, outTail, launched: h.launched() };
+    };
+    const r1 = feed('mascot', ['Скрепка установлена', 'HM-RECEIPT path C:\\x\\ClaudeMascot', 'HM-MASCOT launched=0', 'Скрепка установлена, но не запустилась']);
+    assert.deepStrictEqual(r1.sent, ['Скрепка установлена', 'Скрепка установлена, но не запустилась'], 'маркер и квитанция в UI-лог не идут: ' + JSON.stringify(r1.sent));
+    assert.deepStrictEqual(r1.outTail, r1.sent, 'и в хвост вывода (сводка провала, причина пропуска) тоже');
+    assert(r1.logged.includes('HM-MASCOT launched=0'), 'в файл журнала маркер пишется — это диагностика для поддержки');
+    assert.strictEqual(r1.launched, false, 'launched=0 → false');
+    assert.strictEqual(feed('mascot', ['HM-MASCOT launched=1']).launched, true, 'launched=1 → true');
+    assert.strictEqual(feed('mascot', ['текст']).launched, null, 'маркера нет — признака нет (macOS, прежние скрипты)');
+    const foreign = feed('git', ['HM-MASCOT launched=1']);
+    assert.strictEqual(foreign.launched, null, 'чужой шаг признак скрепки не выставляет');
+    assert.deepStrictEqual(foreign.sent, ['HM-MASCOT launched=1'], 'и для чужого шага это обычная строка');
+    // Сводка провала: машинная строка не становится «причиной». Строк «про ошибку» здесь нет нарочно: когда они есть,
+    // сводка берёт только их, и маркер в неё не попал бы и без фильтра — тест не отличил бы подлог от нормы.
+    const sum = FE.summarizeFailure(['Ставлю скрепку...', 'HM-MASCOT launched=0', 'Скрепка установлена'], { code: 1 });
+    assert.deepStrictEqual(sum.lines, ['Ставлю скрепку...', 'Скрепка установлена'], 'в сводке — только настоящие строки: ' + JSON.stringify(sum));
+    assert(!/HM-MASCOT/.test(sum.oneLine), 'и в отчёте её нет: ' + sum.oneLine);
+    // То же при наличии строк про ошибку: маркер не мешает выбору.
+    const sum2 = FE.summarizeFailure(['Ставлю скрепку...', 'HM-MASCOT launched=0', 'ОШИБКА: нет WebView2'], { code: 1 });
+    assert.deepStrictEqual(sum2.lines, ['ОШИБКА: нет WebView2'], 'строки про ошибку выбраны, маркер не мешает: ' + JSON.stringify(sum2));
+    // Ответ шага: признак виден renderer-у только когда маркер был (у остальных шагов поле не появляется).
+    const code = codeOnlyJs(m);
+    assert(/if \(mascotLaunched !== null\) res\.mascotLaunched = mascotLaunched;/.test(code), 'main.js кладёт признак в ответ шага');
+    assertOrder(code, 'const emitLine = (l) => {', 'if (mascotLaunched !== null) res.mascotLaunched', 'признак объявлен до ответа');
+    assert(/runOutcome\.parseMascotLaunch\(l\)/.test(code), 'main.js разбирает маркер общей функцией, не своим регэкспом');
+  });
+
+  ok('скрепка (финиш): установщик не смог её запустить — строка про неё этого не скрывает: без «запустил её один раз» и «на рабочем столе», с тем, как открыть самому; запустил или признака нет — прежний текст', () => {
+    const H = mkNsHarness();
+    try {
+      H.run('STATE.platform = "win32"');
+      const text = (launched) => { H.run('STATE.mascotLaunched = ' + launched); return H.run('mascotNoteText()'); };
+      ['undefined', 'true'].forEach((v) => {
+        const t = text(v);
+        assert(/на рабочем столе/.test(t) && /Установщик запустил её один раз после установки\. Запустить снова: Пуск → «Claude Mascot»/.test(t), v + ': прежний текст: ' + t);
+      });
+      const t = text('false');
+      assert(!/запустил её один раз/.test(t) && !/на рабочем столе/.test(t), 'не запускали — не пишем, что запустили и что она на столе: ' + t);
+      assert(/Установщик не смог запустить её сам/.test(t), 'сказано прямо: ' + t);
+      assert(/Запустить: Пуск → «Claude Mascot»/.test(t) && /%LOCALAPPDATA%\\Programs\\ClaudeMascot\\claude-mascot\.exe/.test(t), 'как открыть самому: ' + t);
+      assert(/Удалить/.test(t) && /Скрепка Claude \(маскот\)/.test(t) && /запусти её или удали/.test(t), 'как убрать и что без запущенной скрепки притормаживает — как раньше: ' + t);
+      assert(!/автозагруз|автозапуск|Автозагрузка|Объекты входа|вместе с Windows|при входе/i.test(t), 'про автозапуск ни слова: ' + t);
+      // На экране финиша — та же строка, и только если скрепку ставил ЭТОТ прогон.
+      H.run('STATE.mascotLaunched = false; STATE.installedEver = new Set(["mascot"])');
+      const html = renderNsHtml(H, '[], [], [], false, [], [], [], []');
+      assert(/ns-mascot[^]*Установщик не смог запустить её сам/.test(html) && !/запустил её один раз/.test(html), 'экран финиша: ' + html.slice(html.indexOf('ns-mascot'), html.indexOf('ns-mascot') + 300));
+      H.run('STATE.platform = "darwin"; STATE.mascotLaunched = undefined');
+      const mac = H.run('mascotNoteText()');
+      assert(/Установщик запустил её один раз после установки\. Запустить снова: ⌘\+Пробел → «Claude Mascot»/.test(mac), 'macOS: признака нет (mascot.sh маркер не печатает) — текст прежний: ' + mac);
+    } finally { H.dispose(); }
+  });
+
+  trackAsync(okAsync('скрепка (прогон app.js): признак запуска из ответа шага mascot доезжает до строки на финише; чужой шаг его не задаёт; при launched=true или без признака — прежний текст', async () => {
+    const off = await runScenario({ mascot: { ok: true, code: 0, mascotLaunched: false }, verify: { ok: true, code: 0 } });
+    assert.strictEqual(off.mascotLaunched, false, 'renderer сохранил launched=false');
+    assert(/Установщик не смог запустить её сам/.test(off.mascotNote) && !/запустил её один раз/.test(off.mascotNote), off.mascotNote);
+    const on = await runScenario({ mascot: { ok: true, code: 0, mascotLaunched: true }, verify: { ok: true, code: 0 } });
+    assert.strictEqual(on.mascotLaunched, true);
+    assert(/запустил её один раз/.test(on.mascotNote), on.mascotNote);
+    const none = await runScenario({ mascot: { ok: true, code: 0 }, verify: { ok: true, code: 0 } });
+    assert.strictEqual(none.mascotLaunched, undefined, 'признака нет (macOS) — ничего не выдумываем');
+    assert(/запустил её один раз/.test(none.mascotNote), none.mascotNote);
+    // Признак чужого шага скрепке не приписывается.
+    const foreign = await runScenario({ git: { ok: true, code: 0, mascotLaunched: false }, verify: { ok: true, code: 0 } });
+    assert.strictEqual(foreign.mascotLaunched, undefined, 'признак читается только у шага mascot');
+  }));
 
   ok('связь с Anthropic: совет — по ВИДУ сбоя (нет сети, перехват сертификата, сбой проверки, 403 через VPN-прокси, нечитаемый прокси), а не «нужен VPN» на всё (C-05, C-09)', () => {
     const H = loadRenderer({ build: (doc, mk) => { const n = mk('div'); n.id = 'ns-net'; doc.body.appendChild(n); } });

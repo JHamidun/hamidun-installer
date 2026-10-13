@@ -241,8 +241,8 @@ function explainScriptFailure(tail) {
 // Полный хвост остаётся в журнале установки на машине человека.
 
 // Шум, по которому нельзя понять НИЧЕГО: пустые строки, рамки, проценты,
-// служебные строки квитанций и чек-листа.
-const NOISE_RE = /^[\s=_*.\-–—]*$|^\s*\[?\d{1,3}\s*%|^HM-RECEIPT\b|^CHECK\s+(ok|fail|skip)\b/i;
+// служебные строки квитанций, исхода запуска скрепки (HM-MASCOT) и чек-листа.
+const NOISE_RE = /^[\s=_*.\-–—]*$|^\s*\[?\d{1,3}\s*%|^HM-(RECEIPT|MASCOT)\b|^CHECK\s+(ok|fail|skip)\b/i;
 // Признаки строки, которая говорит о ПРОВАЛЕ, а не о ходе работы.
 const ERRISH_RE = /ошибк|не удал|не устан|не смог|не найден|не подтверд|не хватает|отказано|запрещ|провал|прерван|\berror\b|\bfail/i;
 const ERRISH_EN_RE = /exception|traceback|denied|refused|cannot|can't|could not|unable|not found|no such|timed? out|fatal|abort|EPERM|EACCES|EBUSY|ENOENT|ENOSPC|exit code/i;
