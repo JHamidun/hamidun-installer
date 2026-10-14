@@ -1884,6 +1884,11 @@ ipcMain.handle('save-start-here', () => {
     src = path.resolve(root, rel);
     if (!src.startsWith(root + path.sep)) return { ok: false, dest: '', src: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, dest: '', src, error: 'source-missing' };
+    // Содержимое считаем ДО проверки стола: чтение 600 КБ памятки и сводки конфига — десятки
+    // миллисекунд, а между проверкой папки и записью программа пользователя успела бы подменить
+    // папку. Теперь между ними только lstat имени: окно остаётся, но в доли миллисекунды.
+    let html = null;
+    try { html = startHereHtml(src); } catch (e1) { html = null; }
     // Папка — из профиля, а не «как сказала оболочка» (safeDesktopDir): ответ оболочки лежит в ветке
     // реестра, которую без UAC правит любая программа пользователя, и перенаправленный в чужую
     // папку стол получил бы файл, созданный администратором. Отказ — как любой другой сбой
@@ -1920,8 +1925,9 @@ ipcMain.handle('save-start-here', () => {
     }
     // Числа в памятке («N навыков, M команд, K помощников») — из сводки конфига ЭТОГО человека, а не
     // зашитые в файл. Не получилось подставить — кладём файл как есть: памятка важнее цифр.
-    try { fs.writeFileSync(dest, startHereHtml(src), 'utf8'); }
-    catch (e2) { fs.copyFileSync(src, dest); }
+    let wrote = false;
+    if (html !== null) { try { fs.writeFileSync(dest, html, 'utf8'); wrote = true; } catch (e2) { wrote = false; } }
+    if (!wrote) fs.copyFileSync(src, dest);
     return { ok: true, dest, src };
   } catch (e) {
     // src отдаём и при ошибке — renderer откроет вшитую копию как фолбэк.

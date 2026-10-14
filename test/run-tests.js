@@ -32242,12 +32242,12 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     new Function('ipcMain', 'app', 'os', 'fs', 'path', 'process', 'readJson', 'resourceRoot', 'startHereHtml', 'desktopPath', 'logToFile',
       body + '\n; return true;')(
       { handle: (n, fn) => { handlers[n] = fn; } },
-      { getPath: (n) => { assert.strictEqual(n, 'desktop'); return env.shellDesktop; } },
+      { getPath: (n) => { assert.strictEqual(n, 'desktop'); if (env.events) env.events.push('desk'); return env.shellDesktop; } },
       { userInfo: () => ({ homedir: env.profile }), homedir: () => env.envHome || env.profile },
       fs, path, { platform: 'win32' },
       () => ({ finish: { startHtmlRelPath: 'assets/START-HERE.html' } }),
       () => env.root,
-      (s) => fs.readFileSync(s, 'utf8'),
+      (s) => { if (env.events) env.events.push('html'); return fs.readFileSync(s, 'utf8'); },
       env.desktopPath || (() => { try { return DP(); } catch (e) { return null; } })(),
       (id, line) => logs.push(id + ': ' + line));
     return { run: () => handlers['save-start-here'](), logs };
@@ -32272,6 +32272,12 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert(good.ok === true && good.dest === path.join(desk, MEMO_NAME), 'законный стол: ' + JSON.stringify(good));
       assert.strictEqual(fs.readFileSync(good.dest, 'utf8'), '<html>memo</html>');
       assert.deepStrictEqual(g.logs, [], 'на законном столе журнал молчит');
+      // Окно между проверкой стола и записью: содержимое памятки готово ДО проверки (чтение большого файла и сводки конфига
+      // сюда не попадает), а проверка стола и запись идут подряд.
+      const ev = [];
+      const g2 = loadHandler(src, { profile: t.P, shellDesktop: desk, root, events: ev });
+      assert(g2.run().ok === true);
+      assert.deepStrictEqual(ev, ['html', 'desk'], 'сначала содержимое памятки, потом проверка стола — и сразу запись');
       // Вне профиля.
       const b = h(startup);
       const bad = b.run();
@@ -32392,6 +32398,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     const h = code(handlerSlice(MAINJS()));
     assertOrder(h, 'safeDesktopDir()', 'fs.writeFileSync(dest', 'проверка стола раньше записи памятки');
     assertOrder(h, 'safeDesktopDir()', 'fs.copyFileSync(src, dest)', 'и раньше запасной копии');
+    assertOrder(h, 'startHereHtml(src)', 'safeDesktopDir()', 'содержимое памятки готово до проверки стола: между проверкой и записью нет чтения файлов');
     assert(!/app\.getPath\('desktop'\)/.test(h), 'в обработчике нет прямого ответа оболочки');
     const sd = code(fnSlice(MAINJS(), 'function safeDesktopDir'));
     assert(/os\.userInfo\(\)\.homedir/.test(sd) && !/os\.homedir\(\)/.test(sd), 'профиль — os.userInfo().homedir (токен), а не os.homedir() (переменная окружения)');
@@ -32425,7 +32432,9 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     '    $saveCwd = [Environment]::CurrentDirectory',
     '    if ($c.cwd) { [Environment]::CurrentDirectory = $c.cwd }',
     '    try {',
-    '        $v = Test-HmShellFolder -ProfileDir $c.profile -Candidate $c.candidate',
+    // kind — какую папку проверяют (Desktop или Programs); без него проверка общая, как для стола.
+    '        if ($c.kind) { $v = Test-HmShellFolder -ProfileDir $c.profile -Candidate $c.candidate -Kind $c.kind }',
+    '        else { $v = Test-HmShellFolder -ProfileDir $c.profile -Candidate $c.candidate }',
     '        $old = $false; if ($c.candidate) { $old = Test-Path -LiteralPath $c.candidate -PathType Container }',
     '    } finally { [Environment]::CurrentDirectory = $saveCwd }',
     "    Write-Output ('CASE|' + $c.label + '|' + $v.Ok + '|' + $v.Dir + '|' + $v.Reason + '|OLD=' + $old)",
@@ -32652,6 +32661,43 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       for (const v of [0xA0000003, 0xA000000C, 0x8000001B, 0x9000001C, 0x90000019]) assert.strictEqual(pred[String(v)], false, 'не облачный тег ' + v.toString(16));
       assert.strictEqual(pred['-1'], false, '«не прочитали» — не облако');
       assert(/^NOADDTYPE=True$/m.test(r.stdout), 'Get-HmReparseTag без Add-Type');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Test-HmShellFolder (PS 5.1): меню Пуск принимается только на обычном месте профиля — любая другая папка внутри профиля (в том числе пустая, выбранная подменяющим) отказ; стол по-прежнему любая папка профиля; без -Kind проверка общая (контроль)', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const progs = t.mk(t.P, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+      const startMenu = path.dirname(progs);
+      const startupSub = t.mk(progs, 'Startup');
+      const desk = t.mk(t.P, 'Desktop');
+      const empty = t.mk(t.P, 'Empty');                       // пустой каталог внутри профиля: то, что выбрал бы подменяющий
+      const fakeProgs = t.mk(t.P, 'Start Menu', 'Programs');  // похоже на меню Пуск, но не оно
+      const rows = {
+        'обычное место': progs, 'регистр': progs.toUpperCase(), 'прямые слэши': progs.replace(/\\/g, '/'), 'слэш на конце': progs + '\\',
+        'точки внутри пути': progs + '\\..\\Programs',       // без нормализации в JS: схлопывает её проверка
+      };
+      const refused = { 'пустая папка в профиле': empty, 'стол вместо меню': desk, 'похожее имя в корне профиля': fakeProgs, 'папка выше': startMenu, 'папка ниже (Startup)': startupSub };
+      const cases = [];
+      for (const k of Object.keys(rows)) cases.push({ label: 'P+' + k, profile: t.P, candidate: rows[k], kind: 'Programs' });
+      for (const k of Object.keys(refused)) {
+        cases.push({ label: 'P-' + k, profile: t.P, candidate: refused[k], kind: 'Programs' });
+        cases.push({ label: 'C-' + k, profile: t.P, candidate: refused[k] });                 // контроль: общая проверка (как до правки) принимает
+      }
+      cases.push({ label: 'D+пустая папка', profile: t.P, candidate: empty, kind: 'Desktop' });  // стол: любая папка профиля (OneDrive, локали)
+      const out = runMatrix(cases);
+      for (const k of Object.keys(rows)) {
+        const o = out['P+' + k];
+        assert(o && o.ok === true && o.dir.toLowerCase() === progs.toLowerCase(), 'обычное место принято (' + k + '): ' + JSON.stringify(o));
+      }
+      assert.strictEqual(out['P+обычное место'].dir, progs, 'Dir — нормализованный путь без слэша на конце');
+      for (const k of Object.keys(refused)) {
+        const r = out['P-' + k];
+        assert(r && r.ok === false && r.dir === '' && /Пуск/.test(r.reason), 'меню Пуск не на обычном месте — отказ с причиной (' + k + '): ' + JSON.stringify(r));
+        assert(out['C-' + k] && out['C-' + k].ok === true, 'контроль: проверка без вида папки принимала «' + k + '»: ' + JSON.stringify(out['C-' + k]));
+      }
+      assert(out['D+пустая папка'].ok === true, 'для стола вид папки не сужает выбор: ' + JSON.stringify(out['D+пустая папка']));
     } finally { t.cleanup(); }
   });
 
@@ -32904,10 +32950,11 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     const t = mkTree();
     try {
       const desk = t.mk(t.P, 'Desktop');
+      const deskCtl = t.mk(t.P, 'DesktopCtl');
       const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
       fs.writeFileSync(path.join(hostile, 'control.txt'), 'x');
       const tmp = t.mk(t.base, 'private-temp');
-      t.links.push(desk);          // если подмена удастся, на месте стола окажется junction: cleanup уберёт её раньше рекурсивного удаления
+      t.links.push(desk, deskCtl);          // если подмена удастся, на месте стола окажется junction: cleanup уберёт её раньше рекурсивного удаления
       const r = runPsFile([
         '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
         '. $env:HM_T_LIB',
@@ -32916,10 +32963,18 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
         'function Move-HmShortcutFile([string]$From, [string]$To) { Invoke-HmSwap ([IO.Path]::GetDirectoryName($To)) "SWAP"; [IO.File]::Move($From, $To) }',
         tryNew('R', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
         '$script:ev | ForEach-Object { $_ }',
-      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp });
+        // Контроль в том же прогоне и с той же подменой: закрепления нет (заглушка вместо Open-HmPinnedShellFolder) —
+        // переименование удаётся, и ярлык уходит за junction.
+        '$script:ev.Clear()',
+        'function Open-HmPinnedShellFolder { param([string]$ProfileDir, [string]$Dir) return [IntPtr]::Zero }',
+        tryNew('CTL', '-Dir $env:HM_T_CTL -Name "c.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '$script:ev | ForEach-Object { "CTL-" + $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_CTL: deskCtl, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp });
       assert.strictEqual(r.status, 0, r.stdout + r.stderr);
-      assert.deepStrictEqual(onlyControl(hostile), [], 'ярлык не ушёл за junction в чужой каталог (прежний код: подмена удавалась, ярлык ложился туда): ' + r.stdout);
+      assert.deepStrictEqual(onlyControl(hostile).filter((n) => n !== 'c.lnk'), [], 'ярлык не ушёл за junction в чужой каталог (прежний код: подмена удавалась, ярлык ложился туда): ' + r.stdout);
       assert(/^SWAP=blocked /m.test(r.stdout), 'переименование проверенной папки упёрлось в дескриптор: ' + r.stdout);
+      assert(/^CTL-SWAP=done$/m.test(r.stdout) && fs.existsSync(path.join(hostile, 'c.lnk')),
+        'контроль: без закрепления та же подмена удаётся и ярлык уходит за ссылку — стенд различает: ' + r.stdout);
       assert(/^R=ok /m.test(r.stdout) && fs.existsSync(path.join(desk, 'a.lnk')), 'ярлык лёг в проверенную папку: ' + r.stdout);
       assert.strictEqual(headOf(path.join(desk, 'a.lnk')), '76,0,0,0', 'на месте — настоящий ShellLink');
       assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
@@ -33086,6 +33141,11 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       for (const k of ['ok', 'users', 'taken', 'dirname', 'ioerr', 'silent', 'hostile']) {
         assert(new RegExp('^REL-' + k + '=True$', 'm').test(r.stdout), 'дескриптор закрыт после сценария «' + k + '»: ' + r.stdout);
       }
+      // Страж закрыт вместе с папкой на каждом выходе: файл удаляется при закрытии, в папках его нет (в том числе в чужой).
+      for (const k of ['ok', 'taken', 'dirname', 'ioerr', 'silent']) {
+        assert(!fs.readdirSync(d[k]).some((n) => /^\.hm-pin-/.test(n)), 'страж не остался в папке «' + k + '»: ' + fs.readdirSync(d[k]).join(','));
+      }
+      assert(!fs.readdirSync(hostile).some((n) => /^\.hm-pin-/.test(n)), 'страж не остался и в чужом каталоге: ' + fs.readdirSync(hostile).join(','));
     } finally { t.cleanup(); }
   });
 
@@ -33169,6 +33229,252 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert(/^CONTROL=wrote$/m.test(r.stdout) && fs.existsSync(path.join(hostile, 'control.txt')), 'контроль: прежний способ писал в чужую папку через «Desktop » — стенд различает: ' + r.stdout);
       assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
     } finally { t.cleanup(); }
+  });
+
+  // =========================================================================
+  // 3г. New-HmShortcutFile: пустую папку нельзя превратить в junction «на месте»
+  // =========================================================================
+  // Дескриптор папки закрывает ПЕРЕИМЕНОВАНИЕ, а превращение пустого каталога в ссылку «на месте»
+  // (FSCTL_SET_REPARSE_POINT через открытие «за атрибутами») общий доступ обходит. Папку выбирает тот, кто
+  // переписал реестр, — то есть это может быть пустой каталог внутри профиля, и проверку он проходит.
+  // Обвязка зовёт ту же операцию, что и подменяющая программа, и возвращает код ответа системы:
+  // 0 — папка стала ссылкой, 145 (ERROR_DIR_NOT_EMPTY) — каталог не пуст, превращение отвергнуто.
+  // Add-Type — только в тестовой обвязке (дочерний процесс на своём TEMP): сам помощник собирает вызовы в памяти.
+  const HMCONV_CS = String.raw`
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class HmConv {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tpl);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(IntPtr h, uint code, byte[] inBuf, uint inLen, byte[] outBuf, uint outLen, out uint ret, IntPtr ov);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    // 0 — каталог стал junction на target; иначе код ошибки системы.
+    public static int ConvertInPlace(string dir, string target) {
+        // FILE_WRITE_ATTRIBUTES | SYNCHRONIZE, общий доступ «всё», OPEN_EXISTING, BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
+        IntPtr h = CreateFileW(dir, 0x00100100u, 7u, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        try {
+            byte[] s = Encoding.Unicode.GetBytes(@"\??\" + target);
+            byte[] p = Encoding.Unicode.GetBytes(target);
+            int dataLen = 8 + s.Length + 2 + p.Length + 2;
+            byte[] buf = new byte[8 + dataLen];
+            BitConverter.GetBytes(0xA0000003u).CopyTo(buf, 0);                 // IO_REPARSE_TAG_MOUNT_POINT
+            BitConverter.GetBytes((ushort)dataLen).CopyTo(buf, 4);
+            BitConverter.GetBytes((ushort)0).CopyTo(buf, 8);
+            BitConverter.GetBytes((ushort)s.Length).CopyTo(buf, 10);
+            BitConverter.GetBytes((ushort)(s.Length + 2)).CopyTo(buf, 12);
+            BitConverter.GetBytes((ushort)p.Length).CopyTo(buf, 14);
+            s.CopyTo(buf, 16);
+            p.CopyTo(buf, 16 + s.Length + 2);
+            uint ret;
+            bool ok = DeviceIoControl(h, 0x000900A4u, buf, (uint)buf.Length, null, 0, out ret, IntPtr.Zero);   // FSCTL_SET_REPARSE_POINT
+            return ok ? 0 : Marshal.GetLastWin32Error();
+        } finally { CloseHandle(h); }
+    }
+}`;
+  const CONV_PS = ["Add-Type -TypeDefinition @'", HMCONV_CS.trim(), "'@"];
+  const names = (d) => fs.readdirSync(d);
+
+  ok('u4 New-HmShortcutFile (PS 5.1): пустую папку нельзя превратить в junction на месте между закреплением и Move — внутри закреплённой папки держится файл-страж (его не открыть и не удалить), превращение упирается в код 145 (каталог не пуст), ярлык ложится в проверенную папку; с одним дескриптором папки (контроль) превращение удавалось и ярлык уходил за ссылку', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Empty');              // пустой каталог внутри профиля — выбор того, кто переписал реестр
+      const deskCtl = t.mk(t.P, 'EmptyCtl');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      fs.writeFileSync(path.join(hostile, 'control.txt'), 'x');
+      const tmp = t.mk(t.base, 'private-temp');
+      t.links.push(desk, deskCtl);                  // если превращение удастся, на месте папки окажется junction: cleanup уберёт её раньше рекурсивного удаления
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(CONV_PS, SHORT_FILL, [
+        '$script:ev = New-Object System.Collections.Generic.List[string]',
+        // Окно подмены — между закреплением и Move (шов Move-HmShortcutFile): подменяющая программа превращает папку в ссылку
+        // на чужой каталог «на месте». Заодно пробуем то, что пробовала бы она с самим стражем: открыть и удалить.
+        'function Move-HmShortcutFile([string]$From, [string]$To) {',
+        '    $d = [IO.Path]::GetDirectoryName($To)',
+        '    $found = @(Get-ChildItem -LiteralPath $d -Force | ForEach-Object { $_.Name })',
+        '    $script:ev.Add("LIST=" + ($found -join ","))',
+        '    foreach ($n in $found) {',
+        '        if ($n -notlike ".hm-pin-*") { continue }',
+        '        $p = Join-Path $d $n',
+        '        try { [IO.File]::Delete($p); $script:ev.Add("SENT-DELETE=ALLOWED") } catch { $script:ev.Add("SENT-DELETE=blocked") }',
+        '        try { $f = New-Object IO.FileStream($p, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)); $f.Dispose(); $script:ev.Add("SENT-OPEN=ALLOWED") } catch { $script:ev.Add("SENT-OPEN=blocked") }',
+        '    }',
+        '    $script:ev.Add("CONV=" + [HmConv]::ConvertInPlace($d, $env:HM_T_HOSTILE))',
+        '    [IO.File]::Move($From, $To)',
+        '}',
+        tryNew('R', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '"AFTER=" + ((Get-ChildItem -LiteralPath $env:HM_T_DIR -Force | ForEach-Object { $_.Name }) -join ",")',
+        '$script:ev | ForEach-Object { $_ }',
+        // Контроль в том же прогоне: закрепление прежнее — только дескриптор папки, файла-стража нет.
+        '$script:ev.Clear()',
+        'function Open-HmPinnedShellFolder { param([string]$ProfileDir, [string]$Dir) return (Open-HmDirHandle $Dir $true) }',
+        tryNew('CTL', '-Dir $env:HM_T_CTL -Name "c.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '$script:ev | ForEach-Object { "CTL-" + $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_CTL: deskCtl, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^LIST=\.hm-pin-[0-9a-f]{32}$/m.test(r.stdout), 'на момент переноса внутри папки держится файл-страж (прежний код: папка пуста): ' + r.stdout);
+      assert(/^SENT-DELETE=blocked$/m.test(r.stdout) && /^SENT-OPEN=blocked$/m.test(r.stdout), 'стража нельзя ни открыть, ни удалить: ' + r.stdout);
+      assert(/^CONV=145$/m.test(r.stdout), 'превращение папки в ссылку «на месте» отвергнуто — каталог не пуст, код 145 (прежний код: 0 — папка стала ссылкой): ' + r.stdout);
+      assert(/^R=ok /m.test(r.stdout) && /^AFTER=a\.lnk$/m.test(r.stdout), 'ярлык лёг в проверенную папку, стража после себя не оставили: ' + r.stdout);
+      assert.deepStrictEqual(names(desk), ['a.lnk'], 'в проверенной папке один ярлык');
+      assert(!fs.lstatSync(desk).isSymbolicLink(), 'папка осталась папкой');
+      assert.strictEqual(headOf(path.join(desk, 'a.lnk')), '76,0,0,0', 'на месте — настоящий ShellLink');
+      assert.deepStrictEqual(onlyControl(hostile).filter((n) => n !== 'c.lnk'), [], 'за ссылкой ярлыка нет: ' + r.stdout);
+      // Контроль: один дескриптор папки (то, что было до стража) — пустую папку превращают «на месте», ярлык уходит за ссылку.
+      assert(/^CTL-CONV=0$/m.test(r.stdout), 'контроль: при одном дескрипторе папки превращение удалось — стенд различает: ' + r.stdout);
+      assert(fs.existsSync(path.join(hostile, 'c.lnk')), 'контроль: ярлык ушёл за ссылку в чужой каталог: ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): папку превратили в ссылку на месте ДО создания стража — служебный файл лёг бы в чужой каталог, его путь по дескриптору не совпал, отказ; за ссылкой ничего не осталось, ярлыка нет (прежний код: ярлык уходил за ссылку)', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Empty');
+      const deskRep = t.mk(t.P, 'EmptyRep');
+      const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
+      fs.writeFileSync(path.join(hostile, 'control.txt'), 'x');
+      const victim = path.join(hostile, 'v.lnk'); fs.writeFileSync(victim, 'VICTIM');
+      const tmp = t.mk(t.base, 'private-temp');
+      t.links.push(desk, deskRep);
+      const hook = [
+        // Закрепление читает путь трижды: папки, профиля и (если есть) стража. Подмена — после второго чтения: папка
+        // проверена и закреплена, пуста, стража ещё нет.
+        '$script:ev = New-Object System.Collections.Generic.List[string]',
+        '$script:n = 0',
+        '$script:origPath = ${function:Get-HmHandlePath}',
+        'function Get-HmHandlePath([IntPtr]$Handle) {',
+        '    $r = & $script:origPath $Handle',
+        '    $script:n++',
+        '    if ($script:n -eq 2) { $script:ev.Add("CONV=" + [HmConv]::ConvertInPlace($env:HM_T_CUR, $env:HM_T_HOSTILE)) }',
+        '    return $r',
+        '}',
+      ];
+      const run = (cur, name, extra) => runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(CONV_PS, SHORT_FILL, hook, [
+        tryNew('R', '-Dir $env:HM_T_CUR -Name "' + name + '" -Fill $fill -ProfileDir $env:HM_T_P' + (extra || '')),
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_CUR: cur, HM_T_P: t.P, HM_T_HOSTILE: hostile, TEMP: tmp, TMP: tmp });
+      const r1 = run(desk, 'b.lnk');
+      assert.strictEqual(r1.status, 0, r1.stdout + r1.stderr);
+      assert(/^CONV=0$/m.test(r1.stdout), 'подмена в последний миг до стража удалась (папка ещё пуста): ' + r1.stdout);
+      assert(/^R=InvalidOperationException .*не совпал/m.test(r1.stdout), 'отказ с причиной по-русски (прежний код: R=ok, ярлык за ссылкой): ' + r1.stdout);
+      assert.deepStrictEqual(onlyControl(hostile).filter((n) => n !== 'v.lnk'), [], 'в чужом каталоге ничего не осталось — ни ярлыка, ни служебного файла: ' + r1.stdout);
+      // С -Replace: чужой файл с тем же именем нельзя ни удалить, ни заместить.
+      const r2 = run(deskRep, 'v.lnk', ' -Replace');
+      assert.strictEqual(r2.status, 0, r2.stdout + r2.stderr);
+      assert(/^CONV=0$/m.test(r2.stdout) && /^R=InvalidOperationException .*не совпал/m.test(r2.stdout), 'с -Replace тот же отказ: ' + r2.stdout);
+      assert(fs.existsSync(victim) && fs.readFileSync(victim, 'utf8') === 'VICTIM', 'чужой файл с тем же именем цел: ' + r2.stdout);
+      assert.deepStrictEqual(onlyControl(hostile).filter((n) => n !== 'v.lnk'), [], 'и служебных файлов в чужом каталоге нет');
+      assert.deepStrictEqual(fs.readdirSync(tmp).filter((n) => /^hm-lnk-/.test(n)), [], 'временных файлов не осталось');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 New-HmShortcutFile (PS 5.1): между попытками папка и страж отпущены — пока идёт пауза повтора, папку можно переименовать, и на ней ничего не висит; после сбоев Move стража в папке не остаётся', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const tmp = t.mk(t.base, 'private-temp');
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+      ].concat(SHORT_FILL, [
+        '$script:ev = New-Object System.Collections.Generic.List[string]',
+        '$script:n = 0',
+        'function Move-HmShortcutFile([string]$From, [string]$To) { $script:n++; if ($script:n -le 2) { throw (New-Object System.IO.IOException("занят")) }; [IO.File]::Move($From, $To) }',
+        // Пауза повтора — функцией вместо командлета: на это время папка не должна быть закреплена.
+        'function Start-Sleep {',
+        '    param([int]$Milliseconds, [int]$Seconds)',
+        '    $left = @(Get-ChildItem -LiteralPath $env:HM_T_DIR -Force | Where-Object { $_.Name -like ".hm-pin-*" }).Count',
+        '    try { [IO.Directory]::Move($env:HM_T_DIR, $env:HM_T_DIR + ".p"); [IO.Directory]::Move($env:HM_T_DIR + ".p", $env:HM_T_DIR); $script:ev.Add("PAUSE-FREE sentinels=" + $left) }',
+        '    catch { $script:ev.Add("PAUSE-HELD sentinels=" + $left) }',
+        '}',
+        tryNew('R', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
+        '"MOVES=" + $script:n',
+        '$script:ev | ForEach-Object { $_ }',
+      ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^R=ok /m.test(r.stdout) && /^MOVES=3$/m.test(r.stdout), 'два сбоя пережиты, третья попытка прошла: ' + r.stdout);
+      const pauses = lines(r.stdout).filter((l) => /^PAUSE-/.test(l));
+      assert.deepStrictEqual(pauses, ['PAUSE-FREE sentinels=0', 'PAUSE-FREE sentinels=0'], 'в обе паузы папка свободна и стража в ней нет: ' + r.stdout);
+      assert.deepStrictEqual(names(desk), ['a.lnk'], 'стража после себя не оставили');
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Move-HmShortcutFile (PS 5.1): временный файл на другом томе не проходит сквозь висячий symlink на имени ярлыка — отказ, цель не создана; symlink вместо временного файла не даёт прочитать свою цель; обычный File.Move и File.Copy между томами (контроль) делали и то и другое', () => {
+    needWinPs();
+    // Статически: первый шаг — Move под неугадываемым именем (не Copy), второй — переименование в той же папке.
+    const libText = codeOnly(fs.readFileSync(USERPATH, 'utf8'));
+    const mvFrom = libText.indexOf('function Move-HmShortcutFile');
+    assert(mvFrom !== -1, 'Move-HmShortcutFile на месте');
+    const mvSrc = libText.slice(mvFrom, libText.indexOf('\nfunction ', mvFrom + 10));
+    assert(/NewGuid\(\)/.test(mvSrc) && /\[IO\.File\]::Move\(\$From, \$stage\)/.test(mvSrc) && /\[IO\.File\]::Move\(\$stage, \$To\)/.test(mvSrc),
+      'перенос в два шага через неугадываемое имя рядом с ярлыком: ' + mvSrc.slice(0, 300));
+    assert(!/\[IO\.File\]::Copy\(|Copy-Item/.test(mvSrc), 'Copy не используется: CopyFile идёт по symlink-источнику и читает его цель');
+    // Другой том, чем TEMP: на одном томе File.Move — переименование, и оно ссылку на занятом имени не разворачивает.
+    const cur = path.parse(os.tmpdir()).root.toUpperCase();
+    let xroot = '';
+    for (const letter of ['D:\\', 'E:\\', 'F:\\', 'C:\\']) {
+      if (letter === cur) continue;
+      try { xroot = fs.mkdtempSync(path.join(letter, 'hm-u4-xmove-')); break; } catch (e) { xroot = ''; }
+    }
+    if (!xroot) SKIP('нет второго тома: перенос между томами не проверить');
+    const t = mkTree();
+    try {
+      const desk = path.join(xroot, 'Desktop'); fs.mkdirSync(desk);
+      const hostile = path.join(xroot, 'ProgramData'); fs.mkdirSync(hostile);
+      const link = path.join(desk, 'a.lnk'); const target = path.join(hostile, 'created-by-move.lnk');
+      const linkC = path.join(desk, 'ctl.lnk'); const targetC = path.join(hostile, 'created-by-control.lnk');
+      const secret = path.join(xroot, 'secret.txt'); fs.writeFileSync(secret, 'SECRET-CONTENT');
+      const tmp = t.mk(t.base, 'private-temp');
+      const srcLinkOne = path.join(tmp, 'src-link-one.lnk'); const srcLinkTwo = path.join(tmp, 'src-link-two.lnk');
+      try {
+        fs.symlinkSync(target, link, 'file'); fs.symlinkSync(targetC, linkC, 'file');
+        fs.symlinkSync(secret, srcLinkOne, 'file'); fs.symlinkSync(secret, srcLinkTwo, 'file');
+      } catch (e) { SKIP('здесь нельзя создать symlink на файл (нужен Developer Mode или права администратора): ' + e.code); }
+      const r = runPsFile([
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '. $env:HM_T_LIB',
+        '$src = Join-Path $env:TEMP "src-one.lnk"; [IO.File]::WriteAllText($src, "LNK")',
+        '$src2 = Join-Path $env:TEMP "src-two.lnk"; [IO.File]::WriteAllText($src2, "LNK")',
+        // 1. Назначение — висячая ссылка на занятом имени.
+        "try { Move-HmShortcutFile $src $env:HM_T_LINK; 'MOVE=ok' } catch { 'MOVE=' + $_.Exception.GetType().Name }",
+        "'SRC-LEFT=' + (Test-Path -LiteralPath $src)",
+        // Контроль — прежний способ: обычный File.Move между томами.
+        "try { [IO.File]::Move($src2, $env:HM_T_LINKC); 'CTL=ok' } catch { 'CTL=' + $_.Exception.GetType().Name }",
+        // 2. Вместо временного файла подложили symlink на чужой файл: цель не должна ни прочитаться, ни лечь в папку ярлыка.
+        "try { Move-HmShortcutFile $env:HM_T_SRCLINK1 (Join-Path $env:HM_T_DESK 'b.lnk'); 'SRCLINK=ok' } catch { 'SRCLINK=' + $_.Exception.GetType().Name }",
+        // Контроль — копирование: File.Copy идёт по symlink-источнику и читает его цель.
+        "try { [IO.File]::Copy($env:HM_T_SRCLINK2, (Join-Path $env:HM_T_DESK 'copied.lnk')); 'COPY=ok' } catch { 'COPY=' + $_.Exception.GetType().Name }",
+      ].join('\n'), { HM_T_LIB: USERPATH, HM_T_LINK: link, HM_T_LINKC: linkC, HM_T_DESK: desk, HM_T_SRCLINK1: srcLinkOne, HM_T_SRCLINK2: srcLinkTwo, TEMP: tmp, TMP: tmp });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^MOVE=(InvalidOperationException|IOException|MethodInvocationException)$/m.test(r.stdout), 'занятое имя (висячий symlink) — отказ: ' + r.stdout);
+      assert(!fs.existsSync(target), 'цель висячего symlink не создана (прежний File.Move создавал её): ' + r.stdout);
+      assert.deepStrictEqual(fs.readdirSync(desk).filter((n) => /^\.hm-stage-/.test(n)), [], 'копия в папке при отказе убрана');
+      // Содержимое чужого файла в папку ярлыка не попало ни под каким именем (кроме контроля).
+      const leaked = fs.readdirSync(desk).filter((n) => n !== 'copied.lnk').filter((n) => {
+        try { return fs.statSync(path.join(desk, n)).isFile() && fs.readFileSync(path.join(desk, n), 'utf8') === 'SECRET-CONTENT'; } catch (e) { return false; }
+      });
+      assert.deepStrictEqual(leaked, [], 'содержимое цели symlink-источника не скопировано в папку ярлыка: ' + r.stdout);
+      // Контроли: стенд различает (иначе проверки выше ничего не доказывают).
+      if (!fs.existsSync(targetC)) SKIP('на этой системе перенос между томами не прошёл сквозь symlink (контроль не воспроизвёл): ' + r.stdout);
+      assert(/^CTL=ok$/m.test(r.stdout), 'контроль: File.Move между томами прошёл сквозь symlink и создал цель: ' + r.stdout);
+      assert(/^COPY=ok$/m.test(r.stdout) && fs.readFileSync(path.join(desk, 'copied.lnk'), 'utf8') === 'SECRET-CONTENT',
+        'контроль: File.Copy идёт по symlink-источнику и читает его цель — поэтому первый шаг переноса именно Move: ' + r.stdout);
+    } finally {
+      try { fs.rmSync(xroot, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+      t.cleanup();
+    }
   });
 
   // =========================================================================
@@ -33276,7 +33582,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       const costume = psVs(cloudStubs.concat(body).join('\n'), { HM_FIRSTRUN_ROOT: sb.base, HM_T_OD: odLink });
       assert.strictEqual(costume.status, 0, costume.stdout + costume.stderr);
       assert(!fs.existsSync(path.join(realOd, 'Desktop', LNK)), 'junction в облачной «одежде»: ярлыка за ней нет: ' + costume.stdout);
-      assert(/Ярлык \(Рабочий стол\) пропущен: путь по дескриптору не совпал/.test(costume.stdout), 'отказ назван: ' + costume.stdout);
+      assert(/Ярлык \(Рабочий стол\) пропущен: [^\r\n]*не совпал/.test(costume.stdout), 'отказ назван: ' + costume.stdout);
       // Настоящая облачная папка стоит на месте: её путь по дескриптору равен проверенному (это проверяет отдельный
       // тест на живом OneDrive). Здесь «облачная» папка — junction, у неё путь другой, поэтому закрепление подменено
       // заглушкой: предмет этого сценария — признание облачного тега, а не сверка пути.
@@ -33302,6 +33608,69 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert.deepStrictEqual([fs.readdirSync(sb.desk), fs.readdirSync(sb.progs)], [[], []], 'ярлыков нет');
       assert(/Ярлык \(Рабочий стол\) пропущен: [^\r\n]*_userpath\.ps1/.test(r.stdout), 'причина названа: ' + r.stdout);
     } finally { sb.cleanup(); try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+  });
+
+  ok('u4 Set-HmShellDirs и Get-HmSafeShellFolder: ответ оболочки проверяется уже при сборке путей — чужая папка даёт $null и причину; меню Пуск принимается только на обычном месте профиля, стол — любой папкой профиля', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const progs = t.mk(t.P, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const own = t.mk(t.P, 'MyStart');           // пустой каталог в профиле — выбор того, кто переписал реестр
+      const r = psVs([
+        '$a = @{}; Set-HmShellDirs $a $env:HM_T_P $env:HM_T_DESK $env:HM_T_PROGS',
+        "'GOOD=' + $a.Desktop + '|' + $a.Programs + '|[' + $a.DesktopWhy + $a.ProgramsWhy + ']'",
+        '$b = @{}; Set-HmShellDirs $b $env:HM_T_P $env:HM_T_STARTUP $env:HM_T_STARTUP',
+        "'HOSTILE=' + ($null -eq $b.Desktop) + '|' + ($null -eq $b.Programs)",
+        "'HOSTILE-DESK-WHY=' + $b.DesktopWhy",
+        "'HOSTILE-PROGS-WHY=' + $b.ProgramsWhy",
+        '$c = @{}; Set-HmShellDirs $c $env:HM_T_P $env:HM_T_OWN $env:HM_T_OWN',
+        "'OWN=' + $c.Desktop + '|' + ($null -eq $c.Programs)",
+        "'OWN-PROGS-WHY=' + $c.ProgramsWhy",
+        // Тот же вид папки у общего помощника: без -Log строка уходит в вывод шага, поэтому -Log собирает её сам.
+        '$sink = New-Object System.Collections.Generic.List[string]',
+        "$g = Get-HmSafeShellFolder -Kind Programs -ProfileDir $env:HM_T_P -Candidate $env:HM_T_PROGS -Log { param($l) $sink.Add($l) }",
+        "$h = Get-HmSafeShellFolder -Kind Programs -ProfileDir $env:HM_T_P -Candidate $env:HM_T_OWN -Log { param($l) $sink.Add($l) }",
+        "'SAFE-PROGS=' + $g + '|' + ($null -eq $h) + '|lines=' + $sink.Count",
+      ].join('\n'), { HM_T_P: t.P, HM_T_DESK: desk, HM_T_PROGS: progs, HM_T_STARTUP: startup, HM_T_OWN: own });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(r.stdout.includes('GOOD=' + desk + '|' + progs + '|[]'), 'обычные места профиля приняты: ' + r.stdout);
+      assert(/^HOSTILE=True\|True$/m.test(r.stdout), 'чужая папка — $null и для стола, и для Пуска (прежняя сборка путей принимала бы любую существующую): ' + r.stdout);
+      assert(/^HOSTILE-DESK-WHY=.*вне профиля/m.test(r.stdout) && /^HOSTILE-PROGS-WHY=.*вне профиля/m.test(r.stdout), 'причина названа: ' + r.stdout);
+      assert(r.stdout.includes('OWN=' + own + '|True'), 'стол — любая папка профиля, а меню Пуск в нестандартной папке — отказ: ' + r.stdout);
+      assert(/^OWN-PROGS-WHY=.*Пуск/m.test(r.stdout), 'причина назвала меню Пуск: ' + r.stdout);
+      assert(r.stdout.includes('SAFE-PROGS=' + progs + '|True|lines=1'), 'общий помощник тоже различает вид папки, и отказ — одна строка в журнале: ' + r.stdout);
+    } finally { t.cleanup(); }
+  });
+
+  ok('u4 Set-HmClaudeShortcut: папка проверяется ещё раз на месте использования — чужая и меню Пуск не на обычном месте дают skipped до любого обращения к ярлыку и без вызова записи; законные пишутся', () => {
+    needWinPs();
+    const t = mkTree();
+    try {
+      const desk = t.mk(t.P, 'Desktop');
+      const progs = t.mk(t.P, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+      const startup = t.mk(t.base, 'ProgramData', 'StartUp');
+      const own = t.mk(t.P, 'MyStart');
+      const r = psVs([
+        // Запись — «растяжка»: если проверка на месте использования её пропустила, счётчик вызовов это покажет.
+        '$script:calls = 0',
+        'function New-HmShortcutFile { param($Dir, $Name, $Fill, $ProfileDir, $Kind, [switch]$Replace) $script:calls++; return (Join-Path $Dir $Name) }',
+        '$m = New-Object "System.Collections.Generic.HashSet[string]"',
+        "function T([string]$Label, [string]$Id, [string]$Dir) {",
+        "    $x = Set-HmClaudeShortcut -Id $Id -Dir $Dir -Launcher 'C:\\x\\claude-code.cmd' -WorkDir $env:HM_T_P -Marker $m -Anchor $env:HM_T_P -IncludeAnchor $false -ProfileDir $env:HM_T_P",
+        "    $Label + '=' + $x.State + '|' + $x.Error + '|calls=' + $script:calls",
+        '}',
+        "T 'HOSTILE' 'desktop' $env:HM_T_STARTUP",
+        "T 'PROGS-OWN' 'programs' $env:HM_T_OWN",
+        "T 'DESK' 'desktop' $env:HM_T_DESK",
+        "T 'PROGS' 'programs' $env:HM_T_PROGS",
+      ].join('\n'), { HM_T_P: t.P, HM_T_DESK: desk, HM_T_PROGS: progs, HM_T_STARTUP: startup, HM_T_OWN: own });
+      assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+      assert(/^HOSTILE=skipped\|.*вне профиля.*\|calls=0$/m.test(r.stdout), 'папка вне профиля: пропуск без вызова записи: ' + r.stdout);
+      assert(/^PROGS-OWN=skipped\|.*Пуск.*\|calls=0$/m.test(r.stdout), 'меню Пуск в чужой для него папке профиля: пропуск без вызова записи: ' + r.stdout);
+      assert(/^DESK=created\|\|calls=1$/m.test(r.stdout) && /^PROGS=created\|\|calls=2$/m.test(r.stdout), 'законные папки доходят до записи: ' + r.stdout);
+    } finally { t.cleanup(); }
   });
 
   ok('u4 Get-HmPaths: на настоящей машине стол и меню Пуск — либо $null с причиной, либо внутри профиля из списка профилей; профиль не берётся из $env:USERPROFILE', () => {
@@ -33469,7 +33838,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     assert(!/\bAdd-Type\b/.test(mine), 'в блоке про стол и ярлыки нет Add-Type');
   });
 
-  ok('u4 _userpath.ps1: закрепление папки — право на чтение каталога и общий доступ без удаления, закрепление после проверки и до любых действий с именем ярлыка, закрытие в finally и перед паузой повтора (статически)', () => {
+  ok('u4 _userpath.ps1: закрепление папки — право на чтение каталога и общий доступ без удаления, файл-страж (уникальное имя, общий доступ 0, CREATE_NEW, удаление при закрытии, сверка пути) после сверки пути папки, закрепление после проверки и до любых действий с именем ярлыка, закрытие в finally и перед паузой повтора (статически)', () => {
     const c = codeOnly(fs.readFileSync(USERPATH, 'utf8'));
     for (const sym of ['CreateFileW', 'CloseHandle', 'GetFinalPathNameByHandleW']) {
       const native = c.slice(c.indexOf('function Get-HmFsNative'), c.indexOf('function Get-HmReparseTag'));
@@ -33497,15 +33866,36 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     const pin = cutPs(c, 'Open-HmPinnedShellFolder');
     assert(/Get-HmHandlePath \$h/.test(pin) && /Get-HmHandlePath \$hp/.test(pin), 'путь берётся по дескриптору и у папки, и у профиля');
     assert(/OrdinalIgnoreCase/.test(pin), 'сравнение без учёта регистра');
-    assertOrder(pin, 'Get-HmHandlePath $h', 'путь по дескриптору не совпал', 'сверка пути — до возврата дескриптора');
-    assert(/finally \{\s*if \(-not \$ok\) \{ Close-HmDirHandle \$h \}/.test(pin), 'при отказе дескриптор закрывается самой функцией');
+    assertOrder(pin, 'Get-HmHandlePath $h', 'путь не совпал', 'сверка пути — до возврата дескриптора');
+    assertOrder(pin, 'путь не совпал', 'Open-HmPinSentinel $got', 'страж — только после сверки пути папки и по настоящему пути папки');
+    assertOrder(pin, 'Open-HmPinSentinel $got', 'return [pscustomobject]@{ Dir = $h; Sentinel = $s }', 'страж создан до возврата закрепления');
+    assert(/finally \{\s*if \(-not \$ok\) \{ Close-HmDirHandle \$s; Close-HmDirHandle \$h \}/.test(pin), 'при отказе и страж, и дескриптор закрываются самой функцией');
+    // Страж: имя неугадываемое (GUID), доступ с правом DELETE (иначе удаления при закрытии нет), общий доступ 0 (открыть, а значит
+    // и удалить, не может никто), CREATE_NEW (занятое имя — отказ, не запись сквозь ссылку), флаг удаления при закрытии,
+    // настоящий путь файла по дескриптору сверяется с «путь папки + имя», при несовпадении файл закрывается.
+    const sen = cutPs(c, 'Open-HmPinSentinel');
+    const sc = /CreateFileW\(\$q, \[uint32\](0x[0-9A-Fa-f]+), \[uint32\](\d+), \[IntPtr\]::Zero, \[uint32\](\d+), \[uint32\](0x[0-9A-Fa-f]+), \[IntPtr\]::Zero\)/.exec(sen);
+    assert(sc, 'вызов CreateFileW стража на месте: ' + sen.slice(0, 600));
+    assert((parseInt(sc[1], 16) & 0x10000) === 0x10000, 'в праве доступа стража есть DELETE (0x10000): ' + sc[1]);
+    assert.strictEqual(parseInt(sc[2], 10), 0, 'общий доступ стража 0: никто другой его не откроет');
+    assert.strictEqual(parseInt(sc[3], 10), 1, 'CREATE_NEW');
+    assert((parseInt(sc[4], 16) & 0x04000000) === 0x04000000, 'FILE_FLAG_DELETE_ON_CLOSE: ' + sc[4]);
+    assert(/NewGuid\(\)/.test(sen), 'имя стража — GUID: заранее его не занять');
+    assert(/Get-HmHandlePath \$s/.test(sen) && /OrdinalIgnoreCase/.test(sen), 'путь стража сверяется по дескриптору, без учёта регистра');
+    assertOrder(sen, 'CreateFileW', 'Get-HmHandlePath $s', 'сверка пути — после создания');
+    assert(/finally \{\s*if \(-not \$same\) \{ Close-HmDirHandle \$s \}/.test(sen), 'несовпавший страж закрывается (и исчезает) самой функцией');
+    // Закрытие пары: страж первым, потом папка; нулевой и пустой — без ошибки.
+    const cl = cutPs(c, 'Close-HmDirHandle');
+    assert(/PSObject\.Properties\['Sentinel'\]/.test(cl), 'Close-HmDirHandle понимает пару «папка + страж»');
+    assertOrder(cl, 'Close-HmDirHandle $Handle.Sentinel', 'Close-HmDirHandle $Handle.Dir', 'страж закрывается раньше папки');
   });
 
-  ok('u4 закрепление папки: на машине с настоящим OneDrive и настоящим столом дескриптор открывается, а его путь совпадает с проверенным (только чтение — ничего не создаётся)', () => {
+  ok('u4 закрепление папки: на машине с настоящим OneDrive и настоящим столом дескриптор открывается, а его путь совпадает с проверенным (только чтение — ничего не создаётся, файл-страж здесь не создаётся)', () => {
     needWinPs();
     const od = process.env.OneDrive || process.env.OneDriveConsumer || process.env.OneDriveCommercial || '';
-    // Только чтение: открыть каталог за чтением и закрыть. Пишущих вызовов здесь нет, а проверка нужна на живых облачных
-    // папках: их точка повторной обработки не должна ломать сверку пути дескриптора.
+    // Только чтение: открыть каталог за чтением (Open-HmDirHandle с закреплением — само по себе ничего не создаёт) и закрыть.
+    // Open-HmPinnedShellFolder здесь не зовётся: он кладёт в папку файл-страж, а писать в настоящий профиль владельца тест
+    // не вправе. Проверка нужна на живых облачных папках: их точка повторной обработки не должна ломать сверку пути.
     const r = runPsFile([
       '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
       '. $env:HM_T_LIB',
@@ -33515,7 +33905,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       '    $vf = Test-HmShellFolder -ProfileDir $prof -Candidate $p',
       "    if (-not $vf.Ok) { 'OUTSIDE=' + $p; continue }",
       '    try {',
-      '        $h = Open-HmPinnedShellFolder -ProfileDir $prof -Dir ([string]$vf.Dir)',
+      '        $h = Open-HmDirHandle ([string]$vf.Dir) $true',
       '        $final = Get-HmHandlePath $h',
       '        Close-HmDirHandle $h',
       "        'PINNED=' + $final + ' | ' + $vf.Dir",

@@ -366,9 +366,11 @@ function Set-HmShellDirs {
         $Paths.ProgramsWhy = $Paths.DesktopWhy
         return
     }
-    $d = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $DesktopAnswer
+    $d = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $DesktopAnswer -Kind Desktop
     if ($d.Ok) { $Paths.Desktop = $d.Dir } else { $Paths.DesktopWhy = $d.Reason }
-    $p = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $ProgramsAnswer
+    # Меню «Пуск» — только на обычном месте профиля (Kind = Programs): выбирать другую папку незачем,
+    # а выбор подменяющего (пустой каталог внутри профиля) — это то, что проверка и отсекает.
+    $p = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $ProgramsAnswer -Kind Programs
     if ($p.Ok) { $Paths.Programs = $p.Dir } else { $Paths.ProgramsWhy = $p.Reason }
 }
 
@@ -996,7 +998,9 @@ function Set-HmClaudeShortcut {
     }
     # Проверка на месте использования: пути могли собрать где и когда угодно, а папка за это время
     # могла стать ссылкой. Сверяем с профилем (список профилей Windows), а не с переменной окружения.
-    $vf = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $Dir
+    $kind = 'Desktop'
+    if ($Id -eq 'programs') { $kind = 'Programs' }
+    $vf = Test-HmShellFolder -ProfileDir $ProfileDir -Candidate $Dir -Kind $kind
     if (-not $vf.Ok) { return @{ State = 'skipped'; Path = ''; Error = $vf.Reason } }
     if (-not (Test-Path -LiteralPath $Dir)) { return @{ State = 'skipped'; Path = ''; Error = "папки $Dir нет" } }
     $lnk = Join-Path $Dir $script:HmLnkName
