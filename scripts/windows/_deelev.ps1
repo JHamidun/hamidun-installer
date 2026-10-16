@@ -529,7 +529,9 @@ function Test-HmTrustedSigner {
         # раздваиваем кавычки обратно, а не Trim('"'): значение, в котором кавычки есть на самом деле, не должно
         # сойти за значение без них.
         if ($org.Length -ge 2 -and $org.StartsWith('"') -and $org.EndsWith('"')) { $org = $org.Substring(1, $org.Length - 2).Replace('""', '"') }
-        if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
+        # Порядковое сравнение без учёта регистра, а не -ne: оператор сравнивает с учётом культуры, и мягкий перенос (U+00AD) в
+        # имени издателя «не слышен» (проверено на PowerShell 5.1) — O="Microsoft Corporation\u00AD" проходило бы как пин.
+        if (-not [string]::Equals($org, $ExpectedOrg, [StringComparison]::OrdinalIgnoreCase)) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
     }
     # (e) Опциональный (более мягкий) пин по Subject — для издателей, у кого RDN не подтверждён.
     if ($ExpectedSubjectMatch -and ("$($cert.Subject)" -notmatch $ExpectedSubjectMatch)) {

@@ -4,8 +4,11 @@
 # уже лежит в vendor\apps (так его зовёт tools\regen-checksums.js перед записью манифеста). Код выхода:
 # 0 — всё подтверждено пином, 1 — нет.
 # Continue (not Stop): нативные команды (npm/pip) пишут notice в stderr — под Stop это рушит скрипт.
-param([switch]$VerifyOnly)
+param([switch]$VerifyOnly, [switch]$Release)
 $ErrorActionPreference = 'Continue'
+# -Release: релизная сборка (npm run dist / dist:win зовут `fetch:vendor -- -Release`). То же, что HM_RELEASE=1 в окружении:
+# без личного списка паттернов экспорт-фильтра nomad-src сборка останавливается (как в CI), а не предупреждает и едет дальше.
+if ($Release) { $env:HM_RELEASE = '1' }
 $root  = Split-Path -Parent $PSScriptRoot
 $apps  = Join-Path $root 'vendor\apps'
 if (-not $VerifyOnly) { New-Item -ItemType Directory -Force $apps | Out-Null }
@@ -190,7 +193,12 @@ function Test-HmVendorSigner {
   try { $cn = [string]$cert.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) }
   catch { return New-HmSignerVerdict $false 'signed' $true ("имя подписанта не читается: " + $_.Exception.Message) }
   $allowed = @($rule.cn)
-  if ($allowed -cnotcontains $cn) {
+  # Сравнение ПОРЯДКОВОЕ (Ordinal). -ceq / -ccontains / -cnotcontains в Windows PowerShell 5.1 сравнивают с учётом культуры, а там
+  # мягкий перенос (U+00AD) «не слышен»: «Microsoft Corporation» + U+00AD считалось бы равным пину (проверено на 5.1.26100). УЦ
+  # выпускает сертификат с таким именем, поэтому равенство должно быть побайтовым, а не языковым.
+  $cnMatch = $false
+  foreach ($pin in $allowed) { if ([string]::Equals([string]$pin, $cn, [StringComparison]::Ordinal)) { $cnMatch = $true; break } }
+  if (-not $cnMatch) {
     return New-HmSignerVerdict $false 'signed' $true ("подписант «" + $cn + "» не из пина (ожидалось: " + ($allowed -join ' | ') + ")")
   }
   if (-not (Test-HmCertHasEku $cert '1.3.6.1.5.5.7.3.3')) {

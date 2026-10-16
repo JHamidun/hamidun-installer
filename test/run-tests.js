@@ -24590,7 +24590,7 @@ ok('config.json в репозитории без сборочных маркер
     assert(/\[Parameter\(Mandatory = \$true\)\]\[string\]\$Path,\s+\[string\]\$ExpectedOrg = '',\s+\[string\]\$ExpectedSubjectMatch = ''/.test(fn), 'сигнатура прежняя');
     assert(/Get-AuthenticodeSignature -LiteralPath \$Path/.test(fn) && /\.Status -ne 'Valid'/.test(fn), 'Status=Valid по-прежнему обязателен');
     assert(/Get-HmSignerChainRoot -Cert \$cert/.test(fn) && /Get-HmMachineRootThumbprints/.test(fn), 'корень цепочки сверяется с машинным стором');
-    assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(fn) && /\$ExpectedSubjectMatch -and/.test(fn) && /\$org -ne \$ExpectedOrg/.test(fn), 'EKU и оба пина на месте');
+    assert(/1\.3\.6\.1\.5\.5\.7\.3\.3/.test(fn) && /\$ExpectedSubjectMatch -and/.test(fn) && /\[string\]::Equals\(\$org, \$ExpectedOrg, \[StringComparison\]::OrdinalIgnoreCase\)/.test(fn) && !/\$org -ne \$ExpectedOrg/.test(fn), 'EKU и оба пина на месте; O= сравнивается порядково, а не оператором с культурой');
     assert(/\$sig\.TimeStamperCertificate/.test(fn) && /Get-HmSignerChainRoot -Cert \$tsCert -Eku '1\.3\.6\.1\.5\.5\.7\.3\.8'/.test(fn) && /\$machineRoots -notcontains \[string\]\$tsAnchor\.Root\.Thumbprint/.test(fn),
       'просроченный лист принимается только по метке времени от TSA, чей корень лежит в LocalMachine\\Root');
     const helpers = s.slice(s.indexOf('function Get-HmMachineRootThumbprints'), s.indexOf('function Test-HmTrustedSigner'));
@@ -25314,9 +25314,9 @@ ok('config.json в репозитории без сборочных маркер
   })();
   const needPs = () => { if (!psAvail) SKIP('нужен Windows PowerShell 5.1'); };
   // Запуск случая из test/fetch-vendor-harness.ps1: строки «МЕТКА значение» + код выхода.
-  const runCase = (name, work, timeoutMs) => {
+  const runCase = (name, work, timeoutMs, script) => {
     const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', HARNESS,
-      '-Script', FV, '-Case', name, '-Work', work], { encoding: 'utf8', timeout: timeoutMs || 240000 });
+      '-Script', script || FV, '-Case', name, '-Work', work], { encoding: 'utf8', timeout: timeoutMs || 240000 });
     const out = String(r.stdout || '').replace(/^﻿/, '') + String(r.stderr || '');
     return { status: r.status, out, lines: out.split(/\r?\n/).map((l) => l.replace(/^﻿/, '')).filter(Boolean) };
   };
@@ -25591,6 +25591,9 @@ ok('config.json в репозитории без сборочных маркер
         S('prefixed', 'vscode-setup.exe', 'Valid', 'Not Microsoft Corporation'),
         S('case-variant', 'vscode-setup.exe', 'Valid', 'microsoft corporation'),
         S('trailing-space', 'vscode-setup.exe', 'Valid', 'Microsoft Corporation '),
+        // мягкий перенос (U+00AD): оператор с культурой считает такое имя равным пину, порядковое сравнение — нет
+        S('soft-hyphen-trailing', 'vscode-setup.exe', 'Valid', 'Microsoft Corporation\u00AD'),
+        S('soft-hyphen-inside', 'vscode-setup.exe', 'Valid', 'Micro\u00ADsoft Corporation'),
         // статусы Authenticode, кроме Valid
         S('not-signed', 'git-setup.exe', 'NotSigned', null), S('hash-mismatch', 'git-setup.exe', 'HashMismatch', 'Johannes Schindelin'),
         S('not-time-valid', 'git-setup.exe', 'NotTimeValid', 'Johannes Schindelin'), S('not-trusted', 'git-setup.exe', 'NotTrusted', 'Johannes Schindelin'),
@@ -25621,17 +25624,32 @@ ok('config.json в репозитории без сборочных маркер
       assert(/Evil Corp/.test(got['wrong-subject'].reason) && /Johannes Schindelin/.test(got['wrong-subject'].reason), 'названы и увиденный подписант, и ожидаемый');
       assert(/vendor-signers\.json/.test(got['unknown-file'].reason), 'для неизвестного имени названа таблица');
       // Подделка/нечитаемая подпись подлежит удалению; неизвестное имя и unsigned — не удаляются.
-      ['wrong-subject', 'superstring', 'case-variant', 'not-signed', 'hash-mismatch', 'valid-without-cert', 'read-throws'].forEach((k) => assert.strictEqual(got[k].del, true, k + ': файл подлежит удалению'));
+      ['wrong-subject', 'superstring', 'case-variant', 'soft-hyphen-trailing', 'soft-hyphen-inside', 'not-signed', 'hash-mismatch', 'valid-without-cert', 'read-throws'].forEach((k) => assert.strictEqual(got[k].del, true, k + ': файл подлежит удалению'));
       assert.strictEqual(got['unknown-file'].del, false, 'неизвестное имя не удаляется: файл не подделан, он не внесён');
       assert.strictEqual(got['unknown-file'].kind, 'unknown');
       assert.strictEqual(got['unsigned-mascot'].kind, 'unsigned');
       // Негативный контроль: «наивная» проверка (достаточно Status = Valid) пропустила бы все подмены с настоящей подписью.
       const naive = (x) => x.status === 'Valid';
-      ['wrong-subject', 'other-vendor-cn', 'superstring', 'prefixed', 'case-variant', 'trailing-space'].forEach((k) => {
+      ['wrong-subject', 'other-vendor-cn', 'superstring', 'prefixed', 'case-variant', 'trailing-space', 'soft-hyphen-trailing', 'soft-hyphen-inside'].forEach((k) => {
         const row = rows.find((x) => x.name === k);
         assert.strictEqual(naive(row), true, 'контроль: наивная проверка «Valid» принимает «' + k + '»');
         assert.strictEqual(got[k].ok, false, 'а пин издателя — отклоняет «' + k + '»');
       });
+      // КОНТРОЛЬ посылки: прежний оператор (-cnotcontains) на этой машине принимает имя с мягким переносом. Копия скрипта с
+      // прежней строкой вместо порядкового сравнения обязана пропустить обе строки — иначе тест выше ничего не охраняет.
+      const mutDir = path.join(work, 'mut-tools');
+      fs.mkdirSync(mutDir, { recursive: true });
+      fs.copyFileSync(SIGNERS, path.join(mutDir, 'vendor-signers.json'));
+      const src = fs.readFileSync(FV, 'utf8');
+      const ordinalBlock = /\$cnMatch = \$false\r?\n\s*foreach \(\$pin in \$allowed\) \{[^\r\n]*\r?\n\s*if \(-not \$cnMatch\) \{/;
+      assert(ordinalBlock.test(src), 'порядковый блок найден в скрипте (контроль строится по нему)');
+      fs.writeFileSync(path.join(mutDir, 'fetch-vendor.ps1'), src.replace(ordinalBlock, 'if ($allowed -cnotcontains $cn) {'), 'utf8');
+      const rOld = runCase('signer', work, 240000, path.join(mutDir, 'fetch-vendor.ps1'));
+      const old = {};
+      rOld.lines.forEach((l) => { const m = /^SIGNER (\S+) (\w+) (\w+) (\w+) ?(.*)$/.exec(l); if (m) old[m[1]] = m[2] === 'True'; });
+      assert.strictEqual(old['soft-hyphen-trailing'], true, 'КОНТРОЛЬ: прежний оператор принимает «Microsoft Corporation» + U+00AD (' + rOld.out.slice(-300) + ')');
+      assert.strictEqual(old['soft-hyphen-inside'], true, 'КОНТРОЛЬ: и «Micro» + U+00AD + «soft Corporation»');
+      assert.strictEqual(old['superstring'], false, 'контроль не сломал остальное: надстрока по-прежнему отклоняется');
     } finally { fs.rmSync(work, { recursive: true, force: true }); }
   });
 
@@ -25724,7 +25742,8 @@ ok('config.json в репозитории без сборочных маркер
     assert(/OutOfWindow/.test(anchored), 'срок оценивается у КАЖДОГО звена, а не только у листа');
     const v = fn('Test-HmVendorSigner');
     assert(/SignatureType/.test(v) && /Test-HmSignerAnchored/.test(v), 'тип подписи и якорь проверяются в самом вердикте');
-    assertOrder(v, "-cnotcontains $cn", 'Test-HmSignerAnchored', 'якорь проверяется после имени подписанта');
+    assertOrder(v, '[string]::Equals([string]$pin, $cn, [StringComparison]::Ordinal)', 'Test-HmSignerAnchored', 'якорь проверяется после имени подписанта (порядковое сравнение)');
+    assert(!/-cnotcontains|-ccontains|-ceq\s+\$cn/.test(v), 'имя подписанта не сравнивается операторами с культурой');
     assertOrder(v, 'Test-HmSignerAnchored', "return New-HmSignerVerdict $true 'signed' $false", 'положительный вердикт возможен только после якоря');
   });
 
@@ -33401,5 +33420,57 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     if (!pinned.length && !od && !lines(r.stdout).some((l) => l.startsWith('OUTSIDE='))) SKIP('на этой машине нет ни OneDrive, ни проверяемого стола');
     assert(pinned.length > 0 || lines(r.stdout).some((l) => l.startsWith('OUTSIDE=')), 'хотя бы одна настоящая папка закреплена (или честно вне профиля): ' + r.stdout);
     assert(!lines(r.stdout).some((l) => /^FAILED=InvalidOperationException/.test(l)), 'ни одна законная папка не отвергнута как «подменённая»: ' + r.stdout);
+  });
+})();
+
+// ===========================================================================
+// u11. Релизный ключ фетчера. Замечание ревью u7: «жёсткий» гейт личного списка паттернов включался только в CI
+// или при HM_RELEASE=1 в окружении, а локальные `npm run dist` / `dist:win` эту переменную не выставляли — релиз
+// мог собраться с предупреждением вместо остановки. Теперь dist и dist:win зовут `fetch:vendor -- -Release`.
+// ===========================================================================
+(function () {
+  console.log('\n== Фетчер vendor: ключ -Release (u11) ==');
+  const { spawnSync } = require('child_process');
+  const FV = path.join(ROOT, 'tools', 'fetch-vendor.ps1');
+  const havePs = process.platform === 'win32' && !spawnSync('powershell.exe', ['-NoProfile', '-Command', '1'], { encoding: 'utf8', timeout: 30000 }).error;
+
+  ok('u11: fetch-vendor.ps1 -Release выставляет HM_RELEASE=1 до первой загрузки, а dist и dist:win зовут фетчер с -Release', () => {
+    const src = fs.readFileSync(FV, 'utf8');
+    assert(/param\(\[switch\]\$VerifyOnly, \[switch\]\$Release\)/.test(src), 'ключ -Release объявлен рядом с -VerifyOnly');
+    assert(src.includes("if ($Release) { $env:HM_RELEASE = '1' }"), 'ключ выставляет HM_RELEASE=1');
+    assertOrder(src, "if ($Release) { $env:HM_RELEASE = '1' }", 'Test-HmReleaseBuild -Ci', 'флаг выставлен раньше, чем по нему принимается решение о личном списке');
+    assertOrder(src, "if ($Release) { $env:HM_RELEASE = '1' }", 'Invoke-RestMethod', 'и раньше первого обращения к сети');
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    ['dist', 'dist:win'].forEach((k) => {
+      const c = String(pkg.scripts[k]);
+      assert(/npm run fetch:config && npm run fetch:vendor -- -Release && npm run sync:sizes/.test(c), k + ': фетчер зовётся с -Release между fetch:config и sync:sizes');
+      // контроль: прежняя цепочка (без ключа) эту проверку не проходит
+      assert(!/npm run fetch:config && npm run fetch:vendor -- -Release && npm run sync:sizes/.test(c.replace(' -- -Release', '')), k + ': контроль — без ключа проверка краснеет');
+    });
+    assert(!/-Release/.test(String(pkg.scripts['fetch:vendor'])), 'сам fetch:vendor ключа не несёт: ручной запуск остаётся «предупредить и продолжить»');
+    assert(!/fetch:vendor/.test(String(pkg.scripts['dist:win:lite'])) && !/fetch:vendor/.test(String(pkg.scripts['dist:mac'])), 'lite и mac фетчер не зовут (у mac свой CI-гейт)');
+  });
+
+  ok('u11: fetch-vendor.ps1 (прогон PS 5.1): оператор if ($Release) из скрипта — с ключом ставит HM_RELEASE=1, без ключа переменную не трогает', () => {
+    if (!havePs) SKIP('нужен Windows PowerShell 5.1');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u11-rel-'));
+    try {
+      const probe = path.join(dir, 'probe.ps1');
+      fs.writeFileSync(probe, [
+        'param([string]$Script)',
+        '$ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)',
+        '$st = $ast.FindAll({ param($x) $x -is [System.Management.Automation.Language.IfStatementAst] -and $x.Clauses[0].Item1.Extent.Text -eq \'$Release\' }, $true) | Select-Object -First 1',
+        'if (-not $st) { Write-Output \'MISSING-IF\'; exit 9 }',
+        '$sb = [scriptblock]::Create($st.Extent.Text)',
+        '$env:HM_RELEASE = $null; $Release = $true;  . $sb; Write-Output ("ON=" + $env:HM_RELEASE)',
+        '$env:HM_RELEASE = \'prev\'; $Release = $false; . $sb; Write-Output ("OFF=" + $env:HM_RELEASE)',
+        ''
+      ].join('\r\n'), 'utf8');
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probe, '-Script', FV], { encoding: 'utf8', timeout: 60000 });
+      const out = String(r.stdout || '');
+      assert(!/MISSING-IF/.test(out), 'оператор найден в скрипте: ' + out + String(r.stderr || ''));
+      assert(/(^|\n)ON=1\r?\n/.test(out), 'с ключом HM_RELEASE=1: ' + out);
+      assert(/(^|\n)OFF=prev\r?\n/.test(out), 'без ключа переменная не тронута: ' + out);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 })();
