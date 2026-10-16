@@ -15,7 +15,7 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 65388144,
+            "win32": 66763664,
             "darwin": 63387151
           }
         },
@@ -30,7 +30,7 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 32874496,
+            "win32": 33230848,
             "darwin": 92775015
           }
         },
@@ -46,7 +46,7 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 232347808,
+            "win32": 251842640,
             "darwin": 555685401
           }
         },
@@ -62,7 +62,7 @@
           "requires": [],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 199597544,
+            "win32": 215228800,
             "darwin": 441615875
           }
         },
@@ -80,7 +80,7 @@
           "needsAdmin": false,
           "sizeNote": "это npm-кеш целиком; на диск встанет одна сборка — заметно меньше",
           "sizeBytes": {
-            "win32": 115012677,
+            "win32": 131041921,
             "darwin": 141774806
           }
         },
@@ -98,7 +98,7 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 89803239,
+            "win32": 126352276,
             "darwin": 97969163
           }
         },
@@ -133,7 +133,7 @@
           ],
           "needsAdmin": false,
           "sizeBytes": {
-            "win32": 257949255,
+            "win32": 257982999,
             "darwin": 233358780
           }
         },
@@ -154,7 +154,7 @@
             "darwin": "браузер для автоматизации уже внутри"
           },
           "sizeBytes": {
-            "win32": 178745597,
+            "win32": 181305544,
             "darwin": 797395819
           }
         }
@@ -227,7 +227,7 @@
             "darwin"
           ],
           "sizeBytes": {
-            "win32": 76364288,
+            "win32": 32442464,
             "darwin": 20848713
           }
         }
@@ -350,7 +350,7 @@
             }
           ],
           "sizeBytes": {
-            "win32": 20946752,
+            "win32": 19615736,
             "darwin": 21423161
           }
         }
