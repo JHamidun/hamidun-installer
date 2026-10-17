@@ -1084,6 +1084,9 @@ function Test-NomadSrcCritical {
 function Invoke-NomadSrcSanitize {
   # Возвращает $true = фильтр пройден; $false = FATAL (несводимые паттерны / битая структура).
   param([string]$Src)
+  # Относительные пути ниже режутся по длине $Src. Windows PowerShell 5.1 раскрывает короткие имена 8.3 в FullName потомков
+  # (C:\Users\RUNNER~1 -> C:\Users\runneradmin), а переданную строку оставляет как есть: корень берём тем же способом.
+  try { $Src = (Get-Item -LiteralPath $Src -ErrorAction Stop).FullName.TrimEnd('\') } catch { }
   Write-Host "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
   # Паттерны: общие (в репозитории) + личные (неотслеживаемый файл / HM_LEAK_PATTERNS) — см. Get-HmLeakPatterns.
   # HM_LEAK_PATTERNS_FILE — явный путь к списку (другой рабочий каталог, общий файл на несколько сборок);
@@ -1237,7 +1240,9 @@ function Invoke-NomadSrcSanitize {
 # (верифицирует). Self-contained (не зависит от Get-HmFileSha256).
 function Get-HmTreeSha256 {
     param([string]$Root)
-    $root = (Resolve-Path -LiteralPath $Root).Path
+    # Resolve-Path оставляет короткое написание 8.3 как есть, а FullName потомков Windows PowerShell 5.1 раскрывает: срез по длине корня
+    # съезжал бы, и хеш дерева зависел от написания пути. Корень берём тем же способом, каким получены потомки.
+    $root = (Get-Item -LiteralPath (Resolve-Path -LiteralPath $Root).Path).FullName
     $lines = New-Object System.Collections.Generic.List[string]
     $sha1 = [System.Security.Cryptography.SHA256]::Create()
     try {

@@ -7,6 +7,16 @@ const os = require('os');
 const http = require('http');
 const crypto = require('crypto');
 
+// TEMP на раннере GitHub — псевдоним 8.3 (C:\Users\RUNNER~1\...), и у любого человека с профилем длиннее восьми знаков тоже;
+// PowerShell и продукт отвечают длинным написанием. Песочницы строятся под TEMP и сверяются буквально, поэтому и сам процесс, и все
+// дочерние сразу получают длинное написание.
+if (process.platform === 'win32') {
+  try {
+    const longTmp = fs.realpathSync.native(os.tmpdir());
+    if (longTmp && longTmp.toLowerCase() !== os.tmpdir().toLowerCase()) { process.env.TEMP = longTmp; process.env.TMP = longTmp; }
+  } catch (e) { /* остаётся написание, которое дали */ }
+}
+
 const ROOT = path.join(__dirname, '..');
 const HMDeps = require(path.join(ROOT, 'src', 'renderer', 'deps.js'));
 const components = JSON.parse(fs.readFileSync(path.join(ROOT, 'components.json'), 'utf8'));
@@ -2767,6 +2777,34 @@ function mkHomeDir() {
   catch (e) { return d; }
 }
 function dropDir(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+// Снять саму ссылку (junction или symlink). rmdir(2) ссылке на каталог отказывает (ENOTDIR) на POSIX, а Windows её снимает.
+function dropLink(p) { try { fs.unlinkSync(p); } catch (e) { fs.rmdirSync(p); } }
+// WScript.Shell хранит пути и описание ярлыка в кодовой странице системы (ANSI). На Windows с западной локалью (раннер GitHub) кириллица
+// в имени ярлыка, в его цели или в пути папки не переживает ни Save(), ни чтение ярлыка («Value does not fall within the expected range»
+// или пустые свойства). У людей на русской Windows (кодовая страница 1251) это работает, и тесты, которые кладут ярлыки с русскими
+// именами (ярлык курса, «Claude Code — мои проекты») и читают их обратно, рассчитаны именно на такую систему.
+let _cyrLnkWorks = null;
+function cyrillicShortcutsWork() {
+  if (_cyrLnkWorks !== null) return _cyrLnkWorks;
+  _cyrLnkWorks = false;
+  if (process.platform !== 'win32') return _cyrLnkWorks;
+  let dir = '';
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cyrlnk-'));
+    const sub = path.join(dir, 'Иван О’Брайен Тест'); fs.mkdirSync(sub);
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $sh = New-Object -ComObject WScript.Shell; $p = Join-Path $env:HM_CYR_DIR 'Claude Code — мои проекты.lnk'; " +
+      "try { $s = $sh.CreateShortcut($p); $s.TargetPath = (Join-Path $env:HM_CYR_DIR 'Запустить курс.cmd'); $s.Description = 'первый'; $s.Save(); " +
+      "$b = $sh.CreateShortcut($p); 'BACK=' + $b.Description + '|' + $b.TargetPath } catch { 'ERR=' + $_.Exception.Message }"],
+    { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HM_CYR_DIR: sub }) });
+    _cyrLnkWorks = String(r.stdout || '').includes('BACK=первый|' + path.join(sub, 'Запустить курс.cmd'));
+  } catch (e) { _cyrLnkWorks = false; }
+  finally { if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } } }
+  return _cyrLnkWorks;
+}
+function needCyrillicShortcuts() {
+  if (!cyrillicShortcutsWork()) SKIP('кодовая страница этой Windows не вмещает кириллицу в путях и свойствах ярлыка (WScript.Shell хранит их в ANSI) — тест рассчитан на русскую систему');
+}
 function targetPathsOf(plan) {
   return plan.targets.map((t) => t.path || t.dir || t.file || t.plist || '').filter(Boolean);
 }
@@ -6687,6 +6725,9 @@ if (powershellAvailable()) {
       fs.writeFileSync(sb('vendor\\apps\\claude-code.vsix'), Buffer.alloc(262144, 7));
       fs.writeFileSync(sb('vendor\\apps\\chatgpt.vsix'), Buffer.alloc(262144, 8));
       fs.writeFileSync(sb('la\\Programs\\Microsoft VS Code\\bin\\code.cmd'), '@echo off\r\n');
+      // «Редактор на диске» — это Code.exe, одиночный code.cmd (остаток удаления, шим Cursor) не считается: без файла скрипт честно пропускает
+      // шаг. На машине разработчика Code.exe находился в настоящей установке VS Code по реестру, и недостающий файл песочницы не был виден.
+      fs.writeFileSync(sb('la\\Programs\\Microsoft VS Code\\Code.exe'), 'MZ-stub');
       const env = Object.assign({}, process.env, {
         TEMP: sb('temp'), TMP: sb('temp'), LOCALAPPDATA: sb('la'),
         USERPROFILE: sb('home'), HM_VENDOR: sb('vendor')
@@ -12891,7 +12932,7 @@ ok('config.json в репозитории без сборочных маркер
     const src = m.slice(i, j + 2);
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-a1c-vsx-'));
     try {
-      const mk = (rel, text) => { const f = path.join(base, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text || 'x'); return f; };
+      const mk = (rel, text) => { const f = path.join(base, ...rel.split('\\')); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, text || 'x'); return f; };
       const make = (la, pf, cli) => new Function('path', 'firstExisting', 'winLocalAppData', 'winPF', 'resolveExecutable',
         src + '; return winVsCodeExe;')(path,
         (ps) => { for (const p of ps) { try { if (p && fs.existsSync(p)) return p; } catch (e) { /* */ } } return ''; },
@@ -16566,6 +16607,7 @@ ok('config.json в репозитории без сборочных маркер
       } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
     });
     ok('A2 ярлык «Claude Code — мои проекты»: ведёт в лаунчер с --projects, флага «от имени администратора» нет', () => {
+      needCyrillicShortcuts();
       const sb = mkSandbox('lnk');
       try {
         assert.strictEqual(firstRun(sb).status, 0);
@@ -16984,7 +17026,8 @@ ok('config.json в репозитории без сборочных маркер
     (fs.readFileSync(MAC_TRAP, 'utf8').match(/Настройки VS Code для новичка:[^"\r\n]*/g) || []).forEach((l) => ours.push(l));
     A2_FINALLY_LINES.forEach((l) => ours.push(l));
     if (psOk) assert(A2_FINALLY_LINES.length >= 2, 'строки обвязки vscode.ps1 собраны прогоном: ' + A2_FINALLY_LINES.length);
-    assert(ours.length >= 10, 'строк набрано достаточно: ' + ours.length);
+    // Без PowerShell (macOS, Linux) нет четырёх прогонов vscode.ps1 и строк его обвязки: остаются строки macOS-зеркала и trap-файла.
+    assert(ours.length >= (psOk ? 10 : 6), 'строк набрано достаточно: ' + ours.length);
     for (const l of ours) {
       assert(!/(\.\.\.|…)\s*$/.test(l), 'строка шага не выглядит «этапом»: ' + l);
     }
@@ -21003,7 +21046,7 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(o.st, 'link', o.out);
       assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'сквозь ссылку ничего не записано');
       assert(/ссылка/.test(o.out), 'причина названа: ' + o.out);
-      fs.rmdirSync(path.join(box.home, '.codex'));
+      dropLink(path.join(box.home, '.codex'));
       // AGENTS.md — ссылка на чужой файл
       fs.mkdirSync(path.join(box.home, '.codex'));
       const ext = path.join(box.base, 'external.md'); fs.writeFileSync(ext, 'EXTERNAL');
@@ -21376,7 +21419,9 @@ ok('config.json в репозитории без сборочных маркер
   function runClaudeSh(opts) {
     const base = mkTmp('hm-csh-');
     const home = base + '/home'; fs.mkdirSync(home, { recursive: true });
-    const bin = base + '/bin'; fs.mkdirSync(bin);
+    // Заглушки лежат в ~/.local/bin: claude.sh ставит этот каталог в PATH ПЕРВЫМ, а за ним /usr/local/bin и Homebrew, где на Mac
+    // живут настоящие npm и curl; из любого другого каталога заглушки они перекрывают (раннер macOS ставил настоящий Claude Code по сети).
+    const bin = home + '/.local/bin'; fs.mkdirSync(bin, { recursive: true });
     exe(bin + '/curl', '#!/bin/sh\nexit 22\n');                // claude.ai не отвечает → путь через npm
     exe(bin + '/dscl', '#!/bin/sh\nexit 1\n');                // оболочку входа задаёт SHELL
     exe(bin + '/npm', [
@@ -21411,7 +21456,7 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(o.status, 0, 'exit 0: ' + o.out.slice(-500));
       assert(/Проверка новым окном Терминала: 9\.9\.9/.test(o.out), 'проверка окна напечатала версию: ' + o.out.slice(-400));
       assert(!/ЧАСТИЧНО/.test(o.out), 'частичного успеха нет');
-      assert(/"claude":\{"verdict":"works"/.test(o.checks), 'вердикт: ' + o.checks);
+      assert(/"claude":\s*\{\s*"verdict":\s*"works"/.test(o.checks), 'вердикт: ' + o.checks);
     } finally { dropDir(o.base); }
   });
 
@@ -21424,7 +21469,7 @@ ok('config.json в репозитории без сборочных маркер
       assert(o.last.length <= 240, 'строка ≤ 240 знаков (' + o.last.length + '): ' + o.last);
       assert.strictEqual(o.out.split('\n').filter((l) => /^ЧАСТИЧНО:/.test(l)).length, 1, 'ровно одна строка ЧАСТИЧНО');
       assert(!/ОШИБКА:/.test(o.out), 'слова «ОШИБКА» нет — это не провал');
-      assert(/"claude":\{"verdict":"works"/.test(o.checks), 'сам claude работает — вердикт «works»: ' + o.checks);
+      assert(/"claude":\s*\{\s*"verdict":\s*"works"/.test(o.checks), 'сам claude работает — вердикт «works»: ' + o.checks);
       assert(/Новое окно Терминала не находило|OK: 9\.9\.9|OK: claude установлен/.test(o.out), 'человеку сказано, что claude установлен');
     } finally { dropDir(o.base); }
   });
@@ -21725,13 +21770,15 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(r.status, 0);
       assert(/^\[touchup-config\] пропущено: settings\.json не разбирается как JSON-объект/.test(r.out) && linesOf(r.out).length === 1, r.out);
       assert.strictEqual(fs.readFileSync(home + '/.claude/settings.json', 'utf8'), '[{"mcpServers": {}}]', 'файл не тронут');
-      // node есть, но падает
-      const bin = base + '/bin'; fs.mkdirSync(bin);
+      // node есть, но падает. Заглушка лежит в ~/.local/bin: скрипт ставит его в PATH первым, а настоящий node из /usr/local/bin или
+      // Homebrew идёт следом и на Mac перекрыл бы заглушку из любого другого каталога.
+      const bin = home + '/.local/bin'; fs.mkdirSync(bin, { recursive: true });
       exe(bin + '/node', '#!/bin/sh\nexit 3\n');
       fs.writeFileSync(home + '/.claude/settings.json', '{"mcpServers": {}}');
-      r = touchupRun('touchup-config.sh', home, {}, mp(bin));
+      r = touchupRun('touchup-config.sh', home, {}, '');
       assert.strictEqual(r.status, 0, 'код 0, даже если node упал');
       assert(/^\[touchup-config\] пропущено: правка профиля завершилась ошибкой/.test(r.out), r.out);
+      fs.rmSync(bin + '/node');
       // нет node вовсе (если на машине он лежит в /usr/local/bin или Homebrew — случай не воспроизвести)
       const probe = spawnSync('bash', ['-c', 'export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; command -v node'], { encoding: 'utf8', env: Object.assign({}, process.env, { HOME: home }) });
       if (!(probe.stdout || '').trim()) {
@@ -21976,7 +22023,7 @@ ok('config.json в репозитории без сборочных маркер
       assert(/^ОБНОВЛЕНО: ~\/\.claude\/settings\.json/.test(ls[0]) && !/Codex/.test(ls[0]), ls[0]);
       assert(/^\[touchup-config\] пропущено: ~\/\.codex или AGENTS\.md в нём — ссылка/.test(ls[1]), ls[1]);
       assert.deepStrictEqual(fs.readdirSync(elsewhere), [], 'сквозь ссылку ничего не записано');
-      fs.rmdirSync(b.home + '/.codex');
+      dropLink(b.home + '/.codex');
       fs.mkdirSync(b.home + '/.codex');
       const utf16 = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('# мои правила\n', 'utf16le')]);
       fs.writeFileSync(b.agents, utf16);
@@ -23069,9 +23116,14 @@ ok('config.json в репозитории без сборочных маркер
       "  console.log('RESULT ' + JSON.stringify(res));",
       "})().catch((e) => { console.log('RESULT ' + JSON.stringify({ fatal: String(e && e.message).slice(0, 300) })); process.exitCode = 1; });",
     ].join('\n'));
+    // Скрипт-пробник лежит во временной папке, и playwright-core из node_modules репозитория он сам не найдёт: резолвер идёт вверх от
+    // самого скрипта. Каталог пакета отдаём через NODE_PATH (на машине разработчика он стоял там же глобально).
+    const pwMain = require.resolve('playwright-core');
+    const pwModules = pwMain.slice(0, pwMain.lastIndexOf('node_modules') + 'node_modules'.length);
     const env = Object.assign({}, process.env, {
       HM_E2E_GUI: path.join(ROOT, 'test', 'e2e-gui.js'), HM_PROBE_EXE: real.exe, HM_DECOY_DIR: decoyDir,
       HM_MARK_APP: path.join(real.base, 'm-app-pw.txt'), HM_UD: path.join(real.base, 'ud-pw'),
+      NODE_PATH: [pwModules].concat(String(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)).join(path.delimiter),
     });
     delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
     const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 300000, env });
@@ -26286,6 +26338,33 @@ ok('config.json в репозитории без сборочных маркер
     assert(!withList.left.includes('extra/name[1].txt'), 'withList: личное имя в файле с [ ] в имени найдено: ' + withList.left.join(','));
   });
 
+  // 8.3 (u12): корень сценария передан коротким псевдонимом, как выглядит %TEMP% у людей с длинным именем профиля (и на раннере GitHub).
+  // Windows PowerShell 5.1 раскрывает псевдоним в FullName потомков, но не в переданной строке: срез по длине корня давал пути вроде
+  // «rc/LICENSE», и фильтр сверял правила с чужими именами.
+  ok('fetch-vendor.ps1 (прогон PS 5.1): экспорт-фильтр nomad-src при коротком (8.3) написании корня — относительные пути не съезжают, ключ в файле с [ ] в имени найден', () => {
+    needPs();
+    const work = mkWork('san-with-a-long-directory-name');
+    try {
+      const probe = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:HM_U12_DIR).ShortPath'],
+        { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HM_U12_DIR: work }) });
+      const short = String(probe.stdout || '').trim();
+      if (!short.includes('~') || short.toLowerCase() === work.toLowerCase()) SKIP('короткие имена 8.3 на этом томе выключены — псевдоним не получить');
+      const files = [
+        { rel: 'pyproject.toml', text: '[project]\nname = "x"\nreadme = "README.md"\n' },
+        { rel: 'README.md', text: '# x\n' }, { rel: 'LICENSE', text: 'MIT\n' },
+        { rel: 'agent/core.py', text: 'print(1)\n' },
+        { rel: 'notes[1].txt', text: 'token ' + FAKE_KEY + '\n' }
+      ];
+      fs.writeFileSync(path.join(work, 'scenario.json'), JSON.stringify({ env: {}, files }), 'utf8');
+      const r = runCase('sanitize', short, 300000);
+      assert(!r.lines.some((l) => /^MISSING-FN/.test(l)), 'функции найдены: ' + r.lines.join(' | '));
+      assert.strictEqual(r.status, 0, 'harness: ' + r.out.slice(-800));
+      const left = r.lines.filter((l) => /^LEFT /.test(l)).map((l) => l.slice(5)).sort();
+      assert.deepStrictEqual(left, ['LICENSE', 'README.md', 'agent/core.py', 'pyproject.toml'], 'остались ровно чистые файлы под своими именами (а ключ в notes[1].txt удалён): ' + left.join(','));
+      assert((r.lines.find((l) => /^SANITIZE returned=/.test(l)) || '') === 'SANITIZE returned=True', 'фильтр пройден: ' + r.out.slice(-600));
+    } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  });
+
   ok('fetch-vendor-mac.sh (прогон bash): релизная сборка без личного списка — отказ, флаг HM_ALLOW_NO_PRIVATE_LEAK_LIST пропускает с баннером, локально предупреждение; пустой список — ошибка; правила те же, что у PowerShell-версии', () => {
     if (!bashAvail) SKIP('нет bash');
     const py = spawnSync('python', ['-c', 'import sys;print(sys.executable)'], { encoding: 'utf8', timeout: 30000 });
@@ -29330,7 +29409,10 @@ ok('config.json в репозитории без сборочных маркер
         assert(/helper-ran/.test(r.stdout || ''), 'позитивный контроль: тело выполнилось');
         return fs.existsSync(marker);
       };
-      assert.strictEqual(probe(['--posix']), true, 'КОНТРОЛЬ: без -p (прежний запуск `sh -c`) PS4 из окружения исполняется — вектор реален');
+      // Контроль доказывает, что проба вообще видит дыру. Системный bash 3.2 и Homebrew bash 5 на macOS не обязаны исполнять подстановку
+      // в PS4 из окружения в режиме POSIX — там вектора нет, и требовать его показа нельзя; защита `-p` ниже проверяется на всех системах.
+      const vectorReal = probe(['--posix']);
+      if (process.platform !== 'darwin') assert.strictEqual(vectorReal, true, 'КОНТРОЛЬ: без -p (прежний запуск `sh -c`) PS4 из окружения исполняется — вектор реален');
       assert.strictEqual(probe(['--posix', '-p']), false, 'с -p PS4/SHELLOPTS из окружения игнорируются');
       // и сам помощник (настоящий текст из buildHelperScript) под теми же флагами, с очищенным окружением
       const dir = work + '/h';
@@ -29969,6 +30051,16 @@ function Start-TempPoller([string]$Dir) {
             foreach ($f in [IO.Directory]::GetFileSystemEntries($dir)) {
                 $n = [IO.Path]::GetFileName($f)
                 if (-not $seen.Contains($n)) { $seen.Add($n) }
+                # Свежие сборки Windows PowerShell 5.1 кладут файлы компиляции Add-Type в подкаталог TEMP со случайным именем, а не прямо
+                # в TEMP: без захода внутрь «следы» прежнего кода не видны, и отрицательный контроль краснеет на исправной машине.
+                if ([IO.Directory]::Exists($f)) {
+                    try {
+                        foreach ($g in [IO.Directory]::GetFileSystemEntries($f)) {
+                            $m = $n + '/' + [IO.Path]::GetFileName($g)
+                            if (-not $seen.Contains($m)) { $seen.Add($m) }
+                        }
+                    } catch { }
+                }
             }
             Start-Sleep -Milliseconds 5
         }
@@ -31793,6 +31885,26 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert(/BAD=0/.test(r.stdout || ''), 'ParseFile без ошибок: ' + (r.stdout || '') + (r.stderr || ''));
     } finally { drop(dir); }
   });
+
+  // 8.3 (u12): переносной exe разворачивает ресурсы под %TEMP%, а у человека с профилем длиннее восьми знаков он записан псевдонимом
+  // (C:\Users\IVANPE~1\...). Windows PowerShell 5.1 раскрывает псевдоним в FullName файлов, но не в строке HM_ASSETS: прежний срез
+  // `FullName.Substring($starterSrc.Length)` съезжал, и PROMPTS.md ложился в подкаталог с обрезком имени — ученик «не находил файл».
+  ok('u12: config.ps1 — стартовый проект при коротком (8.3) написании HM_ASSETS: PROMPTS.md и .keep лежат прямо в ~/HamidunStart, лишних подкаталогов нет', () => {
+    needPs();
+    const sb = mkCfg('c83-with-a-long-directory-name');
+    try {
+      const probe = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:HM_U12_DIR).ShortPath'],
+        { encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HM_U12_DIR: sb.assets }) });
+      const short = String(probe.stdout || '').trim();
+      if (!short.includes('~') || short.toLowerCase() === sb.assets.toLowerCase()) SKIP('короткие имена 8.3 на этом томе выключены — псевдоним не получить');
+      const r = runCfg(sb, { env: { HM_ASSETS: short } });
+      const dst = path.join(sb.home, 'HamidunStart');
+      assert(fs.existsSync(dst), 'стартовый проект создан: ' + r.out.slice(-600));
+      assert.deepStrictEqual(fs.readdirSync(dst).sort(), ['.keep', 'PROMPTS.md'], 'файлы лежат плоско, без каталога с обрезком имени: ' + r.out.slice(-600));
+      assert.strictEqual(fs.readFileSync(path.join(dst, 'PROMPTS.md'), 'utf8'), 'prompts');
+      assert(!/PROMPTS\.md в .* не появился/.test(r.out), 'скрипт не жалуется на пропавший PROMPTS.md: ' + r.out.slice(-600));
+    } finally { drop(sb.base); }
+  });
 })();
 
 // ===========================================================================
@@ -32615,6 +32727,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
 
   ok('u4 New-HmShortcutFile (PS 5.1): ярлык ложится через временный файл и Move — без -Replace занятое имя это отказ, с -Replace обычный файл заменяется, временных файлов не остаётся', () => {
     needWinPs();
+    needCyrillicShortcuts();
     const t = mkTree();
     try {
       const desk = t.mk(t.P, 'Desktop');
@@ -32651,6 +32764,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
 
   ok('u4 New-HmShortcutFile (PS 5.1): подложенные жёсткая ссылка и symlink на имени ярлыка — чужой файл цел, папка или junction на этом месте — отказ; обычный Save() по тому же имени затирает чужой файл (контроль)', () => {
     needWinPs();
+    needCyrillicShortcuts();
     const t = mkTree();
     try {
       const desk = t.mk(t.P, 'Desktop');
@@ -33138,6 +33252,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
 
   ok('u4 A2 ярлыки: стол в OneDrive (облачная заглушка по тегу) получает ярлык, обычная junction на его месте — нет', () => {
     needWinPs();
+    needCyrillicShortcuts();
     const sb = mkSandbox('onedrive');
     try {
       const realOd = path.join(sb.base, 'cloud-real');
@@ -33264,6 +33379,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
 
   ok('u4 course.ps1: ярлык курса идёт в папку стола, прошедшую проверку профиля; стол вне профиля — ярлыка нет, лаунчер и причина остаются; без проверки (контроль) ярлык лёг бы в чужую папку', () => {
     needWinPs();
+    needCyrillicShortcuts();
     const t = mkTree();
     try {
       const src = fs.readFileSync(COURSE, 'utf8');
@@ -33472,5 +33588,57 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert(/(^|\n)ON=1\r?\n/.test(out), 'с ключом HM_RELEASE=1: ' + out);
       assert(/(^|\n)OFF=prev\r?\n/.test(out), 'без ключа переменная не тронута: ' + out);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+})();
+
+// ===========================================================================
+// u12. Короткие имена 8.3 в корнях сверки. На раннере GitHub, а также у любого человека с профилем длиннее восьми знаков, %TEMP% — псевдоним
+// (C:\Users\RUNNER~1\...), и переносной exe разворачивает ресурсы именно под него. Windows PowerShell 5.1 раскрывает 8.3 в FullName потомков,
+// но не в Resolve-Path и не в переданной строке, поэтому срез «FullName.Substring(корень.Length)» съезжал на разницу длин: хеш дерева
+// зависел от написания пути, а сверка по нему отказывала исправной установке.
+// ===========================================================================
+(function () {
+  console.log('\n== Короткие имена 8.3 в корнях сверки (u12) ==');
+  const { spawnSync } = require('child_process');
+  const PSX = 'powershell.exe';
+  const havePs = process.platform === 'win32' && !spawnSync(PSX, ['-NoProfile', '-Command', '1'], { encoding: 'utf8', timeout: 30000 }).error;
+  const runPsx = (script, env) => spawnSync(PSX, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    { encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, env || {}) });
+  // Короткое написание существующей папки; '' — на этом томе короткие имена выключены.
+  const shortOf = (dir) => {
+    const s = String(runPsx('(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:HM_U12_DIR).ShortPath', { HM_U12_DIR: dir }).stdout || '').trim();
+    return s && s.includes('~') && s.toLowerCase() !== dir.toLowerCase() ? s : '';
+  };
+
+  ok('u12: Get-HmTreeSha256 (_verify.ps1 и fetch-vendor.ps1) даёт один и тот же хеш дерева для длинного и для короткого (8.3) написания корня', () => {
+    if (!havePs) SKIP('нужен Windows PowerShell 5.1');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u12-with-a-long-directory-name-'));
+    try {
+      const tree = path.join(base, 'nomad-src-with-a-long-name');
+      fs.mkdirSync(path.join(tree, 'pkg'), { recursive: true });
+      fs.writeFileSync(path.join(tree, 'pyproject.toml'), '[project]\nname = "x"\n');
+      fs.writeFileSync(path.join(tree, 'pkg', 'mod.py'), 'print(1)\n');
+      const short = shortOf(tree);
+      if (!short) SKIP('короткие имена 8.3 на этом томе выключены — псевдоним не получить');
+      // Контроль: прежняя формула на коротком корне даёт не тот путь — иначе тест не отличил бы возврат дефекта.
+      const old = runPsx("$root = (Resolve-Path -LiteralPath $env:HM_U12_DIR).Path; foreach ($f in Get-ChildItem -LiteralPath $root -Recurse -File) { 'REL=' + $f.FullName.Substring($root.Length).TrimStart('\\', '/') }", { HM_U12_DIR: short });
+      const oldRel = String(old.stdout || '').split(/\r?\n/).filter((l) => /^REL=/.test(l)).map((l) => l.slice(4));
+      if (oldRel.includes('pyproject.toml')) SKIP('эта сборка Windows PowerShell не раскрывает 8.3 в FullName — дефект не воспроизводится: ' + oldRel.join(','));
+      assert(oldRel.length === 2, 'контроль: прежняя формула отдала пути: ' + old.stdout + old.stderr);
+      const verify = path.join(ROOT, 'scripts', 'windows', '_verify.ps1');
+      const fv = path.join(ROOT, 'tools', 'fetch-vendor.ps1');
+      const load = {
+        verify: ". '" + verify + "'; ",
+        fetchVendor: "$ast = [System.Management.Automation.Language.Parser]::ParseFile('" + fv + "', [ref]$null, [ref]$null); "
+          + "$fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-HmTreeSha256' }, $true); "
+          + ". ([scriptblock]::Create($fn.Extent.Text)); "
+      };
+      Object.keys(load).forEach((k) => {
+        const r = runPsx(load[k] + "'LONG=' + (Get-HmTreeSha256 $env:HM_U12_LONG); 'SHORT=' + (Get-HmTreeSha256 $env:HM_U12_SHORT)", { HM_U12_LONG: tree, HM_U12_SHORT: short });
+        const a = /(^|\n)LONG=([0-9a-f]{64})/.exec(r.stdout || ''); const b = /(^|\n)SHORT=([0-9a-f]{64})/.exec(r.stdout || '');
+        assert(a && b, k + ': хеши посчитаны: ' + r.stdout + r.stderr);
+        assert.strictEqual(b[2], a[2], k + ': короткое написание корня не меняет хеш дерева');
+      });
+    } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ } }
   });
 })();

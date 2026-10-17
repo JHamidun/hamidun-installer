@@ -588,8 +588,13 @@ if ($starterSrc) {
     if (-not $starterLink -and (Test-Path $starterDst)) {
         $added = 0; $kept = 0; $failed = 0
         try {
-            Get-ChildItem -LiteralPath $starterSrc -Force -Recurse -File -ErrorAction Stop | ForEach-Object {
-                $rel = $_.FullName.Substring($starterSrc.Length).TrimStart('\', '/')
+            # Корень — в том же написании, в каком Get-ChildItem отдаёт FullName. Windows PowerShell 5.1 раскрывает короткие имена 8.3
+            # (C:\Users\IVANPE~1 -> C:\Users\Ivan Petrov), а %TEMP%, под который разворачивается переносной exe, у людей с длинным именем
+            # профиля именно такой псевдоним: срез по длине голого $starterSrc съезжал, и PROMPTS.md падал в подкаталог с обрезком имени.
+            $starterRoot = $starterSrc
+            try { $starterRoot = (Get-Item -LiteralPath $starterSrc -ErrorAction Stop).FullName.TrimEnd('\') } catch { }
+            Get-ChildItem -LiteralPath $starterRoot -Force -Recurse -File -ErrorAction Stop | ForEach-Object {
+                $rel = $_.FullName.Substring($starterRoot.Length).TrimStart('\', '/')
                 $dstFile = Join-Path $starterDst $rel
                 $dstDir = Split-Path $dstFile -Parent
                 $fileLink = $null

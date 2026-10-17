@@ -42,7 +42,7 @@ $MUTANTS = @{
     'any-status'     = @{ Fn = 'Test-HmTrustedSigner'; Find = "if (`$sig.Status -ne 'Valid') {"; Repl = 'if ($false) {' }
     'no-eku'         = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if (-not $hasCodeSigning) {'; Repl = 'if ($false) {' }
     'no-subject-pin' = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if ($ExpectedSubjectMatch -and ('; Repl = 'if ($false -and (' }
-    'no-org-pin'     = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if ($org -ne $ExpectedOrg) {'; Repl = 'if ($false) {' }
+    'no-org-pin'     = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if (-not [string]::Equals($org, $ExpectedOrg, [StringComparison]::OrdinalIgnoreCase)) {'; Repl = 'if ($false) {' }
     'no-tsa-anchor'  = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if ($machineRoots -notcontains [string]$tsAnchor.Root.Thumbprint) {'; Repl = 'if ($false) {' }
     'no-tsa-required' = @{ Fn = 'Test-HmTrustedSigner'; Find = 'if ($anchor.OutOfWindow -ne $false) {'; Repl = 'if ($false) {' }
     # Срок звеньев цепочки: проверка метки времени (b2) обязана срабатывать от ЛЮБОГО звена вне срока, а не
