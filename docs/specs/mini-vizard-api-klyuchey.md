@@ -3,7 +3,7 @@
 <!-- spec-id: mini-vizard-api-klyuchey -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/credentials-merge.js`, `src/main.js:1580-1591`, `src/renderer/app.js:2171-2183`, `src/renderer/app.js:2440`, `src/renderer/app.js:2458-2486`, `src/preload.js:40`, `src/renderer/styles.css:502-523`, `config.json`, `src/credentials-merge.js:53-141`, `src/link-guard.js:1-202`
+- **Код:** `src/credentials-merge.js`, `src/main.js:1593-1604`, `src/renderer/app.js:2171-2183`, `src/renderer/app.js:2440`, `src/renderer/app.js:2458-2486`, `src/preload.js:40`, `src/renderer/styles.css:502-523`, `config.json`, `src/credentials-merge.js:53-141`, `src/link-guard.js:1-202`
 - **Тесты:** «ключи визарда: замена НА МЕСТЕ, порядок цел, доллар в значении не толкуется», «ключи визарда: мусорные имена и пустые значения отбиты, файл не тронут», «ключи визарда: файл не прочитан — НЕ ПИШЕМ (иначе теряются все прежние ключи)», «main.js делегирует запись ключей модулям, копий логики не осталось», «u10a/B credentials-merge: ~/.claude — junction → ключи НЕ сохранены с понятной причиной, жертва цела; без проверки ключи уезжают в чужой каталог», «u10a/B credentials-merge: ссылка-файл на месте файла ключей не читается (чужое содержимое не копируется в наш файл); обычный путь работает как раньше», «u10a/B том, секреты: ~/.claude, hermes, AppData и HERMES_HOME — junction на путь тома → прокси, ключи и ключ агента НЕ записаны, обращений за ссылкой нет, жертва цела; без сверки имён всё уходит в чужой каталог»
 
 ## Что обещает человеку
@@ -38,7 +38,7 @@
 `contextBridge` в `src/preload.js:40`, канал `save-credentials`.
 
 **Запись.** Обработчик `ipcMain.handle('save-credentials', …)` — однострочная делегация
-(`src/main.js:2800`) в `saveCredentials()` из модуля `src/credentials-merge.js`
+(`src/main.js:2813`) в `saveCredentials()` из модуля `src/credentials-merge.js`
 (`src/credentials-merge.js:52-103`). Слияние работает так:
 
 1. Считает путь: `file = ~/.claude/.credentials.master.env` — `credentialsPath()`
@@ -79,7 +79,7 @@
 
 **Соседняя кнопка «Показать файл ключей»** (`#ns-keys`, `src/renderer/app.js:2521`, обработчик
 `src/renderer/app.js:2688`) зовёт `revealPath(credPath)`. Аргумент из renderer'а main **игнорирует**:
-`ipcMain.handle('reveal-path', …)` (`src/main.js:1972-1983`) сам собирает цель из
+`ipcMain.handle('reveal-path', …)` (`src/main.js:1985-1996`) сам собирает цель из
 `config.json` → `finish.credentialsRelPath` (сейчас `.claude/.credentials.master.env`,
 подтверждено чтением `config.json`), проверяет, что она внутри домашнего каталога, что файл
 существует, и вызывает `shell.showItemInFolder`. Путь, который renderer показывает человеку
@@ -122,7 +122,7 @@
    `if (saved.length)` (`src/credentials-merge.js:91`).
 9. **Renderer не может заставить main показать произвольный путь.** `reveal-path` игнорирует
    аргумент, собирает цель из вшитого `config.json`, требует, чтобы она начиналась с
-   `home + path.sep`, и чтобы файл существовал (`src/main.js:1978-1979`).
+   `home + path.sep`, и чтобы файл существовал (`src/main.js:1991-1992`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -164,7 +164,7 @@
    `save-credentials` не запускается вовсе. Инвариант 8 страхует только не-UI вызывающего.
 9. Скомпрометированный renderer передал бы `\\attacker\share\…`, и `shell.showItemInFolder` под
    elevated-процессом смонтировал бы чужой UNC/WebDAV-ресурс — вектор из комментария в
-   `src/main.js:1968-1971`.
+   `src/main.js:1981-1984`.
 
 ## Границы
 
@@ -187,13 +187,13 @@
   `os.homedir()` берётся как есть, без переадресации на интерактивного пользователя. При
   «over-the-shoulder UAC» (админ ввёл свой пароль на чужой машине) ключи уедут в профиль админа.
   Установщик предупреждает об этом отдельным баннером до установки
-  (`detectForeignUserWarning`, `src/main.js:545-621`), но сам мини-визард никакой компенсации не
+  (`detectForeignUserWarning`, `src/main.js:558-634`), но сам мини-визард никакой компенсации не
   делает.
 - **Ничего не перезапускается.** Записанный ключ подхватят только те процессы, которые прочитают
   файл после сохранения; уже открытый терминал или редактор об изменении не узнают.
 - **Два источника пути живут раздельно.** Запись — по захардкоженному
   `~/.claude/.credentials.master.env` (`credentialsPath`, `src/credentials-merge.js:39-41`), показ файла и подпись пути — по
-  `finish.credentialsRelPath` из `config.json` (`src/main.js:1975`, `src/renderer/app.js:2226`).
+  `finish.credentialsRelPath` из `config.json` (`src/main.js:1988`, `src/renderer/app.js:2226`).
   Сейчас значения совпадают (проверено чтением `config.json`).
 
 ## Риски и открытые вопросы

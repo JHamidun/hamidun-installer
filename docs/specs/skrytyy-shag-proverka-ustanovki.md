@@ -3,7 +3,7 @@
 <!-- spec-id: skrytyy-shag-proverka-ustanovki -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:105-114`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:362-367`, `src/renderer/app.js:1601-1611`, `src/renderer/app.js:1680-1718`, `src/renderer/app.js:2044-2053`, `src/renderer/app.js:2067-2140`, `src/renderer/app.js:2318-2363`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1`, `scripts/windows/_claudeenv.ps1`, `src/main.js:681-686`, `src/main.js:1533-1601`, `src/main.js:3198-3207`, `src/main.js:3698-3706`, `src/install-env.js:20-46`, `src/install-manifest.js:162-172`
+- **Код:** `components.json:105-114`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`, `src/renderer/app.js:362-367`, `src/renderer/app.js:1601-1611`, `src/renderer/app.js:1680-1718`, `src/renderer/app.js:2044-2053`, `src/renderer/app.js:2067-2140`, `src/renderer/app.js:2318-2363`, `src/renderer/styles.css:477-499`, `scripts/windows/claude.ps1`, `scripts/windows/_claudeenv.ps1`, `src/main.js:694-699`, `src/main.js:1546-1614`, `src/main.js:3211-3220`, `src/main.js:3711-3719`, `src/install-env.js:20-46`, `src/install-manifest.js:162-172`
 - **Тесты:** «P0-B/P1-3 (verify.ps1): каталоги .vscode/.vscode-oss/.cursor, match ^${extId}-<цифра> (Directory-only), НЕ editor CLI», «ИНВАРИАНТ: 0 прямых elevated editor-бинарь execution (extension.ps1/verify.ps1/vscode.ps1/main.js)», «claude.ps1 пишет вердикт в checks.json, verify.ps1 его переносит», «P1 (app.js): res.skipped -> skipped+bad+runtimeSkipped; HM_SELECTED фильтруется для verify», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен», «A06: claude.ps1 правит политику общей функцией до пробы и пишет вердикт claude-ps; verify.ps1 показывает запрет отдельной строкой», «R1 (verify.ps1, песочница): повторный запуск, где config и claude найдены на диске и сняты, всё равно чинит settings.json, PATH и политику», «R1: если config выбран, verify настройки не трогает (это работа config.ps1); nmd и python чинятся независимо от галочек», «R1: сухой прогон ничего не пишет; claude с вердиктом broken не трогается», «R1: политику задаёт групповая политика — verify её не трогает, но говорит об этом красной строкой чек-листа даже при снятой галочке claude», «B12 (verify.ps1, песочница): AGENTS.md пака кладётся из вшитого пака на КАЖДОМ прогоне, в том числе при выбранном config (расширение Codex могло встать позже него); повтор ничего не меняет», «verify.ps1: проверка playwright идёт по файлам — интерпретатор в блоке нигде не вызывается (ни оператором вызова, ни ключом -c с import), метки CHECK прежние», «verify.ps1 (PowerShell 5.1, фейковые деревья): Test-HmPyPackage находит playwright в user site и в Lib/site-packages, различает версию Python (имя каталога, python3XY.dll, pyvenv.cfg, суффиксы -32 и -arm64), видит venv (Scripts и Lib рядом), не засчитывает каталог без __init__.py, соседний dist-info (playwright_stealth) и псевдоним WindowsApps, кириллица и U+2019 в пути», «verify.ps1 целиком (PowerShell 5.1, сухой прогон): строка CHECK для Python-пакетов по фейковому дереву — нет пакета, пакет без браузера, пакет и браузер; прежний вызов интерпретатора на том же дереве краснел бы», «u9/M-4: verify.sh подключает диспетчер touch-up-ов до чеклиста, в dry-run только печатает», «u9/M-4: verify.sh (прогон bash) исполняет touch-up-ы рядом по именам до чеклиста и завершается кодом 0», «u9/M-4: verify.sh (прогон bash) — dry-run не запускает touch-up-ы, сломанный диспетчер verify не роняет», «u9/M-4: контроль — verify.sh без блока диспетчера оставляет touch-up-ы мёртвыми», «u3-B: Write-HmCheck пишет checks.json через случайный CreateNew-файл: подмена каталога ссылкой во время сериализации не пишет сквозь неё, байты прежние», «u10b F19: список имён в вызове диспетчера (verify.ps1, verify.sh) равен touchup-* в репозитории — забытый файл или лишнее имя красят тест, порядок стабилен (Windows — по алфавиту, macOS — как давал глоб в локали C)», «u10b F19: PS 5.1 — запускаются только перечисленные touch-up-ы, в порядке списка; лишний файл со строгим именем не исполняется никогда, кривые имена в списке и отсутствующие файлы называются в журнале и не мешают остальным (контроль: прежний глоб находит лишний файл)», «u10b F19: диспетчер требует список (параметр -Names обязателен), а _touchups.ps1 не перечисляет каталог — Get-ChildItem/Get-Item -Filter по каталогу touch-up-ов не осталось», «u10b F19: bash — hm_run_touchups запускает перечисленные имена в порядке списка; лишний файл, кривое имя, путь и расширение не исполняются, отсутствующий файл назван, зависший прерван»
 
 ## Что обещает человеку
@@ -55,14 +55,14 @@ VS Code по умолчанию — PowerShell — его не запускае�
   hidden (`src/renderer/app.js:976`, комментарий 904-906: «Служебные (hidden, напр. verify) не
   показываем»);
 * детекция «уже установлено» его не видит — `detect-state` пропускает hidden
-  (`src/main.js:3228`), поэтому автоснятие уже установленного его не касается
+  (`src/main.js:3241`), поэтому автоснятие уже установленного его не касается
   (`src/renderer/app.js:238` требует `!c.hidden`);
 * жёлтый баннер «часть компонентов уже установлена» не считает hidden установленными —
   `renderInstalledBanner` требует `!STATE.byId[id].hidden` (`src/renderer/app.js:254`);
 * маркер установки и запись в `installed.json` для него не пишутся
-  (`src/main.js:1555` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
+  (`src/main.js:1568` → `receipts.shouldRecordInstall(code, isDryRun, !!(meta && meta.hidden))`),
   а `uninstall-component` для hidden отвечает отказом «Служебный компонент … не деинсталлируется»
-  (`src/main.js:3726-3728`).
+  (`src/main.js:3739-3741`).
 
 В списке шагов на экране установки он **виден** — `buildSteps` рисует все id прогона по
 `STATE.byId[id].name` (`src/renderer/app.js:1521-1531`), то есть человек видит строку
@@ -75,7 +75,7 @@ VS Code по умолчанию — PowerShell — его не запускае�
 не было; дубликат снимает та же фильтрация.
 
 **3. Запуск.** Скрипт выбирается по платформе: `scriptFor(id)` строит
-`scripts/windows/verify.ps1` или `scripts/macos/verify.sh` (`src/main.js:681-686`). На Windows
+`scripts/windows/verify.ps1` или `scripts/macos/verify.sh` (`src/main.js:694-699`). На Windows
 процесс установщика запущен elevated (`package.json` → `build.win.requestedExecutionLevel:
 "requireAdministrator"`), поэтому verify.ps1 исполняется под админом — из этого растут его
 ограничения (см. инвариант 5).
@@ -178,8 +178,8 @@ verify.ps1 читает этот файл и переносит вердикт: 
 10. **Крест чек-листа ломает «Готово!».** `okAll` включает `!checkFailed`
     (`src/renderer/app.js:2093-2097`).
 11. **Служебный компонент не удаляется и не числится установленным.** hidden отсекается в
-    `detect-state` (`src/main.js:3206`), в записи маркера (`src/main.js:1547`) и в
-    `uninstall-component` (`src/main.js:3704-3706`).
+    `detect-state` (`src/main.js:3219`), в записи маркера (`src/main.js:1560`) и в
+    `uninstall-component` (`src/main.js:3717-3719`).
 12. **Блок починок профиля — на каждом прогоне, без галочек, и ничего не запускает.** Он выполняется всегда, когда есть `verify` (а он есть всегда), читает и пишет только HKCU и файлы профиля, не стартует `claude`/`python`/`nmd` и в dry-run не пишет (`scripts/windows/verify.ps1`, блок между строками `every-run repairs (B)` и `end`).
 
 ## Что ломается, если инвариант нарушить
@@ -309,7 +309,7 @@ verify.ps1 читает этот файл и переносит вердикт: 
 9. **TODO в перечисленных файлах есть, но это перекрёстные ссылки, а не маркеры незавершённой
    работы.** Совпадений два, оба вне процитированных диапазонов строк:
    `src/renderer/app.js:715` («интерактивный (детект в main.js; на Windows пока пусто — см. TODO
-   там)») и `src/main.js:1903` («Известное ограничение (как у всей установки, см. TODO про
+   там)») и `src/main.js:1916` («Известное ограничение (как у всей установки, см. TODO про
    cross-user»). FIXME нет ни одного. Отдельная мелочь: TODO, на который ссылается
    `app.js:715`, в `src/main.js` поиском не находится вовсе — ссылка ведёт в пустоту.
 10. **Windows: пакет playwright проверяется по файлам, а не импортом.** Каталог модуля с `__init__.py`

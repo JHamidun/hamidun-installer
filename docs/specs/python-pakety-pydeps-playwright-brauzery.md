@@ -3,7 +3,7 @@
 <!-- spec-id: python-pakety-pydeps-playwright-brauzery -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:140-160`, `scripts/windows/pydeps.ps1`, `scripts/windows/_userpath.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:66-106`, `scripts/windows/_deelev.ps1:467-548`, `src/main.js:1257-1275`, `src/main.js:1294-1295`, `src/main.js:1542-1547`, `src/install-receipts.js:34-59`, `src/renderer/app.js:1740-1751`, `package.json:115-126`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:351-358`, `mac-arch-support.json`
+- **Код:** `components.json:140-160`, `scripts/windows/pydeps.ps1`, `scripts/windows/_userpath.ps1`, `scripts/macos/pydeps.sh`, `scripts/windows/_verify.ps1:66-106`, `scripts/windows/_deelev.ps1:467-548`, `src/main.js:1270-1288`, `src/main.js:1307-1308`, `src/main.js:1555-1560`, `src/install-receipts.js:34-59`, `src/renderer/app.js:1740-1751`, `package.json:115-126`, `tools/sync-sizes.js:98-101`, `tools/fetch-vendor.ps1:351-358`, `mac-arch-support.json`
 - **Тесты:** «enableWithDeps: selecting "pydeps" transitively pulls config+git+node», «disableDependents: turning off git turns off config+pydeps», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «pydeps.sh: ОБА .pkg через общий root-скрипт HM_PKG_INSTALL_SH (PSF Team ID позиционным); verify_pkg_team_id убран», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «install-скрипты: отсутствие арх-варианта объясняется человеку, а не падает молча», «размер: фильтр extraResources читается из package.json и реально исключает», «размер: измерение vendor согласовано с фильтром (исключённое не считается)», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «A09: python в новом терминале — заглушка Магазина первой -> fix, настоящий python или Python из Магазина -> ok», «R7: Get-HmPathWithDir -Prepend переносит уже стоящий каталог в начало, сохраняя %VAR% и остальные записи; уже первый или без -Prepend — не трогает», «R7: Add-HmUserPath -Prepend в песочном ключе реестра ставит Python перед заглушкой Магазина, не портит REG_EXPAND_SZ и не пишет повторно», «R1 (verify.ps1, песочница): повторный запуск, где config и claude найдены на диске и сняты, всё равно чинит settings.json, PATH и политику», «R1: если config выбран, verify настройки не трогает (это работа config.ps1); nmd и python чинятся независимо от галочек», «pydeps.sh (функц.): Intel, готовой сборки нет → пропуск 120 с понятной строкой, без компиляции, рантайм доведён», «pydeps.sh (функц.): Intel без сети → красный провал с советом про интернет, НЕ «пропуск»», «pydeps.sh (функц.): Apple Silicon без Xcode CLT → только готовые сборки; нет сборки → пропуск 120 (без окна про cc)», «pydeps.sh (функц.): Apple Silicon С инструментами — компиляция разрешена, готовое в приоритете; провал = красный (негативный контроль)», «hm_sdist_is_pure_python / hm_pip_exempt_sdists: исключение из «только готовых» — для чистого Python; компилируемое не пускаем», «hm_requirement_lines / hm_requirement_name / hm_names_summary: разбор requirements.txt и усечение списка имён», «pydeps.sh (целиком): одна библиотека без готовой сборки не обнуляет остальные — поштучно, exit 121 и ОДНА строка «ЧАСТИЧНО:» с именами», «pydeps.sh (целиком): pyaes (у PyPI только исходники) разрешён в «только готовых» и БЕЗ вшитого набора колёс», «pydeps.sh (целиком): вшитые исходники — в исключении только чистый Python, компилируемый архив не пускаем», «pydeps.sh (целиком): ни одна библиотека не встала → пропуск 120 со всеми именами; сбой сети посреди поштучной → красный, не «пропуск»», «pydeps.sh (целиком): строка «ЧАСТИЧНО:» укладывается в 240 знаков и при 40 непоставившихся библиотеках», «u10b pydeps.ps1: браузеры Playwright копируются в ms-playwright как раньше, папка закреплена на время копирования (переименовать её в разгар копии нельзя), после копии закрепки нет; junction на папку или её родителя — отказ с предупреждением, чужая папка цела»
 
 ## Что обещает человеку
@@ -33,10 +33,10 @@ darwin 797 395 819) не пишутся руками — их генерируе
 браузеры Playwright.
 
 Перед запуском скрипта `src/main.js` собирает окружение: `HM_VENDOR` указывает либо на
-докачанный staging (lite-издание), либо на вшитый vendor (`vroot`, `src/main.js:1267`;
+докачанный staging (lite-издание), либо на вшитый vendor (`vroot`, `src/main.js:1280`;
 присвоение — `:1135`), а `HM_BUNDLED_CONFIG` резолвится через `vendorPick('config-pack')` —
 «есть в staging → оттуда, иначе из вшитого vendor» (`vendorPick` объявлен в
-`src/main.js:1275-1282`, присвоение — `:1136`). Именно из-за lite-издания там и появился
+`src/main.js:1288-1295`, присвоение — `:1136`). Именно из-за lite-издания там и появился
 `vendorPick`: staging компонента `pydeps` не содержит config-pack, и без этого шаг падал.
 
 ### Windows — `scripts/windows/pydeps.ps1`
@@ -161,7 +161,7 @@ makensis), поэтому офлайн-ветка `pydeps.ps1:174` в упако
 
 `exit 0` → маркер установки пишется (`shouldRecordInstall`, `src/install-receipts.js:57-59`).
 `exit 120` → `isSkipExit` (`:33-34`), маркер и манифест **не** пишутся: `skipped =
-receipts.isSkipExit(code)` (`src/main.js:1549`), гейт записи `shouldRecordInstall(code,
+receipts.isSkipExit(code)` (`src/main.js:1562`), гейт записи `shouldRecordInstall(code,
 isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уходит «пропущен (код 120, нечего
 ставить) — маркер/манифест НЕ записаны» (`:1365`). Renderer ставит шагу статус `skipped`,
 добавляет его в `bad` (чтобы зависимые не стартовали) и печатает «Пропущено: нечего устанавливать»
@@ -191,9 +191,9 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    эти два командлета, и ни на что больше. Остальные сетевые шаги скрипта таймаута не
    имеют вовсе: `winget install` (`:58`), `pip install` (`:154`, `:160`, `:161`, `:164`,
    `:166`) и `python -m playwright install chromium` (`:184`, `:194`). Хост их тоже не
-   убивает: watchdog в `src/main.js:1497-1499` намеренно без kill, `stallTimer`
+   убивает: watchdog в `src/main.js:1510-1512` намеренно без kill, `stallTimer`
    (`:1300-1316`) только печатает сообщение раз в 10 минут. Единственный kill по таймауту
-   в файле — `src/main.js:2105` (20 с; на пути докачки, `opts.retry`, при молчании примитива ещё одна попытка на 60 с) — сидит внутри `winMakeSecureDir()` (объявлена на
+   в файле — `src/main.js:2118` (20 с; на пути докачки, `opts.retry`, при молчании примитива ещё одна попытка на 60 с) — сидит внутри `winMakeSecureDir()` (объявлена на
    `:1649`), примитива СОЗДАНИЯ Admins-only staging-каталога, и к install-скриптам
    отношения не имеет. Практически это значит, что вечный спиннер из «Что ломается №5»
    остаётся достижим — самый хрупкий по сети шаг (докачка Chromium, ~150 МБ, о чём
@@ -202,7 +202,7 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    идут с `/quiet` (`pydeps.ps1:57`, `:96`). Держится тестом «Windows: установщики, САМИ
    запускающие приложение, идут БЕЗ -Wait».
 7. **Отсутствие `requirements.txt` на Windows — код 120, а не 1.** `pydeps.ps1:142`;
-   следствие в `src/install-receipts.js:34-59` и `src/main.js:1549` (`isSkipExit`), `:1335`
+   следствие в `src/install-receipts.js:34-59` и `src/main.js:1562` (`isSkipExit`), `:1335`
    (`shouldRecordInstall` не пропускает код 120), `:1365` (запись в лог): маркер установки
    не пишется, шаг помечается «пропущено».
 8. **Провал офлайн-ветки pip не завершает шаг.** После ненулевого кода идёт онлайн-докачка
@@ -359,6 +359,6 @@ isDryRun, hidden)` (`:1335`) на коде 120 ложен, и в лог уход
    `hm_explain_build_failure`; на Windows человек
    получает «Часть библиотек не установилась — смотри лог» (`pydeps.ps1:170`).
    Общий разбор хвоста — `failureExplain.explainScriptFailure(outTail)` в
-   `src/main.js:1627` (словарь `src/failure-explain.js:27` знает про
+   `src/main.js:1640` (словарь `src/failure-explain.js:27` знает про
    `cargo`/`rustc`/`PyO3`) — частично это компенсирует, но специализированного объяснения,
    как на macOS, здесь нет.
