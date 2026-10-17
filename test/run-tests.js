@@ -22948,6 +22948,20 @@ ok('config.json в репозитории без сборочных маркер
     return null;
   }
 
+  // Переименование exe, который только что копировали или запускали. На Windows такой файл ещё держит антивирус (сканирует
+  // свежую копию в 190 МБ) или дочерние процессы Electron (GPU, crashpad), которые живут чуть дольше родителя: rename
+  // падает EBUSY. CI, 17.10.2026, два прогона подряд: красный тест «настоящий Electron 44» (rename electron.exe → Hamidun
+  // Setup.exe в finally проверки «неупакованного» режима) и следом ENOENT во втором тесте на той же копии. Это гонка с
+  // чужим процессом, а не дефект продукта; повторяем с паузой, прочие ошибки — сразу наружу.
+  function renameRetry(from, to) {
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(from, to); return; } catch (e) {
+        if (attempt >= 40 || !/^(EBUSY|EPERM|EACCES)$/.test(String(e && e.code))) throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+      }
+    }
+  }
+
   let REAL; // undefined — ещё не готовили; null — недоступно; объект — копия dist во временной папке
   function realCopy() {
     if (REAL === null) SKIP('нет настоящего Electron для рантайм-проверки');
@@ -22960,15 +22974,7 @@ ok('config.json в репозитории без сборочных маркер
     const dist = path.join(base, 'dist');
     fs.cpSync(src.dist, dist, { recursive: true }); // ~370 МБ: ~2 с на SSD; exe меняем ТОЛЬКО в копии
     const exe = path.join(dist, 'Hamidun Setup.exe');
-    // Только что скопированный electron.exe (190 МБ) на Windows сканирует антивирус и держит открытым: rename сразу после
-    // cpSync падал EBUSY (CI, 17.10.2026, прогон на main после слияния: тест красный, второй тест — следом, ENOENT).
-    // Повторяем с паузой: это гонка со сканером, а не дефект.
-    for (let attempt = 0; ; attempt++) {
-      try { fs.renameSync(path.join(dist, src.rel), exe); break; } catch (e) {
-        if (attempt >= 40 || !/^(EBUSY|EPERM|EACCES)$/.test(String(e && e.code))) throw e;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-      }
-    }
+    renameRetry(path.join(dist, src.rel), exe);
     // Раскладка как у настоящей сборки: resources/app есть, поэтому `exe скрипт.js` не запускает скрипт
     // как приложение, а ELECTRON_RUN_AS_NODE — единственный способ выполнить чужой JS через аргумент.
     const appDir = path.join(dist, 'resources', 'app');
@@ -23006,9 +23012,9 @@ ok('config.json в репозитории без сборочных маркер
   // То же, но под именем electron.exe: «неупакованный» режим, где NODE_OPTIONS Electron не режет сам.
   function asUnpackaged(real, fn) {
     const alt = path.join(real.dist, 'electron.exe');
-    fs.renameSync(real.exe, alt);
+    renameRetry(real.exe, alt);
     real.cur = alt;
-    try { return fn(); } finally { fs.renameSync(alt, real.exe); real.cur = real.exe; }
+    try { return fn(); } finally { renameRetry(alt, real.exe); real.cur = real.exe; }
   }
   const VEC = {
     control: (real) => probe(real, 'control', {}, []),
