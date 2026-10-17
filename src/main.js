@@ -2199,7 +2199,7 @@ async function winMakeSecureDir(opts) {
       return null;
     }
     const dir = m[1].trim();
-    if (!dir) return null;
+    if (!dir) { lastSecureDirError = 'примитив вернул пустой путь'; return null; }
     const rm = () => rmStagingTree(dir);
     // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
     // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
@@ -2215,10 +2215,20 @@ async function winMakeSecureDir(opts) {
       lastSecureDirError = 'примитив вернул путь вне %ProgramData% — каталог не тронут';
       return null;
     }
-    if (!fs.existsSync(dir)) return null;
-    if (!remoteFetch.verifyDirSecureWin(dir)) { rm(); return null; }   // owner=Admins, посторонних ACE нет
+    if (!fs.existsSync(dir)) { lastSecureDirError = 'каталог пропал сразу после создания: ' + dir; return null; }
+    // Причину отказа проверки берём из её журнала. Раньше тут молча возвращался null: на чистой машине проверка
+    // упиралась в таймаут PowerShell, а человек читал «часто мешает антивирус» вместо настоящей причины
+    // («PowerShell не ответил за N с», «посторонний ACE», «владелец …»).
+    const verifyLog = [];
+    if (!remoteFetch.verifyDirSecureWin(dir, (l) => verifyLog.push(String(l).replace(/^\s*\[sec\]\s*/, '').trim()))) {
+      lastSecureDirError = (verifyLog[verifyLog.length - 1] || 'проверка прав на каталог не пройдена').slice(0, 300);
+      rm(); return null;                                              // owner=Admins, посторонних ACE нет
+    }
     return dir;
-  } catch (e) { return null; }
+  } catch (e) {
+    lastSecureDirError = String((e && e.message) || e).slice(0, 300);
+    return null;
+  }
 }
 
 // Запуск ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же пользователь — проверяется по самому токену

@@ -300,40 +300,51 @@ function trustedEnv() {
 // КРИТИЧНО (round-2): проверяем ВЛАДЕЛЬЦА — icacls /setowner как non-admin может
 // молча выйти 0 НЕ сменив владельца; user-owner сохраняет неявный WRITE_DAC и
 // сможет вернуть себе доступ. Owner != {SYSTEM,Admins} → INSECURE (fail-closed).
+// Скрипт проверки — БЕЗ единого командлета (ни New-Object, ни Get-Acl, ни Write-Output, ни Test-Path): только язык,
+// статические методы .NET и [Console]. Это условие скорости, а не стиль. Windows PowerShell 5.1 находит командлет через
+// кэш анализа модулей; потомок идёт с урезанным окружением (trustedEnv: ни LOCALAPPDATA, ни PSModuleAnalysisCachePath),
+// кэша у него нет, и первый же командлет заставляет PowerShell заново разобрать все модули System32. На чистом раннере
+// GitHub это 18–32 с на КАЖДЫЙ запуск (замер 17.10.2026: три запуска подряд — те же 22 с, кэш между ними не копится),
+// на слабом диске с антивирусом так же. Без командлетов тот же скрипт отрабатывает за ~0,15 с. Прежний вариант
+// (New-Object + .Access + Write-Output) упирался в таймаут, проверка молча возвращала false, и lite не качал
+// НИ ОДНОГО компонента («не подготовилась защищённая папка загрузки»).
+// SID читаются напрямую (GetAccessRules с типом SecurityIdentifier): ни перевода в имена через LSA, ни Translate.
+// Не командлет здесь и [System.IO.Directory]::GetAccessControl: статический метод есть в каждой .NET Framework 4.x.
+const VERIFY_DIR_SCRIPT =
+  "$ErrorActionPreference='Stop';" +
+  "$d=$env:HM_VERIFY_DIR;" +
+  "$allow=@('S-1-5-18','S-1-5-32-544');" +
+  "$acl=[System.IO.Directory]::GetAccessControl($d);" +
+  "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
+  "if($allow -notcontains $o){[Console]::Out.Write('INSECURE:owner='+$o);exit 0};" +
+  "foreach($a in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){" +
+  "$s=$a.IdentityReference.Value;" +
+  "if($allow -notcontains $s){[Console]::Out.Write('INSECURE:ace='+$s);exit 0}};" +
+  "[Console]::Out.Write('SECURE')";
+// Запас: без командлетов проверка занимает доли секунды, но вызов синхронный и честный ответ на очень слабой машине
+// (первый запуск после установки, антивирус) важнее, чем несколько секунд тишины окна.
+const VERIFY_DIR_TIMEOUT_MS = 30000;
+
 function verifyDirSecureWin(dir, log) {
   const ps = winPowershellPath();
   if (!ps) { log && log('  [sec] powershell не найден — не могу проверить ACL'); return false; }
-  const script =
-    "$ErrorActionPreference='Stop';" +
-    "$d=$env:HM_VERIFY_DIR;" +
-    "$allow=@('S-1-5-18','S-1-5-32-544');" +
-    // ACL читаем через .NET, а НЕ Get-Acl: cmdlet тянет модуль Microsoft.PowerShell.Security,
-    // который в 5.1 не грузится при PSModulePath от PowerShell 7. Тогда проверка падала бы
-    // на ИСПРАВНОМ каталоге и докачка умирала «по соображениям безопасности». Cmdlet
-    // остаётся последним шансом (окружение мы и так чиним в trustedEnv).
-    "$acl=$null;" +
-    "try{$acl=(New-Object System.IO.DirectoryInfo($d)).GetAccessControl()}catch{}" +
-    "if($null -eq $acl){try{$acl=[System.IO.FileSystemAclExtensions]::GetAccessControl((New-Object System.IO.DirectoryInfo($d)))}catch{}};" +
-    "if($null -eq $acl){$acl=Get-Acl -LiteralPath $d};" +
-    "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
-    "if($allow -notcontains $o){Write-Output ('INSECURE:owner='+$o);exit 0};" +
-    "foreach($a in $acl.Access){" +
-    "try{$s=$a.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$s=[string]$a.IdentityReference};" +
-    "if($allow -notcontains $s){Write-Output ('INSECURE:ace='+$s);exit 0}};" +
-    "Write-Output 'SECURE'";
   const env = Object.assign(trustedEnv(), { HM_VERIFY_DIR: dir });
   // Таймаут ОБЯЗАТЕЛЕН: вызов синхронный, и он идёт в цикле на старте приложения —
   // pruneStaleSecureDirs обходит все %ProgramData%\HmDeElev-* сразу после createWindow.
   // Без предела один затянувшийся powershell (первый запуск после установки, агрессивный
   // антивирус, повреждённый профиль) держит главный поток, и окно установщика не
-  // появляется вовсе: человек видит, что «ничего не запустилось». 20 секунд с запасом
-  // хватает на честный ответ, а fail-closed ниже трактует таймаут как «не подтвердили
-  // безопасность каталога» — то есть в сторону отказа, а не доверия.
-  const r = spawnSync(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-    { encoding: 'utf8', windowsHide: true, env, timeout: 20000 });
+  // появляется вовсе: человек видит, что «ничего не запустилось». Fail-closed ниже трактует
+  // таймаут как «не подтвердили безопасность каталога» — то есть в сторону отказа, а не доверия;
+  // причина при этом называется (вызывающий кладёт её в текст шага), а не теряется.
+  const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', VERIFY_DIR_SCRIPT],
+    { encoding: 'utf8', windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: VERIFY_DIR_TIMEOUT_MS });
   const out = String(r.stdout || '').trim();
   if (!r.error && r.status === 0 && /(^|\n)SECURE$/.test(out)) return true;
-  log && log('  [sec] проверка ACL не пройдена для ' + dir + ': ' + (out || trimOut(r) || (r.error && r.error.message) || ('exit ' + r.status)));
+  const timedOut = r.error && (r.error.code === 'ETIMEDOUT' || /ETIMEDOUT/.test(String(r.error.message || '')));
+  const why = out || trimOut(r)
+    || (timedOut ? 'PowerShell не ответил за ' + (VERIFY_DIR_TIMEOUT_MS / 1000) + ' с' : (r.error && r.error.message))
+    || ('exit ' + r.status);
+  log && log('  [sec] проверка ACL не пройдена для ' + dir + ': ' + why);
   return false;
 }
 
@@ -1062,6 +1073,7 @@ module.exports = {
   // security-хелперы (для отчёта/тестов)
   ensureCacheSecure,      // Windows: проверка атомарно-защищённого кэша (без create/icacls)
   verifyDirSecureWin,     // SID-based проверка owner+DACL (Windows)
+  VERIFY_DIR_SCRIPT,      // тест-хук: текст скрипта проверки (тест следит, что в нём нет командлетов)
   // тест-хук: подмена транспорта openStream для детерминированных resume-тестов.
   __setOpenStreamImpl: (fn) => { openStreamImpl = fn || null; }
 };

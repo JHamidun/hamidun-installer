@@ -38308,3 +38308,113 @@ function Get-HmTouchupFilesOld {
   });
 
 })();
+
+// ===========================================================================
+// u13. Проверка прав на каталог загрузки (remote-fetch.verifyDirSecureWin) без командлетов.
+// Живой случай 17.10.2026: реальный GUI-прогон e2e на чистой Windows (раннер GitHub) падал на первом же компоненте
+// lite-издания — «не подготовилась защищённая папка загрузки». Сам примитив New-HmSecureStagingDir работал, а вот
+// следом приложение перепроверяло созданный каталог второй PowerShell-проверкой. Эта проверка идёт с урезанным
+// окружением (trustedEnv: без LOCALAPPDATA и PSModuleAnalysisCachePath), поэтому у Windows PowerShell 5.1 нет
+// кэша анализа модулей, и КАЖДЫЙ командлет (New-Object, Get-Acl, Write-Output, Test-Path…) стоит 18–32 секунды —
+// замер на раннере: любой командлет ≈ 18 с, скрипт без командлетов ≈ 0,15 с. Таймаут проверки был 20 с (его добавили
+// 06.09 вместе с «вызовами без предела»), проверка возвращала false молча, а причина не писалась никуда: человек читал
+// «часто мешает антивирус». До 06.09 тот же вызов просто работал медленно, поэтому раньше e2e был зелёным.
+// Ни один из существующих гейтов этого не видел: staging-primitive.ps1 гоняет примитив в полном окружении и
+// сам вердикт приложения не вызывает, а юнит-тесты подставляли `verifyDirSecureWin: () => true`.
+// ===========================================================================
+(function u13VerifyDirSecure() {
+  console.log('\n== Проверка прав на каталог загрузки без командлетов (u13) ==');
+  const { spawnSync } = require('child_process');
+  const IS_WIN = process.platform === 'win32';
+  const RF = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+  const SYS32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  const ICACLS = path.join(SYS32, 'icacls.exe');
+  const WHOAMI = path.join(SYS32, 'whoami.exe');
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  // Командлет — это «Глагол-Существительное»: New-Object, Get-Acl, Write-Output, Test-Path. Идентификаторы вида
+  // S-1-5-18 и слова без дефиса под шаблон не подходят.
+  const cmdletsIn = (s) => (String(s).match(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/g) || []);
+  // Скрипт проверки до исправления — контроль: тот же предикат обязан его ловить.
+  const OLD_VERIFY_SCRIPT = [
+    "$ErrorActionPreference='Stop';$d=$env:HM_VERIFY_DIR;$allow=@('S-1-5-18','S-1-5-32-544');$acl=$null;",
+    "try{$acl=(New-Object System.IO.DirectoryInfo($d)).GetAccessControl()}catch{}",
+    "if($null -eq $acl){try{$acl=[System.IO.FileSystemAclExtensions]::GetAccessControl((New-Object System.IO.DirectoryInfo($d)))}catch{}};",
+    "if($null -eq $acl){$acl=Get-Acl -LiteralPath $d};",
+    "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;",
+    "if($allow -notcontains $o){Write-Output ('INSECURE:owner='+$o);exit 0};foreach($a in $acl.Access){",
+    "try{$s=$a.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$s=[string]$a.IdentityReference};",
+    "if($allow -notcontains $s){Write-Output ('INSECURE:ace='+$s);exit 0}};Write-Output 'SECURE'"
+  ].join('');
+
+  ok('u13: скрипт проверки каталога (verifyDirSecureWin) не содержит ни одного командлета и читает SID напрямую, без перевода в имена', () => {
+    const s = RF.VERIFY_DIR_SCRIPT;
+    assert.strictEqual(typeof s, 'string', 'скрипт проверки экспортирован для теста (VERIFY_DIR_SCRIPT)');
+    assert.deepStrictEqual(cmdletsIn(s), [], 'в скрипте проверки командлеты — каждый стоит 18–32 с без кэша модулей: ' + cmdletsIn(s).join(', '));
+    assert(/\[System\.IO\.Directory\]::GetAccessControl\(\$d\)/.test(s), 'ACL берётся статическим методом .NET');
+    assert(/GetAccessRules\(\$true,\$true,\[System\.Security\.Principal\.SecurityIdentifier\]\)/.test(s), 'правила читаются сразу как SecurityIdentifier');
+    assert(!/\.Access\b|\.Translate\(/.test(s), 'нет ни .Access (перевод в имена через LSA), ни Translate');
+    assert(/\[Console\]::Out\.Write\('SECURE'\)/.test(s) && /INSECURE:owner=/.test(s) && /INSECURE:ace=/.test(s), 'вердикт идёт через [Console], формат ответа прежний');
+    assert(/S-1-5-18/.test(s) && /S-1-5-32-544/.test(s), 'допустимы только SYSTEM и Administrators');
+    // контроль: тот же предикат ловит прежний скрипт (иначе тест ничего бы не охранял)
+    const old = cmdletsIn(OLD_VERIFY_SCRIPT);
+    ['New-Object', 'Get-Acl', 'Write-Output'].forEach((c) => assert(old.includes(c), 'контроль: прежний скрипт содержал ' + c));
+    assert(/\.Access\b/.test(OLD_VERIFY_SCRIPT) && /\.Translate\(/.test(OLD_VERIFY_SCRIPT), 'контроль: прежний скрипт читал .Access и звал Translate');
+  });
+
+  ok('u13: winMakeSecureDir называет причину, когда перепроверка созданного каталога не прошла (раньше молчаливый null → «часто мешает антивирус»)', () => {
+    const mj = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const i = mj.indexOf('async function winMakeSecureDir(');
+    assert(i > 0, 'функция winMakeSecureDir на месте');
+    const tail = mj.slice(i);
+    const body = tail.slice(0, tail.search(/\r?\n\}\r?\n/));
+    assert(/verifyDirSecureWin\(dir,\s*\(l\)\s*=>/.test(body), 'перепроверка зовётся с журналом, а не молча');
+    assert(/lastSecureDirError\s*=\s*\(verifyLog\[verifyLog\.length - 1\]/.test(body), 'последняя строка журнала проверки становится причиной шага');
+    assert(!/verifyDirSecureWin\(dir\)\)\s*\{\s*rm\(\);\s*return null;/.test(body), 'прежней молчаливой ветки нет');
+    assert(/catch \(e\) \{\s*lastSecureDirError = /.test(body), 'общий catch тоже называет причину');
+    assert(/if \(!dir\) \{ lastSecureDirError = /.test(body) && /if \(!fs\.existsSync\(dir\)\) \{ lastSecureDirError = /.test(body), 'пустой путь и пропавший каталог тоже называют причину');
+  });
+
+  ok('u13: verifyDirSecureWin (настоящий PowerShell 5.1, окружение без кэша модулей): каталог с посторонним ACE отвергается, причина названа, ответ быстрее 15 с', () => {
+    if (!IS_WIN) SKIP('только Windows');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u13-'));
+    try {
+      const d = path.join(base, 'plain');
+      fs.mkdirSync(d);
+      const g = spawnSync(ICACLS, [d, '/grant', '*S-1-5-32-545:(OI)(CI)R'], { encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(g.status, 0, 'icacls выдал Users доступ: ' + g.stdout + g.stderr);
+      const lines = [];
+      const t0 = Date.now();
+      const res = RF.verifyDirSecureWin(d, (l) => lines.push(l));
+      const ms = Date.now() - t0;
+      assert.strictEqual(res, false, 'каталог с доступом Users безопасным не считается');
+      assert(/INSECURE:(owner|ace)=S-1-/.test(lines.join('\n')), 'скрипт дошёл до вердикта и назвал SID, а не упёрся в таймаут: ' + lines.join(' | '));
+      assert(ms < 15000, 'проверка заняла ' + ms + ' мс — без командлетов она укладывается в доли секунды');
+    } finally { drop(base); }
+  });
+
+  ok('u13: verifyDirSecureWin принимает каталог, запертый как в приложении (владелец Administrators, DACL = SYSTEM + Administrators), быстрее 15 с; с доступом Users — отвергает', () => {
+    if (!IS_WIN) SKIP('только Windows');
+    const who = spawnSync(WHOAMI, ['/groups'], { encoding: 'utf8', timeout: 60000 });
+    if (!/S-1-16-(12288|16384)\b/.test(String(who.stdout || ''))) SKIP('нужен повышенный запуск (администратор): запертый каталог иначе не создать и не убрать');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u13-locked-'));
+    try {
+      const d = path.join(base, 'locked');
+      fs.mkdirSync(d);
+      const a = spawnSync(ICACLS, [d, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], { encoding: 'utf8', timeout: 60000 });
+      const b = spawnSync(ICACLS, [d, '/setowner', '*S-1-5-32-544'], { encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(a.status, 0, 'icacls запер DACL: ' + a.stdout + a.stderr);
+      assert.strictEqual(b.status, 0, 'icacls назначил владельца Administrators: ' + b.stdout + b.stderr);
+      const lines = [];
+      const t0 = Date.now();
+      const res = RF.verifyDirSecureWin(d, (l) => lines.push(l));
+      const ms = Date.now() - t0;
+      assert.strictEqual(res, true, 'запертый каталог принят: ' + lines.join(' | '));
+      assert(ms < 15000, 'проверка заняла ' + ms + ' мс — без командлетов она укладывается в доли секунды');
+      const g = spawnSync(ICACLS, [d, '/grant', '*S-1-5-32-545:(OI)(CI)R'], { encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(g.status, 0, 'icacls выдал Users доступ: ' + g.stdout + g.stderr);
+      const lines2 = [];
+      assert.strictEqual(RF.verifyDirSecureWin(d, (l) => lines2.push(l)), false, 'после выдачи Users доступа каталог отвергнут');
+      assert(/INSECURE:ace=S-1-5-32-545/.test(lines2.join('\n')), 'назван посторонний SID Users: ' + lines2.join(' | '));
+    } finally { drop(base); }
+  });
+})();
