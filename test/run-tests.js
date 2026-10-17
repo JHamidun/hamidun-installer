@@ -30848,6 +30848,11 @@ if ($env:HM_TEST_SWAP -eq '1') {
   const NOPIN_ANCHOR = 'if ($script:hmPins.ContainsKey($key)) { return }';
   const NOPIN = (t) => { assert(t.includes(NOPIN_ANCHOR), 'якорь отключения закрепки на месте'); return t.replace(NOPIN_ANCHOR, () => 'return'); };
   const noPinScripts = (sb) => variantDir(sb, 'nopin', NOPIN);
+  // Снос скилла при прунинге после u10b идёт через Remove-HmTreeNoFollow (своя закрепка и проверка цепочки). Прежнее поведение — голый
+  // Remove-Item по пути, найденному перечислением: на нём и воспроизводится дыра в контролях.
+  const OLD_PRUNE_CALL = '                        Remove-HmTreeNoFollow -Path $skillItem.FullName -Anchor $env:USERPROFILE\r\n';
+  const OLDPRUNE = (t) => { assert(t.includes(OLD_PRUNE_CALL), 'вызов Remove-HmTreeNoFollow в прунинге на месте'); return t.replace(OLD_PRUNE_CALL, () => '                        Remove-Item -LiteralPath $skillItem.FullName -Recurse -Force -ErrorAction SilentlyContinue\r\n'); };
+  const noPinOldPruneScripts = (sb) => variantDir(sb, 'nopin-oldprune', (t) => OLDPRUNE(NOPIN(t)));
   const pinsIn = (dir) => { try { return fs.readdirSync(dir).filter((n) => /^\.hm-pin-/.test(n)); } catch (e) { return []; } };
   // Процесс уже завершился, но ОС закрывает его дескрипторы (и удаляет файл DeleteOnClose) чуть позже: ждём до 3 секунд.
   const waitNoPins = (dir, keep) => {
@@ -31099,7 +31104,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
     const sc = mkCfg('p3c');
     try {
       prep(sc);
-      const r = runSwap(sc, HOOK_AT_PRUNE, env, noPinScripts(sc));
+      const r = runSwap(sc, HOOK_AT_PRUNE, env, noPinOldPruneScripts(sc));
       assert.deepStrictEqual(swapLog(sc), ['SWAP=MOVED'], 'контроль: без закрепки подмена удаётся' + '\n' + r.out + r.err);
       assert(!fs.existsSync(path.join(sc.victim, 'skills', 'our-skill', 'precious.txt')), 'контроль: прунинг удалил каталог в чужой папке (после последней проверки корень ~/.claude не проверялся)');
     } finally { drop(sc.base); }
@@ -31150,7 +31155,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
     const s3 = mkCfg('q3');
     try {
       prep(s3);
-      const dir = variantDir(s3, 'noprunecheck', (t) => NOPIN(t).replace("        Assert-HmConfigNoLink -When 'перед удалением скиллов'\r\n", ''));
+      const dir = variantDir(s3, 'noprunecheck', (t) => OLDPRUNE(NOPIN(t)).replace("        Assert-HmConfigNoLink -When 'перед удалением скиллов'\r\n", ''));
       const r = runSwap(s3, HOOK_AT_PACKSKILLS, env, dir);
       assert.deepStrictEqual(swapLog(s3), ['SWAP=MOVED'], 'контроль: подмена удалась' + '\n' + r.out + r.err);
       assert(!fs.existsSync(precious(s3)), 'контроль: без обеих защит прунинг удалил каталог в чужой папке: ' + r.out + r.err);

@@ -30,10 +30,10 @@ hm_run_touchups() {
   for name in "$@"; do
     case "$name" in
       touchup-*) ;;
-      *) echo "[touchups] пропущено: имя «$name» не строгое (нужно touchup-<буквы-цифры-дефис>)"; continue ;;
+      *) echo "[touchups] пропущено: имя «${name}» не строгое (нужно touchup-<буквы-цифры-дефис>)"; continue ;;
     esac
     case "$name" in
-      *[!A-Za-z0-9-]*) echo "[touchups] пропущено: имя «$name» не строгое (нужно touchup-<буквы-цифры-дефис>)"; continue ;;   # только буквы, цифры и дефис
+      *[!A-Za-z0-9-]*) echo "[touchups] пропущено: имя «${name}» не строгое (нужно touchup-<буквы-цифры-дефис>)"; continue ;;   # только буквы, цифры и дефис
     esac
     f="$dir/$name.sh"
     [ -f "$f" ] || { echo "[$name] пропущено: нет файла $name.sh рядом с verify.sh"; continue; }
