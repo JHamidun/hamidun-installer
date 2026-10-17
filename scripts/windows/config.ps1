@@ -1,6 +1,7 @@
 ﻿# Hamidun config (.claude) — Windows
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_cfgmigrate.ps1')  # правка settings.json прошлых версий пака + опись (CATALOG.md, сводка)
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Remove-HmTreeNoFollow: снос клона, старых копий и скиллов без хода по ссылке (F17)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -209,12 +210,20 @@ if ($haveBundled) {
     # и правильный исход — быстро упасть с понятной ошибкой, а не висеть.
     $gitHard = @('-c','core.fsmonitor=false','-c','core.hooksPath=NUL','-c','core.symlinks=false',
                  '-c','credential.helper=','-c','credential.interactive=false')
-    # Ссылку на месте клона снимаем как ссылку (Directory.Delete без рекурсии трогает только её): на сборке
-    # Windows PowerShell 5.1.26100 Remove-Item -Recurse ссылку не обходит, но на других сборках проверить это
-    # нечем, а каталог лежит в профиле, где ссылку подложит любой процесс пользователя.
+    # Дерево клона лежит в профиле и сносится под администратором: Remove-Item -Recurse проходит junction на РОДИТЕЛЬСКОМ
+    # звене пути (~/.hamidun-setup подменили между проверкой выше и этим местом: удалился <чужая папка>\config-repo), а на
+    # сборках Windows PowerShell 5.1 старше проверенной 5.1.26100 — и вложенную ссылку. Remove-HmTreeNoFollow закрепляет
+    # родителя и каждый каталог, сверяет настоящий путь и снимает ссылку КАК ссылку (в том числе на самом месте клона).
+    # Подмена на пути — остановка без удаления чужого; «занято» — ниже проверка по диску назовёт причину.
     if (Test-Path $clone) {
-        if (Test-HmIsReparse $clone) { try { [System.IO.Directory]::Delete($clone, $false) } catch { } }
-        else { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }
+        try { Remove-HmTreeNoFollow -Path $clone -Anchor $env:USERPROFILE }
+        catch [System.InvalidOperationException] {
+            Write-Host "Конфиг НЕ разложен: путь к прежнему клону пака ($clone) не прошёл проверку на ссылки при удалении ($($_.Exception.Message)). Остановился: чужое не удалено, ничего не скопировано."
+            Write-Host "  Установщик работает с правами администратора, а ссылку или подмену папки мог устроить любая программа обычного пользователя."
+            Write-Host "  Что сделать: проверь ~/.hamidun-setup на ссылки (rmdir снимает только ссылку, файлы цели остаются) и повтори установку этого компонента; если ссылок у тебя быть не должно — проверь компьютер антивирусом."
+            exit 1
+        }
+        catch { }
     }
     # Каталог мог НЕ удалиться (антивирус или индексатор держат объект в .git —
     # SilentlyContinue это проглатывает). Тогда clone падает с «destination path already
@@ -321,7 +330,14 @@ if (Test-Path $claudeHome) {
                     Write-Host "  (пропускаю ссылку, а не копию: $($_.Name) — рекурсивное удаление ушло бы в чужой каталог)"
                     try { [System.IO.Directory]::Delete($_.FullName, $false) } catch { }
                 } else {
-                    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
+                    # Вложенные ссылки и подмена родителя в старой копии (она лежит в профиле) — тоже не повод идти за ними:
+                    # Remove-HmTreeNoFollow снимает ссылку как ссылку и сверяет настоящий путь каждого каталога.
+                    $oldCopy = $_
+                    # Снос с закреплением каждой папки (~40 мс на папку) медленнее Remove-Item: в копии ~/.claude их тысячи, поэтому
+                    # человеку сказано заранее, что тишина здесь — работа, а не зависание.
+                    Write-Host "  Убираю лишнюю старую копию $($oldCopy.Name) — в ней много файлов, это может занять минуту-другую..."
+                    try { Remove-HmTreeNoFollow -Path $oldCopy.FullName -Anchor $env:USERPROFILE }
+                    catch { Write-Host "  (старую копию $($oldCopy.Name) убрать не вышло — оставляю: $($_.Exception.Message))" }
                 }
             }
     } catch { Write-Host "  (старые копии ~/.claude.backup.* не удалось перечислить — оставляю как есть)" }
@@ -537,7 +553,9 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
             Write-Host "Прунинг паков пропущен (fail-closed): ~/.claude/skills — reparse point (junction/symlink). Удалено: 0."
         } elseif (Test-Path $skillsDir) {
             $removed = 0
+            $pruneStop = $false   # подмена на пути: остальные скиллы не трогаем
             Get-ChildItem -Directory $skillsDir | ForEach-Object {
+                if ($pruneStop) { return }
                 # Симлинк/junction-скилл НИКОГДА не удаляем: Remove-Item -Recurse на
                 # reparse-point в PS 5.1 может уйти в ЧУЖУЮ цель, и ссылка по
                 # определению не «доложена нами» (мы копируем реальные каталоги).
@@ -550,12 +568,25 @@ if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS) {
                 # (иначе снятие пака работало бы ровно один раз, на чистой машине).
                 $weAdded = (-not $preExisting.ContainsKey($_.Name)) -or $ourPrev.ContainsKey($_.Name)
                 if ($packAll.ContainsKey($_.Name) -and -not $keep.ContainsKey($_.Name) -and $weAdded) {
-                    Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue
-                    $removed++
+                    # Снос — Remove-HmTreeNoFollow, а не Remove-Item -Recurse: каталог skills сам мог быть подменён ссылкой после
+                    # проверки выше (список скиллов тогда читался бы из чужой папки, и Remove-Item стёр бы файлы в ней), а внутри
+                    # скилла может лежать ссылка. Родитель закрепляется и сверяется с профилем; подмена — стоп всего прунинга.
+                    $skillItem = $_
+                    $skillGone = $false
+                    try {
+                        Remove-HmTreeNoFollow -Path $skillItem.FullName -Anchor $env:USERPROFILE
+                        $skillGone = -not (Test-Path -LiteralPath $skillItem.FullName)
+                    }
+                    catch [System.InvalidOperationException] {
+                        $pruneStop = $true
+                        Write-Host "  Прунинг остановлен: путь к ~/.claude/skills не прошёл проверку на ссылки ($($_.Exception.Message)). Чужое не удалено."
+                    }
+                    catch { Write-Host "  Скилл $($skillItem.Name) убрать не вышло: $($_.Exception.Message)" }
+                    if ($skillGone) { $removed++ }
                 }
             }
             if ($removed -gt 0) { Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: $removed)." }
-            else { Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: 0) — под снятые наборы нашего ничего не нашлось, пред-существующее не трогаю." }
+            elseif (-not $pruneStop) { Write-Host "Скиллы отфильтрованы по выбранным наборам (убрано: 0) — под снятые наборы нашего ничего не нашлось, пред-существующее не трогаю." }
         }
     }
 }

@@ -30,10 +30,14 @@ is_selected() {
 # и touchup-mascot/-vscode/-config/-claude-path/-vscode-owner здесь не запускались никогда.
 # Диспетчер идёт в подоболочке: verify по контракту НЕ падает, и ошибка библиотеки (set -u, exit,
 # синтаксис) не должна унести чеклист.
+# СПИСОК ИМЁН в вызове — единственное, что решает, какие файлы запустятся (F19): каталог не перечисляется, лишний
+# файл touchup-*.sh рядом с verify.sh не запускается никогда. Новый touch-up = новый файл И его имя здесь (порядок — как у
+# сортировки по имени в локали C); тест в test/run-tests.js (раздел u10b) сверяет список с touchup-*.sh в репозитории.
 if [ -n "${HM_DRY_RUN:-}" ]; then
   echo "  [dry-run] WOULD: прогнать быстрые исправления из touchup-*.sh (каждое отдельным процессом, до 30 с) — без галочек, на каждом запуске"
 else
-  ( . "$DIR/_touchups.sh" && hm_run_touchups "$DIR" 30 ) \
+  ( . "$DIR/_touchups.sh" && hm_run_touchups "$DIR" 30 \
+      touchup-claude-path touchup-config touchup-mascot touchup-vscode-owner touchup-vscode ) \
     || echo "Быстрые исправления пропущены — на установку это не влияет."
 fi
 # --- end touch-ups ---

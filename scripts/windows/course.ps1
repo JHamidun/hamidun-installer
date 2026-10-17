@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_userpath.ps1')  # Get-HmSafeShellFolder / Test-HmShellFolder: стол — из профиля, а не из реестра
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # F17: снос и распаковка курса без хода по ссылкам (Remove-HmTreeNoFollow, Expand-HmZipSafe)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -60,31 +61,86 @@ if ($DRY) {
 Confirm-HmArtifact $zip
 
 Write-Host "Распаковываю курс-симулятор в $target ..."
-New-Item -ItemType Directory -Force $target | Out-Null
-# Повторная установка: сносим контентные папки курса — Expand-Archive -Force не удаляет
+# F17 (разбор безопасности): папка курса лежит в профиле, где любой процесс того же пользователя вправе создать junction
+# без прав. Прежний цикл сноса (Remove-Item -Recurse) и Expand-Archive -Force проходят junction на ЛЮБОМ родительском звене
+# пути: с vibecoding-course\.claude → чужая папка цикл стёр <чужая>\skills и <чужая>\commands (проверено на Windows
+# PowerShell 5.1), а файлы курса легли в ту же чужую папку. Поэтому:
+#   1. цепочка от опоры (профиль из токена, для папки вне профиля — корень тома) до папки курса проверяется ДО первого
+#      действия; ссылка на пути — отказ с кодом 1, ничего не удалено и не записано;
+#   2. папка курса создаётся (недостающие звенья — по одному, под закрепкой родителя) и закрепляется: пока открыт пустой
+#      файл-закрепка, её и все родительские папки нельзя переименовать или подменить ссылкой; закрепка держится до конца скрипта;
+#   3. снос — Remove-HmTreeNoFollow, распаковка — Expand-HmZipSafe: оба заново сверяют путь по дескриптору, не идут по ссылкам
+#      (ссылка снимается как ссылка) и пишут файл переносом по имени. Подробности и границы — в шапке _linksafe.ps1.
+$courseAnchor = Get-HmTrustAnchor -Path $courseDir
+# Слова отказа подобраны так, чтобы разбор причины в main.js (failure-explain) не принял его за «занятый файл» или
+# «файл не прошёл проверку подлинности» и не отправил человека чинить не то.
+function Stop-HmCourseUnsafe {
+    param([string]$Reason, [string]$Link)
+    Write-Host "Курс-симулятор НЕ установлен и не обновлён: $Reason"
+    Write-Host "  Установщик работает с правами администратора, а ссылку или подмену папки мог устроить любая программа обычного пользователя: запись «сквозь» неё ушла бы в чужую папку. Дальше я не пошёл: за подменённым путём ничего не удалено и не записано."
+    if ($Link) {
+        Write-Host "  Что сделать: если ссылку делал ты (например, вынес папку курса на другой диск), удали её командой rmdir `"$Link`" (она снимает только ссылку, файлы цели остаются), положи обычную папку на её место и повтори установку курса."
+    } else {
+        Write-Host "  Что сделать: повтори установку курса; не помогло — проверь папку курса ($courseDir) на ссылки (у них на значке стрелка) и пришли журнал установки в бота поддержки."
+    }
+    Write-Host "  Если ссылки у тебя быть не должно — проверь компьютер антивирусом."
+    exit 1
+}
+$courseLink = $null
+try { $courseLink = Find-HmLinkOnPath -Path $courseDir -Anchor $courseAnchor }
+catch {
+    Write-Host "Курс-симулятор НЕ установлен и не обновлён: не удалось проверить, что папка курса — обычная папка ($($_.Exception.Message)). Ничего не удалено и не записано."
+    Write-Host "  Что сделать: повтори установку этого компонента; не помогло — пришли журнал установки в бота поддержки."
+    exit 1
+}
+if ($courseLink) { Stop-HmCourseUnsafe -Reason "на пути к папке курса стоит ссылка (junction/symlink): $courseLink" -Link $courseLink }
+$hmCoursePin = $null   # ссылка на закрепку нужна, иначе сборщик мусора закрыл бы файл раньше времени
+try { $hmCoursePin = Open-HmPinnedDir -Dir $courseDir -Anchor $courseAnchor }
+catch [System.InvalidOperationException] { Stop-HmCourseUnsafe -Reason $_.Exception.Message -Link $_.Exception.Data['HmLink'] }
+catch {
+    Write-Host "Не удалось подготовить папку курса ($courseDir): $($_.Exception.Message)"
+    exit 1
+}
+# Повторная установка: сносим контентные папки курса — распаковка поверх не удаляет
 # файлы, исчезнувшие из новой версии, и наставник продолжал бы видеть старые уроки.
 # Прогресс ученика не трогаем: sandbox/ и .course/state.json / identity.json в архив не входят.
-if (Test-Path (Join-Path $courseDir 'CLAUDE.md')) {
+if (Test-Path -LiteralPath (Join-Path $courseDir 'CLAUDE.md')) {
     Write-Host "Курс уже установлен — обновляю файлы курса (прогресс и sandbox сохраняются)."
     # Сносим ТОЛЬКО папки из архива. Внутри .claude трогаем лишь skills/commands —
     # settings.local.json (накопленные учеником permission-разрешения Claude Code)
     # и прочие runtime-файлы должны пережить обновление. state.json/identity.json/sandbox
     # в архив не входят и остаются нетронутыми.
-    foreach ($sub in @('tracks', '.claude\skills', '.claude\commands', '.course\knowledge')) {
+    $updateSubs = @('tracks', '.claude\skills', '.claude\commands', '.course\knowledge')
+    # Сначала проверяем родителей ВСЕХ четырёх путей, ничего не удаляя: ссылка выше (vibecoding-course\.claude → чужая папка)
+    # — отказ, пока курс цел целиком, а не после того, как tracks уже снесены. Сама папка из списка, будь она ссылкой, не
+    # отказ: её снимают как ссылку.
+    foreach ($sub in $updateSubs) {
+        $parentLink = $null
+        try { $parentLink = Find-HmLinkOnPath -Path (Split-Path -Parent (Join-Path $courseDir $sub)) -Anchor $courseAnchor }
+        catch { $parentLink = "$sub (проверка не удалась: $($_.Exception.Message))" }
+        if ($parentLink) { Stop-HmCourseUnsafe -Reason "на пути к «$sub» стоит ссылка (junction/symlink): $parentLink" -Link $parentLink }
+    }
+    foreach ($sub in $updateSubs) {
         $p = Join-Path $courseDir $sub
-        if (Test-Path $p) {
-            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
-            # Залоченный файл: Remove-Item молча оставляет его; Expand-Archive поверх
-            # намешал бы старое с новым. Останавливаемся с внятным сообщением.
-            if (Test-Path $p) {
-                Write-Host "Не удалось обновить файлы курса ($sub): папка занята. Закрой программы, использующие папку курса, и запусти установку ещё раз."
-                exit 1
-            }
+        try { Remove-HmTreeNoFollow -Path $p -Anchor $courseAnchor }
+        catch [System.InvalidOperationException] { Stop-HmCourseUnsafe -Reason $_.Exception.Message -Link $_.Exception.Data['HmLink'] }
+        catch {
+            # Залоченный файл: снос убирает остальное и называет, что не вышло; распаковка поверх
+            # намешала бы старое с новым. Останавливаемся с внятным сообщением.
+            Write-Host "Не удалось обновить файлы курса ($sub): папка занята. Закрой программы, использующие папку курса, и запусти установку ещё раз."
+            exit 1
+        }
+        # Итог — по диску, а не по отсутствию исключения.
+        if (Test-Path -LiteralPath $p) {
+            Write-Host "Не удалось обновить файлы курса ($sub): папка занята. Закрой программы, использующие папку курса, и запусти установку ещё раз."
+            exit 1
         }
     }
 }
 try {
-    Expand-Archive -Path $zip -DestinationPath $target -Force -ErrorAction Stop
+    [void](Expand-HmZipSafe -Zip $zip -Dest $target -Anchor $courseAnchor)
+} catch [System.InvalidOperationException] {
+    Stop-HmCourseUnsafe -Reason $_.Exception.Message -Link $_.Exception.Data['HmLink']
 } catch {
     Write-Host "Не удалось распаковать курс: $($_.Exception.Message)"
     exit 1
@@ -125,7 +181,9 @@ if ($env:HM_COURSE_BEACON_URL) {
             } else {
                 $raw = $raw.TrimEnd() + "`n`n" + $block + "`n"
             }
-            [System.IO.File]::WriteAllText($cfgYaml, $raw, (New-Object System.Text.UTF8Encoding($false)))
+            # Запись — переносом по имени (Write-HmFileSafe: временный файл рядом + перенос), а не открытием самого имени на
+            # запись: file-symlink, подложенная на config.yaml, заставила бы WriteAllText записать блок с секретом в её цель.
+            Write-HmFileSafe -Path $cfgYaml -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes($raw))
             if ($s) {
                 Write-Host "Маяк завершения включён (с подписью)."
             } else {
@@ -136,60 +194,105 @@ if ($env:HM_COURSE_BEACON_URL) {
 }
 
 # --- глобальная установка наставника в ~/.claude (опционально) ---
+# ~/.claude лежит в профиле так же, как папка курса (F17): навыки здесь сносились Remove-Item -Recurse и копировались
+# Copy-Item -Recurse (оба идут по junction на ~/.claude и ~/.claude/skills), а CLAUDE.md писался WriteAllText по имени (идёт по
+# file-symlink). Теперь цепочка до ~/.claude/skills проверяется до первого действия; ссылка — навыки и блок не ставятся
+# (сам курс уже установлен, часть необязательная, шаг от этого не краснеет). Навыки разворачиваются из ТОГО ЖЕ архива,
+# что и курс (они совпадают с .claude\skills свежераспакованной папки), снос и запись — как для папки курса.
 if ($env:HM_COURSE_GLOBAL -eq '1') {
     $claudeHome = Join-Path $env:USERPROFILE '.claude'
-    $skillsSrc  = Join-Path $courseDir '.claude\skills'
     $skillsDst  = Join-Path $claudeHome 'skills'
-    if (Test-Path $skillsSrc) {
-        New-Item -ItemType Directory -Force $skillsDst | Out-Null
-        # foreach (НЕ ForEach-Object): единый скоуп, флаг $skFail виден после цикла.
-        # Без него финальное «установлены» печаталось даже когда навык не встал (папка занята).
-        $skFail = $false
-        foreach ($d in (Get-ChildItem -Directory $skillsSrc)) {
-            $t = Join-Path $skillsDst $d.Name
-            if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }
-            if (Test-Path $t) {
-                # Папка занята (антивирус/редактор): копирование поверх создало бы вложенный
-                # дубль course-driver/course-driver, а грузился бы старый навык.
-                Write-Host "Не удалось обновить навык $($d.Name): папка занята. Закрой программы, использующие ~/.claude/skills, и запусти установку ещё раз."
-                $skFail = $true
-            } else {
-                Copy-Item -Recurse -Force $d.FullName $t
+    $skillsPrefix = 'vibecoding-course/.claude/skills/'
+    $globalAnchor = Get-HmTrustAnchor -Path $claudeHome
+    $globalLink = $null
+    try { $globalLink = Find-HmLinkOnPath -Path $skillsDst -Anchor $globalAnchor }
+    catch { $globalLink = "$skillsDst (проверка не удалась: $($_.Exception.Message))" }
+    if ($globalLink) {
+        Write-Host "Наставник НЕ подключён глобально: на пути к ~/.claude стоит ссылка (junction/symlink) или путь не удалось проверить: $globalLink. Установщик работает с правами администратора и сквозь ссылки не пишет; сам курс установлен."
+        Write-Host "  Что сделать: если ссылку делал ты, удали её командой rmdir (она снимает только ссылку, файлы цели остаются), положи обычную папку на её место и повтори установку курса."
+    } else {
+      try {
+        $skillNames = @()
+        # Без @(...) вокруг вызова: Get-HmZipTopNames возвращает массив одним объектом (`,@(...)`), и @() завернул бы его ещё раз.
+        try { $skillNames = Get-HmZipTopNames -Zip $zip -Prefix $skillsPrefix }
+        catch { Write-Host "Навыки курса глобально не поставлены: не удалось прочитать архив ($($_.Exception.Message))."; $skillNames = @() }
+        if ($null -eq $skillNames) { $skillNames = @() } else { $skillNames = @($skillNames) }
+        if ($skillNames.Count) {
+            # foreach (НЕ ForEach-Object): единый скоуп, флаг $skFail виден после цикла.
+            # Без него финальное «установлены» печаталось даже когда навык не встал (папка занята).
+            $skFail = $false
+            $okNames = @()
+            foreach ($n in $skillNames) {
+                $t = Join-Path $skillsDst $n
+                $gone = $false
+                try { Remove-HmTreeNoFollow -Path $t -Anchor $globalAnchor; $gone = -not (Test-Path -LiteralPath $t) }
+                catch [System.InvalidOperationException] { throw }
+                catch { $gone = $false }
+                if ($gone) {
+                    $okNames += $n
+                } else {
+                    # Папка занята (антивирус/редактор): раскладка поверх смешала бы старые файлы навыка с новыми,
+                    # а грузился бы старый навык.
+                    Write-Host "Не удалось обновить навык ${n}: папка занята. Закрой программы, использующие ~/.claude/skills, и запусти установку ещё раз."
+                    $skFail = $true
+                }
+            }
+            if ($okNames.Count) {
+                try { [void](Expand-HmZipSafe -Zip $zip -Dest $skillsDst -Anchor $globalAnchor -Prefix $skillsPrefix -Only $okNames) }
+                catch [System.InvalidOperationException] { throw }
+                catch { Write-Host "Не удалось поставить навыки курса глобально: $($_.Exception.Message)"; $skFail = $true }
+            }
+            # Успех печатаем ТОЛЬКО если ни один навык не провалился (как skfail в course.sh).
+            if (-not $skFail) { Write-Host "Навыки курса установлены глобально в ~/.claude/skills." }
+        }
+        # защищённый блок в ~/.claude/CLAUDE.md (идемпотентно, с бэкапом)
+        $claudeMd = Join-Path $claudeHome 'CLAUDE.md'
+        $begin = '# >>> vibecoding-course >>>'
+        $end   = '# <<< vibecoding-course <<<'
+        $note  = "$begin`nРежим наставника по вайбкодингу доступен глобально. Курс: $courseDir`nВести ученика — по скиллам course-driver / course-check / course-role и файлу $courseDir\CLAUDE.md.`n$end"
+        $cur = ''
+        if (Test-HmIsReparse $claudeMd) {
+            # Ссылка на самом файле: читать её незачем — содержимое цели (в том числе закрытого файла, который администратор
+            # прочитать может) легло бы в обычный файл пользователя.
+            Write-Host "Блок наставника в ~/.claude/CLAUDE.md не записан: сам файл — ссылка (symlink), а установщик работает с правами администратора и сквозь ссылки не пишет. Курс и его навыки установлены."
+            Write-Host "  Что сделать: если ссылку делал ты, удали её командой rmdir или del (она снимает только ссылку), положи обычный файл на её место и повтори установку курса."
+        } else {
+        if (Test-Path -LiteralPath $claudeMd) {
+            # Строгий UTF-8 (throwOnInvalidBytes): при BOM-less ANSI/cp1251-файле нестрогий
+            # декодер молча превратил бы кириллицу в U+FFFD и записал мусор обратно. Ловим
+            # это и читаем в системной кодировке — файл не портим. (BOM у UTF-8/UTF-16
+            # StreamReader détectит сам поверх переданной кодировки.)
+            try {
+                $cur = [System.IO.File]::ReadAllText($claudeMd, (New-Object System.Text.UTF8Encoding($false, $true)))
+            } catch {
+                $cur = [System.IO.File]::ReadAllText($claudeMd, [System.Text.Encoding]::Default)
+            }
+            # Бэкап делаем ОДИН раз: повторный запуск не должен перетирать оригинал
+            # версией, в которую блок курса уже вписан. Запись — переносом по имени; сбой не критичен (как и раньше).
+            if (-not (Test-Path -LiteralPath "$claudeMd.bak-course")) {
+                try { Write-HmUserFile -Path "$claudeMd.bak-course" -Bytes ([System.IO.File]::ReadAllBytes($claudeMd)) -Anchor $globalAnchor }
+                catch [System.InvalidOperationException] { throw }
+                catch { }
             }
         }
-        # Успех печатаем ТОЛЬКО если ни один навык не провалился (как skfail в course.sh).
-        if (-not $skFail) { Write-Host "Навыки курса установлены глобально в ~/.claude/skills." }
-    }
-    # защищённый блок в ~/.claude/CLAUDE.md (идемпотентно, с бэкапом)
-    $claudeMd = Join-Path $claudeHome 'CLAUDE.md'
-    $begin = '# >>> vibecoding-course >>>'
-    $end   = '# <<< vibecoding-course <<<'
-    $note  = "$begin`nРежим наставника по вайбкодингу доступен глобально. Курс: $courseDir`nВести ученика — по скиллам course-driver / course-check / course-role и файлу $courseDir\CLAUDE.md.`n$end"
-    $cur = ''
-    if (Test-Path $claudeMd) {
-        # Строгий UTF-8 (throwOnInvalidBytes): при BOM-less ANSI/cp1251-файле нестрогий
-        # декодер молча превратил бы кириллицу в U+FFFD и записал мусор обратно. Ловим
-        # это и читаем в системной кодировке — файл не портим. (BOM у UTF-8/UTF-16
-        # StreamReader détectит сам поверх переданной кодировки.)
-        try {
-            $cur = [System.IO.File]::ReadAllText($claudeMd, (New-Object System.Text.UTF8Encoding($false, $true)))
-        } catch {
-            $cur = [System.IO.File]::ReadAllText($claudeMd, [System.Text.Encoding]::Default)
+        if ($null -eq $cur) { $cur = '' }
+        if ($cur -match [regex]::Escape($begin)) {
+            $cur = [regex]::Replace($cur, '(?ms)' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end), $note)
+        } else {
+            $cur = ($cur.TrimEnd() + "`n`n" + $note + "`n")
         }
-        # Бэкап делаем ОДИН раз: повторный запуск не должен перетирать оригинал
-        # версией, в которую блок курса уже вписан.
-        if (-not (Test-Path "$claudeMd.bak-course")) { Copy-Item $claudeMd "$claudeMd.bak-course" -ErrorAction SilentlyContinue }
+        # Без BOM: этот файл читают Claude Code и git-инструменты, BOM им ни к чему. Файл человека: «только чтение» — его выбор,
+        # поэтому без -ClearReadOnly (запись откажет, и это названо ниже).
+        Write-HmUserFile -Path $claudeMd -Bytes ((New-Object System.Text.UTF8Encoding($false)).GetBytes($cur)) -Anchor $globalAnchor
+        Write-Host "Наставник подключён глобально (блок в ~/.claude/CLAUDE.md)."
+        }
+      } catch [System.InvalidOperationException] {
+        Write-Host "Наставник НЕ подключён глобально: $($_.Exception.Message). Установщик работает с правами администратора и сквозь ссылки не пишет; сам курс установлен."
+        Write-Host "  Что сделать: если ссылку делал ты, удали её командой rmdir (она снимает только ссылку, файлы цели остаются), положи обычную папку на её место и повтори установку курса."
+      } catch {
+        Write-Host "Наставник глобально подключён не полностью: $($_.Exception.Message)"
+      }
     }
-    if ($null -eq $cur) { $cur = '' }
-    if ($cur -match [regex]::Escape($begin)) {
-        $cur = [regex]::Replace($cur, '(?ms)' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end), $note)
-    } else {
-        $cur = ($cur.TrimEnd() + "`n`n" + $note + "`n")
-    }
-    New-Item -ItemType Directory -Force $claudeHome | Out-Null
-    # Без BOM: этот файл читают Claude Code и git-инструменты, BOM им ни к чему.
-    [System.IO.File]::WriteAllText($claudeMd, $cur, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host "Наставник подключён глобально (блок в ~/.claude/CLAUDE.md)."
 }
 
 # --- ярлык запуска на рабочем столе ---
@@ -237,8 +340,10 @@ function New-HmCourseShortcut {
             'echo либо открой эту папку в своём агенте и напиши: начать',
             'pause'
         ) -join "`r`n"
-        # BOM не пишем: cmd.exe его не понимает и спотыкается на первой строке.
-        [IO.File]::WriteAllText($launcherPath, $launcherBody + "`r`n", (New-Object Text.UTF8Encoding $false))
+        # BOM не пишем: cmd.exe его не понимает и спотыкается на первой строке. Запись — переносом по имени
+        # (Write-HmFileSafe), а не открытием самого имени на запись: file-symlink, подложенная на «Запустить курс.cmd», заставила бы
+        # WriteAllText переписать её цель под администратором. Лаунчер — наш файл: «только чтение» с него снимается.
+        Write-HmFileSafe -Path $launcherPath -Bytes ((New-Object Text.UTF8Encoding $false).GetBytes($launcherBody + "`r`n")) -ClearReadOnly
         if (-not $desktop) { return $null }   # причину уже напечатал Get-HmSafeShellFolder
         # Имя приходит из конфига сборки; разделитель пути в нём увёл бы файл из проверенной папки.
         if ($Name -match '[\\/:*?"<>|]') { throw "в имени ярлыка недопустимые знаки: $Name" }

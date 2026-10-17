@@ -1,6 +1,7 @@
 ﻿# AI-мост (Hamidun Bridge) — Windows: ставим агент + автозапуск (трей)
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Write-HmUserFile: агент и config.json пишутся без хода по ссылке (junction на %LOCALAPPDATA%\HamidunBridge, symlink на файл)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -69,8 +70,15 @@ if (-not $py) { Write-Host "Python не найден — выберите ком
 $pyw = Join-Path (Split-Path $py) 'pythonw.exe'
 
 # 3. агент + зависимости (офлайн из wheels если есть)
-New-Item -ItemType Directory -Force $dst | Out-Null
-Copy-Item -Force $agentSrc (Join-Path $dst 'bridge_agent.py')
+# Каталог моста лежит в профиле, а запись идёт под администратором: junction на %LOCALAPPDATA%\HamidunBridge (или выше по
+# пути) уводил New-Item и Copy-Item в чужую папку, а file-symlink на bridge_agent.py — запись в её цель. Каталог создаётся
+# и проверяется по цепочке от профиля, файл ложится переносом по имени (Write-HmUserFile). Агент — наш файл: «только чтение»
+# с него снимается, как снимал прежний Copy-Item -Force.
+try { Write-HmUserFile -Path (Join-Path $dst 'bridge_agent.py') -Bytes ([System.IO.File]::ReadAllBytes($agentSrc)) -ClearReadOnly }
+catch {
+    Write-Host "ОШИБКА: агент моста не записан в $dst ($($_.Exception.Message)) — мост НЕ установлен. Если на пути к папке моста стоит ссылка (junction/symlink), удали её (rmdir снимает только ссылку) и повтори установку."
+    exit 1
+}
 $wheels = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'pywheels' } else { '' }
 # SECURITY (#6): $py/$pyw лежат в user-профиле — они USER-WRITABLE. Запуск '& $py' в ЭТОМ
 # скрипте (установщик requireAdministrator -> high integrity) исполнил бы user-writable python
@@ -139,8 +147,17 @@ if (-not (Test-Path $cfgPath)) {
     } | ConvertTo-Json -Depth 5)
     # Windows PowerShell 5.1 «Set-Content -Encoding utf8» пишет UTF-8 С BOM, а
     # bridge_agent.py json.load на BOM падал → конфиг молча терялся. Пишем БЕЗ BOM
-    # через .NET UTF8Encoding с флагом «не эмитить BOM» ($false).
-    [System.IO.File]::WriteAllText($cfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+    # через .NET UTF8Encoding с флагом «не эмитить BOM» ($false). Запись — переносом по имени
+    # (Write-HmUserFile), а не WriteAllText по имени: symlink на config.json вёл бы запись в её цель.
+    try { Write-HmUserFile -Path $cfgPath -Bytes ((New-Object System.Text.UTF8Encoding -ArgumentList $false).GetBytes($cfgJson)) }
+    catch {
+        $cfgOk = $false
+        Write-Host "Не удалось записать config.json моста: $($_.Exception.Message)"
+    }
+} elseif ($env:HM_BRIDGE_ENDPOINT -and (Test-HmIsReparse $cfgPath)) {
+    # Ссылка на самом config.json: читать её незачем — в токен и адрес сервера легло бы содержимое чужой цели.
+    $cfgOk = $false
+    Write-Host "Не удалось обновить адрес сервера в существующем config.json: сам файл — ссылка (symlink), а установщик работает с правами администратора и сквозь ссылки не пишет."
 } elseif ($env:HM_BRIDGE_ENDPOINT) {
     # config.json уже есть, но издатель пересобрал установщик с адресом сервера —
     # доставляем новый endpoint/token в существующий конфиг, сохраняя ssh/enabled ученика.
@@ -155,7 +172,7 @@ if (-not (Test-Path $cfgPath)) {
             if ($null -ne $cfg.PSObject.Properties['bridgeToken']) { $cfg.bridgeToken = "$($env:HM_BRIDGE_TOKEN)" }
             else { $cfg | Add-Member -NotePropertyName bridgeToken -NotePropertyValue "$($env:HM_BRIDGE_TOKEN)" -Force }
         }
-        [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+        Write-HmUserFile -Path $cfgPath -Bytes ((New-Object System.Text.UTF8Encoding -ArgumentList $false).GetBytes(($cfg | ConvertTo-Json -Depth 5)))
     } catch {
         # Битый JSON / сбой записи: адрес сервера НЕ доставлен — «Сервер настроен» внизу
         # печатать нельзя (раньше catch только логировал, а успех объявлялся всё равно).

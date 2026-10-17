@@ -5,6 +5,7 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated / Invoke-HmDeElevatedSafe (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Write-HmUserFile: шрифт и стартовый settings.json Cursor пишутся без хода по ссылке
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -184,9 +185,11 @@ if ($fontSrc) {
     else {
         try {
             $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-            New-Item -ItemType Directory -Force $fontDir | Out-Null
             $fontDst = Join-Path $fontDir 'JetBrainsMono-Regular.ttf'
-            Copy-Item -Force $fontSrc $fontDst
+            # Запись под администратором в профиль: junction на Fonts (или выше по пути) уводил New-Item и Copy-Item в чужую
+            # папку, file-symlink на имя шрифта — запись в её цель. Каталог создаётся и проверяется по цепочке от профиля,
+            # файл ложится переносом по имени (Write-HmUserFile); шрифт — наш файл, «только чтение» с него снимается.
+            Write-HmUserFile -Path $fontDst -Bytes ([System.IO.File]::ReadAllBytes($fontSrc)) -ClearReadOnly
             $regKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
             if (-not (Test-Path $regKey)) { New-Item -Path $regKey -Force | Out-Null }
             New-ItemProperty -Path $regKey -Name 'JetBrains Mono Regular (TrueType)' -Value $fontDst -PropertyType String -Force | Out-Null
@@ -203,7 +206,6 @@ if (Test-Path $cursorSettings) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: создать $cursorSettings (autoSave + JetBrains Mono)" }
     else {
         try {
-            New-Item -ItemType Directory -Force (Split-Path $cursorSettings) | Out-Null
             $seed = @'
 {
   "files.autoSave": "afterDelay",
@@ -211,7 +213,10 @@ if (Test-Path $cursorSettings) {
   "terminal.integrated.fontFamily": "JetBrains Mono"
 }
 '@
-            Set-Content -Path $cursorSettings -Value $seed -Encoding UTF8
+            # Те же байты, что давал Set-Content -Encoding UTF8 (UTF-8 с BOM и перевод строки в конце), но переносом по имени
+            # и с проверкой цепочки от профиля: junction на %APPDATA%\Cursor (или выше) и symlink на settings.json уводили
+            # Set-Content в чужое место под администратором. Файл человека, которого ещё нет: «только чтение» снимать не с чего.
+            Write-HmUserFile -Path $cursorSettings -Bytes (ConvertTo-HmBomLineBytes $seed)
             Write-Host "Создал стартовый settings.json Cursor (autoSave + JetBrains Mono)."
         } catch { Write-Host "settings.json Cursor не создался: $($_.Exception.Message)" }
     }

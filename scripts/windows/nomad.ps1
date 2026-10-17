@@ -8,6 +8,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 # #2: интегрити-гейт nomad-src (Confirm-HmArtifact + Get-HmTreeSha256 из _verify.ps1).
 . (Join-Path $PSScriptRoot '_verify.ps1')
 . (Join-Path $PSScriptRoot '_userpath.ps1')   # Add-HmUserPath: ~/.local\bin в PATH пользователя
+. (Join-Path $PSScriptRoot '_linksafe.ps1')   # New-HmUserDir / Write-HmUserFile: брендинг и config.yaml пишутся без хода по ссылке
 
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
@@ -347,24 +348,44 @@ if ($DRY) {
 # ТОЛЬКО если целевого НЕТ — существующий пользовательский файл НЕ перезаписываем.
 $hh = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
 $wroteSoul = $false; $wroteSkin = $false
+# Каталог агента лежит в профиле, и записи в него идут под администратором: junction на HERMES_HOME (или на %LOCALAPPDATA%)
+# уводил Copy-Item и WriteAllText в чужую папку, а file-symlink на SOUL.md/config.yaml — запись в её цель. Поэтому
+# каталог создаётся и проверяется по цепочке от профиля (New-HmUserDir: ссылка — отказ), а файлы пишутся переносом по имени
+# (Write-HmUserFile). Каталог небезопасен — брендинг и облачный блок пропускаются со строкой в журнал, сам Nomad уже стоит.
+$hhSafe = $false
 if (-not $DRY) {
-    New-Item -ItemType Directory -Force -Path $hh, (Join-Path $hh 'skins') | Out-Null
+    try {
+        [void](New-HmUserDir -Path $hh)
+        [void](New-HmUserDir -Path (Join-Path $hh 'skins'))
+        $hhSafe = $true
+    } catch { Write-Host "Nomad: брендинг и настройки НЕ записаны: каталог агента ($hh) не прошёл проверку на ссылки ($($_.Exception.Message)). Сам Nomad установлен." }
+}
+if (-not $DRY -and $hhSafe) {
     $soulDst = Join-Path $hh 'SOUL.md'
     if (-not (Test-Path -LiteralPath $soulDst)) {
         $soulSrc = Join-Path $src 'branding\SOUL.md'
-        if (Test-Path $soulSrc) { Copy-Item $soulSrc $soulDst; $wroteSoul = $true }
+        if (Test-Path $soulSrc) {
+            try { Write-HmUserFile -Path $soulDst -Bytes ([System.IO.File]::ReadAllBytes($soulSrc)); $wroteSoul = $true }
+            catch { Write-Host "  [warn] SOUL.md не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\SOUL.md не найден — пропускаю" }
     } else { Write-Host "  SOUL.md уже существует — не перезаписываю." }
     $skinDst = Join-Path $hh 'skins\nomad.yaml'
     if (-not (Test-Path -LiteralPath $skinDst)) {
         $nomadYamlSrc = Join-Path $src 'branding\skins\nomad.yaml'
-        if (Test-Path $nomadYamlSrc) { Copy-Item $nomadYamlSrc $skinDst; $wroteSkin = $true }
+        if (Test-Path $nomadYamlSrc) {
+            try { Write-HmUserFile -Path $skinDst -Bytes ([System.IO.File]::ReadAllBytes($nomadYamlSrc)); $wroteSkin = $true }
+            catch { Write-Host "  [warn] skins\nomad.yaml не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\skins\nomad.yaml не найден — пропускаю" }
     } else { Write-Host "  skins\nomad.yaml уже существует — не перезаписываю." }
     $cfgY = Join-Path $hh 'config.yaml'
     if (-not (Test-Path $cfgY)) {
         $cfgTmpl = Join-Path $src 'branding\config.yaml.template'
-        if (Test-Path $cfgTmpl) { Copy-Item $cfgTmpl $cfgY }
+        if (Test-Path $cfgTmpl) {
+            try { Write-HmUserFile -Path $cfgY -Bytes ([System.IO.File]::ReadAllBytes($cfgTmpl)) }
+            catch { Write-Host "  [warn] config.yaml не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\config.yaml.template не найден — пропускаю" }
     }
 }
@@ -388,6 +409,12 @@ if (-not $cloudKey) {
     $modelSan = ($cloudModel -replace '["\r\n]', '')
     if ($DRY) {
         Write-Host "  [dry-run] WOULD: в $cfgY вписать model.provider=custom base_url=$urlSan default=$modelSan api_key=<скрыт>"
+    } elseif (-not $hhSafe) {
+        Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан — каталог агента ($hh) не прошёл проверку на ссылки (см. выше). Подключишь позже: nmd model."
+    } elseif (Test-HmIsReparse $cfgY) {
+        # Читать ссылку незачем: содержимое её цели (в том числе закрытого файла, который администратор прочитать может) легло
+        # бы в обычный config.yaml пользователя вместе с ключом.
+        Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан — сам config.yaml это ссылка (symlink), а установщик работает с правами администратора и сквозь ссылки не пишет. Удали ссылку и повтори установку Nomad (или подключи облако позже: nmd model)."
     } else {
         $text = ''
         if (Test-Path $cfgY) { $text = [IO.File]::ReadAllText($cfgY, [Text.Encoding]::UTF8) }
@@ -405,9 +432,11 @@ if (-not $cloudKey) {
                  '  default: "' + $modelSan + '"' + $nl +
                  '# <<< nomad-cloud <<<' + $nl
         $text = $block + $text
-        # config.yaml — данные: пишем БЕЗ BOM (BOM ломает YAML-парсер).
-        [IO.File]::WriteAllText($cfgY, $text, (New-Object Text.UTF8Encoding $false))
-        Write-Host "OK: Nomad подключён к облаку $urlSan (модель $modelSan). Ключ записан в config.yaml."
+        # config.yaml — данные: пишем БЕЗ BOM (BOM ломает YAML-парсер). Запись — переносом по имени, не открытием имени на запись.
+        try {
+            Write-HmUserFile -Path $cfgY -Bytes ((New-Object Text.UTF8Encoding $false).GetBytes($text))
+            Write-Host "OK: Nomad подключён к облаку $urlSan (модель $modelSan). Ключ записан в config.yaml."
+        } catch { Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан: $($_.Exception.Message)" }
     }
 }
 
