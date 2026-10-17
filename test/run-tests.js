@@ -34043,6 +34043,24 @@ public static class HmConv {
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ } }
   });
 
+  // Системный bash 3.2 на macOS (под ним идут скрипты компонентов) в локали C — а приложение из Finder стартует без LANG — считает байт 0xC2
+  // буквой имени: «$name» читается как переменная «name\xC2», она пуста, а закрывающая кавычка превращается в «�». Раннер macOS показал это
+  // на сообщении диспетчера подправок; в course.sh (имя ярлыка в итоговой строке) и mascot.sh стояло то же. Имя берём в {}.
+  ok('u12: в скриптах macOS нет переменной без {}, за которой сразу идёт не-ASCII знак (bash 3.2 в локали C глотает её имя)', () => {
+    const hit = (l) => /\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/.exec(l);
+    assert(hit('echo "«$NAME»"') && !hit('echo "«${NAME}»"') && !hit('echo "$NAME — ок"'), 'контроль: проверка различает плохую и хорошую запись');
+    const dir = path.join(ROOT, 'scripts', 'macos');
+    const bad = [];
+    fs.readdirSync(dir).filter((f) => f.endsWith('.sh')).forEach((f) => {
+      fs.readFileSync(path.join(dir, f), 'utf8').split('\n').forEach((l, i) => {
+        if (/^\s*#/.test(l)) return;
+        const m = hit(l);
+        if (m) bad.push(f + ':' + (i + 1) + ': ' + m[0]);
+      });
+    });
+    assert.deepStrictEqual(bad, [], 'переменная без {} перед не-ASCII знаком: ' + bad.join(' | '));
+  });
+
   // Слияние 14.10 оставило в спеке маркеры конфликта (<<<<<<< ours … >>>>>>> theirs), и они ушли в ветку: спеки-гейт проверяет ссылки, но не это.
   ok('u12: в отслеживаемых файлах нет маркеров конфликта слияния (<<<<<<<, |||||||, >>>>>>>)', () => {
     const r = spawnSync('git', ['grep', '-n', '-I', '-E', '^(<<<<<<<|>>>>>>>) |^[|]{7} ', '--', '.', ':!node_modules'], { cwd: ROOT, encoding: 'utf8', timeout: 120000 });

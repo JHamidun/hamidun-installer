@@ -387,7 +387,7 @@ if pgrep -f "/Contents/MacOS/$APP_BIN" >/dev/null 2>&1; then PROC_ALIVE=1; fi
 # Автозапуска нет, поэтому в каждом исходе говорим, откуда открыть скрепку потом.
 # ~/Applications в Finder — папка «Программы» внутри домашней (не та, что в боковой панели).
 MASCOT_NAME="${APP_NAME%.app}"
-REOPEN="Программы → $MASCOT_NAME (в Finder: домашняя папка → «Программы»; или Cmd+Пробел и «$MASCOT_NAME»)"
+REOPEN="Программы → $MASCOT_NAME (в Finder: домашняя папка → «Программы»; или Cmd+Пробел и «${MASCOT_NAME}»)"
 if [ "$HEALTHY" = "1" ] && [ "$PROC_ALIVE" = "1" ]; then
   echo "  Сама при входе в систему скрепка не запускается — открыть её снова: $REOPEN."
   echo "OK: Скрепка установлена и запущена — она уже на экране. Ctrl+Shift+D откроет твои сессии Claude."
