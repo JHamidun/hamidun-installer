@@ -22960,7 +22960,15 @@ ok('config.json в репозитории без сборочных маркер
     const dist = path.join(base, 'dist');
     fs.cpSync(src.dist, dist, { recursive: true }); // ~370 МБ: ~2 с на SSD; exe меняем ТОЛЬКО в копии
     const exe = path.join(dist, 'Hamidun Setup.exe');
-    fs.renameSync(path.join(dist, src.rel), exe);
+    // Только что скопированный electron.exe (190 МБ) на Windows сканирует антивирус и держит открытым: rename сразу после
+    // cpSync падал EBUSY (CI, 17.10.2026, прогон на main после слияния: тест красный, второй тест — следом, ENOENT).
+    // Повторяем с паузой: это гонка со сканером, а не дефект.
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(path.join(dist, src.rel), exe); break; } catch (e) {
+        if (attempt >= 40 || !/^(EBUSY|EPERM|EACCES)$/.test(String(e && e.code))) throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+      }
+    }
     // Раскладка как у настоящей сборки: resources/app есть, поэтому `exe скрипт.js` не запускает скрипт
     // как приложение, а ELECTRON_RUN_AS_NODE — единственный способ выполнить чужой JS через аргумент.
     const appDir = path.join(dist, 'resources', 'app');
