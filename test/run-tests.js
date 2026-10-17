@@ -3488,11 +3488,13 @@ ok('Codex P0 (scripts): брендинг SOUL.md/nomad.yaml копируется
 
   const nps = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
   assert(/if \(-not \(Test-Path -LiteralPath \$soulDst\)\) \{/.test(nps), 'nomad.ps1: SOUL.md — гейт на отсутствие');
-  assert(/Copy-Item \$soulSrc \$soulDst/.test(nps), 'nomad.ps1: Copy-Item SOUL.md');
+  // u10b: брендинг ложится не Copy-Item (открывал имя файла и шёл по ссылке), а переносом по имени из-под проверки цепочки от профиля
+  // (Write-HmUserFile); перезаписи по-прежнему нет — ни -Force, ни -ClearReadOnly (файл человека).
+  assert(/Write-HmUserFile -Path \$soulDst -Bytes \(\[System\.IO\.File\]::ReadAllBytes\(\$soulSrc\)\)/.test(nps), 'nomad.ps1: запись SOUL.md переносом по имени');
   assert(/if \(-not \(Test-Path -LiteralPath \$skinDst\)\) \{/.test(nps), 'nomad.ps1: nomad.yaml — гейт на отсутствие');
-  assert(/Copy-Item \$nomadYamlSrc \$skinDst/.test(nps), 'nomad.ps1: Copy-Item nomad.yaml');
-  assert(!/Copy-Item \$soulSrc[^\n]*-Force/.test(nps), 'nomad.ps1: -Force убран у SOUL.md');
-  assert(!/Copy-Item \$nomadYamlSrc[^\n]*-Force/.test(nps), 'nomad.ps1: -Force убран у nomad.yaml');
+  assert(/Write-HmUserFile -Path \$skinDst -Bytes \(\[System\.IO\.File\]::ReadAllBytes\(\$nomadYamlSrc\)\)/.test(nps), 'nomad.ps1: запись nomad.yaml переносом по имени');
+  assert(!/Copy-Item \$soulSrc|Copy-Item \$nomadYamlSrc/.test(nps), 'nomad.ps1: Copy-Item брендинга убран (шёл по ссылке)');
+  assert(!/Write-HmUserFile -Path \$(soulDst|skinDst)[^\n]*-ClearReadOnly/.test(nps), 'nomad.ps1: у файлов человека (SOUL.md, nomad.yaml) нет -ClearReadOnly');
   assert(/не перезаписываю/.test(nps), 'nomad.ps1: сообщение о не-перезаписи');
 });
 
@@ -8963,7 +8965,14 @@ ok('config.json в репозитории без сборочных маркер
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-bridge-'));
     const scriptsDir = path.join(base, 'scripts');
     fs.mkdirSync(scriptsDir);
-    fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', 'bridge.ps1'), path.join(scriptsDir, 'bridge.ps1'));
+    // Профиль «из токена» в песочнице — каталог теста (шов Get-HmProfileRoot): запись агента и config.json идёт через библиотеку
+    // link-safe записи (u10b), она проверяет цепочку от профиля и подключает _userpath.ps1 из своей папки. От настоящего профиля
+    // машины тест зависеть не должен: у разработчика TEMP может лежать за junction, и это был бы законный, но посторонний отказ.
+    const bridgeSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'bridge.ps1'), 'utf8');
+    const bridgeDot = ". (Join-Path $PSScriptRoot '_linksafe.ps1')";
+    assert(bridgeSrc.includes(bridgeDot), 'bridge.ps1 подключает _linksafe.ps1');
+    fs.writeFileSync(path.join(scriptsDir, 'bridge.ps1'), bridgeSrc.replace(bridgeDot, () => bridgeDot + '\r\nfunction Get-HmProfileRoot { return $env:HM_TEST_PROFILE_ROOT }'));
+    ['_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', f), path.join(scriptsDir, f)));
     // Стаб примитива де-элевации ($PSScriptRoot копии → сорсится ОН, не настоящий):
     // НИКАКОГО schtasks; код возврата selftest задаёт тест через HM_TEST_SELFTEST_EXIT.
     fs.writeFileSync(path.join(scriptsDir, '_deelev.ps1'), Buffer.concat([
@@ -9030,7 +9039,7 @@ ok('config.json в репозитории без сборочных маркер
   }
   function runBridgePs1(sb, extraEnv) {
     const env = Object.assign({}, process.env, {
-      LOCALAPPDATA: sb.localApp, HM_AGENT_DIR: sb.agentDir, HM_TEST_LOG: sb.logPath
+      LOCALAPPDATA: sb.localApp, HM_AGENT_DIR: sb.agentDir, HM_TEST_LOG: sb.logPath, HM_TEST_PROFILE_ROOT: sb.base
     });
     ['HM_DRY_RUN', 'HM_VENDOR', 'HM_BRIDGE_TOKEN', 'HM_BRIDGE_ENDPOINT', 'HM_BRIDGE_PACDOMAINS']
       .forEach((k) => delete env[k]);
@@ -11364,7 +11373,7 @@ ok('config.json в репозитории без сборочных маркер
   // Библиотеки, а не компоненты: их подключают через точку (dot-source), они
   // НЕ запускаются обёрткой и своего кода возврата не отдают. Требовать от них
   // финальный exit — требовать неверного.
-  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1', '_userpath.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', '_mascot.ps1', '_touchups.ps1']);
+  const LIBS = new Set(['_deelev.ps1', '_verify.ps1', '_lib.ps1', '_userpath.ps1', '_linksafe.ps1', '_cfgmigrate.ps1', '_claudeenv.ps1', '_mascot.ps1', '_touchups.ps1']);
 
   const listScripts = () => fs.readdirSync(path.join(ROOT, 'scripts', 'windows'))
     .filter((f) => f.endsWith('.ps1'))
@@ -11619,11 +11628,13 @@ ok('config.json в репозитории без сборочных маркер
       w('touchup-bad_name.ps1', "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");                  // подчёркивание: чужое имя
       w('other.ps1', "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");
       w("touchup-q'uote.ps1", "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");                   // апостроф: тоже чужое имя
+      w('touchup-extra.ps1', "Write-Host 'НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ'\n");                     // строгое имя, но в списке нет (F19)
+      // Список имён — из вызова (в verify.ps1 он литеральный); порядок запуска — порядок списка.
       const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
-        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -TimeoutSec 20; Write-Host 'КОНЕЦ'");
+        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -Names @('touchup-a', 'touchup-b') -TimeoutSec 20; Write-Host 'КОНЕЦ'");
       const lines = (r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       assert.deepStrictEqual(lines, ['ОБНОВЛЕНО: первый — привет', 'ОБНОВЛЕНО: второй', 'КОНЕЦ'],
-        'порядок по имени, кириллица без мусора, чужие имена не запускаются; вывод: ' + r.stdout + r.stderr);
+        'порядок списка, кириллица без мусора, чужие имена и файлы вне списка не запускаются; вывод: ' + r.stdout + r.stderr);
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -11637,7 +11648,7 @@ ok('config.json в репозитории без сборочных маркер
       w('touchup-c-ok.ps1', "Write-Host 'ОБНОВЛЕНО: дошёл'\n");
       const t0 = Date.now();
       const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
-        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -TimeoutSec 30; Write-Host 'КОНЕЦ'");
+        "'; Invoke-HmTouchups -Dir '" + q(dir) + "' -Names @('touchup-a-hang', 'touchup-b-throw', 'touchup-c-ok') -TimeoutSec 30; Write-Host 'КОНЕЦ'");
       const sec = (Date.now() - t0) / 1000;
       const out = r.stdout || '';
       assert(/\[touchup-a-hang\] прервано/.test(out), 'таймаут обязан быть назван: ' + out);
@@ -11656,7 +11667,7 @@ ok('config.json в репозитории без сборочных маркер
       fs.mkdirSync(dir);
       fs.writeFileSync(path.join(dir, 'touchup-x.ps1'), "\uFEFFWrite-Host 'ОБНОВЛЕНО: апостроф'\n", 'utf8');
       const r = runPs("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; . '" + q(psLib) +
-        "'; Invoke-HmTouchups -Dir ([string]$env:HM_T_DIR) -TimeoutSec 20",
+        "'; Invoke-HmTouchups -Dir ([string]$env:HM_T_DIR) -Names @('touchup-x') -TimeoutSec 20",
       Object.assign({}, process.env, { HM_T_DIR: dir }));
       assert(/ОБНОВЛЕНО: апостроф/.test(r.stdout || ''), 'путь с ’ сломал запуск: ' + r.stdout + r.stderr);
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
@@ -11667,7 +11678,7 @@ ok('config.json в репозитории без сборочных маркер
     assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'кириллица в комментариях и строках — нужен UTF-8 BOM');
     assert(!/^\s*exit\b/m.test(codeOnly(b.toString('utf8'))), 'библиотека не должна завершать процесс');
     if (process.platform !== 'win32') return;
-    const r = runPs(". '" + q(psLib) + "'; Invoke-HmTouchups -Dir 'C:\\нет-такого-каталога-hm'; Write-Host 'ЖИВ'");
+    const r = runPs(". '" + q(psLib) + "'; Invoke-HmTouchups -Dir 'C:\\нет-такого-каталога-hm' -Names @('touchup-x'); Write-Host 'ЖИВ'");
     assert(/ЖИВ/.test(r.stdout || ''), 'отсутствующий каталог не должен ронять verify: ' + r.stdout + r.stderr);
   });
 
@@ -11685,11 +11696,12 @@ ok('config.json в репозитории без сборочных маркер
       const lib = path.join(ROOT, 'scripts', 'macos', '_touchups.sh').replace(/\\/g, '/');
       const d = dir.replace(/\\/g, '/');
       const t0 = Date.now();
-      const r = spawnSync('bash', ['-c', '. "$1"; hm_run_touchups "$2" 3; echo КОНЕЦ', 'x', lib, d], { encoding: 'utf8', timeout: 60000 });
+      // имена — в вызове (в verify.sh они литеральны); порядок запуска — порядок списка; touchup-bad_name и other.sh в список не входят
+      const r = spawnSync('bash', ['-c', '. "$1"; hm_run_touchups "$2" 3 touchup-a touchup-b touchup-hang; echo КОНЕЦ', 'x', lib, d], { encoding: 'utf8', timeout: 60000 });
       const sec = (Date.now() - t0) / 1000;
       const lines = (r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       assert.deepStrictEqual(lines, ['ОБНОВЛЕНО: первый', 'ОБНОВЛЕНО: второй', '[touchup-hang] прервано: не уложился в 3 с', 'КОНЕЦ'],
-        'порядок по имени (a, b, hang); вывод: ' + r.stdout + r.stderr);
+        'порядок списка (a, b, hang); вывод: ' + r.stdout + r.stderr);
       assert(sec < 25, 'зависший touch-up держал диспетчер ' + sec + ' с');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
@@ -13343,7 +13355,12 @@ ok('config.json в репозитории без сборочных маркер
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u5-bridge-'));
     try {
       const scripts = path.join(base, 'scripts'); fs.mkdirSync(scripts);
-      fs.writeFileSync(path.join(scripts, 'bridge.ps1'), scriptText);
+      // профиль «из токена» в песочнице — каталог теста (шов Get-HmProfileRoot), чтобы тест не зависел от настоящего профиля и
+      // от того, куда у разработчика переехал TEMP; прежние варианты текста скрипта (негативные контроли) шва не имеют — и не нужен
+      const dotLine = ". (Join-Path $PSScriptRoot '_linksafe.ps1')";
+      fs.writeFileSync(path.join(scripts, 'bridge.ps1'), scriptText.includes(dotLine) ? scriptText.replace(dotLine, () => dotLine + '\r\nfunction Get-HmProfileRoot { return $env:HM_TEST_PROFILE_ROOT }') : scriptText);
+      // запись агента и config.json идёт через библиотеку link-safe записи (u10b); она подключает _userpath.ps1 из своей папки
+      ['_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(ROOT, 'scripts', 'windows', f), path.join(scripts, f)));
       fs.writeFileSync(path.join(scripts, '_deelev.ps1'), psFile(STUB_SHELL.concat([
         'function Invoke-HmDeElevatedSafe {',
         '  param($Exe, [string[]]$Arguments = @(), [string]$Label = "", [int]$TimeoutSec = 600)',
@@ -13377,7 +13394,7 @@ ok('config.json в репозитории без сборочных маркер
         'exit $LASTEXITCODE'
       ]));
       const env = Object.assign({}, process.env, {
-        LOCALAPPDATA: localApp, APPDATA: appData, HM_AGENT_DIR: agentDir, HM_T_LOG: log, HM_T_SELFTEST_EXIT: String(sc.selftest || 0),
+        LOCALAPPDATA: localApp, APPDATA: appData, HM_AGENT_DIR: agentDir, HM_T_LOG: log, HM_T_SELFTEST_EXIT: String(sc.selftest || 0), HM_TEST_PROFILE_ROOT: base,
         HM_T_GATE: sc.gate || 'medium', HM_T_CODE: String(sc.code || 0), HM_T_REASON: sc.reason || ''
       });
       ['HM_DRY_RUN', 'HM_VENDOR', 'HM_BRIDGE_TOKEN', 'HM_BRIDGE_ENDPOINT', 'HM_BRIDGE_PACDOMAINS'].forEach((k) => delete env[k]);
@@ -28719,8 +28736,9 @@ ok('config.json в репозитории без сборочных маркер
     assertOrder(s, '# --- touch-ups', '# --- end touch-ups ---', 'границы блока на месте');
     const block = s.slice(s.indexOf('# --- touch-ups'), s.indexOf('# --- end touch-ups ---'));
     assert(block.length > 300, 'блок объяснён комментарием, а не голой строкой');
-    assert(/if \[ -n "\$\{HM_DRY_RUN:-\}" \]; then\s*\n\s*echo "  \[dry-run\] WOULD: прогнать быстрые[^\n]*\n\s*else\s*\n\s*\( \. "\$DIR\/_touchups\.sh" && hm_run_touchups "\$DIR" 30 \)/.test(block),
-      'в dry-run — одна строка WOULD, запуск только в else, диспетчер — в подоболочке (его ошибка не уносит чеклист)');
+    // u10b (F19): после лимита идёт литеральный список имён (touchup-<имя> через пробел, на следующей строке), а не перечисление каталога
+    assert(/if \[ -n "\$\{HM_DRY_RUN:-\}" \]; then\s*\n\s*echo "  \[dry-run\] WOULD: прогнать быстрые[^\n]*\n\s*else\s*\n\s*\( \. "\$DIR\/_touchups\.sh" && hm_run_touchups "\$DIR" 30 \\\n\s+(?:touchup-[A-Za-z0-9-]+\s+)+\)/.test(block),
+      'в dry-run — одна строка WOULD, запуск только в else, диспетчер — в подоболочке (его ошибка не уносит чеклист), имена — списком');
     assert(!/\bexit\b/.test(codeOnly(block)), 'блок диспетчера не завершает verify раньше времени');
     assert(/exit 0\s*$/.test(s), 'verify по-прежнему всегда завершается кодом 0');
   });
@@ -28746,8 +28764,11 @@ ok('config.json в репозитории без сборочных маркер
     needBash();
     const b = verifyBox();
     try {
-      wr(b.dir + '/touchup-b.sh', 'echo "ОБНОВЛЕНО: второй"\nexit 0\n');
-      wr(b.dir + '/touchup-a.sh', 'echo "ОБНОВЛЕНО: первый"\nexit 7\n');             // код выхода не учитывается
+      // u10b (F19): запускаются только имена из списка в вызове verify.sh (claude-path, config, mascot, vscode-owner, vscode, в этом
+      // порядке); в песочнице лежат два из них. Строгое имя, которого в списке нет, и чужие имена не запускаются никогда.
+      wr(b.dir + '/touchup-mascot.sh', 'echo "ОБНОВЛЕНО: второй"\nexit 0\n');
+      wr(b.dir + '/touchup-config.sh', 'echo "ОБНОВЛЕНО: первый"\nexit 7\n');             // код выхода не учитывается
+      wr(b.dir + '/touchup-extra.sh', 'echo "НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ"\n');                 // строгое имя, но в списке нет
       wr(b.dir + '/touchup-bad_name.sh', 'echo "НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ"\n');           // подчёркивание: чужое имя
       wr(b.dir + '/other.sh', 'echo "НЕ ДОЛЖЕН ЗАПУСТИТЬСЯ"\n');
       const r = b.run();
@@ -28757,8 +28778,9 @@ ok('config.json в репозитории без сборочных маркер
       const iB = lines.indexOf('ОБНОВЛЕНО: второй');
       const iCheck = lines.indexOf('Финальная проверка установки...');
       assert(iA !== -1 && iB !== -1 && iCheck !== -1, 'все три строки на месте: ' + JSON.stringify(lines));
-      assert(iA < iB && iB < iCheck, 'порядок по имени (a, b) и оба — ДО чеклиста: ' + JSON.stringify(lines));
-      assert(!/НЕ ДОЛЖЕН/.test(r.stdout), 'чужие имена не запускаются');
+      assert(iA < iB && iB < iCheck, 'порядок списка (config, mascot) и оба — ДО чеклиста: ' + JSON.stringify(lines));
+      assert(!/НЕ ДОЛЖЕН/.test(r.stdout), 'чужие имена и файл вне списка не запускаются');
+      ['claude-path', 'vscode-owner', 'vscode'].forEach((n) => assert(lines.includes('[touchup-' + n + '] пропущено: нет файла touchup-' + n + '.sh рядом с verify.sh'), 'перечисленный файл, которого нет, назван в журнале: ' + n));
       assert(lines.filter((l) => /^CHECK /.test(l)).length >= 4, 'чеклист после touch-up\'ов напечатан целиком: ' + JSON.stringify(lines));
     } finally { dropDir(b.work); }
   });
@@ -28767,7 +28789,7 @@ ok('config.json в репозитории без сборочных маркер
     needBash();
     let b = verifyBox();
     try {
-      wr(b.dir + '/touchup-a.sh', ': > "' + b.work + '/RAN"\necho "ОБНОВЛЕНО: не должен печататься"\n');
+      wr(b.dir + '/touchup-mascot.sh', ': > "' + b.work + '/RAN"\necho "ОБНОВЛЕНО: не должен печататься"\n');   // имя из списка: без dry-run он бы запустился
       const r = b.run({ HM_DRY_RUN: '1' });
       assert.strictEqual(r.status, 0, r.stdout + r.stderr);
       assert(/\[dry-run\] WOULD: прогнать быстрые исправления из touchup-\*\.sh/.test(r.stdout), 'строка WOULD: ' + r.stdout);
@@ -28794,7 +28816,7 @@ ok('config.json в репозитории без сборочных маркер
     assert(start !== -1 && end > start, 'блок диспетчера найден');
     const b = verifyBox({ verifySrc: src.slice(0, start) + src.slice(end) });
     try {
-      wr(b.dir + '/touchup-a.sh', 'echo "ОБНОВЛЕНО: первый"\n');
+      wr(b.dir + '/touchup-mascot.sh', 'echo "ОБНОВЛЕНО: первый"\n');   // имя из списка: с диспетчером он бы запустился
       const r = b.run();
       assert.strictEqual(r.status, 0);
       assert(!/ОБНОВЛЕНО: первый/.test(r.stdout), 'без диспетчера touch-up не запускается — именно это и было дефектом M-4');
@@ -30560,6 +30582,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
     const dir = path.join(sb.base, 'blind');
     fs.mkdirSync(dir, { recursive: true });
     fs.copyFileSync(path.join(WIN, '_cfgmigrate.ps1'), path.join(dir, '_cfgmigrate.ps1'));
+    fs.copyFileSync(path.join(WIN, '_linksafe.ps1'), path.join(dir, '_linksafe.ps1'));   // снос клона/копий/скиллов (u10b); подключает «слепую» _userpath.ps1 рядом
     const cfgNew = rawWin('config.ps1');
     let cfgOld = oldCopyEdit(cfgNew);
     if (opts && opts.noPin) {   // и закрепки нет: config.ps1 в части защиты от ссылок таков, каким был до обеих правок
@@ -30688,7 +30711,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
   const variantDir = (sb, name, edit) => {
     const dir = path.join(sb.base, name);
     fs.mkdirSync(dir, { recursive: true });
-    ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+    ['_cfgmigrate.ps1', '_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
     const src = rawWin('config.ps1');
     const edited = edit(src);
     assert(edited !== src, 'мутация применилась: ' + name);
@@ -31378,7 +31401,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
         seedClaude(sb2.home);
         const nolock = path.join(sb2.base, 'nolock');
         fs.mkdirSync(nolock);
-        ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(nolock, f)));
+        ['_cfgmigrate.ps1', '_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(nolock, f)));
         const cfgSrc = rawWin('config.ps1');
         const cfgNoLock = cfgSrc.replace(/^[ \t]*\$backupLock = New-Object[^\n]*\r?\n/m, '');
         assert(cfgNoLock !== cfgSrc, 'мутация применилась: замок вырезан');
@@ -31450,7 +31473,7 @@ if ($env:HM_TEST_SWAP -eq '1') {
         try {
           seedClaude(s2.home);
           const dir = path.join(s2.base, 'variant'); fs.mkdirSync(dir);
-          ['_cfgmigrate.ps1', '_userpath.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+          ['_cfgmigrate.ps1', '_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
           const src = rawWin('config.ps1');
           const mutated = edit(src);
           assert(mutated !== src, 'мутация применилась: ' + tag);
@@ -31503,14 +31526,16 @@ if ($env:HM_TEST_SWAP -eq '1') {
     assert(/exit 1/.test(msg), 'остановка с кодом 1');
 
     // --- ссылка на пути записи не стирается рекурсивно (клон пака в профиле) ---------------------------------
-    // Поведенчески это проверить нельзя: на Windows PowerShell 5.1.26100 Remove-Item -Recurse ссылку не обходит (ни сам
-    // корень, ни вложенную), так что результат на этой сборке одинаков; защита нужна там, где обходит.
+    // Поведение (ссылка на месте клона, вложенная ссылка, подмена РОДИТЕЛЬСКОЙ папки на лету между проверкой и сносом)
+    // исполняется в разделе u10b: на Windows PowerShell 5.1.26100 Remove-Item -Recurse ссылку-элемент не обходит, а вот ссылку
+    // на родительском звене проходит. Здесь — порядок и форма вызова.
     const rmAt = code.indexOf('if (Test-Path $clone) {');
     assert(rmAt > 0, 'удаление прежнего клона найдено');
     const rmBlock = code.slice(rmAt, code.indexOf('Test-Path $clone', rmAt + 30));
-    assert(/Test-HmIsReparse \$clone/.test(rmBlock) && /\[System\.IO\.Directory\]::Delete\(\$clone, \$false\)/.test(rmBlock),
-      'ссылка на месте клона снимается как ссылка (Directory.Delete без рекурсии), а не Remove-Item -Recurse');
-    assert(/else \{ Remove-Item -Recurse -Force \$clone/.test(rmBlock), 'рекурсивное удаление — только для обычной папки');
+    assert(/Remove-HmTreeNoFollow -Path \$clone -Anchor \$env:USERPROFILE/.test(rmBlock),
+      'снос прежнего клона — Remove-HmTreeNoFollow: родитель закреплён и сверен с профилем, ссылка (и на самом месте клона) снимается как ссылка');
+    assert(!/Remove-Item -Recurse/.test(rmBlock), 'рекурсивного Remove-Item по пути в профиле нет');
+    assert(/catch \[System\.InvalidOperationException\][\s\S]*?exit 1/.test(rmBlock), 'подмена на пути — остановка с кодом 1, а не молчаливое продолжение');
     assertOrder(code, "clone --depth 1", "$cfgCloneCheck = Join-Path $clone '.claude'", 'источник клона ставится на проверку после clone');
     const cloneChk = code.indexOf("$cfgCloneCheck = Join-Path $clone '.claude'");
     assert(/^[ \t]*Assert-HmConfigNoLink\b/m.test(code.slice(cloneChk, cloneChk + 160)), 'сразу за назначением $cfgCloneCheck идёт проверка: клон-источник под той же проверкой, что назначение');
@@ -33402,4 +33427,2447 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     assert(pinned.length > 0 || lines(r.stdout).some((l) => l.startsWith('OUTSIDE=')), 'хотя бы одна настоящая папка закреплена (или честно вне профиля): ' + r.stdout);
     assert(!lines(r.stdout).some((l) => /^FAILED=InvalidOperationException/.test(l)), 'ни одна законная папка не отвергнута как «подменённая»: ' + r.stdout);
   });
+})();
+
+// @@u10b-section@@
+// ===========================================================================
+// u10b (разбор безопасности 09.10.2026: F17 + остаток F16 + F19). Раздел самодостаточен: его можно гонять отдельно.
+//
+//   C. F17: «обновить курс» сносила папки курса Remove-Item -Recurse, а Expand-Archive -Force писал файлы курса поверх —
+//      оба проходят junction на РОДИТЕЛЬСКОМ звене пути (vibecoding-course\.claude → чужая папка: стёрло <чужая>\skills и
+//      <чужая>\commands, файлы курса легли туда же). То же в config.ps1 (снос клона пака, старых копий ~/.claude.backup.*,
+//      скиллов при снятом наборе) и в HM_COURSE_GLOBAL. Новая библиотека scripts/windows/_linksafe.ps1: проверка цепочки от
+//      опоры, закрепка каталога открытым файлом + сверка настоящего пути по дескриптору, снос без хода по ссылкам,
+//      распаковка архива в закреплённые папки.
+//   D. Остальные писатели под администратором в пользовательские папки (nomad, bridge, extension, uv, pydeps, launcher и маяк
+//      курса): цепочка от профиля + перенос по имени (Write-HmFileSafe) вместо Copy-Item / WriteAllText / Set-Content.
+//   E. F19: диспетчер touch-up'ов запускал ВСЁ, что совпало с touchup-*, — теперь только список имён из вызова в verify.
+//
+// Тесты исполняют код (PS 5.1, настоящие junction, настоящая распаковка zip), а не ищут слова в тексте. У каждой защиты —
+// отрицательный контроль: прежнее поведение на тех же входах. Каждый тест, который может дотянуться до профиля, идёт в
+// дочернем процессе с песочным USERPROFILE/HOME/APPDATA/LOCALAPPDATA/HERMES_HOME/TEMP, и первым утверждением проверяется,
+// что они внутри каталога теста.
+// ===========================================================================
+(function () {
+  console.log('\n== u10b: снос и распаковка без хода по ссылкам (F17), записи писателей, фиксированный список touch-up (F19) ==');
+  const { spawnSync } = require('child_process');
+  const crypto = require('crypto');
+  const IS_WIN = process.platform === 'win32';
+  const WIN = path.join(ROOT, 'scripts', 'windows');
+  const MACD = path.join(ROOT, 'scripts', 'macos');
+  const LIB = path.join(WIN, '_linksafe.ps1');
+  const SYS32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  const PS51 = path.join(SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const BOM = '\uFEFF';
+  // PowerShell считает ограничителем строки не только ASCII «'», но и U+2018/U+2019/U+201A/U+201B: удваиваем все пять видов.
+  const q = (s) => "'" + String(s).replace(/['‘’‚‛]/g, '$&$&') + "'";
+  const rawWin = (f) => fs.readFileSync(path.join(WIN, f), 'utf8').replace(/^\uFEFF/, '');
+  const readText = (p) => fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '');
+  // \u0412\u044B\u0440\u0435\u0437\u043A\u0430 \u043A\u0443\u0441\u043A\u0430 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0435\u0433\u043E \u0441\u043A\u0440\u0438\u043F\u0442\u0430 \u043F\u043E \u0434\u0432\u0443\u043C \u043C\u0435\u0442\u043A\u0430\u043C (\u043E\u0431\u0435 \u043E\u0431\u044F\u0437\u0430\u043D\u044B \u043D\u0430\u0439\u0442\u0438\u0441\u044C \u2014 \u0438\u043D\u0430\u0447\u0435 \u043F\u0440\u0430\u0432\u043A\u0430 \u0441\u043A\u0440\u0438\u043F\u0442\u0430 \u043C\u043E\u043B\u0447\u0430 \u043E\u0431\u043D\u0443\u043B\u0438\u043B\u0430 \u0431\u044B \u0442\u0435\u0441\u0442).
+  const cutText = (src, from, to) => {
+    const i = src.indexOf(from);
+    assert(i >= 0, '\u043D\u0430\u0447\u0430\u043B\u043E \u0432\u044B\u0440\u0435\u0437\u043A\u0438 \u043D\u0430\u0439\u0434\u0435\u043D\u043E \u0432 \u0441\u043A\u0440\u0438\u043F\u0442\u0435: ' + from);
+    const j = to ? src.indexOf(to, i + from.length) : src.length;
+    assert(j > i, '\u043A\u043E\u043D\u0435\u0446 \u0432\u044B\u0440\u0435\u0437\u043A\u0438 \u043D\u0430\u0439\u0434\u0435\u043D \u0432 \u0441\u043A\u0440\u0438\u043F\u0442\u0435: ' + to);
+    return src.slice(i, j);
+  };
+  const lines = (s) => String(s || '').split(/\r?\n/);
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+
+  let _psOk = null;
+  const needPs = () => {
+    if (!IS_WIN) SKIP('нужен Windows (настоящие junction и пути диска)');
+    if (_psOk === null) {
+      const p = spawnSync(PS51, ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8', timeout: 60000 });
+      _psOk = !(p.error || p.status !== 0);
+    }
+    if (!_psOk) SKIP('нет Windows PowerShell 5.1');
+  };
+
+  // Песочница. Ссылки убираются ПЕРВЫМИ и по одной (rmdir на самой ссылке), чтобы рекурсивное удаление никогда не пошло
+  // сквозь junction в чужую папку.
+  function mkSandbox(tag) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u10b-' + tag + '-'));
+    const sb = { base, n: 0, links: [] };
+    sb.profile = path.join(base, 'Users', 'Иван О’Брайен Тест');          // кириллица, пробелы и U+2019 в имени профиля
+    sb.tmp = path.join(base, 'tmp');
+    sb.victim = path.join(base, 'victim');
+    sb.mk = (...p) => { const d = path.join(...p); fs.mkdirSync(d, { recursive: true }); return d; };
+    sb.link = (target, at) => { fs.symlinkSync(target, at, 'junction'); sb.links.push(at); return at; };
+    sb.mk(sb.profile); sb.mk(sb.tmp); sb.mk(sb.victim);
+    sb.mk(sb.profile, 'AppData', 'Roaming'); sb.mk(sb.profile, 'AppData', 'Local');
+    sb.cleanup = () => {
+      for (const l of sb.links.slice().reverse()) { try { fs.rmdirSync(l); } catch (e) { /* уже нет */ } }
+      drop(base);
+    };
+    return sb;
+  }
+  const scratchEnv = (sb) => ({
+    USERPROFILE: sb.profile, HOME: sb.profile,
+    APPDATA: path.join(sb.profile, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(sb.profile, 'AppData', 'Local'),
+    HERMES_HOME: path.join(sb.profile, 'AppData', 'Local', 'hermes'), TEMP: sb.tmp, TMP: sb.tmp,
+  });
+  // Первое утверждение каждого теста, который может дотянуться до профиля: все пути профиля песочницы — внутри каталога теста.
+  const assertScratch = (sb) => {
+    const env = scratchEnv(sb);
+    const baseL = path.resolve(sb.base).toLowerCase() + path.sep;
+    Object.keys(env).forEach((k) => assert(path.resolve(env[k]).toLowerCase().startsWith(baseL), k + ' песочницы внутри каталога теста: ' + env[k]));
+  };
+  // PS-скрипт — файлом с BOM и CRLF (кириллица в литералах доходит без перекодировки командной строки).
+  function runPs(sb, text, env, o) {
+    assertScratch(sb);
+    const f = path.join(sb.base, 'run-' + (++sb.n) + '.ps1');
+    fs.writeFileSync(f, BOM + '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n$ErrorActionPreference = "Continue"\r\n' + String(text).replace(/\r?\n/g, '\r\n'));
+    const e = Object.assign({}, process.env, scratchEnv(sb), env || {});
+    ['HM_DRY_RUN', 'HM_KEEP_SKILLS', 'HM_ALL_PACK_SKILLS', 'HM_ADDITIVE', 'HM_COURSE_TARGET', 'HM_COURSE_GLOBAL', 'HM_COURSE_BEACON_URL', 'HM_COURSE_BEACON_SECRET'].forEach((k) => { delete e[k]; });
+    Object.assign(e, env || {});
+    const r = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f], { encoding: 'utf8', timeout: (o && o.timeout) || 300000, env: e });
+    return { status: r.status, out: String(r.stdout || ''), err: String(r.stderr || '') };
+  }
+  const kv = (out) => { const g = {}; lines(out).forEach((l) => { const m = /^(\w+)=(.*)$/.exec(l); if (m) g[m[1]] = m[2].trim(); }); return g; };
+  const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+  const names = (d) => { try { return fs.readdirSync(d).sort(); } catch (e) { return null; } };
+  const listAll = (d) => { const out = []; const walk = (x) => { for (const e of fs.readdirSync(x, { withFileTypes: true })) { const f = path.join(x, e.name); out.push(f); if (e.isDirectory() && !e.isSymbolicLink()) walk(f); } }; walk(d); return out; };
+  // Все пути ниже каталога, относительные, отсортированные; ссылки не раскрываются.
+  const relTree = (d) => listAll(d).map((f) => path.relative(d, f)).sort();
+  const pinsIn = (d) => { try { return fs.readdirSync(d).filter((n) => /^\.hm-pin-/.test(n) || /\.hamidun-tmp-/.test(n)); } catch (e) { return []; } };
+  const canFileSymlink = (() => {
+    let cached = null;
+    return (sb) => {
+      if (cached !== null) return cached;
+      const t = path.join(sb.base, 'probe-target.txt'); const l = path.join(sb.base, 'probe-link.txt');
+      fs.writeFileSync(t, 'x');
+      try { fs.symlinkSync(t, l, 'file'); fs.unlinkSync(l); cached = true; } catch (e) { cached = false; }
+      return cached;
+    };
+  })();
+
+  // ---- zip без внешних зависимостей: без сжатия (метод 0), имена в UTF-8 (бит 11) — как у нашего архива курса ----------
+  const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+  const crc32 = (buf) => { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  function makeZip(entries) {
+    const parts = []; const central = []; let offset = 0;
+    for (const e of entries) {
+      const name = Buffer.from(e.name, 'utf8');
+      const data = Buffer.isBuffer(e.data) ? e.data : Buffer.from(String(e.data == null ? '' : e.data), 'utf8');
+      const crc = crc32(data);
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(0, 8);
+      lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18);
+      lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+      parts.push(lh, name, data);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8);
+      ch.writeUInt16LE(0, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14); ch.writeUInt32LE(crc, 16);
+      ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28);
+      ch.writeUInt32LE(offset, 42);
+      central.push(ch, name);
+      offset += 30 + name.length + data.length;
+    }
+    const cd = Buffer.concat(central); const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+    return Buffer.concat(parts.concat([cd, eocd]));
+  }
+  // Архив курса: те же верхняя папка и состав верхнего уровня, что у настоящего (vibecoding-course/{CLAUDE.md,.claude,.course,
+  // tracks,sandbox}), с кириллическим именем файла; v — «версия» содержимого.
+  const COURSE_FILES = (v) => [
+    ['vibecoding-course/CLAUDE.md', 'claude ' + v],
+    ['vibecoding-course/.claude/commands/start.md', 'start ' + v],
+    ['vibecoding-course/.claude/commands/начать.md', 'начать ' + v],
+    ['vibecoding-course/.claude/skills/course-driver/SKILL.md', 'driver ' + v],
+    ['vibecoding-course/.claude/skills/course-check/SKILL.md', 'check ' + v],
+    ['vibecoding-course/.course/config.yaml', 'name: course\r\nlang: ru\r\n'],
+    ['vibecoding-course/.course/knowledge/core/README.md', 'knowledge ' + v],
+    ['vibecoding-course/tracks/_core/m01.md', 'track ' + v],
+    ['vibecoding-course/sandbox/README.md', 'sandbox readme'],
+    ['vibecoding-course/empty.txt', ''],
+  ].map((a) => ({ name: a[0], data: a[1] }));
+  const courseZip = (v) => makeZip(COURSE_FILES(v));
+  // vendor песочницы: zip курса и checksums.json (Confirm-HmArtifact сверяет sha256 и размер).
+  function mkVendor(sb, zipBuf) {
+    const v = sb.mk(sb.base, 'vendor'); sb.mk(v, 'course');
+    fs.writeFileSync(path.join(v, 'course', 'vibecoding-course.zip'), zipBuf);
+    fs.writeFileSync(path.join(v, 'checksums.json'), JSON.stringify({ 'vibecoding-course.zip': { sha256: crypto.createHash('sha256').update(zipBuf).digest('hex'), bytes: zipBuf.length } }));
+    sb.vendor = v;
+    return v;
+  }
+  // Прогон библиотеки: подтягиваем настоящую _linksafe.ps1, профиль из токена подменяем песочным (шов Get-HmProfileRoot).
+  const LIB_PRELUDE = (sb) => [
+    '. ' + q(LIB),
+    'function Get-HmProfileRoot { return ' + q(sb.profile) + ' }',
+    "function Show($k, $v) { $s = [string]$v; Write-Output ($k + '=' + $(if ($s -eq '') { '<null>' } else { $s })) }",
+  ].join('\r\n');
+  // Вызов, который должен бросить: тип исключения и текст — одной строкой.
+  const TRY = String.raw`function Try-Do([scriptblock]$sb) { try { & $sb; return 'OK' } catch { return ($_.Exception.GetType().Name + ': ' + (($_.Exception.Message) -replace '\s+', ' ')) } }`;
+
+
+  // =========================================================================
+  // 1. _linksafe.ps1: проход по цепочке от опоры
+  // =========================================================================
+  ok('u10b _linksafe: Find-HmLinkOnPath — первое звено-ссылка от опоры вниз; облачная заглушка OneDrive не ссылка, нечитаемый тег — ссылка; звено с пробелом на конце и путь вне опоры отвергаются; прежний Get-HmLinkOnChain облачную папку отвергал бы', () => {
+    needPs();
+    const sb = mkSandbox('find');
+    try {
+      const root = sb.profile;
+      sb.mk(root, 'plain', 'sub'); sb.mk(sb.victim, 'deep'); sb.mk(root, 'a');
+      ['plainj', 'cloudj', 'unreadable'].forEach((n) => sb.link(sb.victim, path.join(root, n)));
+      sb.link(sb.victim, path.join(root, 'a', 'j'));
+      const rootLink = sb.link(root, path.join(sb.base, 'profile-link'));
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + String.raw`
+# Тег точки повторной обработки: cloudj — облачная заглушка (0x9000001A), unreadable — не прочитался (-1), остальное — junction.
+function Get-HmReparseTag([string]$Path) { if ($Path -like '*cloudj*') { return 0x9000001AL } elseif ($Path -like '*unreadable*') { return [long]-1 } else { return 0xA0000003L } }
+$root = ${q(root)}
+Show 'clean' (Find-HmLinkOnPath -Path (Join-Path $root 'plain\sub') -Anchor $root)
+Show 'missing' (Find-HmLinkOnPath -Path (Join-Path $root 'plain\nope\deeper') -Anchor $root)
+Show 'direct' (Find-HmLinkOnPath -Path (Join-Path $root 'plainj') -Anchor $root)
+Show 'below' (Find-HmLinkOnPath -Path (Join-Path $root 'plainj\deep') -Anchor $root)
+Show 'nested' (Find-HmLinkOnPath -Path (Join-Path $root 'a\j\deep') -Anchor $root)
+Show 'cloud' (Find-HmLinkOnPath -Path (Join-Path $root 'cloudj\deep') -Anchor $root)
+Show 'unreadable' (Find-HmLinkOnPath -Path (Join-Path $root 'unreadable\deep') -Anchor $root)
+Show 'slash' (Find-HmLinkOnPath -Path ((Join-Path $root 'PLAINJ') + '\') -Anchor ($root + '\'))
+Show 'anchorlink' (Find-HmLinkOnPath -Path (Join-Path ${q(rootLink)} 'plain\sub') -Anchor ${q(rootLink)})
+Show 'outside' (Find-HmLinkOnPath -Path ${q(sb.victim)} -Anchor $root)
+Show 'self' (Find-HmLinkOnPath -Path $root -Anchor $root)
+Show 'space' (Find-HmLinkOnPath -Path (Join-Path $root 'plain\sub \x') -Anchor $root)
+Show 'nbsp' (Find-HmLinkOnPath -Path (Join-Path $root ('plain\sub' + [char]0x00A0 + '\x')) -Anchor $root)
+Show 'volroot' (Find-HmLinkOnPath -Path (Join-Path $root 'a\j\deep') -Anchor ([IO.Path]::GetPathRoot($root)))
+# Контроль: прежний помощник волны 1 облачную папку считает ссылкой (у него только атрибут, без тега) — ради этого и новый обход.
+Show 'oldChainCloud' (Get-HmLinkOnChain -Path (Join-Path $root 'cloudj\deep') -Root $root)
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.clean, '<null>', 'обычная цепочка чиста' + dump);
+      assert.strictEqual(g.missing, '<null>', 'несуществующие звенья — не ссылка' + dump);
+      assert(same(g.direct, path.join(root, 'plainj')), 'прямая ссылка названа: ' + g.direct + dump);
+      assert(same(g.below, path.join(root, 'plainj')), 'ниже ссылки называется САМА ссылка: ' + g.below);
+      assert(same(g.nested, path.join(root, 'a', 'j')), 'вложенная ссылка в середине пути: ' + g.nested);
+      assert.strictEqual(g.cloud, '<null>', 'облачная заглушка (тег 0x9000001A) — не ссылка: ' + g.cloud);
+      assert(same(g.unreadable, path.join(root, 'unreadable')), 'тег не прочитался — считаем ссылкой: ' + g.unreadable);
+      assert(same(g.slash, path.join(root, 'plainj')), 'регистр и хвостовые слэши не мешают: ' + g.slash);
+      assert.strictEqual(g.anchorlink, '<null>', 'сама опора доверенная, даже если это junction: ' + g.anchorlink);
+      assert(g.outside && g.outside !== '<null>' && same(g.outside, sb.victim), 'путь вне опоры проверить нельзя — возвращается сам путь: ' + g.outside);
+      assert.strictEqual(g.self, '<null>', 'опора сама по себе — не нарушение');
+      // kv() обрезает пробелы по краям, поэтому пробел на конце звена в ответе не виден: важно, что ответ не пустой и назван
+      // именно этот каталог.
+      assert(g.space && g.space !== '<null>' && same(g.space, path.join(root, 'plain', 'sub')), 'звено с пробелом на конце отвергнуто: «' + g.space + '»');
+      assert(g.nbsp && g.nbsp !== '<null>', 'звено с неразрывным пробелом на конце отвергнуто: ' + g.nbsp);
+      assert(same(g.volroot, path.join(root, 'a', 'j')), 'опора — корень тома: ссылка в середине пути найдена: ' + g.volroot);
+      assert(same(g.oldChainCloud, path.join(root, 'cloudj')), 'контроль: прежний Get-HmLinkOnChain облачную папку отвергал бы: ' + g.oldChainCloud);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Get-HmTrustAnchor — профиль из токена, если путь внутри него, иначе корень тома; двойник профиля по префиксу и корень диска вместо профиля — не опора', () => {
+    needPs();
+    const sb = mkSandbox('anchor');
+    try {
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + String.raw`
+Show 'inside' (Get-HmTrustAnchor -Path (Join-Path ${q(sb.profile)} 'HamidunCourse\vibecoding-course'))
+Show 'outside' (Get-HmTrustAnchor -Path ${q(path.join(sb.base, 'elsewhere', 'Course'))})
+Show 'twin' (Get-HmTrustAnchor -Path (${q(sb.profile)} + '2\Course'))
+function Get-HmProfileRoot { return ([IO.Path]::GetPathRoot(${q(sb.base)})) }
+Show 'rootprofile' (Get-HmTrustAnchor -Path (Join-Path ([IO.Path]::GetPathRoot(${q(sb.base)})) 'x\y'))
+function Get-HmProfileRoot { throw 'boom' }
+Show 'throws' (Get-HmTrustAnchor -Path (Join-Path ${q(sb.profile)} 'x'))
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      const root = path.parse(sb.base).root;
+      assert(same(g.inside, sb.profile), 'внутри профиля опора — профиль: ' + g.inside + dump);
+      assert(same(g.outside, root), 'вне профиля опора — корень тома: ' + g.outside + dump);
+      assert(same(g.twin, root), 'двойник профиля по префиксу («…Тест2») — не внутри: ' + g.twin);
+      assert(same(g.rootprofile, root), 'профиль-«корень диска» опорой не служит: ' + g.rootprofile);
+      assert(same(g.throws, root), 'профиль из токена не прочитался — опора корень тома, а не исключение: ' + g.throws);
+    } finally { sb.cleanup(); }
+  });
+
+  // =========================================================================
+  // 2. _linksafe.ps1: закрепка каталога
+  // =========================================================================
+  ok('u10b _linksafe: закрепка — каталог и родитель не переименовываются и не удаляются, пока она открыта; ссылка на пути → InvalidOperationException ДО записи (чужая папка не тронута); без закрепки переименование проходит (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('pin');
+    try {
+      const dir = sb.mk(sb.profile, 'HamidunCourse', 'vibecoding-course');
+      sb.mk(sb.victim, 'skills');
+      sb.link(sb.victim, path.join(sb.profile, 'J'));
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}; $dir = ${q(dir)}
+$pin = New-HmDirPin -Dir $dir -Anchor $prof
+Show 'real' $pin.Real
+Show 'sentinel' (Test-Path -LiteralPath ($dir + '\' + $pin.Name))
+Show 'rename' (Try-Do { Rename-Item -LiteralPath $dir -NewName 'vc2' -ErrorAction Stop })
+Show 'renameParent' (Try-Do { Rename-Item -LiteralPath (Join-Path $prof 'HamidunCourse') -NewName 'HC2' -ErrorAction Stop })
+Show 'delete' (Try-Do { [IO.Directory]::Delete($dir, $false) })
+$pin.Stream.Dispose()
+Show 'gone' (-not (Test-Path -LiteralPath ($dir + '\' + $pin.Name)))
+# Контроль: закрепка отпущена — то же переименование проходит, то есть подмена возможна и закрепка именно её запрещает.
+Show 'ctrlRename' (Try-Do { Rename-Item -LiteralPath $dir -NewName 'vc2' -ErrorAction Stop })
+# Ссылка на пути: закрепка отказывает до записи.
+$vs = Join-Path ${q(sb.victim)} 'skills'
+$t0 = (Get-Item -LiteralPath $vs).LastWriteTimeUtc.Ticks
+Show 'swap' (Try-Do { $p = New-HmDirPin -Dir (Join-Path $prof 'J\skills') -Anchor $prof; $p.Stream.Dispose() })
+Show 'victimTouched' (((Get-Item -LiteralPath $vs).LastWriteTimeUtc.Ticks) -ne $t0)
+Show 'victimCount' (@(Get-ChildItem -LiteralPath $vs -Force).Count)
+Show 'missing' (Try-Do { $p = New-HmDirPin -Dir (Join-Path $prof 'Missing') -Anchor $prof; $p.Stream.Dispose() })
+Show 'outside' (Try-Do { $p = New-HmDirPin -Dir ${q(sb.victim)} -Anchor $prof; $p.Stream.Dispose() })
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert(same(g.real, dir), 'настоящий путь закрепки — путь каталога: ' + g.real + dump);
+      assert.strictEqual(g.sentinel, 'True', 'файл-закрепка внутри каталога' + dump);
+      assert(/^IOException/.test(g.rename), 'переименование закреплённого каталога отвергнуто: ' + g.rename);
+      assert(/^IOException/.test(g.renameParent), 'переименование родителя закреплённого каталога отвергнуто: ' + g.renameParent);
+      assert(g.delete !== 'OK' && !/^OK/.test(g.delete), 'удаление закреплённого каталога отвергнуто: ' + g.delete);
+      assert.strictEqual(g.gone, 'True', 'закрепка исчезает при закрытии' + dump);
+      assert.strictEqual(g.ctrlRename, 'OK', 'контроль: без закрепки переименование проходит' + dump);
+      assert(/^InvalidOperationException: .*не там, где проверяли/.test(g.swap), 'junction на пути → InvalidOperationException: ' + g.swap);
+      assert.strictEqual(g.victimTouched, 'False', 'в чужую папку не писали даже мгновенно (время её изменения прежнее)' + dump);
+      assert.strictEqual(g.victimCount, '0', 'чужая папка пуста');
+      assert(/^IOException/.test(g.missing), 'нет каталога → IOException (повторять можно): ' + g.missing);
+      assert(/^InvalidOperationException: .*не внутри доверенной опоры/.test(g.outside), 'вне опоры → InvalidOperationException: ' + g.outside);
+      assert.deepStrictEqual(names(sb.victim), ['skills'], 'в чужой папке по-прежнему только свой каталог');
+    } finally { sb.cleanup(); }
+  });
+
+  // Превращение ПУСТОГО каталога в junction «на месте» (FSCTL_SET_REPARSE_POINT через другой дескриптор): закрепка открытым
+  // дескриптором такого превращения не запрещает (разбор u4, E1/E2) — запрещает его только непустота каталога. Поэтому
+  // закрепка — файл, созданный в каталоге, а его настоящий путь сверяется с ожидаемым.
+  const CONVERT_CS = String.raw`
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class HmTestJunction {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inBuf, int inSize, IntPtr outBuf, int outSize, out int ret, IntPtr ov);
+    public static void Convert(string dir, string target) {
+        byte[] sub = Encoding.Unicode.GetBytes(@"\??\" + target);
+        byte[] prn = Encoding.Unicode.GetBytes(target);
+        int pathLen = sub.Length + 2 + prn.Length + 2;
+        byte[] buf = new byte[16 + pathLen];
+        BitConverter.GetBytes(0xA0000003u).CopyTo(buf, 0);
+        BitConverter.GetBytes((ushort)(8 + pathLen)).CopyTo(buf, 4);
+        BitConverter.GetBytes((ushort)0).CopyTo(buf, 8);
+        BitConverter.GetBytes((ushort)sub.Length).CopyTo(buf, 10);
+        BitConverter.GetBytes((ushort)(sub.Length + 2)).CopyTo(buf, 12);
+        BitConverter.GetBytes((ushort)prn.Length).CopyTo(buf, 14);
+        sub.CopyTo(buf, 16);
+        prn.CopyTo(buf, 16 + sub.Length + 2);
+        using (SafeFileHandle h = CreateFileW(dir, 0x00100100, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
+            if (h.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            int ret;
+            if (!DeviceIoControl(h, 0x000900A4, buf, buf.Length, IntPtr.Zero, 0, out ret, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+`;
+  // Зеркало библиотеки с отключённой сверкой пути ЗАКРЕПКИ после её создания (прежний вид: «закрепили — значит закреплено»).
+  const NOPINPATH = (t) => {
+    const re = /if \(-not \[string\]::Equals\(\$gotPin, \$want \+ '\\' \+ \$name, \[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{/;
+    assert(re.test(t), 'сверка пути закрепки найдена в библиотеке');
+    return t.replace(re, 'if ($false) {');
+  };
+  // Копия библиотеки с правкой рядом с настоящей _userpath.ps1 (библиотека подключает соседа по $PSScriptRoot).
+  function variantLib(sb, name, edit) {
+    const dir = path.join(sb.base, name); fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(WIN, '_userpath.ps1'), path.join(dir, '_userpath.ps1'));
+    const src = readText(LIB);
+    const edited = edit(src);
+    assert(edited !== src, 'мутация применилась: ' + name);
+    const f = path.join(dir, '_linksafe.ps1');
+    fs.writeFileSync(f, BOM + edited.replace(/\r?\n/g, '\r\n'));
+    return f;
+  }
+  const PRELUDE_FOR = (sb, libFile) => [
+    '. ' + q(libFile),
+    'function Get-HmProfileRoot { return ' + q(sb.profile) + ' }',
+    "function Show($k, $v) { $s = [string]$v; Write-Output ($k + '=' + $(if ($s -eq '') { '<null>' } else { $s })) }",
+  ].join('\r\n');
+
+  const INPLACE_BODY = (sb, libFile, dir) => PRELUDE_FOR(sb, libFile) + '\r\n' + TRY + '\r\n' + String.raw`
+Add-Type -TypeDefinition @'
+${CONVERT_CS}
+'@
+$prof = ${q(sb.profile)}; $dir = ${q(dir)}; $victim = ${q(sb.victim)}
+$global:HmConverted = $false
+# Шов: в миг создания файла-закрепки (каталог уже сверен и открыт) пустой каталог превращается в junction НА МЕСТЕ.
+function New-Object {
+    [CmdletBinding()]
+    param([Parameter(Position = 0)][string]$TypeName, [Parameter(Position = 1)][object[]]$ArgumentList)
+    if ($TypeName -eq 'System.IO.FileStream' -and $ArgumentList -and ([string]$ArgumentList[0]) -like '*.hm-pin-*' -and -not $global:HmConverted) {
+        $global:HmConverted = $true
+        [HmTestJunction]::Convert($dir, $victim)
+    }
+    Microsoft.PowerShell.Utility\New-Object @PSBoundParameters
+}
+$res = $null
+$res = Try-Do { $script:p = New-HmDirPin -Dir $dir -Anchor $prof }
+Show 'result' $res
+Show 'converted' $global:HmConverted
+Show 'isLink' ([bool]((Get-Item -LiteralPath $dir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint))
+Show 'victimDuring' ((Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) -join ',')
+if ($script:p) { $script:p.Stream.Dispose() }
+Show 'victimAfter' ((Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) -join ',')
+`;
+  ok('u10b _linksafe: пустой каталог превращён в junction на месте между сверкой и созданием закрепки — закрепка легла в чужую папку, сверка настоящего пути файла это видит и отказывает, файл исчезает; без этой сверки закрепка принимается (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('inplace');
+    try {
+      const dir = sb.mk(sb.profile, 'EmptyDir');
+      const r = runPs(sb, INPLACE_BODY(sb, LIB, dir));
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.converted, 'True', 'превращение состоялось (шов сработал)' + dump);
+      assert.strictEqual(g.isLink, 'True', 'каталог стал junction' + dump);
+      assert(/^InvalidOperationException: .*закрепка легла не в ту папку/.test(g.result), 'закрепка отказала: ' + g.result + dump);
+      assert.strictEqual(g.victimAfter, '<null>', 'после отказа в чужой папке пусто (файл-закрепка убран закрытием)' + dump);
+    } finally { sb.cleanup(); }
+    // Контроль: сверки пути закрепки нет — закрепка принята, а файл лежит в ЧУЖОЙ папке.
+    const sc = mkSandbox('inplace-c');
+    try {
+      const dir = sc.mk(sc.profile, 'EmptyDir');
+      const r = runPs(sc, INPLACE_BODY(sc, variantLib(sc, 'nopinpath', NOPINPATH), dir));
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.result, 'OK', 'контроль: без сверки пути закрепка принята' + dump);
+      assert(/\.hm-pin-/.test(g.victimDuring), 'контроль: файл-закрепка лежит в чужой папке: ' + g.victimDuring + dump);
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Open-HmPinnedDir — недостающие звенья создаются по одному и закрепляются; ссылка, файл на месте папки, звено с пробелом на конце, путь вне опоры → отказ ДО создания чего-либо; закрепки не остаются', () => {
+    needPs();
+    const sb = mkSandbox('openpin');
+    try {
+      fs.writeFileSync(path.join(sb.profile, 'afile'), 'x');
+      sb.link(sb.victim, path.join(sb.profile, 'J'));
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+$pin = Open-HmPinnedDir -Dir (Join-Path $prof 'New\Level2\Level3') -Anchor $prof
+Show 'leaf' $pin.Dir
+Show 'real' $pin.Real
+Show 'leafSentinel' (Test-Path -LiteralPath (Join-Path $pin.Dir $pin.Name))
+$pin.Stream.Dispose()
+$pin = Open-HmPinnedDir -Dir (Join-Path $prof 'New\Level2\Level3') -Anchor $prof
+Show 'again' $pin.Dir
+$pin.Stream.Dispose()
+Show 'anchorItself' (Try-Do { $p = Open-HmPinnedDir -Dir $prof -Anchor $prof; $p.Stream.Dispose() })
+Show 'link' (Try-Do { $p = Open-HmPinnedDir -Dir (Join-Path $prof 'J\new') -Anchor $prof; $p.Stream.Dispose() })
+Show 'file' (Try-Do { $p = Open-HmPinnedDir -Dir (Join-Path $prof 'afile\x') -Anchor $prof; $p.Stream.Dispose() })
+Show 'space' (Try-Do { $p = Open-HmPinnedDir -Dir (Join-Path $prof 'Bad \x') -Anchor $prof; $p.Stream.Dispose() })
+Show 'outside' (Try-Do { $p = Open-HmPinnedDir -Dir (Join-Path ${q(sb.base)} 'elsewhere') -Anchor $prof; $p.Stream.Dispose() })
+Show 'badCreated' (Test-Path -LiteralPath (Join-Path $prof 'Bad '))
+# Корень тома как опора: путь вне профиля.
+$vr = [IO.Path]::GetPathRoot($prof)
+$p3 = Open-HmPinnedDir -Dir (Join-Path ${q(sb.base)} 'rootanchor\a\b') -Anchor $vr
+Show 'volLeaf' $p3.Dir
+$p3.Stream.Dispose()
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      const leaf = path.join(sb.profile, 'New', 'Level2', 'Level3');
+      assert(same(g.leaf, leaf), 'недостающие звенья созданы, итог — закрепка листа: ' + g.leaf + dump);
+      assert(same(g.real, leaf), 'настоящий путь листа — его путь');
+      assert.strictEqual(g.leafSentinel, 'True', 'закрепка лежит в листовом каталоге');
+      assert(same(g.again, leaf), 'существующий каталог тоже закрепляется');
+      assert.strictEqual(g.anchorItself, 'OK', 'сама опора закрепляется');
+      assert(/^InvalidOperationException: .*ссылка \(junction\/symlink\)/.test(g.link), 'ссылка на пути → InvalidOperationException: ' + g.link);
+      assert(/^IOException: .*лежит файл/.test(g.file), 'файл на месте папки → IOException: ' + g.file);
+      assert(/^InvalidOperationException: .*точкой или пробелом/.test(g.space), 'звено с пробелом на конце → InvalidOperationException: ' + g.space);
+      assert.strictEqual(g.badCreated, 'False', 'отказ раньше создания: папки «Bad » нет');
+      assert(/^InvalidOperationException: .*не внутри доверенной опоры/.test(g.outside), 'вне опоры → InvalidOperationException: ' + g.outside);
+      assert(same(g.volLeaf, path.join(sb.base, 'rootanchor', 'a', 'b')), 'опора — корень тома: каталоги созданы и закреплены: ' + g.volLeaf);
+      assert.deepStrictEqual(names(sb.victim), [], 'в чужую папку по ссылке ничего не создано');
+      ['New', 'New\\Level2', 'New\\Level2\\Level3', ''].forEach((s) => assert.deepStrictEqual(pinsIn(path.join(sb.profile, s)), [], 'закрепки не остались: ' + s));
+      assert.deepStrictEqual(pinsIn(path.join(sb.base, 'rootanchor', 'a', 'b')), []);
+    } finally { sb.cleanup(); }
+  });
+
+
+  // =========================================================================
+  // 3. _linksafe.ps1: снос дерева без хода по ссылкам
+  // =========================================================================
+  const ATTRIB = path.join(SYS32, 'attrib.exe');
+  const attrib = (flags, p) => spawnSync(ATTRIB, flags.concat([p]), { encoding: 'utf8', timeout: 30000 });
+  // Дерево с мелочами, на которых ломаются самописные удалялки: только чтение (файл и каталог), скрытый, кириллица, пробелы, ’.
+  function seedTree(root) {
+    const mk = (...p) => fs.mkdirSync(path.join(root, ...p), { recursive: true });
+    const wr = (rel, data) => fs.writeFileSync(path.join(root, rel), data || 'x');
+    mk('a', 'b', 'c'); mk('Каталог пробел', 'x'); mk('O’Brien'); mk('rodir');
+    wr('a/b/c/f.txt'); wr('a/ro.txt'); wr('Каталог пробел/x/файл.md', 'ф'); wr('O’Brien/o.txt'); wr('hid.txt'); wr('rodir/inside.txt');
+    attrib(['+R'], path.join(root, 'a', 'ro.txt'));
+    attrib(['+H'], path.join(root, 'hid.txt'));
+    attrib(['+R'], path.join(root, 'rodir'));
+  }
+  // Что лежит в чужой папке: имена и содержимое (чтобы «цела» значило «байт в байт»).
+  const snapshot = (d) => listAll(d).map((f) => path.relative(d, f) + (fs.statSync(f).isFile() ? ':' + fs.readFileSync(f, 'utf8') : '/')).sort();
+  // Состояние чужой папки (того, куда ведёт ссылка): имя + содержимое каждого файла. PowerShell сам пишет свой кэш старта в
+  // %LOCALAPPDATA%\Microsoft\Windows\{Caches,PowerShell}; когда LOCALAPPDATA теста — junction на чужую папку, этот шум оказывается
+  // в ней. Он не от скрипта под проверкой и отфильтрован точно по этим двум веткам (Microsoft\Windows\Fonts и прочее остаётся видно).
+  const psNoise = (e) => /^Microsoft[\\/]?$/.test(e) || /^Microsoft[\\/]Windows[\\/]?$/.test(e) || /^Microsoft[\\/]Windows[\\/](Caches|PowerShell)([\\/]|$|:)/.test(e);
+  const victimState = (sb) => snapshot(sb.victim).filter((e) => !psNoise(e));
+  const mkVictim = (dir) => {
+    fs.mkdirSync(path.join(dir, 'skills', 's1'), { recursive: true }); fs.mkdirSync(path.join(dir, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'skills', 's1', 'keep.txt'), 'V1'); fs.writeFileSync(path.join(dir, 'commands', 'c.md'), 'V2'); fs.writeFileSync(path.join(dir, 'top.txt'), 'V3');
+  };
+
+  ok('u10b _linksafe: Remove-HmTreeNoFollow сносит обычное дерево (только чтение, скрытое, кириллица, пробелы, ’), не оставляя закрепок, не трогает соседей; несуществующий путь — тихо', () => {
+    needPs();
+    const sb = mkSandbox('rm1');
+    try {
+      const t1 = path.join(sb.profile, 't1'); seedTree(t1);
+      sb.mk(sb.profile, 'keep'); fs.writeFileSync(path.join(sb.profile, 'keep', 'k.txt'), 'k');
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+Show 'removed' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 't1') -Anchor $prof })
+Show 'missing' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 'nope\x\y') -Anchor $prof })
+Show 'file' (Try-Do { Set-Content -LiteralPath (Join-Path $prof 'one.txt') -Value 'x'; Remove-HmTreeNoFollow -Path (Join-Path $prof 'one.txt') -Anchor $prof })
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.removed, 'OK', 'снос без исключения' + dump);
+      assert(!fs.existsSync(t1), 'дерево убрано целиком' + dump);
+      assert.strictEqual(g.missing, 'OK', 'несуществующий путь — тихо' + dump);
+      assert.strictEqual(g.file, 'OK', 'файл тоже сносится' + dump);
+      assert(!fs.existsSync(path.join(sb.profile, 'one.txt')), 'файл убран');
+      assert.strictEqual(fs.readFileSync(path.join(sb.profile, 'keep', 'k.txt'), 'utf8'), 'k', 'сосед цел');
+      assert.deepStrictEqual(pinsIn(sb.profile), [], 'закрепка родителя не осталась');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Remove-HmTreeNoFollow — вложенная и корневая junction снимаются КАК ссылки (цель цела), junction на РОДИТЕЛЬСКОМ звене и файл под ней — InvalidOperationException без удаления чужого, путь вне опоры отвергнут; прежний Remove-Item -Recurse по родительской junction стирает чужую папку (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('rm2');
+    try {
+      const victim = sb.victim; mkVictim(victim);
+      const victim2 = sb.mk(sb.base, 'victim2'); mkVictim(victim2);
+      const victim3 = sb.mk(sb.base, 'victim3'); mkVictim(victim3);
+      const v1 = snapshot(victim); const v2 = snapshot(victim2); const v3 = snapshot(victim3);
+      const t2 = sb.mk(sb.profile, 't2', 'inner'); fs.writeFileSync(path.join(sb.profile, 't2', 'own.txt'), 'o');
+      sb.link(victim, path.join(t2, 'J'));
+      sb.link(victim, path.join(sb.profile, 'RJ'));
+      sb.mk(sb.profile, 'course', 'vc'); sb.link(victim2, path.join(sb.profile, 'course', 'vc', '.claude'));
+      sb.mk(sb.profile, 'course', 'vc2'); sb.link(victim3, path.join(sb.profile, 'course', 'vc2', '.claude'));
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+Show 'nested' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 't2') -Anchor $prof })
+Show 'rootLink' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 'RJ') -Anchor $prof })
+Show 'parentLink' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 'course\vc\.claude\skills') -Anchor $prof })
+Show 'fileUnderLink' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 'course\vc\.claude\top.txt') -Anchor $prof })
+Show 'outside' (Try-Do { Remove-HmTreeNoFollow -Path ${q(sb.victim)} -Anchor $prof })
+# Контроль: прежний цикл — Remove-Item -Recurse по пути через родительскую junction (проверено на Windows PowerShell 5.1).
+$p3 = Join-Path $prof 'course\vc2\.claude\skills'
+if (Test-Path $p3) { Remove-Item -Recurse -Force $p3 -ErrorAction SilentlyContinue }
+Show 'oldLoopVictimSkills' (Test-Path -LiteralPath (Join-Path ${q(victim3)} 'skills'))
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.nested, 'OK', 'вложенная junction не помешала сносу' + dump);
+      assert(!fs.existsSync(path.join(sb.profile, 't2')), 'дерево с вложенной junction убрано');
+      assert.deepStrictEqual(snapshot(victim), v1, 'цель вложенной junction цела байт в байт' + dump);
+      assert.strictEqual(g.rootLink, 'OK', 'корень сноса — junction: снята как ссылка' + dump);
+      assert(!fs.existsSync(path.join(sb.profile, 'RJ')), 'ссылка снята');
+      assert(/^InvalidOperationException: .*не там, где проверяли/.test(g.parentLink), 'junction на родительском звене: ' + g.parentLink + dump);
+      assert(/^InvalidOperationException/.test(g.fileUnderLink), 'файл под родительской junction: ' + g.fileUnderLink);
+      assert.deepStrictEqual(snapshot(victim2), v2, 'чужая папка за родительской junction цела (skills, commands, файлы)' + dump);
+      assert(/^InvalidOperationException/.test(g.outside), 'путь вне опоры отвергнут: ' + g.outside);
+      assert.deepStrictEqual(snapshot(sb.victim), v1, 'victim цел и после отказа вне опоры');
+      assert.strictEqual(g.oldLoopVictimSkills, 'False', 'КОНТРОЛЬ: прежний Remove-Item -Recurse через родительскую junction стёр чужую папку skills — фикстура опасна, тест различает' + dump);
+      assert.deepStrictEqual(pinsIn(sb.profile), [], 'закрепки не остались');
+    } finally { sb.cleanup(); }
+  });
+
+  // Зеркало библиотеки с отключённой сверкой настоящего пути каталога при закреплении (прежний вид: «открылся — значит тот»).
+  const NOPINCHECK1 = (t) => {
+    const re = /if \(-not \[string\]::Equals\(\$got\.TrimEnd\('\\'\), \$want, \[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{/;
+    assert(re.test(t), 'сверка пути каталога найдена в библиотеке');
+    return t.replace(re, 'if ($false) {');
+  };
+  // Обе сверки (до записи и по пути созданной закрепки): вторая страхует первую, поэтому контролю нужны обе выключенными.
+  const NOPINCHECK = (t) => NOPINPATH(NOPINCHECK1(t));
+  const LAYER_BODY = (sb, libFile, victim) => PRELUDE_FOR(sb, libFile) + '\r\n' + TRY + '\r\n' + String.raw`
+# Заглушка тега: cloudn — «облачная заглушка» (по тегу это не ссылка), хотя на деле junction. Защита первого слоя
+# (распознавание ссылки) тем самым выключена; остаётся сверка настоящего пути при закреплении.
+function Get-HmReparseTag([string]$Path) { if ($Path -like '*cloudn*') { return 0x9000001AL } else { return 0xA0000003L } }
+$prof = ${q(sb.profile)}
+Show 'result' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 't3') -Anchor $prof })
+Show 'victimTop' (Test-Path -LiteralPath (Join-Path ${q(victim)} 'top.txt'))
+Show 'victimSkills' (Test-Path -LiteralPath (Join-Path ${q(victim)} 'skills'))
+`;
+  ok('u10b _linksafe: второй слой — если junction принята за обычную папку (облачный тег), закрепка при заходе сверяет настоящий путь и отказывает: чужая папка цела; без сверки пути тот же вход стирает чужую папку (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('rm3');
+    try {
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      sb.mk(sb.profile, 't3'); fs.writeFileSync(path.join(sb.profile, 't3', 'own.txt'), 'o');
+      sb.link(sb.victim, path.join(sb.profile, 't3', 'cloudn'));
+      const r = runPs(sb, LAYER_BODY(sb, LIB, sb.victim));
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert(/^InvalidOperationException: .*не там, где проверяли/.test(g.result), 'заход в «облачную» junction отвергнут по настоящему пути: ' + g.result + dump);
+      assert.deepStrictEqual(snapshot(sb.victim), v, 'чужая папка цела' + dump);
+    } finally { sb.cleanup(); }
+    const sc = mkSandbox('rm3c');
+    try {
+      mkVictim(sc.victim);
+      sc.mk(sc.profile, 't3'); fs.writeFileSync(path.join(sc.profile, 't3', 'own.txt'), 'o');
+      sc.link(sc.victim, path.join(sc.profile, 't3', 'cloudn'));
+      const r = runPs(sc, LAYER_BODY(sc, variantLib(sc, 'nopincheck', NOPINCHECK), sc.victim));
+      const g = kv(r.out);
+      assert.strictEqual(g.victimTop, 'False', 'КОНТРОЛЬ: без сверки пути чужая папка стёрта — тест различает: ' + r.out + r.err);
+    } finally { sc.cleanup(); }
+  });
+
+  const SWAP_BODY = (sb, libFile, victim) => PRELUDE_FOR(sb, libFile) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}; $victim = ${q(victim)}
+$orig = (Get-Command Remove-HmListedEntry -CommandType Function).ScriptBlock
+$global:HmSwapped = $false
+# Шов: перед первой записью дерева (a) «малварь» переименовывает ещё не тронутый каталог b и ставит на его имя junction.
+function Remove-HmListedEntry {
+    param([string]$Path, [System.IO.FileAttributes]$Attr, [string]$ParentReal, $Failures)
+    if (-not $global:HmSwapped -and $Path -like '*\t4\a') {
+        $global:HmSwapped = $true
+        $b = Join-Path $prof 't4\b'
+        Rename-Item -LiteralPath $b -NewName 'b-real'
+        New-Item -ItemType Junction -Path $b -Value $victim | Out-Null
+    }
+    & $orig -Path $Path -Attr $Attr -ParentReal $ParentReal -Failures $Failures
+}
+Show 'result' (Try-Do { Remove-HmTreeNoFollow -Path (Join-Path $prof 't4') -Anchor $prof })
+Show 'swapped' $global:HmSwapped
+Show 'victimTop' (Test-Path -LiteralPath (Join-Path $victim 'top.txt'))
+`;
+  ok('u10b _linksafe: подмена на лету — ещё не тронутый каталог дерева переименовали и поставили на его имя junction между списком и заходом: закрепка видит чужой настоящий путь и отказывает, чужая папка цела; без сверки пути она стёрта (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('rm4');
+    try {
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      ['a', 'b'].forEach((n) => { sb.mk(sb.profile, 't4', n); fs.writeFileSync(path.join(sb.profile, 't4', n, 'f.txt'), n); });
+      sb.links.push(path.join(sb.profile, 't4', 'b'));   // junction создаст шов теста; убрать её первой при уборке
+      const r = runPs(sb, SWAP_BODY(sb, LIB, sb.victim));
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.swapped, 'True', 'подмена состоялась (шов сработал)' + dump);
+      assert(/^InvalidOperationException: .*не там, где проверяли/.test(g.result), 'заход по подменённому имени отвергнут: ' + g.result + dump);
+      assert.deepStrictEqual(snapshot(sb.victim), v, 'чужая папка цела' + dump);
+      assert(!fs.existsSync(path.join(sb.profile, 't4', 'a')), 'до подмены каталог a уже убран (обход шёл по порядку)');
+    } finally { sb.cleanup(); }
+    const sc = mkSandbox('rm4c');
+    try {
+      mkVictim(sc.victim);
+      ['a', 'b'].forEach((n) => { sc.mk(sc.profile, 't4', n); fs.writeFileSync(path.join(sc.profile, 't4', n, 'f.txt'), n); });
+      sc.links.push(path.join(sc.profile, 't4', 'b'));
+      const r = runPs(sc, SWAP_BODY(sc, variantLib(sc, 'nopincheck2', NOPINCHECK), sc.victim));
+      const g = kv(r.out);
+      assert.strictEqual(g.swapped, 'True', 'контроль: подмена состоялась');
+      assert.strictEqual(g.victimTop, 'False', 'КОНТРОЛЬ: без сверки пути обход вошёл по подменённому имени и стёр чужую папку — тест различает: ' + r.out + r.err);
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Remove-HmTreeNoFollow — занятый файл не мешает убрать остальное: IOException со счётом и первой причиной, после освобождения снос доходит до конца', () => {
+    needPs();
+    const sb = mkSandbox('rm5');
+    try {
+      sb.mk(sb.profile, 't6', 'd'); fs.writeFileSync(path.join(sb.profile, 't6', 'd', 'busy.txt'), 'b'); fs.writeFileSync(path.join(sb.profile, 't6', 'other.txt'), 'o');
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}; $t6 = Join-Path $prof 't6'
+$h = [IO.File]::Open((Join-Path $t6 'd\busy.txt'), 'Open', 'Read', 'None')
+Show 'busy' (Try-Do { Remove-HmTreeNoFollow -Path $t6 -Anchor $prof })
+Show 'otherGone' (-not (Test-Path -LiteralPath (Join-Path $t6 'other.txt')))
+Show 'busyKept' (Test-Path -LiteralPath (Join-Path $t6 'd\busy.txt'))
+$h.Dispose()
+Show 'after' (Try-Do { Remove-HmTreeNoFollow -Path $t6 -Anchor $prof })
+Show 'goneAfter' (-not (Test-Path -LiteralPath $t6))
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert(/^IOException: не удалось убрать объектов: 1 \(первый: .*busy\.txt/.test(g.busy), 'счёт и первая причина названы: ' + g.busy + dump);
+      assert.strictEqual(g.otherGone, 'True', 'остальное убрано' + dump);
+      assert.strictEqual(g.busyKept, 'True', 'занятый файл на месте');
+      assert.strictEqual(g.after, 'OK', 'после освобождения снос доходит до конца' + dump);
+      assert.strictEqual(g.goneAfter, 'True');
+      assert.deepStrictEqual(pinsIn(sb.profile), [], 'закрепки не остались');
+    } finally { sb.cleanup(); }
+  });
+
+  // =========================================================================
+  // 4. _linksafe.ps1: распаковка архива в закреплённые папки
+  // =========================================================================
+  ok('u10b _linksafe: Expand-HmZipSafe раскладывает архив как Expand-Archive (имена, кириллица, пустой файл, вложенность), повтор заменяет файлы и даже файлы с атрибутом только-чтение, чужие файлы рядом целы, закрепки и временные файлы не остаются', () => {
+    needPs();
+    const sb = mkSandbox('exp1');
+    try {
+      const zip1 = path.join(sb.base, 'c1.zip'); fs.writeFileSync(zip1, courseZip(1));
+      const zip2 = path.join(sb.base, 'c2.zip'); fs.writeFileSync(zip2, courseZip(2));
+      const dest = path.join(sb.profile, 'HamidunCourse');
+      const r1 = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+Show 'first' (Try-Do { $script:n = Expand-HmZipSafe -Zip ${q(zip1)} -Dest ${q(dest)} -Anchor $prof })
+Show 'written' $script:n
+`);
+      assert.strictEqual(kv(r1.out).first, 'OK', 'первая распаковка: ' + r1.out + r1.err);
+      assert.strictEqual(kv(r1.out).written, '10', 'записано десять файлов: ' + r1.out);
+      COURSE_FILES(1).forEach((e) => {
+        const f = path.join(dest, ...e.name.split('/'));
+        assert(fs.existsSync(f), 'файл на месте: ' + e.name);
+        assert.strictEqual(fs.readFileSync(f, 'utf8'), String(e.data), 'байты те же: ' + e.name);
+      });
+      assert(fs.existsSync(path.join(dest, 'vibecoding-course', '.claude', 'commands', 'начать.md')), 'кириллическое имя файла');
+      assert.deepStrictEqual(listAll(dest).filter((f) => pinsIn(path.dirname(f)).length), [], 'закрепок и временных файлов не осталось');
+      // повтор: «только чтение» на файле курса, чужие файлы рядом
+      fs.writeFileSync(path.join(dest, 'vibecoding-course', 'sandbox', 'mine.txt'), 'student');
+      attrib(['+R'], path.join(dest, 'vibecoding-course', 'CLAUDE.md'));
+      const r2 = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+Show 'second' (Try-Do { [void](Expand-HmZipSafe -Zip ${q(zip2)} -Dest ${q(dest)} -Anchor ${q(sb.profile)}) })
+`);
+      assert.strictEqual(kv(r2.out).second, 'OK', 'повтор поверх: ' + r2.out + r2.err);
+      assert.strictEqual(fs.readFileSync(path.join(dest, 'vibecoding-course', 'CLAUDE.md'), 'utf8'), 'claude 2', 'файл «только чтение» заменён');
+      assert.strictEqual(fs.readFileSync(path.join(dest, 'vibecoding-course', 'sandbox', 'mine.txt'), 'utf8'), 'student', 'чужой файл рядом цел');
+      assert.deepStrictEqual(listAll(dest).filter((f) => pinsIn(path.dirname(f)).length), [], 'после повтора закрепок нет');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Expand-HmZipSafe — junction на родительском звене внутри курса и на самой папке назначения: InvalidOperationException, в чужую папку ничего не записано; прежний Expand-Archive -Force пишет в неё (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('exp2');
+    try {
+      const zip = path.join(sb.base, 'c.zip'); fs.writeFileSync(zip, courseZip(1));
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      const vc = sb.mk(sb.profile, 'HamidunCourse', 'vibecoding-course');
+      sb.link(sb.victim, path.join(vc, '.claude'));
+      const victim2 = sb.mk(sb.base, 'victim2'); mkVictim(victim2); const v2 = snapshot(victim2);
+      sb.link(victim2, path.join(sb.profile, 'DestLink'));
+      const victim3 = sb.mk(sb.base, 'victim3');
+      sb.mk(sb.profile, 'Ctl', 'vibecoding-course'); sb.link(victim3, path.join(sb.profile, 'Ctl', 'vibecoding-course', '.claude'));
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+Show 'parentLink' (Try-Do { [void](Expand-HmZipSafe -Zip ${q(zip)} -Dest (Join-Path $prof 'HamidunCourse') -Anchor $prof) })
+Show 'destLink' (Try-Do { [void](Expand-HmZipSafe -Zip ${q(zip)} -Dest (Join-Path $prof 'DestLink') -Anchor $prof) })
+# Контроль: прежний Expand-Archive -Force по той же раскладке (junction .claude внутри курса).
+Expand-Archive -Path ${q(zip)} -DestinationPath (Join-Path $prof 'Ctl') -Force -ErrorAction SilentlyContinue
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert(/^InvalidOperationException: .*ссылка \(junction\/symlink\)/.test(g.parentLink), 'junction внутри курса: ' + g.parentLink + dump);
+      assert.deepStrictEqual(snapshot(sb.victim), v, 'чужая папка за .claude цела — ни skills, ни commands не записаны' + dump);
+      assert(/^InvalidOperationException: .*ссылка \(junction\/symlink\)/.test(g.destLink), 'junction на папке назначения: ' + g.destLink + dump);
+      assert.deepStrictEqual(snapshot(victim2), v2, 'чужая папка за папкой назначения цела');
+      assert(fs.existsSync(path.join(victim3, 'skills', 'course-driver', 'SKILL.md')) || fs.existsSync(path.join(victim3, 'commands', 'start.md')),
+        'КОНТРОЛЬ: прежний Expand-Archive -Force записал файлы курса в чужую папку за junction — фикстура опасна, тест различает: ' + names(victim3));
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Expand-HmZipSafe — недопустимые имена в архиве (.., абсолютный путь, диск, поток данных, точка на конце) отвергаются раньше записи любого файла; Get-HmZipTopNames и -Prefix/-Only', () => {
+    needPs();
+    const sb = mkSandbox('exp3');
+    try {
+      const bad = {
+        'родительский': 'vibecoding-course/../../evil.txt', 'вверх': '../evil.txt', 'диск': 'C:/evil.txt', 'корень': '/abs/evil.txt',
+        'поток': 'vibecoding-course/a.txt:stream', 'точка': 'vibecoding-course/trail./a.txt', 'пробел': 'vibecoding-course/sp /a.txt',
+      };
+      const zips = {};
+      Object.keys(bad).forEach((k) => {
+        zips[k] = path.join(sb.base, 'bad-' + Object.keys(zips).length + '.zip');
+        fs.writeFileSync(zips[k], makeZip([{ name: bad[k], data: 'EVIL' }, { name: 'vibecoding-course/ok.txt', data: 'ok' }]));
+      });
+      const good = path.join(sb.base, 'good.zip'); fs.writeFileSync(good, courseZip(1));
+      const dest = path.join(sb.profile, 'D');
+      const calls = Object.keys(bad).map((k) => "Show " + q('bad' + Object.keys(zips).indexOf(k)) + " (Try-Do { [void](Expand-HmZipSafe -Zip " + q(zips[k]) + " -Dest " + q(dest) + " -Anchor $prof) })").join('\r\n');
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n$prof = ' + q(sb.profile) + '\r\n' + calls + '\r\n' + String.raw`
+Show 'top' ((Get-HmZipTopNames -Zip ${q(good)} -Prefix 'vibecoding-course/.claude/skills/') -join ',')
+Show 'prefixCount' (Expand-HmZipSafe -Zip ${q(good)} -Dest (Join-Path $prof 'S') -Anchor $prof -Prefix 'vibecoding-course/.claude/skills/')
+Show 'only' (Expand-HmZipSafe -Zip ${q(good)} -Dest (Join-Path $prof 'S2') -Anchor $prof -Prefix 'vibecoding-course/.claude/skills/' -Only @('course-check'))
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      Object.keys(bad).forEach((k, i) => assert(/^InvalidDataException: недопустимое имя в архиве/.test(g['bad' + i]), 'имя «' + bad[k] + '» отвергнуто: ' + g['bad' + i] + dump));
+      assert(!fs.existsSync(path.join(sb.profile, 'evil.txt')) && !fs.existsSync(path.join(sb.base, 'evil.txt')) && !fs.existsSync(path.join(dest, 'vibecoding-course', 'ok.txt')),
+        'ничего не записано ни выше папки назначения, ни рядом: ' + relTree(sb.profile).join(' | '));
+      assert.strictEqual(g.top, 'course-driver,course-check', 'имена навыков под префиксом — в порядке архива: ' + g.top + dump);
+      assert.strictEqual(g.prefixCount, '2', 'под префиксом два файла');
+      assert.deepStrictEqual(relTree(path.join(sb.profile, 'S')), ['course-check', 'course-check\\SKILL.md', 'course-driver', 'course-driver\\SKILL.md'], 'префикс срезан');
+      assert.strictEqual(g.only, '1', '-Only оставляет один навык');
+      assert.deepStrictEqual(relTree(path.join(sb.profile, 'S2')), ['course-check', 'course-check\\SKILL.md']);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b _linksafe: Expand-HmZipSafe — file-symlink, подложенная на имя файла курса, не пишется насквозь: распаковка останавливается, цель цела; прежний WriteAllText по тому же имени пишет в цель (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('exp4');
+    try {
+      if (!canFileSymlink(sb)) SKIP('file-symlink без прав (нужен режим разработчика) — случай недостижим для злоумышленника в этой среде');
+      const zip = path.join(sb.base, 'c.zip'); fs.writeFileSync(zip, courseZip(1));
+      const target = path.join(sb.victim, 'precious.txt'); fs.writeFileSync(target, 'PRECIOUS');
+      const target2 = path.join(sb.victim, 'precious2.txt'); fs.writeFileSync(target2, 'PRECIOUS2');
+      const d = sb.mk(sb.profile, 'New', 'vibecoding-course'); fs.symlinkSync(target, path.join(d, 'CLAUDE.md'), 'file');
+      fs.symlinkSync(target2, path.join(sb.profile, 'ctl-link.txt'), 'file');
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+Show 'safe' (Try-Do { [void](Expand-HmZipSafe -Zip ${q(zip)} -Dest (Join-Path $prof 'New') -Anchor $prof) })
+Show 'targetAfterSafe' ([IO.File]::ReadAllText(${q(target)}))
+# Контроль: запись по имени, как делали WriteAllText в course.ps1 (маяк, лаунчер) и Copy-Item в остальных писателях.
+[IO.File]::WriteAllText((Join-Path $prof 'ctl-link.txt'), 'OVERWRITTEN')
+Show 'targetAfterOld' ([IO.File]::ReadAllText(${q(target2)}))
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert(g.safe !== 'OK', 'распаковка остановлена на ссылке: ' + g.safe + dump);
+      assert.strictEqual(g.targetAfterSafe, 'PRECIOUS', 'цель symlink цела после безопасной распаковки' + dump);
+      assert.strictEqual(g.targetAfterOld, 'OVERWRITTEN', 'КОНТРОЛЬ: запись по имени пошла сквозь symlink в цель — фикстура опасна, тест различает' + dump);
+    } finally { sb.cleanup(); }
+  });
+
+  // =========================================================================
+  // 5. _linksafe.ps1: одиночные записи (New-HmUserDir, Write-HmUserFile)
+  // =========================================================================
+  ok('u10b _linksafe: Write-HmUserFile и New-HmUserDir — каталог создаётся по звеньям, файл ложится переносом (байты те же, атрибут только-чтение у файла человека не снимается, у нашего — снимается); junction на пути — отказ, чужая папка цела; прежний WriteAllText идёт насквозь (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('wuf');
+    try {
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      sb.link(sb.victim, path.join(sb.profile, 'J'));
+      const human = path.join(sb.profile, 'Docs', 'human.txt'); sb.mk(sb.profile, 'Docs'); fs.writeFileSync(human, 'H'); attrib(['+R'], human);
+      const ours = path.join(sb.profile, 'Docs', 'ours.txt'); fs.writeFileSync(ours, 'O'); attrib(['+R'], ours);
+      const r = runPs(sb, LIB_PRELUDE(sb) + '\r\n' + TRY + '\r\n' + String.raw`
+$prof = ${q(sb.profile)}
+$b = [Text.Encoding]::UTF8.GetBytes("данные ’")
+Show 'create' (Try-Do { Write-HmUserFile -Path (Join-Path $prof 'A\B\f.bin') -Bytes $b })
+Show 'empty' (Try-Do { Write-HmUserFile -Path (Join-Path $prof 'A\empty.bin') -Bytes ([byte[]]@()) })
+Show 'dir' (Try-Do { [void](New-HmUserDir -Path (Join-Path $prof 'N\M\K')) })
+Show 'humanRO' (Try-Do { Write-HmUserFile -Path ${q(human)} -Bytes $b })
+Show 'oursRO' (Try-Do { Write-HmUserFile -Path ${q(ours)} -Bytes $b -ClearReadOnly })
+Show 'viaLink' (Try-Do { Write-HmUserFile -Path (Join-Path $prof 'J\new\f.txt') -Bytes $b })
+Show 'dirViaLink' (Try-Do { [void](New-HmUserDir -Path (Join-Path $prof 'J\newdir')) })
+# Контроль: прежняя запись по имени сквозь junction.
+Show 'old' (Try-Do { [IO.File]::WriteAllText((Join-Path $prof 'J\top.txt'), 'OVERWRITTEN') })
+`);
+      const g = kv(r.out);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(g.create, 'OK', 'создание файла в несуществующих каталогах' + dump);
+      assert.strictEqual(fs.readFileSync(path.join(sb.profile, 'A', 'B', 'f.bin'), 'utf8'), 'данные ’', 'байты те же');
+      assert.strictEqual(fs.statSync(path.join(sb.profile, 'A', 'empty.bin')).size, 0, 'пустой файл — законное содержимое');
+      assert.strictEqual(g.dir, 'OK', 'каталог создан');
+      assert(fs.statSync(path.join(sb.profile, 'N', 'M', 'K')).isDirectory());
+      assert(g.humanRO !== 'OK', 'файл человека с «только чтение» не перезаписывается: ' + g.humanRO);
+      assert.strictEqual(fs.readFileSync(human, 'utf8'), 'H', 'файл человека цел');
+      assert.strictEqual(g.oursRO, 'OK', 'наш файл с «только чтение» заменён с -ClearReadOnly' + dump);
+      assert.strictEqual(fs.readFileSync(ours, 'utf8'), 'данные ’');
+      assert(/^InvalidOperationException/.test(g.viaLink), 'запись через junction отвергнута: ' + g.viaLink);
+      assert(/^InvalidOperationException/.test(g.dirViaLink), 'создание каталога через junction отвергнуто: ' + g.dirViaLink);
+      const after = snapshot(sb.victim);
+      assert.deepStrictEqual(after.filter((x) => x !== 'top.txt:OVERWRITTEN'), v.filter((x) => x !== 'top.txt:V3'), 'в чужой папке не появилось ничего нового');
+      assert.strictEqual(fs.readFileSync(path.join(sb.victim, 'top.txt'), 'utf8'), 'OVERWRITTEN', 'КОНТРОЛЬ: прежний WriteAllText по имени записал в чужую папку сквозь junction — фикстура опасна, тест различает');
+      assert.deepStrictEqual(pinsIn(path.join(sb.profile, 'A')).concat(pinsIn(path.join(sb.profile, 'A', 'B')), pinsIn(sb.profile), pinsIn(path.join(sb.profile, 'Docs'))), [], 'закрепки не остались');
+    } finally { sb.cleanup(); }
+  });
+
+
+  // =========================================================================
+  // 6. course.ps1 (F17): настоящий скрипт, настоящая распаковка, настоящие junction
+  // =========================================================================
+  const FE = () => require(path.join(ROOT, 'src', 'failure-explain.js'));
+  // Шов профиля из токена: после подключения _linksafe.ps1 компонент получает свою Get-HmProfileRoot (песочный профиль). Скрипт
+  // прежнего вида (cca497e, библиотеки не знает) остаётся как есть — шов ему не нужен; что новые скрипты библиотеку подключают,
+  // стережёт отдельный тест.
+  function withProfileSeam(src, add) {
+    const dot = ". (Join-Path $PSScriptRoot '_linksafe.ps1')";
+    const i = src.indexOf(dot);
+    if (i < 0) return src;
+    const eol = src.indexOf('\n', i);
+    return src.slice(0, eol + 1) + add + src.slice(eol + 1);
+  }
+  // Песочница course.ps1: НАСТОЯЩИЙ скрипт и библиотеки рядом; хвост со столом и ярлыком отрезан (его гоняют тесты u4 на подставной
+  // папке стола — здесь он дотянулся бы до настоящего рабочего стола владельца); профиль из токена — песочный (шов Get-HmProfileRoot).
+  function courseBox(sb, o) {
+    o = o || {};
+    const dir = sb.mk(sb.base, 'scripts');
+    ['_verify.ps1', '_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+    let src = rawWin('course.ps1').replace(/\r\n/g, '\n');
+    const mark = '# --- ярлык запуска на рабочем столе ---';
+    const cut = src.indexOf(mark);
+    assert(cut > 0, 'граница хвоста со столом найдена в course.ps1');
+    src = src.slice(0, cut) + 'exit 0\n';
+    if (!o.noProfileSeam) src = withProfileSeam(src, 'function Get-HmProfileRoot { return $env:HM_T_PROFILE }\n');
+    if (o.edit) { const e = o.edit(src); assert(e !== src, 'мутация course.ps1 применилась'); src = e; }
+    fs.writeFileSync(path.join(dir, 'course.ps1'), BOM + src.replace(/\n/g, '\r\n'));
+    return dir;
+  }
+  function runCourse(sb, dir, env) {
+    return runPs(sb, '& ' + q(path.join(dir, 'course.ps1')) + '\r\nexit $LASTEXITCODE', Object.assign({ HM_VENDOR: sb.vendor, HM_T_PROFILE: sb.profile }, env || {}));
+  }
+  const courseDirOf = (sb) => path.join(sb.profile, 'HamidunCourse', 'vibecoding-course');
+  const readCourse = (sb, rel) => fs.readFileSync(path.join(courseDirOf(sb), ...rel.split('/')), 'utf8');
+  // Состояние «курс уже стоит» без запуска: CLAUDE.md и контентные папки с устаревшими файлами, плюс файлы ученика.
+  function seedInstalled(sb) {
+    const c = courseDirOf(sb);
+    sb.mk(c, 'tracks', '_core'); sb.mk(c, '.claude', 'skills', 'old-skill'); sb.mk(c, '.claude', 'commands'); sb.mk(c, '.course', 'knowledge'); sb.mk(c, 'sandbox');
+    fs.writeFileSync(path.join(c, 'CLAUDE.md'), 'claude 0');
+    fs.writeFileSync(path.join(c, 'tracks', '_core', 'old.md'), 'stale track');
+    fs.writeFileSync(path.join(c, '.claude', 'skills', 'old-skill', 'SKILL.md'), 'stale skill');
+    fs.writeFileSync(path.join(c, '.claude', 'commands', 'old.md'), 'stale command');
+    fs.writeFileSync(path.join(c, '.course', 'knowledge', 'old.md'), 'stale knowledge');
+    fs.writeFileSync(path.join(c, '.claude', 'settings.local.json'), '{"permissions":"student"}');
+    fs.writeFileSync(path.join(c, '.course', 'state.json'), '{"step":3}');
+    fs.writeFileSync(path.join(c, 'sandbox', 'mine.txt'), 'student work');
+  }
+  // Прежний цикл сноса и распаковки course.ps1 (cca497e), как контроль на тех же входах.
+  const OLD_COURSE_LOOP = String.raw`
+$target = $env:HM_T_TARGET
+$courseDir = Join-Path $target 'vibecoding-course'
+if (Test-Path (Join-Path $courseDir 'CLAUDE.md')) {
+    foreach ($sub in @('tracks', '.claude\skills', '.claude\commands', '.course\knowledge')) {
+        $p = Join-Path $courseDir $sub
+        if (Test-Path $p) {
+            Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            if (Test-Path $p) { Write-Host "busy $sub"; exit 1 }
+        }
+    }
+}
+try { Expand-Archive -Path $env:HM_T_ZIP -DestinationPath $target -Force -ErrorAction Stop } catch { Write-Host ('expand failed: ' + $_.Exception.Message); exit 1 }
+`;
+
+  ok('u10b course.ps1: свежая установка раскладывает курс (кириллица, пустой файл), обновление поверх заменяет tracks / skills / commands / knowledge и сохраняет файлы ученика; закрепок и временных файлов нет', () => {
+    needPs();
+    const sb = mkSandbox('course1');
+    try {
+      mkVendor(sb, courseZip(1));
+      const box = courseBox(sb);
+      const r1 = runCourse(sb, box);
+      const dump1 = '\n' + r1.out + r1.err;
+      assert.strictEqual(r1.status, 0, 'свежая установка: код 0' + dump1);
+      assert(/Курс распакован:/.test(r1.out) && r1.out.includes('HM-RECEIPT path ' + courseDirOf(sb)), 'квитанция владения называет папку курса' + dump1);
+      COURSE_FILES(1).forEach((e) => assert.strictEqual(fs.readFileSync(path.join(sb.profile, 'HamidunCourse', ...e.name.split('/')), 'utf8'), String(e.data), 'файл на месте: ' + e.name));
+      assert.deepStrictEqual(listAll(courseDirOf(sb)).filter((f) => pinsIn(path.dirname(f)).length), [], 'закрепок и временных файлов нет' + dump1);
+      assert.deepStrictEqual(pinsIn(courseDirOf(sb)).concat(pinsIn(path.join(sb.profile, 'HamidunCourse'))), [], 'и в самой папке курса');
+      // Обновление: устаревшее и файлы ученика.
+      const c = courseDirOf(sb);
+      fs.writeFileSync(path.join(c, 'tracks', '_core', 'old.md'), 'stale track');
+      fs.mkdirSync(path.join(c, '.claude', 'skills', 'old-skill'), { recursive: true }); fs.writeFileSync(path.join(c, '.claude', 'skills', 'old-skill', 'SKILL.md'), 'stale skill');
+      fs.writeFileSync(path.join(c, '.claude', 'commands', 'old.md'), 'stale command');
+      fs.writeFileSync(path.join(c, '.course', 'knowledge', 'old.md'), 'stale knowledge');
+      fs.writeFileSync(path.join(c, '.claude', 'settings.local.json'), '{"permissions":"student"}');
+      fs.writeFileSync(path.join(c, '.course', 'state.json'), '{"step":3}');
+      fs.writeFileSync(path.join(c, 'sandbox', 'mine.txt'), 'student work');
+      mkVendor(sb, courseZip(2));
+      const r2 = runCourse(sb, box);
+      const dump2 = '\n' + r2.out + r2.err;
+      assert.strictEqual(r2.status, 0, 'обновление: код 0' + dump2);
+      assert(/Курс уже установлен — обновляю/.test(r2.out), 'сказано, что это обновление' + dump2);
+      COURSE_FILES(2).forEach((e) => assert.strictEqual(fs.readFileSync(path.join(sb.profile, 'HamidunCourse', ...e.name.split('/')), 'utf8'), String(e.data), 'содержимое новой версии: ' + e.name));
+      ['tracks/_core/old.md', '.claude/skills/old-skill', '.claude/commands/old.md', '.course/knowledge/old.md'].forEach((rel) => assert(!fs.existsSync(path.join(c, ...rel.split('/'))), 'устаревшее убрано: ' + rel));
+      assert.strictEqual(readCourse(sb, '.claude/settings.local.json'), '{"permissions":"student"}', 'разрешения ученика пережили обновление');
+      assert.strictEqual(readCourse(sb, '.course/state.json'), '{"step":3}', 'прогресс ученика цел');
+      assert.strictEqual(readCourse(sb, 'sandbox/mine.txt'), 'student work', 'работа в sandbox цела');
+      assert.deepStrictEqual(listAll(c).filter((f) => pinsIn(path.dirname(f)).length), [], 'после обновления закрепок нет');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b course.ps1 F17: junction на РОДИТЕЛЬСКОМ звене (vibecoding-course\\.claude → чужая папка) — обновление курса отказывает с кодом 1 ДО первого удаления, чужие skills и commands целы, курс цел, причина и выход названы; прежний цикл на тех же входах стирает чужую папку и пишет в неё файлы курса (контроль)', () => {
+    needPs();
+    const sb = mkSandbox('course2');
+    try {
+      mkVendor(sb, courseZip(1));
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      seedInstalled(sb);
+      const c = courseDirOf(sb);
+      // .claude — junction на чужую папку (в ней skills и commands, как у настоящей учётки)
+      drop(path.join(c, '.claude'));
+      sb.link(sb.victim, path.join(c, '.claude'));
+      const before = relTree(path.join(c, 'tracks')).concat(relTree(path.join(c, '.course')));
+      const r = runCourse(sb, courseBox(sb));
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'отказ: код 1' + dump);
+      assert.deepStrictEqual(snapshot(sb.victim), v, 'чужая папка цела байт в байт: skills, commands, файлы' + dump);
+      assert.deepStrictEqual(relTree(path.join(c, 'tracks')).concat(relTree(path.join(c, '.course'))), before, 'и сам курс не тронут — отказ раньше любого удаления (tracks на месте)' + dump);
+      assert.strictEqual(readCourse(sb, 'CLAUDE.md'), 'claude 0', 'файл курса не переписан');
+      assert(/ссылк/.test(r.out) && r.out.includes(path.join(c, '.claude')) && /rmdir/.test(r.out) && /повтор/i.test(r.out), 'причина (ссылка), её путь и выход (rmdir, повторить) названы:' + dump);
+      assert(!/БЕЗОПАСНОСТЬ:/.test(r.out) && !/отказано в доступе|доступ запрещ|занят/i.test(r.out), 'слова не путают разбор причины в main.js');
+      assert.strictEqual(FE().explainScriptFailure(lines(r.out).filter(Boolean)), null, 'failure-explain не подменяет эти строки чужим объяснением');
+      assert(fs.lstatSync(path.join(c, '.claude')).isSymbolicLink(), 'саму ссылку не трогали');
+      // КОНТРОЛЬ: прежний цикл на той же раскладке (вторая песочница с такой же фикстурой).
+      const sc = mkSandbox('course2c');
+      try {
+        mkVictim(sc.victim);
+        seedInstalled(sc);
+        const cc = courseDirOf(sc);
+        drop(path.join(cc, '.claude')); sc.link(sc.victim, path.join(cc, '.claude'));
+        const zipPath = path.join(sc.base, 'c.zip'); fs.writeFileSync(zipPath, courseZip(1));
+        const ro = runPs(sc, OLD_COURSE_LOOP, { HM_T_TARGET: path.join(sc.profile, 'HamidunCourse'), HM_T_ZIP: zipPath });
+        assert(!fs.existsSync(path.join(sc.victim, 'skills', 's1', 'keep.txt')) && !fs.existsSync(path.join(sc.victim, 'commands', 'c.md')),
+          'КОНТРОЛЬ: прежний цикл стёр чужие skills и commands через родительскую junction: ' + names(sc.victim) + '\n' + ro.out + ro.err);
+        assert(fs.existsSync(path.join(sc.victim, 'skills', 'course-driver', 'SKILL.md')),
+          'КОНТРОЛЬ: Expand-Archive -Force разложил файлы курса в ту же чужую папку: ' + relTree(sc.victim).join(' | '));
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b course.ps1 F17: junction на других звеньях (папка назначения, папка курса, .course, .claude при свежей установке; на самом tracks — ссылка-элемент снимается как ссылка) — отказ либо снос ссылки, чужая папка цела', () => {
+    needPs();
+    const cases = [
+      ['dest', (sb) => { drop(path.join(sb.profile, 'HamidunCourse')); sb.link(sb.victim, path.join(sb.profile, 'HamidunCourse')); }],
+      ['course', (sb) => { sb.mk(sb.profile, 'HamidunCourse'); sb.link(sb.victim, courseDirOf(sb)); }],
+      ['dotcourse', (sb) => { seedInstalled(sb); const c = courseDirOf(sb); drop(path.join(c, '.course')); sb.link(sb.victim, path.join(c, '.course')); }],
+      // свежая установка (CLAUDE.md нет), ссылка уже стоит ВНУТРИ папки курса: снос не запускается, а Expand-Archive -Force прошёл бы сквозь неё
+      ['fresh-.claude', (sb) => { sb.mk(courseDirOf(sb)); sb.link(sb.victim, path.join(courseDirOf(sb), '.claude')); }],
+    ];
+    cases.forEach(([label, setup]) => {
+      const sb = mkSandbox('course3' + label);
+      try {
+        mkVendor(sb, courseZip(1));
+        mkVictim(sb.victim); const v = snapshot(sb.victim);
+        setup(sb);
+        const r = runCourse(sb, courseBox(sb));
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert.strictEqual(r.status, 1, label + ': отказ, код 1' + dump);
+        assert.deepStrictEqual(snapshot(sb.victim), v, label + ': чужая папка цела' + dump);
+        assert(/ссылк/.test(r.out) && /rmdir/.test(r.out), label + ': причина и выход названы' + dump);
+      } finally { sb.cleanup(); }
+    });
+    // tracks — сама junction (ссылка-ЭЛЕМЕНТ): прежний цикл снимал её как ссылку; так и теперь, чужая папка цела, курс обновляется.
+    const sb = mkSandbox('course3tracks');
+    try {
+      mkVendor(sb, courseZip(2));
+      mkVictim(sb.victim); const v = snapshot(sb.victim);
+      seedInstalled(sb);
+      const c = courseDirOf(sb);
+      drop(path.join(c, 'tracks')); sb.link(sb.victim, path.join(c, 'tracks'));
+      const r = runCourse(sb, courseBox(sb));
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'ссылка-элемент не помеха: код 0' + dump);
+      assert.deepStrictEqual(snapshot(sb.victim), v, 'чужая папка цела' + dump);
+      assert(!fs.lstatSync(path.join(c, 'tracks')).isSymbolicLink(), 'на месте ссылки теперь обычная папка курса');
+      assert.strictEqual(readCourse(sb, 'tracks/_core/m01.md'), 'track 2', 'содержимое новой версии на месте');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b course.ps1: HM_COURSE_TARGET на другом месте (не в профиле) — опора корень тома, установка проходит; ссылка выше по пути (нестандартный каталог за junction) — отказ', () => {
+    needPs();
+    const sb = mkSandbox('course4');
+    try {
+      mkVendor(sb, courseZip(1));
+      const ext = sb.mk(sb.base, 'ext', 'Мои курсы');
+      const r = runCourse(sb, courseBox(sb), { HM_COURSE_TARGET: ext });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'курс вне профиля: код 0' + dump);
+      assert.strictEqual(fs.readFileSync(path.join(ext, 'vibecoding-course', '.claude', 'commands', 'начать.md'), 'utf8'), 'начать 1', 'файлы на месте');
+      assert(!fs.existsSync(path.join(sb.profile, 'HamidunCourse')), 'в профиль ничего не легло');
+    } finally { sb.cleanup(); }
+    const sc = mkSandbox('course4b');
+    try {
+      mkVendor(sc, courseZip(1));
+      mkVictim(sc.victim); const v = snapshot(sc.victim);
+      sc.link(sc.victim, path.join(sc.base, 'extlink'));
+      const r = runCourse(sc, courseBox(sc), { HM_COURSE_TARGET: path.join(sc.base, 'extlink', 'Course') });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'ссылка выше по пути: код 1' + dump);
+      assert.deepStrictEqual(snapshot(sc.victim), v, 'чужая папка цела (курс туда не лёг)' + dump);
+      assert(r.out.includes(path.join(sc.base, 'extlink')), 'названа сама ссылка' + dump);
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b course.ps1: маяк завершения пишется переносом по имени (байты: исходное + блок, без BOM, повтор не дублирует), секрет в журнал не попадает', () => {
+    needPs();
+    const sb = mkSandbox('course5');
+    try {
+      mkVendor(sb, courseZip(1));
+      const env = { HM_COURSE_BEACON_URL: 'https://example.invalid/b"x', HM_COURSE_BEACON_SECRET: 'sEcReT-\\q"7' };
+      const box = courseBox(sb);
+      const r1 = runCourse(sb, box, env);
+      const r2 = runCourse(sb, box, env);
+      const dump = '\n' + r1.out + r1.err + r2.out + r2.err;
+      assert.strictEqual(r1.status, 0, 'код 0' + dump);
+      assert.strictEqual(r2.status, 0, 'повтор: код 0' + dump);
+      const buf = fs.readFileSync(path.join(courseDirOf(sb), '.course', 'config.yaml'));
+      assert(!(buf[0] === 0xEF && buf[1] === 0xBB), 'без BOM');
+      const txt = buf.toString('utf8');
+      assert(txt.startsWith('name: course\r\nlang: ru'), 'исходное содержимое на месте: ' + JSON.stringify(txt));
+      assert.strictEqual((txt.match(/completion_beacon:/g) || []).length, 1, 'блок маяка один и после повтора');
+      assert(txt.includes('url: "https://example.invalid/b\\"x"') && txt.includes('secret: "sEcReT-\\\\q\\"7"'), 'значения экранированы: ' + JSON.stringify(txt));
+      assert(!/sEcReT/.test(r1.out + r2.out), 'секрет в журнал не печатается');
+      assert(/Маяк завершения включён \(с подписью\)/.test(r1.out), 'сказано, что маяк включён');
+      assert.deepStrictEqual(pinsIn(path.join(courseDirOf(sb), '.course')), [], 'временных файлов нет');
+    } finally { sb.cleanup(); }
+  });
+
+
+  // =========================================================================
+  // 6b. course.ps1: глобальная установка наставника (HM_COURSE_GLOBAL), файлы-ссылки внутри курса, занятый файл, лаунчер
+  // =========================================================================
+  const OLD_COURSE_GLOBAL = [
+    "if ($env:HM_COURSE_GLOBAL -eq '1') {",
+    "    $claudeHome = Join-Path $env:USERPROFILE '.claude'",
+    "    $skillsSrc  = Join-Path $courseDir '.claude\\skills'",
+    "    $skillsDst  = Join-Path $claudeHome 'skills'",
+    "    if (Test-Path $skillsSrc) {",
+    "        New-Item -ItemType Directory -Force $skillsDst | Out-Null",
+    "        # foreach (НЕ ForEach-Object): единый скоуп, флаг $skFail виден после цикла.",
+    "        # Без него финальное «установлены» печаталось даже когда навык не встал (папка занята).",
+    "        $skFail = $false",
+    "        foreach ($d in (Get-ChildItem -Directory $skillsSrc)) {",
+    "            $t = Join-Path $skillsDst $d.Name",
+    "            if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue }",
+    "            if (Test-Path $t) {",
+    "                # Папка занята (антивирус/редактор): копирование поверх создало бы вложенный",
+    "                # дубль course-driver/course-driver, а грузился бы старый навык.",
+    "                Write-Host \"Не удалось обновить навык $($d.Name): папка занята. Закрой программы, использующие ~/.claude/skills, и запусти установку ещё раз.\"",
+    "                $skFail = $true",
+    "            } else {",
+    "                Copy-Item -Recurse -Force $d.FullName $t",
+    "            }",
+    "        }",
+    "        # Успех печатаем ТОЛЬКО если ни один навык не провалился (как skfail в course.sh).",
+    "        if (-not $skFail) { Write-Host \"Навыки курса установлены глобально в ~/.claude/skills.\" }",
+    "    }",
+    "    # защищённый блок в ~/.claude/CLAUDE.md (идемпотентно, с бэкапом)",
+    "    $claudeMd = Join-Path $claudeHome 'CLAUDE.md'",
+    "    $begin = '# >>> vibecoding-course >>>'",
+    "    $end   = '# <<< vibecoding-course <<<'",
+    "    $note  = \"$begin`nРежим наставника по вайбкодингу доступен глобально. Курс: $courseDir`nВести ученика — по скиллам course-driver / course-check / course-role и файлу $courseDir\\CLAUDE.md.`n$end\"",
+    "    $cur = ''",
+    "    if (Test-Path $claudeMd) {",
+    "        # Строгий UTF-8 (throwOnInvalidBytes): при BOM-less ANSI/cp1251-файле нестрогий",
+    "        # декодер молча превратил бы кириллицу в U+FFFD и записал мусор обратно. Ловим",
+    "        # это и читаем в системной кодировке — файл не портим. (BOM у UTF-8/UTF-16",
+    "        # StreamReader détectит сам поверх переданной кодировки.)",
+    "        try {",
+    "            $cur = [System.IO.File]::ReadAllText($claudeMd, (New-Object System.Text.UTF8Encoding($false, $true)))",
+    "        } catch {",
+    "            $cur = [System.IO.File]::ReadAllText($claudeMd, [System.Text.Encoding]::Default)",
+    "        }",
+    "        # Бэкап делаем ОДИН раз: повторный запуск не должен перетирать оригинал",
+    "        # версией, в которую блок курса уже вписан.",
+    "        if (-not (Test-Path \"$claudeMd.bak-course\")) { Copy-Item $claudeMd \"$claudeMd.bak-course\" -ErrorAction SilentlyContinue }",
+    "    }",
+    "    if ($null -eq $cur) { $cur = '' }",
+    "    if ($cur -match [regex]::Escape($begin)) {",
+    "        $cur = [regex]::Replace($cur, '(?ms)' + [regex]::Escape($begin) + '.*?' + [regex]::Escape($end), $note)",
+    "    } else {",
+    "        $cur = ($cur.TrimEnd() + \"`n`n\" + $note + \"`n\")",
+    "    }",
+    "    New-Item -ItemType Directory -Force $claudeHome | Out-Null",
+    "    # Без BOM: этот файл читают Claude Code и git-инструменты, BOM им ни к чему.",
+    "    [System.IO.File]::WriteAllText($claudeMd, $cur, (New-Object System.Text.UTF8Encoding($false)))",
+    "    Write-Host \"Наставник подключён глобально (блок в ~/.claude/CLAUDE.md).\"",
+    "}",
+  ].join('\r\n');
+  // Скрипт «как до правки» в части глобальной установки: новый блок HM_COURSE_GLOBAL заменён прежним (cca497e).
+  const globalOldEdit = (t) => {
+    // не первое вхождение: такая же строка стоит и в ветке dry-run выше; нужен блок с началом в нулевой колонке
+    const a = t.indexOf("\nif ($env:HM_COURSE_GLOBAL -eq '1') {\n");
+    assert(a > 0, 'новый блок HM_COURSE_GLOBAL найден');
+    return t.slice(0, a + 1) + OLD_COURSE_GLOBAL.replace(/\r\n/g, '\n') + '\nexit 0\n';
+  };
+  const claudeHomeOf = (sb) => path.join(sb.profile, '.claude');
+  const noteOf = (sb) => '# >>> vibecoding-course >>>\nРежим наставника по вайбкодингу доступен глобально. Курс: ' + courseDirOf(sb) + '\nВести ученика — по скиллам course-driver / course-check / course-role и файлу ' + courseDirOf(sb) + '\\CLAUDE.md.\n# <<< vibecoding-course <<<';
+
+  ok('u10b course.ps1 HM_COURSE_GLOBAL: навыки курса ставятся в ~/.claude/skills (старая версия навыка заменяется целиком, чужие навыки целы), блок наставника дописывается в CLAUDE.md без BOM теми же байтами, бэкап снимается один раз, повтор идемпотентен, закрепок нет', () => {
+    needPs();
+    const sb = mkSandbox('cglob1');
+    try {
+      mkVendor(sb, courseZip(1));
+      const ch = claudeHomeOf(sb);
+      sb.mk(ch, 'skills', 'my-skill'); fs.writeFileSync(path.join(ch, 'skills', 'my-skill', 'SKILL.md'), 'мой навык');
+      sb.mk(ch, 'skills', 'course-driver'); fs.writeFileSync(path.join(ch, 'skills', 'course-driver', 'SKILL.md'), 'старая версия');
+      fs.writeFileSync(path.join(ch, 'skills', 'course-driver', 'stale.txt'), 'устаревший файл');
+      fs.writeFileSync(path.join(ch, 'CLAUDE.md'), 'Мои правила\r\nстрока 2\r\n');
+      const box = courseBox(sb);
+      const r = runCourse(sb, box, { HM_COURSE_GLOBAL: '1' });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'код 0' + dump);
+      assert(/Навыки курса установлены глобально/.test(r.out) && /Наставник подключён глобально/.test(r.out), 'итоги названы' + dump);
+      const rd = (rel) => fs.readFileSync(path.join(ch, ...rel.split('/')), 'utf8');
+      assert.strictEqual(rd('skills/course-driver/SKILL.md'), 'driver 1', 'старая версия навыка заменена' + dump);
+      assert(!fs.existsSync(path.join(ch, 'skills', 'course-driver', 'stale.txt')), 'файл прежней версии навыка убран (раскладка не смешивает старое с новым)');
+      assert.strictEqual(rd('skills/course-check/SKILL.md'), 'check 1', 'новый навык на месте');
+      assert.strictEqual(rd('skills/my-skill/SKILL.md'), 'мой навык', 'чужой навык цел');
+      const md = fs.readFileSync(path.join(ch, 'CLAUDE.md'));
+      assert(!(md[0] === 0xEF && md[1] === 0xBB), 'CLAUDE.md без BOM');
+      assert.strictEqual(md.toString('utf8'), 'Мои правила\r\nстрока 2' + '\n\n' + noteOf(sb) + '\n', 'блок дописан теми же байтами, что давал прежний WriteAllText');
+      assert.strictEqual(fs.readFileSync(path.join(ch, 'CLAUDE.md.bak-course'), 'utf8'), 'Мои правила\r\nстрока 2\r\n', 'бэкап — исходный файл');
+      assert.deepStrictEqual(pinsIn(ch).concat(pinsIn(path.join(ch, 'skills'))), [], 'закрепок и временных файлов нет');
+      // повтор с новой версией курса: блок заменён (один), бэкап не перетёрт, навыки обновлены
+      mkVendor(sb, courseZip(2));
+      const r2 = runCourse(sb, box, { HM_COURSE_GLOBAL: '1' });
+      assert.strictEqual(r2.status, 0, 'повтор: код 0\n' + r2.out + r2.err);
+      assert.strictEqual(rd('skills/course-driver/SKILL.md'), 'driver 2', 'навык обновлён');
+      const md2 = fs.readFileSync(path.join(ch, 'CLAUDE.md'), 'utf8');
+      assert.strictEqual((md2.match(/# >>> vibecoding-course >>>/g) || []).length, 1, 'блок один');
+      assert.strictEqual(md2, 'Мои правила\r\nстрока 2' + '\n\n' + noteOf(sb) + '\n', 'содержимое после повтора то же');
+      assert.strictEqual(fs.readFileSync(path.join(ch, 'CLAUDE.md.bak-course'), 'utf8'), 'Мои правила\r\nстрока 2\r\n', 'бэкап не перетёрт версией с блоком');
+      // CLAUDE.md не было: создаётся с одним блоком
+      const sc = mkSandbox('cglob1b');
+      try {
+        mkVendor(sc, courseZip(1));
+        const r3 = runCourse(sc, courseBox(sc), { HM_COURSE_GLOBAL: '1' });
+        assert.strictEqual(r3.status, 0, 'чистая машина: код 0\n' + r3.out + r3.err);
+        assert.strictEqual(fs.readFileSync(path.join(claudeHomeOf(sc), 'CLAUDE.md'), 'utf8'), '\n\n' + noteOf(sc) + '\n', 'файл создан с блоком (как раньше: TrimEnd пустой строки + два перевода)');
+        assert(!fs.existsSync(path.join(claudeHomeOf(sc), 'CLAUDE.md.bak-course')), 'бэкапа нет — снимать было нечего');
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b course.ps1 HM_COURSE_GLOBAL: junction на ~/.claude или на ~/.claude/skills и symlink на ~/.claude/CLAUDE.md — навыки и блок в чужую папку НЕ пишутся, чужие навыки не стираются, курс при этом установлен (код 0), причина названа; контроль: прежний блок (Remove-Item -Recurse, Copy-Item, WriteAllText) пишет и стирает', () => {
+    needPs();
+    const sb0 = mkSandbox('cglob2probe');
+    const canFile = canFileSymlink(sb0); sb0.cleanup();
+    // third: что прежний блок обязан сделать с чужой папкой (контроль)
+    const cases = [
+      ['junction на ~/.claude', (sb) => { sb.link(sb.victim, claudeHomeOf(sb)); },
+        (sb) => fs.existsSync(path.join(sb.victim, 'CLAUDE.md')) && fs.readFileSync(path.join(sb.victim, 'skills', 'course-driver', 'SKILL.md'), 'utf8') === 'driver 1'],
+      ['junction на ~/.claude/skills', (sb) => { sb.mk(claudeHomeOf(sb)); sb.link(sb.victim, path.join(claudeHomeOf(sb), 'skills')); },
+        (sb) => fs.readFileSync(path.join(sb.victim, 'course-driver', 'SKILL.md'), 'utf8') === 'driver 1'],
+    ];
+    if (canFile) cases.push(['symlink на ~/.claude/CLAUDE.md', (sb) => { sb.mk(claudeHomeOf(sb)); fs.symlinkSync(path.join(sb.victim, 'private.md'), path.join(claudeHomeOf(sb), 'CLAUDE.md'), 'file'); },
+      (sb) => /vibecoding-course/.test(fs.readFileSync(path.join(sb.victim, 'private.md'), 'utf8'))]);
+    cases.forEach(([label, setup, leaked]) => {
+      const seedVictim = (sb) => {
+        mkVictim(sb.victim);
+        sb.mk(sb.victim, 'course-driver'); fs.writeFileSync(path.join(sb.victim, 'course-driver', 'SKILL.md'), 'ЧУЖОЙ НАВЫК');   // имя совпадает с навыком курса
+        fs.writeFileSync(path.join(sb.victim, 'private.md'), 'ЧАСТНЫЕ ЗАМЕТКИ');
+      };
+      const sb = mkSandbox('cglob2');
+      try {
+        mkVendor(sb, courseZip(1));
+        seedVictim(sb);
+        setup(sb);
+        const v = victimState(sb);
+        const r = runCourse(sb, courseBox(sb), { HM_COURSE_GLOBAL: '1' });
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert.strictEqual(r.status, 0, label + ': курс установлен, шаг не красный' + dump);
+        assert.deepStrictEqual(victimState(sb), v, label + ': чужая папка цела — ничего не создано, не записано, не стёрто' + dump);
+        assert(/Наставник НЕ подключён глобально/.test(r.out) || /Блок наставника в ~\/\.claude\/CLAUDE\.md не записан/.test(r.out), label + ': причина названа' + dump);
+        assert(/ссылк/.test(r.out) && /rmdir/.test(r.out), label + ': что сделать названо' + dump);
+        assert(!/Наставник подключён глобально \(блок/.test(r.out), label + ': успех не объявлен' + dump);
+        assert.strictEqual(readCourse(sb, 'CLAUDE.md'), 'claude 1', label + ': сам курс на месте' + dump);
+        // контроль: прежний блок
+        const sc = mkSandbox('cglob2c');
+        try {
+          mkVendor(sc, courseZip(1));
+          seedVictim(sc);
+          setup(sc);
+          const rc = runCourse(sc, courseBox(sc, { edit: globalOldEdit }), { HM_COURSE_GLOBAL: '1' });
+          let did = false;
+          try { did = leaked(sc); } catch (e) { did = false; }
+          assert(did, label + ': КОНТРОЛЬ: прежний блок изменил чужую папку (навыки или блок ушли в неё, чужой навык стёрт): ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+        } finally { sc.cleanup(); }
+      } finally { sb.cleanup(); }
+    });
+  });
+
+  ok('u10b course.ps1: symlink на файл курса при обновлении (CLAUDE.md курса → чужой файл) — отказ (код 1) с названной причиной, файл по ссылке цел (прежний Expand-Archive молча заменял ссылку, новый код строже); висячий symlink на файле-лаунчере Запустить курс.cmd не создаёт файл в цели, лаунчер с атрибутом только-чтение заменяется; контроль: прежний WriteAllText идёт сквозь', () => {
+    needPs();
+    const sb0 = mkSandbox('cfile0');
+    const can = canFileSymlink(sb0); sb0.cleanup();
+    if (!can) SKIP('нет права создавать symlink на файлы (нужен режим разработчика)');
+    const sb = mkSandbox('cfile1');
+    try {
+      mkVendor(sb, courseZip(2));
+      seedInstalled(sb);
+      const c = courseDirOf(sb);
+      const target = path.join(sb.victim, 'private-claude.md'); fs.writeFileSync(target, 'ЧАСТНЫЙ ФАЙЛ');
+      drop(path.join(c, 'CLAUDE.md')); fs.symlinkSync(target, path.join(c, 'CLAUDE.md'), 'file');
+      const r = runCourse(sb, courseBox(sb));
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'отказ: код 1' + dump);
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ЧАСТНЫЙ ФАЙЛ', 'файл по ссылке не переписан' + dump);
+      assert(/Не удалось распаковать курс/.test(r.out) && /ссылк/.test(r.out), 'причина названа' + dump);
+      assert(fs.lstatSync(path.join(c, 'CLAUDE.md')).isSymbolicLink(), 'саму ссылку не трогали');
+      // как было: Expand-Archive -Force на этой сборке PowerShell 5.1 молча ЗАМЕНЯЕТ ссылку обычным файлом и цель не трогает.
+      // Новый код строже (отказ, ничего не пишется): в папке курса файлам-ссылкам взяться неоткуда, кроме подложенных.
+      const sc = mkSandbox('cfile1c');
+      try {
+        seedInstalled(sc);
+        const cc = courseDirOf(sc);
+        const targetC = path.join(sc.victim, 'private-claude.md'); fs.writeFileSync(targetC, 'ЧАСТНЫЙ ФАЙЛ');
+        drop(path.join(cc, 'CLAUDE.md')); fs.symlinkSync(targetC, path.join(cc, 'CLAUDE.md'), 'file');
+        const zipPath = path.join(sc.base, 'c.zip'); fs.writeFileSync(zipPath, courseZip(2));
+        runPs(sc, OLD_COURSE_LOOP, { HM_T_TARGET: path.join(sc.profile, 'HamidunCourse'), HM_T_ZIP: zipPath });
+        assert.strictEqual(fs.readFileSync(targetC, 'utf8'), 'ЧАСТНЫЙ ФАЙЛ', 'прежний Expand-Archive цель ссылки не трогал');
+        assert(!fs.lstatSync(path.join(cc, 'CLAUDE.md')).isSymbolicLink(), 'прежний Expand-Archive заменил ссылку обычным файлом (новый код отказывает)');
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+    // лаунчер: настоящая функция New-HmCourseShortcut из course.ps1; стол не нужен (его проверяют тесты u4)
+    const LAUNCHER_FROM = 'function New-HmCourseShortcut {';
+    const LAUNCHER_TO = '$courseLnk = New-HmCourseShortcut';
+    const runLauncher = (sx, o) => {
+      o = o || {};
+      let fn = cutText(rawWin('course.ps1'), LAUNCHER_FROM, LAUNCHER_TO);
+      if (o.edit) { const e = o.edit(fn); assert(e !== fn, 'мутация применилась'); fn = e; }
+      return runPs(sx, [LIB_PRELUDE(sx), 'function Get-HmSafeShellFolder { param($Kind) return $null }', fn,
+        '$ret = New-HmCourseShortcut -Name ' + q('Курс тест') + ' -CourseDir ' + q(courseDirOf(sx)), "Show 'RET' $ret", "Write-Output 'CUT-DONE'"].join('\r\n'));
+    };
+    const LAUNCHER_BODY = ['@echo off', 'chcp 65001 >nul', 'cd /d "%~dp0"', 'where claude >nul 2>&1', 'if %errorlevel%==0 (', '  claude', '  goto :eof', ')', 'where codex >nul 2>&1', 'if %errorlevel%==0 (', '  codex', '  goto :eof', ')',
+      'echo Ни Claude Code, ни Codex не найдены.', 'echo Запусти установщик ещё раз и включи компонент Claude Code,', 'echo либо открой эту папку в своём агенте и напиши: начать', 'pause'].join('\r\n') + '\r\n';
+    const sd = mkSandbox('claun1');
+    try {
+      sd.mk(courseDirOf(sd));
+      const lp = path.join(courseDirOf(sd), 'Запустить курс.cmd');
+      const r = runLauncher(sd);
+      assert(/CUT-DONE/.test(r.out), 'функция отработала: ' + r.out + r.err);
+      const buf = fs.readFileSync(lp);
+      assert(!(buf[0] === 0xEF && buf[1] === 0xBB), 'лаунчер без BOM (cmd.exe его не понимает)');
+      assert.strictEqual(buf.toString('utf8'), LAUNCHER_BODY, 'лаунчер — те же байты, что писал WriteAllText');
+      // существующий лаунчер «только чтение» — наш файл, заменяется
+      fs.writeFileSync(lp, 'старый'); fs.chmodSync(lp, 0o444);
+      const r2 = runLauncher(sd);
+      assert.strictEqual(fs.readFileSync(lp, 'utf8'), LAUNCHER_BODY, 'лаунчер «только чтение» заменён: ' + r2.out + r2.err);
+      assert.deepStrictEqual(pinsIn(courseDirOf(sd)), [], 'временных файлов нет');
+    } finally { sd.cleanup(); }
+    const se = mkSandbox('claun2');
+    try {
+      se.mk(courseDirOf(se));
+      const lp = path.join(courseDirOf(se), 'Запустить курс.cmd');
+      const dangling = path.join(se.victim, 'made-by-launcher.cmd');
+      fs.symlinkSync(dangling, lp, 'file');
+      const r = runLauncher(se);
+      assert(!fs.existsSync(dangling), 'висячий symlink не создал файл в цели: ' + r.out + r.err);
+      assert(/Ярлык не создался \(не критично\)/.test(r.out) && /ссылк/.test(r.out), 'отказ назван, шаг не красный: ' + r.out);
+      const sf = mkSandbox('claun3');
+      try {
+        sf.mk(courseDirOf(sf));
+        const lpC = path.join(courseDirOf(sf), 'Запустить курс.cmd');
+        const danglingC = path.join(sf.victim, 'made-by-launcher.cmd');
+        fs.symlinkSync(danglingC, lpC, 'file');
+        runLauncher(sf, { edit: (t) => t.replace(/Write-HmFileSafe -Path \$launcherPath -Bytes \(\(New-Object Text\.UTF8Encoding \$false\)\.GetBytes\(\$launcherBody \+ "`r`n"\)\) -ClearReadOnly/, '[IO.File]::WriteAllText($launcherPath, $launcherBody + "`r`n", (New-Object Text.UTF8Encoding $false))') });
+        assert(fs.existsSync(danglingC), 'КОНТРОЛЬ: прежний WriteAllText создал файл в цели через висячую ссылку');
+      } finally { sf.cleanup(); }
+    } finally { se.cleanup(); }
+  });
+
+  ok('u10b course.ps1: сама проверка не удалась (цепочку не прочитать) или папку курса не закрепить — отказ с кодом 1 и названной причиной, ничего не удалено и не записано (fail-closed)', () => {
+    needPs();
+    const dot = ". (Join-Path $PSScriptRoot '_linksafe.ps1')";
+    const inject = (add) => (t) => { const i = t.indexOf(dot); assert(i > 0, 'course.ps1 подключает _linksafe.ps1'); const e = t.indexOf('\n', i); return t.slice(0, e + 1) + add + '\n' + t.slice(e + 1); };
+    const cases = [
+      ['Find-HmLinkOnPath бросает', 'function Find-HmLinkOnPath { throw "simulated attribute failure" }', /не удалось проверить, что папка курса — обычная папка \(simulated attribute failure\)/],
+      ['Open-HmPinnedDir бросает IOException', 'function Open-HmPinnedDir { throw (New-Object System.IO.IOException("simulated pin failure")) }', /Не удалось подготовить папку курса .*simulated pin failure/],
+    ];
+    cases.forEach(([label, add, want]) => {
+      const sb = mkSandbox('cfail');
+      try {
+        mkVendor(sb, courseZip(2));
+        seedInstalled(sb);
+        const c = courseDirOf(sb);
+        const before = relTree(c);
+        const r = runCourse(sb, courseBox(sb, { edit: inject(add) }));
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert.strictEqual(r.status, 1, label + ': код 1' + dump);
+        assert(want.test(r.out), label + ': причина названа' + dump);
+        assert.deepStrictEqual(relTree(c), before, label + ': курс не тронут — ничего не удалено и не записано' + dump);
+        assert.strictEqual(readCourse(sb, 'CLAUDE.md'), 'claude 0', label + ': файлы курса на месте');
+        assert(!/Курс распакован|OK: курс-симулятор установлен/.test(r.out), label + ': успех не объявлен');
+      } finally { sb.cleanup(); }
+    });
+  });
+
+  ok('u10b course.ps1: занятый файл в tracks при обновлении — код 1 и прежнее сообщение про занятую папку, остальные папки курса не тронуты, после освобождения обновление проходит', () => {
+    needPs();
+    const sb = mkSandbox('cbusy');
+    try {
+      mkVendor(sb, courseZip(2));
+      seedInstalled(sb);
+      const c = courseDirOf(sb);
+      const busy = path.join(c, 'tracks', '_core', 'busy.md'); fs.writeFileSync(busy, 'занят');
+      const box = courseBox(sb);
+      const pre = "$h = [IO.File]::Open(" + q(busy) + ", 'Open', 'Read', 'None')\r\n";
+      const r = runPs(sb, pre + '& ' + q(path.join(box, 'course.ps1')) + '\r\nexit $LASTEXITCODE', { HM_VENDOR: sb.vendor, HM_T_PROFILE: sb.profile });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'код 1' + dump);
+      assert(/Не удалось обновить файлы курса \(tracks\): папка занята/.test(r.out), 'прежнее сообщение' + dump);
+      assert(fs.existsSync(path.join(c, '.claude', 'skills', 'old-skill', 'SKILL.md')) && fs.existsSync(path.join(c, '.course', 'knowledge', 'old.md')), 'остальные папки курса не тронуты (до них не дошли)' + dump);
+      assert.strictEqual(readCourse(sb, 'CLAUDE.md'), 'claude 0', 'файлы курса не перезаписаны наполовину');
+      assert.deepStrictEqual(pinsIn(path.join(c, 'tracks')).concat(pinsIn(c)), [], 'закрепок нет');
+      const r2 = runCourse(sb, box);
+      assert.strictEqual(r2.status, 0, 'после освобождения обновление проходит\n' + r2.out + r2.err);
+      assert.strictEqual(readCourse(sb, 'tracks/_core/m01.md'), 'track 2', 'новая версия на месте');
+    } finally { sb.cleanup(); }
+  });
+
+
+  // =========================================================================
+  // 7. config.ps1: снос клона пака, старых копий ~/.claude.backup.* и скиллов снятых наборов — без хода по ссылкам (F17)
+  // =========================================================================
+  function cfgFixture(sb) {
+    const pack = sb.mk(sb.base, 'pack');
+    sb.mk(pack, '.claude', 'skills', 'pack-a'); sb.mk(pack, '.claude', 'skills', 'pack-b'); sb.mk(pack, '.claude', 'rules');
+    fs.writeFileSync(path.join(pack, '.claude', 'skills', 'pack-a', 'SKILL.md'), 'A');
+    fs.writeFileSync(path.join(pack, '.claude', 'skills', 'pack-b', 'SKILL.md'), 'B');
+    fs.writeFileSync(path.join(pack, '.claude', 'rules', 'new-rule.md'), 'fresh rule');
+    fs.writeFileSync(path.join(pack, '.claude', 'settings.json'), '{"fresh":"base"}');
+    fs.writeFileSync(path.join(pack, 'install.ps1'), 'exit 0\r\n');
+    fs.writeFileSync(path.join(pack, 'CLAUDE.md'), 'fresh claude md');
+    fs.writeFileSync(path.join(pack, '.credentials.template.env'), 'TEMPLATE=1');
+    sb.pack = pack;
+    return pack;
+  }
+  // Запуск настоящего config.ps1 в песочнице: профиль, APPDATA, TEMP — внутри каталога теста (runPs проверяет первым делом).
+  // online: без HM_BUNDLED_CONFIG — ветка с git, который подменён функцией (сеть и настоящий clone не нужны).
+  function cfgRun(sb, o) {
+    o = o || {};
+    const driver = (o.driver || []).concat(['& ' + q(path.join(o.scriptsDir || WIN, 'config.ps1')), 'exit $LASTEXITCODE']).join('\r\n');
+    const env = Object.assign({ HM_TEST_VICTIM: sb.victim, HM_TEST_SWAPLOG: path.join(sb.base, 'swap.log'), HM_TEST_GITLOG: path.join(sb.base, 'git.log') }, o.env || {});
+    if (!o.online) env.HM_BUNDLED_CONFIG = sb.pack;
+    fs.writeFileSync(path.join(sb.base, 'swap.log'), ''); fs.writeFileSync(path.join(sb.base, 'git.log'), '');
+    const r = runPs(sb, driver, env, { timeout: 420000 });
+    r.swap = fs.readFileSync(path.join(sb.base, 'swap.log'), 'utf8').split(/\r?\n/).filter(Boolean);
+    r.git = fs.readFileSync(path.join(sb.base, 'git.log'), 'utf8').split(/\r?\n/).filter(Boolean);
+    return r;
+  }
+  // Процесс уже завершился, но ОС закрывает его дескрипторы (и удаляет файлы DeleteOnClose) чуть позже: ждём до 3 секунд.
+  const waitNoPinsIn = (dirs) => {
+    const left = () => dirs.reduce((a, d) => a.concat(pinsIn(d).map((n) => path.join(d, n))), []);
+    for (let i = 0; i < 30 && left().length; i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    return left();
+  };
+  // config.ps1 с правкой текста рядом с настоящими библиотеками — отрицательные контроли «как до правки».
+  function cfgVariant(sb, name, edit) {
+    const dir = path.join(sb.base, name); fs.mkdirSync(dir, { recursive: true });
+    ['_cfgmigrate.ps1', '_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+    const src = rawWin('config.ps1').replace(/\r\n/g, '\n');
+    const edited = edit(src);
+    assert(edited !== src, 'мутация config.ps1 применилась: ' + name);
+    fs.writeFileSync(path.join(dir, 'config.ps1'), BOM + edited.replace(/\n/g, '\r\n'));
+    return dir;
+  }
+  // Поддельный git: пишет вызов в журнал и кладёт «клон» с .claude; Get-Command git в нужный миг подменяет ~/.hamidun-setup ссылкой.
+  const FAKE_GIT_PS = [
+    'function git {',
+    "  Add-Content -LiteralPath $env:HM_TEST_GITLOG -Value ('GIT ' + ($args -join ' '))",
+    '  $dest = [string]$args[$args.Count - 1]',
+    '  New-Item -ItemType Directory -Force -Path (Join-Path $dest ".claude\\rules") | Out-Null',
+    "  [System.IO.File]::WriteAllText((Join-Path $dest '.claude\\rules\\new-rule.md'), 'fresh rule')",
+    "  [System.IO.File]::WriteAllText((Join-Path $dest '.claude\\settings.json'), '{\"fresh\":\"base\"}')",
+    '  $global:LASTEXITCODE = 0',
+    '}',
+  ];
+  const HOOK_SETUP_SWAP = FAKE_GIT_PS.concat([
+    '$global:HmSwapped = $false',
+    'function Get-Command {',
+    '  param($Name, $ErrorAction)',
+    "  if (\"$Name\" -eq 'git') {",
+    '    if (-not $global:HmSwapped) {',
+    '      $global:HmSwapped = $true',
+    "      $s = Join-Path $env:USERPROFILE '.hamidun-setup'",
+    "      Rename-Item -LiteralPath $s -NewName '.hamidun-setup-real'",
+    '      New-Item -ItemType Junction -Path $s -Value $env:HM_TEST_VICTIM | Out-Null',
+    "      Add-Content -LiteralPath $env:HM_TEST_SWAPLOG -Value 'SWAP=MOVED'",
+    '    }',
+    "    return [pscustomobject]@{ Source = 'git' }",
+    '  }',
+    '  if ($ErrorAction) { Microsoft.PowerShell.Core\\Get-Command $Name -ErrorAction $ErrorAction } else { Microsoft.PowerShell.Core\\Get-Command $Name }',
+    '}',
+  ]);
+  const CLONE_OLD = 'if (Test-HmIsReparse $clone) { try { [System.IO.Directory]::Delete($clone, $false) } catch { } } else { Remove-Item -Recurse -Force $clone -ErrorAction SilentlyContinue }';
+  const CLONE_NEW = 'Remove-HmTreeNoFollow -Path $clone -Anchor $env:USERPROFILE';
+  const seedOldClone = (sb) => {
+    const clone = path.join(sb.profile, '.hamidun-setup', 'config-repo');
+    sb.mk(clone, '.git', 'objects', 'pack'); sb.mk(clone, '.claude');
+    fs.writeFileSync(path.join(clone, '.git', 'objects', 'pack', 'pack-1.idx'), 'idx'); fs.chmodSync(path.join(clone, '.git', 'objects', 'pack', 'pack-1.idx'), 0o444);
+    fs.writeFileSync(path.join(clone, '.claude', 'old.txt'), 'old');
+    return clone;
+  };
+
+  ok('u10b config.ps1: онлайн-ветка заменяет прежний клон пака (в нём read-only файлы .git и вложенные папки), git вызывается один раз, пак раскладывается; занятый файл в старом клоне — прежнее сообщение и код 1', () => {
+    needPs();
+    const sb = mkSandbox('cfg1');
+    try {
+      cfgFixture(sb);
+      const clone = seedOldClone(sb);
+      const r = cfgRun(sb, { online: true, driver: FAKE_GIT_PS, env: { HM_ADDITIVE: '1' } });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'код 0' + dump);
+      assert.strictEqual(r.git.length, 1, 'git вызван один раз' + dump);
+      assert(!fs.existsSync(path.join(clone, '.git')) && !fs.existsSync(path.join(clone, '.claude', 'old.txt')), 'прежний клон убран целиком (включая read-only файл .git)' + dump);
+      assert.strictEqual(fs.readFileSync(path.join(sb.profile, '.claude', 'rules', 'new-rule.md'), 'utf8'), 'fresh rule', 'пак разложен из нового клона' + dump);
+      assert.deepStrictEqual(waitNoPinsIn([clone, path.join(clone, '.claude'), path.join(sb.profile, '.claude'), path.join(sb.profile, '.hamidun-setup')]), [], 'закрепки и временные файлы после процесса не остались');
+    } finally { sb.cleanup(); }
+    // занятый файл в старом клоне: снос убирает остальное, а шаг останавливается прежним сообщением
+    const sc = mkSandbox('cfg1b');
+    try {
+      cfgFixture(sc);
+      const clone = seedOldClone(sc);
+      const busy = path.join(clone, '.claude', 'busy.txt'); fs.writeFileSync(busy, 'b');
+      const r = cfgRun(sc, { online: true, driver: ["$h = [IO.File]::Open(" + q(busy) + ", 'Open', 'Read', 'None')"].concat(FAKE_GIT_PS), env: { HM_ADDITIVE: '1' } });
+      assert.strictEqual(r.status, 1, 'код 1\n' + r.out + r.err);
+      assert(/Не удалось очистить каталог для клона/.test(r.out), 'прежнее сообщение\n' + r.out);
+      assert.strictEqual(r.git.length, 0, 'git не вызывался');
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b config.ps1: ~/.hamidun-setup подменили ссылкой МЕЖДУ проверкой цепочки и сносом клона — снос не идёт в чужую папку (причина названа, код 1, git не вызван); контроль: прежний Remove-Item -Recurse стирает config-repo в чужой папке', () => {
+    needPs();
+    const sb = mkSandbox('cfg2');
+    try {
+      cfgFixture(sb);
+      seedOldClone(sb);
+      sb.mk(sb.victim, 'config-repo', 'sub'); fs.writeFileSync(path.join(sb.victim, 'config-repo', 'sub', 'keep.txt'), 'чужое'); fs.writeFileSync(path.join(sb.victim, 'config-repo', 'top.txt'), 'чужое');
+      sb.links.push(path.join(sb.profile, '.hamidun-setup'));
+      const v = victimState(sb);
+      const r = cfgRun(sb, { online: true, driver: HOOK_SETUP_SWAP, env: { HM_ADDITIVE: '1' } });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(r.swap, ['SWAP=MOVED'], 'подмена удалась (иначе тест ничего не доказывает)' + dump);
+      assert.strictEqual(r.status, 1, 'код 1' + dump);
+      assert.deepStrictEqual(victimState(sb), v, 'чужая папка цела байт в байт' + dump);
+      assert.deepStrictEqual(r.git, [], 'git не вызывался — клон в чужую папку не лёг' + dump);
+      assert(/не прошёл проверку на ссылки при удалении/.test(r.out) && /\.hamidun-setup/.test(r.out) && /rmdir/.test(r.out), 'причина и выход названы' + dump);
+      assert(!/БЕЗОПАСНОСТЬ:/.test(r.out) && !/отказано в доступе|доступ запрещ|занят/i.test(r.out), 'слова не путают разбор причины в main.js');
+      // КОНТРОЛЬ: прежний снос
+      const sc = mkSandbox('cfg2c');
+      try {
+        cfgFixture(sc);
+        seedOldClone(sc);
+        sc.mk(sc.victim, 'config-repo', 'sub'); fs.writeFileSync(path.join(sc.victim, 'config-repo', 'sub', 'keep.txt'), 'чужое'); fs.writeFileSync(path.join(sc.victim, 'config-repo', 'top.txt'), 'чужое');
+        sc.links.push(path.join(sc.profile, '.hamidun-setup'));
+        const dir = cfgVariant(sc, 'oldclone', (t) => t.replace(CLONE_NEW, () => CLONE_OLD));
+        const rc = cfgRun(sc, { online: true, driver: HOOK_SETUP_SWAP, scriptsDir: dir, env: { HM_ADDITIVE: '1' } });
+        assert.deepStrictEqual(rc.swap, ['SWAP=MOVED'], 'контроль: подмена удалась');
+        assert(!fs.existsSync(path.join(sc.victim, 'config-repo', 'top.txt')) && !fs.existsSync(path.join(sc.victim, 'config-repo', 'sub', 'keep.txt')),
+          'КОНТРОЛЬ: прежний Remove-Item -Recurse стёр config-repo в чужой папке через родительскую ссылку: ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  // Подмена ~/.claude/skills ссылкой в миг, когда прунинг начинает перечислять эту папку (корень ~/.claude закреплён и не переименовывается,
+  // а skills внутри — переименовывается).
+  const HOOK_SKILLS_SWAP = [
+    '$global:HmSwapped = $false',
+    'function Get-ChildItem {',
+    '  [CmdletBinding()]',
+    '  param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [switch]$Directory, [switch]$Force, [switch]$Recurse, [string]$Filter)',
+    "  if ($Directory -and $Path -and -not $LiteralPath -and ([string]$Path[0]) -like '*skills' -and -not $global:HmSwapped) {",
+    '    $global:HmSwapped = $true',
+    "    $c = Join-Path $env:USERPROFILE '.claude'",
+    "    $r = 'MOVED'",
+    "    try { Rename-Item -LiteralPath (Join-Path $c 'skills') -NewName 'skills-real' -ErrorAction Stop; New-Item -ItemType Junction -Path (Join-Path $c 'skills') -Value $env:HM_TEST_VICTIM -ErrorAction Stop | Out-Null } catch { $r = 'BLOCKED' }",
+    "    Add-Content -LiteralPath $env:HM_TEST_SWAPLOG -Value ('SWAP=' + $r)",
+    '  }',
+    '  Microsoft.PowerShell.Management\\Get-ChildItem @PSBoundParameters',
+    '}',
+  ];
+  const PRUNE_OLD = 'Remove-Item -Recurse -Force -LiteralPath $skillItem.FullName -ErrorAction SilentlyContinue';
+  const PRUNE_NEW = 'Remove-HmTreeNoFollow -Path $skillItem.FullName -Anchor $env:USERPROFILE';
+
+  ok('u10b config.ps1: прунинг скиллов снятого набора убирает наш скилл целиком (в нём read-only файл и вложенная папка), остальные скиллы и пред-существующие цел; подмена ~/.claude/skills ссылкой перед перечислением — прунинг останавливается, чужие файлы целы; контроль: прежний Remove-Item -Recurse стирает чужое', () => {
+    needPs();
+    const env = { HM_ADDITIVE: '1', HM_KEEP_SKILLS: 'pack-a', HM_ALL_PACK_SKILLS: 'pack-a,pack-b' };
+    const sb = mkSandbox('cfg3');
+    try {
+      cfgFixture(sb);
+      sb.mk(sb.pack, '.claude', 'skills', 'pack-b', 'refs');
+      fs.writeFileSync(path.join(sb.pack, '.claude', 'skills', 'pack-b', 'refs', 'r.md'), 'R');
+      fs.writeFileSync(path.join(sb.pack, '.claude', 'skills', 'pack-b', 'ro.md'), 'RO'); fs.chmodSync(path.join(sb.pack, '.claude', 'skills', 'pack-b', 'ro.md'), 0o444);
+      const r = cfgRun(sb, { env });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'код 0' + dump);
+      const sk = path.join(sb.profile, '.claude', 'skills');
+      assert(fs.existsSync(path.join(sk, 'pack-a', 'SKILL.md')), 'выбранный набор на месте' + dump);
+      assert(!fs.existsSync(path.join(sk, 'pack-b')), 'скилл снятого набора убран целиком' + dump);
+      assert(/Скиллы отфильтрованы по выбранным наборам \(убрано: 1\)/.test(r.out), 'итог назван' + dump);
+      assert.deepStrictEqual(pinsIn(sk), [], 'закрепок в skills нет');
+    } finally { sb.cleanup(); }
+    // подмена skills перед перечислением
+    const sc = mkSandbox('cfg3b');
+    try {
+      cfgFixture(sc);
+      sc.mk(sc.victim, 'pack-b', 'inner'); fs.writeFileSync(path.join(sc.victim, 'pack-b', 'inner', 'private.txt'), 'чужое'); fs.writeFileSync(path.join(sc.victim, 'pack-b', 'top.txt'), 'чужое');
+      sc.links.push(path.join(sc.profile, '.claude', 'skills'));
+      const v = victimState(sc);
+      const r = cfgRun(sc, { env, driver: HOOK_SKILLS_SWAP });
+      const dump = '\n' + r.out + r.err;
+      assert.deepStrictEqual(r.swap, ['SWAP=MOVED'], 'подмена удалась (иначе тест ничего не доказывает)' + dump);
+      assert.strictEqual(r.status, 0, 'шаг не красный (прунинг — необязательная часть)' + dump);
+      assert.deepStrictEqual(victimState(sc), v, 'чужая папка цела — pack-b в ней не стёрт' + dump);
+      assert(/Прунинг остановлен: путь к ~\/\.claude\/skills не прошёл проверку на ссылки/.test(r.out), 'остановка названа' + dump);
+      assert(!/Скиллы отфильтрованы по выбранным наборам \(убрано: 0\)/.test(r.out), 'ложного «убрано: 0 — нашего ничего не нашлось» нет');
+      // КОНТРОЛЬ
+      const sd = mkSandbox('cfg3c');
+      try {
+        cfgFixture(sd);
+        sd.mk(sd.victim, 'pack-b', 'inner'); fs.writeFileSync(path.join(sd.victim, 'pack-b', 'inner', 'private.txt'), 'чужое'); fs.writeFileSync(path.join(sd.victim, 'pack-b', 'top.txt'), 'чужое');
+        sd.links.push(path.join(sd.profile, '.claude', 'skills'));
+        const dir = cfgVariant(sd, 'oldprune', (t) => t.replace(PRUNE_NEW, () => PRUNE_OLD));
+        const rc = cfgRun(sd, { env, driver: HOOK_SKILLS_SWAP, scriptsDir: dir });
+        assert.deepStrictEqual(rc.swap, ['SWAP=MOVED'], 'контроль: подмена удалась');
+        assert(!fs.existsSync(path.join(sd.victim, 'pack-b')), 'КОНТРОЛЬ: прежний Remove-Item -Recurse стёр pack-b в чужой папке через подмену skills: ' + relTree(sd.victim).join(' | ') + '\n' + rc.out + rc.err);
+      } finally { sd.cleanup(); }
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b config.ps1: ретенция — занятый файл в старой копии: копия остаётся (причина в журнале), остальные лишние убраны, шаг не падает', () => {
+    needPs();
+    const sb = mkSandbox('cfg5');
+    try {
+      cfgFixture(sb);
+      fs.writeFileSync(path.join(sb.profile, 'x.txt'), 'x');
+      sb.mk(sb.profile, '.claude'); fs.writeFileSync(path.join(sb.profile, '.claude', 'settings.json'), '{"user":"custom"}');
+      const stamp = (n) => path.join(sb.profile, '.claude.backup.201901' + String(n).padStart(2, '0') + '-000001-aaaaaaaa');
+      for (let n = 1; n <= 5; n++) sb.mk(stamp(n));
+      sb.mk(stamp(2), 'd'); const busy = path.join(stamp(2), 'd', 'busy.txt'); fs.writeFileSync(busy, 'b');
+      sb.mk(stamp(1), 'e'); fs.writeFileSync(path.join(stamp(1), 'e', 'f.txt'), 'f');
+      const r = cfgRun(sb, { env: { HM_ADDITIVE: '1' }, driver: ["$h = [IO.File]::Open(" + q(busy) + ", 'Open', 'Read', 'None')"] });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'шаг не красный (ретенция — уборка за собой)' + dump);
+      assert(fs.existsSync(stamp(2)) && fs.existsSync(busy), 'копия с занятым файлом осталась на месте' + dump);
+      assert(!fs.existsSync(stamp(1)) && !fs.existsSync(stamp(3)), 'остальные лишние копии убраны' + dump);
+      assert(/старую копию \.claude\.backup\.20190102-000001-aaaaaaaa убрать не вышло — оставляю: .*busy\.txt/.test(r.out), 'причина названа с путём занятого файла' + dump);
+      assert(fs.existsSync(stamp(4)) && fs.existsSync(stamp(5)), 'новейшие старые копии на месте');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b config.ps1: ретенция копий ~/.claude.backup.* — лишние старые убираются целиком, вложенная junction снимается как ссылка (цель цела), старая копия-ссылка снимается как ссылка, три новейшие остаются', () => {
+    needPs();
+    const sb = mkSandbox('cfg4');
+    try {
+      cfgFixture(sb);
+      sb.mk(sb.profile, '.claude', 'skills', 'user-skill'); fs.writeFileSync(path.join(sb.profile, '.claude', 'skills', 'user-skill', 'SKILL.md'), 'мой');
+      fs.writeFileSync(path.join(sb.profile, '.claude', 'settings.json'), '{"user":"custom"}');
+      const stamp = (n) => path.join(sb.profile, '.claude.backup.201901' + String(n).padStart(2, '0') + '-000001-aaaaaaaa');
+      fs.writeFileSync(path.join(sb.victim, 'private.txt'), 'чужое'); sb.mk(sb.victim, 'inner'); fs.writeFileSync(path.join(sb.victim, 'inner', 'p2.txt'), 'чужое2');
+      sb.link(sb.victim, stamp(1));                                              // самая старая — сама ссылка
+      sb.mk(stamp(2), 'x'); fs.writeFileSync(path.join(stamp(2), 'x', 'f.txt'), 'f'); sb.link(sb.victim, path.join(stamp(2), 'nested-link'));   // вложенная ссылка
+      sb.mk(stamp(3), 'deep', 'er'); fs.writeFileSync(path.join(stamp(3), 'deep', 'er', 'ro.txt'), 'ro'); fs.chmodSync(path.join(stamp(3), 'deep', 'er', 'ro.txt'), 0o444);
+      sb.mk(stamp(4)); sb.mk(stamp(5));
+      const v = victimState(sb);
+      const r = cfgRun(sb, { env: { HM_ADDITIVE: '1' } });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'код 0' + dump);
+      const left = fs.readdirSync(sb.profile).filter((n) => /^\.claude\.backup\./.test(n)).sort();
+      assert.strictEqual(left.length, 3, 'осталось три новейших копии (новая + две из пяти): ' + left.join(', ') + dump);
+      assert.deepStrictEqual(left.filter((n) => /201901/.test(n)), [path.basename(stamp(4)), path.basename(stamp(5))], 'остались 04 и 05, а 01-03 убраны' + dump);
+      assert.deepStrictEqual(victimState(sb), v, 'чужая папка цела: ссылки сняты как ссылки, содержимое цели не тронуто' + dump);
+      assert(/пропускаю ссылку, а не копию/.test(r.out), 'копия-ссылка названа в журнале (прежнее поведение)' + dump);
+      assert(/Убираю лишнюю старую копию \.claude\.backup\.2019010[23]-000001-aaaaaaaa — в ней много файлов/.test(r.out), 'перед сносом большой копии сказано, что это может занять время (тишина — не зависание)' + dump);
+    } finally { sb.cleanup(); }
+  });
+
+
+  // =========================================================================
+  // 8. Остальные писатели под администратором в пользовательские папки: nomad, bridge, extension, uv, pydeps
+  //    (каталог — по цепочке от профиля, файл — переносом по имени; ссылка на любом звене — отказ со строкой в журнале)
+  // =========================================================================
+  // Помощники «как до правки»: запись открывает ИМЯ файла и идёт по ссылкам, каталог создаётся без проверок цепочки
+  // (Copy-Item / WriteAllText / Set-Content / New-Item -Force вели себя именно так). Подкладываются ПОСЛЕ библиотеки — контроль.
+  const NEUTRAL_LIB = [
+    'function New-HmUserDir { param([string]$Path, [string]$Anchor) [void][System.IO.Directory]::CreateDirectory($Path); return $Path }',
+    'function Write-HmUserFile { param([string]$Path, [byte[]]$Bytes, [string]$Anchor, [switch]$ClearReadOnly) [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path)); [System.IO.File]::WriteAllBytes($Path, $Bytes) }',
+    'function Open-HmPinnedDir { param([string]$Dir, [string]$Anchor) [void][System.IO.Directory]::CreateDirectory($Dir); return $null }',
+  ].join('\r\n');
+  // Журнал вызовов, которые обязаны остаться заглушкой: ни один тест этого раздела не пишет в реестр.
+  const REG_STUBS = [
+    'function New-ItemProperty { param($Path, $Name, $Value, $PropertyType, [switch]$Force) Add-Content -LiteralPath $env:HM_T_LOG -Value ("REG-WRITE " + $Path + "|" + $Name + "|" + $Value) }',
+    // New-Item перехватывается только для веток реестра (HKCU:\…); каталоги на диске создаются по-настоящему — прежний код делал это им.
+    'function New-Item { param($Path, $ItemType, $Value, [switch]$Force)',
+    '  if ("$Path" -like "HK*:*") { Add-Content -LiteralPath $env:HM_T_LOG -Value ("NEW-ITEM " + $Path); return }',
+    '  Microsoft.PowerShell.Management\\New-Item @PSBoundParameters }',
+  ].join('\r\n');
+  const logOf = (sb) => { try { return fs.readFileSync(path.join(sb.base, 'calls.log'), 'utf8').split(/\r?\n/).filter(Boolean); } catch (e) { return []; } };
+  const cutEnv = (sb, extra) => Object.assign({ HM_T_LOG: path.join(sb.base, 'calls.log') }, extra || {});
+
+  // ---- 8.1 nomad.ps1: брендинг и облачный блок в HERMES_HOME ----------------------------------------------------------
+  const NOMAD_FROM = '$hh = if ($env:HERMES_HOME)';
+  const NOMAD_TO = 'if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }';
+  function nomadFixture(sb) {
+    const src = sb.mk(sb.base, 'vendor', 'nomad-src'); sb.mk(src, 'branding', 'skins');
+    fs.writeFileSync(path.join(src, 'branding', 'SOUL.md'), 'Душа Nomad — тест\r\nвторая строка\r\n');
+    fs.writeFileSync(path.join(src, 'branding', 'skins', 'nomad.yaml'), 'name: nomad\nbanner: "∞"\n');
+    fs.writeFileSync(path.join(src, 'branding', 'config.yaml.template'), 'model:\n  provider: auto\ndisplay:\n  skin: nomad\n');
+    return src;
+  }
+  function nomadRun(sb, src, o) {
+    o = o || {};
+    let cut = cutText(rawWin('nomad.ps1'), NOMAD_FROM, NOMAD_TO);
+    if (o.edit) { const e = o.edit(cut); assert(e !== cut, 'мутация применилась'); cut = e; }
+    const text = [LIB_PRELUDE(sb), REG_STUBS, o.neutral ? NEUTRAL_LIB : '', '$DRY = $false', '$src = ' + q(src), cut,
+      "Show 'WROTESOUL' $wroteSoul", "Show 'WROTESKIN' $wroteSkin", "Write-Output 'CUT-DONE'"].join('\r\n');
+    return runPs(sb, text, cutEnv(sb, Object.assign({ HM_NOMAD_CLOUD_KEY: 'KEY-ABC', HM_NOMAD_CLOUD_BASEURL: 'https://cp.example.invalid/v1', HM_NOMAD_CLOUD_MODEL: 'model-test' }, o.env || {})));
+  }
+  const NOMAD_BLOCK = '# >>> nomad-cloud (managed by installer -- do not edit inside markers) >>>\r\nmodel:\r\n  provider: "custom"\r\n  base_url: "https://cp.example.invalid/v1"\r\n  api_key: "KEY-ABC"\r\n  default: "model-test"\r\n# <<< nomad-cloud <<<\r\n';
+
+  ok('u10b nomad.ps1: брендинг и облачный блок ложатся в HERMES_HOME теми же байтами (SOUL.md, skins\\nomad.yaml, config.yaml без BOM), повтор идемпотентен, существующий SOUL.md не перезаписывается, закрепок и временных файлов нет', () => {
+    needPs();
+    const sb = mkSandbox('nomad1');
+    try {
+      const src = nomadFixture(sb);
+      const hh = path.join(sb.profile, 'AppData', 'Local', 'hermes');
+      const r = nomadRun(sb, src);
+      const dump = '\n' + r.out + r.err;
+      const g = kv(r.out);
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'вырезка отработала' + dump);
+      assert.deepStrictEqual([g.WROTESOUL, g.WROTESKIN], ['True', 'True'], 'брендинг доложен' + dump);
+      assert.strictEqual(fs.readFileSync(path.join(hh, 'SOUL.md')).toString('hex'), fs.readFileSync(path.join(src, 'branding', 'SOUL.md')).toString('hex'), 'SOUL.md — побайтно как в vendor (CRLF и кириллица)');
+      assert.strictEqual(fs.readFileSync(path.join(hh, 'skins', 'nomad.yaml'), 'utf8'), 'name: nomad\nbanner: "∞"\n', 'skin на месте');
+      const cfgBuf = fs.readFileSync(path.join(hh, 'config.yaml'));
+      assert(!(cfgBuf[0] === 0xEF && cfgBuf[1] === 0xBB), 'config.yaml без BOM (BOM ломает YAML)');
+      assert.strictEqual(cfgBuf.toString('utf8'), NOMAD_BLOCK + 'display:\n  skin: nomad\n', 'облачный блок в начале, остаток шаблона цел');
+      assert(/OK: Nomad подключён к облаку/.test(r.out) && !/KEY-ABC/.test(r.out), 'успех назван, ключ в журнал не попал' + dump);
+      assert.deepStrictEqual(logOf(sb), [], 'реестр не трогался (заглушка не вызывалась)');
+      assert.deepStrictEqual(pinsIn(hh).concat(pinsIn(path.join(hh, 'skins'))), [], 'закрепок и временных файлов нет');
+      // Повтор: SOUL.md человека не трогаем, блок один и тот же.
+      fs.writeFileSync(path.join(hh, 'SOUL.md'), 'моя душа');
+      const r2 = nomadRun(sb, src);
+      const g2 = kv(r2.out);
+      assert(/SOUL\.md уже существует — не перезаписываю/.test(r2.out) && g2.WROTESOUL === 'False', 'существующий SOUL.md не перезаписан' + '\n' + r2.out + r2.err);
+      assert.strictEqual(fs.readFileSync(path.join(hh, 'SOUL.md'), 'utf8'), 'моя душа');
+      assert.strictEqual(fs.readFileSync(path.join(hh, 'config.yaml'), 'utf8'), NOMAD_BLOCK + 'display:\n  skin: nomad\n', 'после повтора блок один и тот же');
+      // Без ключа облака: блок не пишется, остальное на месте.
+      const sc = mkSandbox('nomad1b');
+      try {
+        const src2 = nomadFixture(sc);
+        const r3 = nomadRun(sc, src2, { env: { HM_NOMAD_CLOUD_KEY: '' } });
+        assert(/Ключ Nomad Cloud не задан/.test(r3.out), 'пропуск назван: ' + r3.out + r3.err);
+        assert.strictEqual(fs.readFileSync(path.join(sc.profile, 'AppData', 'Local', 'hermes', 'config.yaml'), 'utf8'), 'model:\n  provider: auto\ndisplay:\n  skin: nomad\n', 'шаблон лёг как есть');
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b nomad.ps1: junction на HERMES_HOME или на его родителя — брендинг и ключ в чужую папку НЕ пишутся, причина названа, сам шаг не падает; контроль: прежние Copy-Item / WriteAllText пишут в чужую папку', () => {
+    needPs();
+    const cases = [
+      ['сам HERMES_HOME', (sb) => { const hh = path.join(sb.profile, 'AppData', 'Local', 'hermes'); sb.link(sb.victim, hh); return hh; }],
+      ['родитель (AppData\\Local)', (sb) => { const l = path.join(sb.profile, 'AppData', 'Local'); drop(l); sb.link(sb.victim, l); return path.join(l, 'hermes'); }],
+    ];
+    cases.forEach(([label, setup]) => {
+      const sb = mkSandbox('nomad2');
+      try {
+        const src = nomadFixture(sb);
+        fs.writeFileSync(path.join(sb.victim, 'keep.txt'), 'чужое');
+        const hh = setup(sb);
+        const v = victimState(sb);
+        const r = nomadRun(sb, src, { env: { HERMES_HOME: hh } });
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert(/CUT-DONE/.test(r.out) && r.status === 0, label + ': шаг не падает' + dump);
+        assert.deepStrictEqual(victimState(sb), v, label + ': чужая папка цела — ничего не создано и не записано' + dump);
+        assert(/брендинг и настройки НЕ записаны/.test(r.out) && /ссылк|junction/.test(r.out), label + ': причина названа' + dump);
+        assert(/ключ в config\.yaml НЕ записан/.test(r.out) && !/OK: Nomad подключён/.test(r.out), label + ': ключ не записан и успех не объявлен' + dump);
+        assert.deepStrictEqual(kv(r.out).WROTESOUL, 'False', label + ': в квитанцию SOUL.md не попадёт');
+        assert(!/KEY-ABC/.test(r.out), label + ': ключ в журнал не попал');
+        // контроль: прежнее поведение
+        const sc = mkSandbox('nomad2c');
+        try {
+          const srcC = nomadFixture(sc);
+          fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+          const hhC = setup(sc);
+          const rc = nomadRun(sc, srcC, { neutral: true, env: { HERMES_HOME: hhC } });
+          assert(fs.existsSync(path.join(sc.victim, label.startsWith('сам') ? '' : 'hermes', 'SOUL.md')) && /KEY-ABC/.test(fs.readFileSync(path.join(sc.victim, label.startsWith('сам') ? '' : 'hermes', 'config.yaml'), 'utf8')),
+            label + ': КОНТРОЛЬ: без цепочки и переноса брендинг и ключ ушли в чужую папку: ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+        } finally { sc.cleanup(); }
+      } finally { sb.cleanup(); }
+    });
+  });
+
+  ok('u10b nomad.ps1: symlink на config.yaml не читается и не пишется (ключ и содержимое цели не переезжают); контроль: прежний код читает и пишет сквозь него', () => {
+    needPs();
+    const sb0 = mkSandbox('nomad3probe');
+    const can = canFileSymlink(sb0); sb0.cleanup();
+    if (!can) SKIP('нет права создавать symlink на файлы (нужен режим разработчика)');
+    const sb = mkSandbox('nomad3');
+    try {
+      const src = nomadFixture(sb);
+      const hh = path.join(sb.profile, 'AppData', 'Local', 'hermes');
+      sb.mk(hh, 'skins');
+      const secret = path.join(sb.victim, 'secret.yaml'); fs.writeFileSync(secret, 'SECRET: закрытое\n');
+      fs.symlinkSync(secret, path.join(hh, 'config.yaml'), 'file');
+      // SOUL.md — тоже ссылка, на существующий файл: «целевой есть» (Test-Path), перезаписи нет ни до правки, ни после
+      const soulTarget = path.join(sb.victim, 'soul-target.md'); fs.writeFileSync(soulTarget, 'ЧУЖАЯ ДУША');
+      fs.symlinkSync(soulTarget, path.join(hh, 'SOUL.md'), 'file');
+      const r = nomadRun(sb, src, { env: { HERMES_HOME: hh } });
+      const dump = '\n' + r.out + r.err;
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'шаг не падает' + dump);
+      assert.strictEqual(fs.readFileSync(secret, 'utf8'), 'SECRET: закрытое\n', 'файл-цель config.yaml цел (ключ в него не записан, содержимое цели не прочитано в журнал)' + dump);
+      assert.strictEqual(fs.readFileSync(soulTarget, 'utf8'), 'ЧУЖАЯ ДУША', 'цель SOUL.md цела');
+      assert(/сам config\.yaml это ссылка/.test(r.out) && !/OK: Nomad подключён/.test(r.out), 'config.yaml: причина названа, успех не объявлен' + dump);
+      assert(fs.lstatSync(path.join(hh, 'config.yaml')).isSymbolicLink() && fs.lstatSync(path.join(hh, 'SOUL.md')).isSymbolicLink(), 'сами ссылки не тронуты');
+      assert.deepStrictEqual(logOf(sb), [], 'реестр не трогался');
+      // КОНТРОЛЬ: прежний код (чтение и запись по имени) идёт сквозь ссылку и кладёт ключ в чужой файл.
+      const sc = mkSandbox('nomad3c');
+      try {
+        const srcC = nomadFixture(sc);
+        const hhC = path.join(sc.profile, 'AppData', 'Local', 'hermes'); sc.mk(hhC, 'skins');
+        const secretC = path.join(sc.victim, 'secret.yaml'); fs.writeFileSync(secretC, 'SECRET: закрытое\n');
+        fs.symlinkSync(secretC, path.join(hhC, 'config.yaml'), 'file');
+        // прежний вид: без ветки «config.yaml — ссылка», запись по имени
+        const rc = nomadRun(sc, srcC, { neutral: true, env: { HERMES_HOME: hhC }, edit: (t) => t.replace('} elseif (Test-HmIsReparse $cfgY) {', '} elseif ($false) {') });
+        const got = fs.readFileSync(secretC, 'utf8');
+        assert(/KEY-ABC/.test(got) && /SECRET: закрытое/.test(got), 'КОНТРОЛЬ: ключ записан в файл-цель через ссылку, содержимое цели прочитано и переписано: ' + rc.out + rc.err);
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  // ---- 8.2 bridge.ps1: агент и config.json ---------------------------------------------------------------------------
+  const BRIDGE_DEELEV_STUB = [
+    'function Invoke-HmDeElevated {',
+    '  param($Exe, [string[]]$ArgList = @())',
+    '  Add-Content -LiteralPath $env:HM_T_LOG -Value ("DEELEV " + ($ArgList -join " "))',
+    '  return [pscustomobject]@{ Gate = "medium"; Code = 0 }',
+    '}',
+    'function Invoke-HmDeElevatedSafe {',
+    '  param($Exe, [string[]]$ArgList = @(), [string]$Label = "")',
+    '  Add-Content -LiteralPath $env:HM_T_LOG -Value ("DEELEV " + ($ArgList -join " "))',
+    '  return [pscustomobject]@{ Gate = "medium"; Code = 0; Finished = $true; ShellReason = "" }',
+    '}',
+    'function Invoke-HmAsShellUser {',
+    '  param([string]$Exe = "", [string[]]$Arguments = @(), [string]$Label = "", [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = "", [string]$WorkingDirectory = "")',
+    '  Add-Content -LiteralPath $env:HM_T_LOG -Value ("SHELL " + $Label)',
+    '  return [pscustomobject]@{ Route = "shell-token"; Gate = "medium"; Code = 0; Reason = ""; ProcessId = 1; Logged = $false; LogNote = "" }',
+    '}',
+  ].join('\r\n');
+  function bridgeBox(sb, o) {
+    o = o || {};
+    const dir = sb.mk(sb.base, 'scripts');
+    ['_userpath.ps1', '_linksafe.ps1'].forEach((f) => fs.copyFileSync(path.join(WIN, f), path.join(dir, f)));
+    fs.writeFileSync(path.join(dir, '_deelev.ps1'), BOM + BRIDGE_DEELEV_STUB + '\r\n');
+    let src = rawWin('bridge.ps1').replace(/\r\n/g, '\n');
+    src = withProfileSeam(src, 'function Get-HmProfileRoot { return $env:HM_T_PROFILE }\n' + (o.neutral ? NEUTRAL_LIB.replace(/\r\n/g, '\n') + '\n' : ''));
+    if (o.edit) { const e = o.edit(src); assert(e !== src, 'мутация bridge.ps1 применилась'); src = e; }
+    fs.writeFileSync(path.join(dir, 'bridge.ps1'), BOM + src.replace(/\n/g, '\r\n'));
+    const agentDir = sb.mk(sb.base, 'agent');
+    fs.writeFileSync(path.join(agentDir, 'bridge_agent.py'), '# агент моста — заглушка\r\nprint("не исполняется")\r\n');
+    fs.writeFileSync(path.join(sb.base, 'calls.log'), '');
+    const driver = [
+      'function Get-Command { param($Name, $ErrorAction)',
+      '  if ("$Name" -eq "python") { return [pscustomobject]@{ Source = "C:\\HmFakePy\\python.exe" } }',
+      '  return [pscustomobject]@{ Source = "$Name" }',
+      '}',
+      REG_STUBS,
+      'function Start-Process { param($FilePath, $ArgumentList, $ErrorAction) Add-Content -LiteralPath $env:HM_T_LOG -Value ("START " + $FilePath) }',
+      '& ' + q(path.join(dir, 'bridge.ps1')),
+      'exit $LASTEXITCODE',
+    ].join('\r\n');
+    return { dir, agentDir, driver };
+  }
+  function bridgeRun(sb, box, env) {
+    return runPs(sb, box.driver, Object.assign({ HM_T_LOG: path.join(sb.base, 'calls.log'), HM_T_PROFILE: sb.profile, HM_AGENT_DIR: box.agentDir }, env || {}));
+  }
+  const bridgeDst = (sb) => path.join(sb.profile, 'AppData', 'Local', 'HamidunBridge');
+
+  ok('u10b bridge.ps1: агент и config.json ложатся побайтно как раньше (агент — копия, config.json без BOM), существующий config.json обновляется с сохранением данных ученика, закрепок нет', () => {
+    needPs();
+    const sb = mkSandbox('bridge1');
+    try {
+      const box = bridgeBox(sb);
+      const r = bridgeRun(sb, box, { HM_BRIDGE_ENDPOINT: 'https://new.example.invalid/enroll', HM_BRIDGE_TOKEN: 'TOK-1' });
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 0, 'exit 0' + dump);
+      const dst = bridgeDst(sb);
+      assert.strictEqual(fs.readFileSync(path.join(dst, 'bridge_agent.py')).toString('hex'), fs.readFileSync(path.join(box.agentDir, 'bridge_agent.py')).toString('hex'), 'агент — побайтная копия' + dump);
+      const buf = fs.readFileSync(path.join(dst, 'config.json'));
+      assert(!(buf[0] === 0xEF && buf[1] === 0xBB), 'config.json без BOM');
+      const cfg = JSON.parse(buf.toString('utf8'));
+      assert.strictEqual(cfg.enrollEndpoint, 'https://new.example.invalid/enroll'); assert.strictEqual(cfg.bridgeToken, 'TOK-1');
+      assert.deepStrictEqual([cfg.socksPort, cfg.httpPort, cfg.pacPort, cfg.enabled], [1080, 1081, 1082, false], 'остальные поля — как раньше');
+      assert(/Сервер настроен/.test(r.out) && /HM-RECEIPT path /.test(r.out), 'итог и квитанция как раньше' + dump);
+      assert.deepStrictEqual(pinsIn(dst), [], 'закрепок и временных файлов нет');
+      // существующий config.json ученика: адрес обновляется, токен ученика цел при пустом HM_BRIDGE_TOKEN
+      cfg.bridgeToken = 'STUDENT'; cfg.ssh.host = 'vps.example.invalid'; fs.writeFileSync(path.join(dst, 'config.json'), JSON.stringify(cfg, null, 2));
+      const r2 = bridgeRun(sb, box, { HM_BRIDGE_ENDPOINT: 'https://newer.example.invalid/enroll' });
+      assert.strictEqual(r2.status, 0, 'повтор: exit 0\n' + r2.out + r2.err);
+      const cfg2 = JSON.parse(fs.readFileSync(path.join(dst, 'config.json'), 'utf8'));
+      assert.deepStrictEqual([cfg2.enrollEndpoint, cfg2.bridgeToken, cfg2.ssh.host], ['https://newer.example.invalid/enroll', 'STUDENT', 'vps.example.invalid'], 'адрес обновлён, данные ученика целы');
+      assert.deepStrictEqual(pinsIn(dst), [], 'и после повтора закрепок нет');
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b bridge.ps1: junction на папку моста или на её родителя — агент не копируется в чужую папку, шаг честно падает (код 1) с причиной; контроль: прежний New-Item + Copy-Item пишут в чужую папку', () => {
+    needPs();
+    const cases = [
+      ['сама HamidunBridge', (sb) => { sb.link(sb.victim, bridgeDst(sb)); }],
+      ['родитель (AppData\\Local)', (sb) => { const l = path.join(sb.profile, 'AppData', 'Local'); drop(l); sb.link(sb.victim, l); }],
+    ];
+    cases.forEach(([label, setup]) => {
+      const sb = mkSandbox('bridge2');
+      try {
+        fs.writeFileSync(path.join(sb.victim, 'keep.txt'), 'чужое');
+        setup(sb);
+        const v = victimState(sb);
+        const r = bridgeRun(sb, bridgeBox(sb), { HM_BRIDGE_ENDPOINT: 'https://x.example.invalid/e', HM_BRIDGE_TOKEN: 'T' });
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert.strictEqual(r.status, 1, label + ': код 1' + dump);
+        assert.deepStrictEqual(victimState(sb), v, label + ': чужая папка цела' + dump);
+        assert(/агент моста не записан/.test(r.out) && /ссылк|junction/.test(r.out) && /мост НЕ установлен/.test(r.out), label + ': причина названа' + dump);
+        assert(!/OK: AI-мост установлен/.test(r.out), label + ': успех не объявлен');
+        assert.deepStrictEqual(logOf(sb), [], label + ': ни реестр, ни запуск не тронуты (отказ раньше)');
+        const sc = mkSandbox('bridge2c');
+        try {
+          fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+          setup(sc);
+          const rc = bridgeRun(sc, bridgeBox(sc, { neutral: true }), { HM_BRIDGE_ENDPOINT: 'https://x.example.invalid/e', HM_BRIDGE_TOKEN: 'T' });
+          const where = label.startsWith('сама') ? sc.victim : path.join(sc.victim, 'HamidunBridge');
+          assert(fs.existsSync(path.join(where, 'bridge_agent.py')), label + ': КОНТРОЛЬ: без цепочки и переноса агент ушёл в чужую папку: ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+        } finally { sc.cleanup(); }
+      } finally { sb.cleanup(); }
+    });
+  });
+
+  ok('u10b bridge.ps1: symlink на bridge_agent.py (висячий) не создаёт файл в цели, symlink на существующий config.json не читается и не переписывается (токен и адрес сервера не уходят в чужой файл); контроль: прежние Copy-Item и WriteAllText идут сквозь', () => {
+    needPs();
+    const sb0 = mkSandbox('bridge3probe');
+    const can = canFileSymlink(sb0); sb0.cleanup();
+    if (!can) SKIP('нет права создавать symlink на файлы (нужен режим разработчика)');
+    const env = { HM_BRIDGE_ENDPOINT: 'https://x.example.invalid/e', HM_BRIDGE_TOKEN: 'SECRET-TOKEN' };
+    // (а) висячий symlink на имени агента (запись безусловная — Copy-Item -Force создавал бы файл по адресу из ссылки)
+    const sb = mkSandbox('bridge3');
+    try {
+      const dst = bridgeDst(sb); sb.mk(dst);
+      const created = path.join(sb.victim, 'made.py');
+      fs.symlinkSync(created, path.join(dst, 'bridge_agent.py'), 'file');
+      const r = bridgeRun(sb, bridgeBox(sb), env);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'шаг честно падает (код 1)' + dump);
+      assert(!fs.existsSync(created), 'висячая ссылка не создала файл в цели' + dump);
+      assert(/агент моста не записан/.test(r.out) && /мост НЕ установлен/.test(r.out) && !/OK: AI-мост установлен/.test(r.out), 'отказ назван, успех не объявлен' + dump);
+      assert(fs.lstatSync(path.join(dst, 'bridge_agent.py')).isSymbolicLink(), 'саму ссылку не трогали');
+      // контроль: прежняя запись по имени
+      const sc = mkSandbox('bridge3c');
+      try {
+        const dstC = bridgeDst(sc); sc.mk(dstC);
+        const createdC = path.join(sc.victim, 'made.py');
+        fs.symlinkSync(createdC, path.join(dstC, 'bridge_agent.py'), 'file');
+        bridgeRun(sc, bridgeBox(sc, { neutral: true }), env);
+        assert(fs.existsSync(createdC) && /агент моста/.test(fs.readFileSync(createdC, 'utf8')), 'КОНТРОЛЬ: прежний код записал агента в файл по адресу из ссылки');
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+    // (б) существующая: цель — файл с чужим содержимым
+    const sd = mkSandbox('bridge3b');
+    try {
+      const dst = bridgeDst(sd); sd.mk(dst);
+      const target = path.join(sd.victim, 'other.json'); fs.writeFileSync(target, '{"private":"data","enrollEndpoint":"old"}');
+      fs.symlinkSync(target, path.join(dst, 'config.json'), 'file');
+      const r = bridgeRun(sd, bridgeBox(sd), env);
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), '{"private":"data","enrollEndpoint":"old"}', 'файл-цель цел' + '\n' + r.out + r.err);
+      assert(/сам файл — ссылка \(symlink\)/.test(r.out) && !/Сервер настроен/.test(r.out), 'причина названа, «Сервер настроен» не объявлен');
+      const sc = mkSandbox('bridge3d');
+      try {
+        const dstC = bridgeDst(sc); sc.mk(dstC);
+        const targetC = path.join(sc.victim, 'other.json'); fs.writeFileSync(targetC, '{"private":"data","enrollEndpoint":"old"}');
+        fs.symlinkSync(targetC, path.join(dstC, 'config.json'), 'file');
+        bridgeRun(sc, bridgeBox(sc, { neutral: true, edit: (t) => t.replace('} elseif ($env:HM_BRIDGE_ENDPOINT -and (Test-HmIsReparse $cfgPath)) {', '} elseif ($false) {') }), env);
+        assert(/SECRET-TOKEN/.test(fs.readFileSync(targetC, 'utf8')), 'КОНТРОЛЬ: прежний код переписал файл-цель, положив в него токен');
+      } finally { sc.cleanup(); }
+    } finally { sd.cleanup(); }
+  });
+
+  // ---- 8.3 extension.ps1: шрифт и стартовый settings.json Cursor ---------------------------------------------------------
+  const EXT_FROM = '# --- вшитый шрифт JetBrains Mono';
+  const EXT_TO = '# Крайняя мера:';
+  function extFixture(sb) {
+    const v = sb.mk(sb.base, 'vendor', 'apps');
+    fs.writeFileSync(path.join(v, 'JetBrainsMono-Regular.ttf'), Buffer.from([0, 1, 0, 0, 0xFF, 0x80, 0x7F, 1, 2, 3]));
+    return path.join(sb.base, 'vendor');
+  }
+  function extRun(sb, vendor, o) {
+    o = o || {};
+    let cut = cutText(rawWin('extension.ps1'), EXT_FROM, EXT_TO);
+    if (o.edit) { const e = o.edit(cut); assert(e !== cut, 'мутация применилась'); cut = e; }
+    const text = [LIB_PRELUDE(sb), REG_STUBS, o.neutral ? NEUTRAL_LIB : '', 'function Test-HmArtifact { param($p) return $true }', '$DRY = $false',
+      cut, "Write-Output 'CUT-DONE'"].join('\r\n');
+    return runPs(sb, text, cutEnv(sb, Object.assign({ HM_VENDOR: vendor }, o.env || {})));
+  }
+  const fontPath = (sb) => path.join(sb.profile, 'AppData', 'Local', 'Microsoft', 'Windows', 'Fonts', 'JetBrainsMono-Regular.ttf');
+  const cursorSettingsPath = (sb) => path.join(sb.profile, 'AppData', 'Roaming', 'Cursor', 'User', 'settings.json');
+  const SEED_TEXT = '{\n  "files.autoSave": "afterDelay",\n  "editor.fontFamily": "JetBrains Mono",\n  "terminal.integrated.fontFamily": "JetBrains Mono"\n}\n';
+
+  ok('u10b extension.ps1: шрифт и стартовый settings.json Cursor — те же байты, что давали Copy-Item и Set-Content -Encoding UTF8 (оракул — настоящий Set-Content), существующий settings.json не трогается, ключ реестра пишется', () => {
+    needPs();
+    const sb = mkSandbox('ext1');
+    try {
+      const vendor = extFixture(sb);
+      const r = extRun(sb, vendor);
+      const dump = '\n' + r.out + r.err;
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'вырезка отработала' + dump);
+      assert.strictEqual(fs.readFileSync(fontPath(sb)).toString('hex'), fs.readFileSync(path.join(vendor, 'apps', 'JetBrainsMono-Regular.ttf')).toString('hex'), 'шрифт — побайтная копия' + dump);
+      // оракул: ровно то, что писал прежний Set-Content -Encoding UTF8
+      const oracle = path.join(sb.base, 'oracle.json');
+      const ro = runPs(sb, "$seed = @'\r\n{\r\n  \"files.autoSave\": \"afterDelay\",\r\n  \"editor.fontFamily\": \"JetBrains Mono\",\r\n  \"terminal.integrated.fontFamily\": \"JetBrains Mono\"\r\n}\r\n'@\r\nSet-Content -Path " + q(oracle) + ' -Value $seed -Encoding UTF8');
+      assert.strictEqual(ro.status, 0, 'оракул отработал: ' + ro.out + ro.err);
+      assert.strictEqual(fs.readFileSync(cursorSettingsPath(sb)).toString('hex'), fs.readFileSync(oracle).toString('hex'), 'settings.json побайтно равен выводу Set-Content -Encoding UTF8 (BOM и CRLF в конце)' + dump);
+      assert(/Шрифт JetBrains Mono установлен/.test(r.out) && /Создал стартовый settings\.json Cursor/.test(r.out), 'итоги названы' + dump);
+      assert.deepStrictEqual(logOf(sb).filter((l) => /REG-WRITE/.test(l)).map((l) => l.replace(/\|.*$/, '')), ['REG-WRITE HKCU:\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts'], 'ключ шрифта — через заглушку (настоящий реестр не тронут)');
+      assert.deepStrictEqual(pinsIn(path.dirname(fontPath(sb))).concat(pinsIn(path.dirname(cursorSettingsPath(sb)))), [], 'закрепок и временных файлов нет');
+      // существующий settings.json человека не трогаем
+      fs.writeFileSync(cursorSettingsPath(sb), '{"mine":true}');
+      const r2 = extRun(sb, vendor);
+      assert(/settings\.json Cursor уже существует — не трогаю/.test(r2.out) && fs.readFileSync(cursorSettingsPath(sb), 'utf8') === '{"mine":true}', 'файл человека цел: ' + r2.out + r2.err);
+      // шрифт с атрибутом «только чтение» (наш файл): обновляется
+      fs.chmodSync(fontPath(sb), 0o444);
+      const r3 = extRun(sb, vendor);
+      assert(/Шрифт JetBrains Mono установлен/.test(r3.out), 'только чтение с нашего шрифта снимается, как снимал Copy-Item -Force: ' + r3.out + r3.err);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b extension.ps1: junction на Fonts, на AppData\\Local или на папку Cursor — шрифт и settings.json в чужую папку НЕ пишутся, причина названа; контроль: прежние Copy-Item и Set-Content пишут', () => {
+    needPs();
+    const cases = [
+      ['Fonts', (sb) => { const f = path.dirname(fontPath(sb)); sb.mk(path.dirname(f)); sb.link(sb.victim, f); }, 'font', ['JetBrainsMono-Regular.ttf']],
+      ['AppData\\Local (родитель Fonts)', (sb) => { const l = path.join(sb.profile, 'AppData', 'Local'); drop(l); sb.link(sb.victim, l); }, 'font', ['Microsoft', 'Windows', 'Fonts', 'JetBrainsMono-Regular.ttf']],
+      ['папка Cursor', (sb) => { sb.mk(sb.profile, 'AppData', 'Roaming'); sb.link(sb.victim, path.join(sb.profile, 'AppData', 'Roaming', 'Cursor')); }, 'cursor', ['User', 'settings.json']],
+    ];
+    cases.forEach(([label, setup, what, leak]) => {
+      const sb = mkSandbox('ext2');
+      try {
+        const vendor = extFixture(sb);
+        fs.writeFileSync(path.join(sb.victim, 'keep.txt'), 'чужое');
+        setup(sb);
+        const v = victimState(sb);
+        const r = extRun(sb, vendor);
+        const dump = '\n' + label + ': ' + r.out + r.err;
+        assert(/CUT-DONE/.test(r.out) && r.status === 0, label + ': шаг не падает' + dump);
+        assert.deepStrictEqual(victimState(sb), v, label + ': чужая папка цела' + dump);
+        if (what === 'font') assert(/Шрифт не установился/.test(r.out) && !/Шрифт JetBrains Mono установлен/.test(r.out) && !logOf(sb).some((l) => /REG-WRITE/.test(l)), label + ': шрифт — отказ назван, ключ реестра не пишется' + dump);
+        else assert(/settings\.json Cursor не создался/.test(r.out) && /ссылк|junction/.test(r.out), label + ': settings.json — отказ назван' + dump);
+        const sc = mkSandbox('ext2c');
+        try {
+          const vendorC = extFixture(sc);
+          fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+          setup(sc);
+          // прежний вид: запись по имени, цепочка не проверяется (так писали Copy-Item шрифта и Set-Content сида)
+          const rc = extRun(sc, vendorC, { neutral: true });
+          assert(fs.existsSync(path.join(sc.victim, ...leak)), label + ': КОНТРОЛЬ: без цепочки и переноса файл ушёл в чужую папку (' + leak.join('\\') + '): ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+        } finally { sc.cleanup(); }
+      } finally { sb.cleanup(); }
+    });
+  });
+
+  ok('u10b extension.ps1: висячий symlink на имени шрифта не создаёт файл в цели (запись безусловная — Copy-Item -Force создал бы), ключ реестра не пишется; контроль: прежняя запись по имени создаёт', () => {
+    needPs();
+    const sb0 = mkSandbox('ext3probe');
+    const can = canFileSymlink(sb0); sb0.cleanup();
+    if (!can) SKIP('нет права создавать symlink на файлы (нужен режим разработчика)');
+    const sb = mkSandbox('ext3');
+    try {
+      const vendor = extFixture(sb);
+      sb.mk(path.dirname(fontPath(sb)));
+      const created = path.join(sb.victim, 'made.ttf');
+      fs.symlinkSync(created, fontPath(sb), 'file');
+      const r = extRun(sb, vendor);
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'шаг не падает\n' + r.out + r.err);
+      assert(!fs.existsSync(created), 'висячая ссылка не создала файл в цели\n' + r.out + r.err);
+      assert(/Шрифт не установился/.test(r.out) && !/Шрифт JetBrains Mono установлен/.test(r.out) && !logOf(sb).some((l) => /REG-WRITE/.test(l)), 'отказ назван, ключ реестра не пишется\n' + r.out);
+      assert(fs.lstatSync(fontPath(sb)).isSymbolicLink(), 'саму ссылку не трогали');
+      const sc = mkSandbox('ext3c');
+      try {
+        const vendorC = extFixture(sc);
+        sc.mk(path.dirname(fontPath(sc)));
+        const createdC = path.join(sc.victim, 'made.ttf');
+        fs.symlinkSync(createdC, fontPath(sc), 'file');
+        extRun(sc, vendorC, { neutral: true });
+        assert(fs.existsSync(createdC), 'КОНТРОЛЬ: прежняя запись по имени создала файл в цели через висячую ссылку');
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+  });
+
+  // ---- 8.4 uv.ps1: копия uv в %LOCALAPPDATA%\Programs\uv -------------------------------------------------------------
+  const UV_FROM = "$dest = Join-Path $env:LOCALAPPDATA 'Programs\\uv'";
+  const UV_TO = '# 3) Добавляем $dest в ПОЛЬЗОВАТЕЛЬСКИЙ PATH';
+  function uvFixture(sb) {
+    const v = sb.mk(sb.base, 'vendor', 'apps', 'uv');
+    fs.writeFileSync(path.join(v, 'uv.exe'), Buffer.from('MZ-uv-exe-' + 'x'.repeat(100)));
+    fs.writeFileSync(path.join(v, 'uvx.exe'), Buffer.from('MZ-uvx-exe-' + 'y'.repeat(50)));
+    return v;
+  }
+  function uvRun(sb, vend, o) {
+    o = o || {};
+    // Строка с $dest, затем от Test-HmReparse до шага PATH: шаг «uv --version» между ними запускает uv.exe и нам не нужен.
+    const full = rawWin('uv.ps1');
+    let cut = cutText(full, UV_FROM, '\n') + '\r\n' + cutText(full, 'function Test-HmReparse', UV_TO);
+    if (o.edit) { const e = o.edit(cut); assert(e !== cut, 'мутация применилась'); cut = e; }
+    const text = [LIB_PRELUDE(sb), o.neutral ? NEUTRAL_LIB : '', o.pre || '', "$ErrorActionPreference = 'Stop'",
+      '$srcUv = ' + q(path.join(vend, 'uv.exe')), '$srcUvxPath = ' + q(path.join(vend, 'uvx.exe')), "$ver = 'uv 0.0.0'", cut, "Write-Output 'CUT-DONE'"].join('\r\n');
+    return runPs(sb, text, cutEnv(sb, o.env));
+  }
+  const uvDest = (sb) => path.join(sb.profile, 'AppData', 'Local', 'Programs', 'uv');
+
+  ok('u10b uv.ps1: uv.exe и uvx.exe копируются побайтно, повтор заменяет, атрибут только-чтение снимается; junction на Programs\\uv снимается как ссылка (цель цела) — как раньше', () => {
+    needPs();
+    const sb = mkSandbox('uv1');
+    try {
+      const vend = uvFixture(sb);
+      const r = uvRun(sb, vend);
+      const dump = '\n' + r.out + r.err;
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'вырезка отработала' + dump);
+      ['uv.exe', 'uvx.exe'].forEach((n) => assert.strictEqual(fs.readFileSync(path.join(uvDest(sb), n)).toString('hex'), fs.readFileSync(path.join(vend, n)).toString('hex'), n + ' — побайтная копия' + dump));
+      assert.deepStrictEqual(pinsIn(uvDest(sb)), [], 'закрепок нет');
+      fs.chmodSync(path.join(uvDest(sb), 'uv.exe'), 0o444);
+      fs.writeFileSync(path.join(vend, 'uv.exe'), Buffer.from('MZ-uv-exe-v2'));
+      const r2 = uvRun(sb, vend);
+      assert(/CUT-DONE/.test(r2.out), 'повтор поверх файла «только чтение»: ' + r2.out + r2.err);
+      assert.strictEqual(fs.readFileSync(path.join(uvDest(sb), 'uv.exe'), 'utf8'), 'MZ-uv-exe-v2', 'новая версия на месте');
+    } finally { sb.cleanup(); }
+    // junction на самом Programs\uv: прежнее поведение — ссылка снимается, каталог создаётся заново, цель цела
+    const sc = mkSandbox('uv1b');
+    try {
+      const vend = uvFixture(sc);
+      fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+      sc.mk(path.dirname(uvDest(sc))); sc.link(sc.victim, uvDest(sc));
+      const v = victimState(sc);
+      const r = uvRun(sc, vend);
+      assert(/CUT-DONE/.test(r.out), 'ссылка на uv не мешает: ' + r.out + r.err);
+      assert.deepStrictEqual(victimState(sc), v, 'чужая папка цела');
+      assert(!fs.lstatSync(uvDest(sc)).isSymbolicLink() && fs.existsSync(path.join(uvDest(sc), 'uv.exe')), 'на месте ссылки настоящий каталог с uv.exe');
+    } finally { sc.cleanup(); }
+  });
+
+  ok('u10b uv.ps1: junction на любом звене выше Programs (AppData\\Local) — отказ (код 1) без записи в чужую папку, symlink на uv.exe не пишется насквозь; контроль: прежняя проверка (только Programs) пропускает ссылку выше и Copy-Item пишет', () => {
+    needPs();
+    const sb = mkSandbox('uv2');
+    try {
+      const vend = uvFixture(sb);
+      fs.writeFileSync(path.join(sb.victim, 'keep.txt'), 'чужое');
+      const l = path.join(sb.profile, 'AppData', 'Local'); drop(l); sb.link(sb.victim, l);
+      const v = victimState(sb);
+      const r = uvRun(sb, vend);
+      const dump = '\n' + r.out + r.err;
+      assert.strictEqual(r.status, 1, 'отказ: код 1' + dump);
+      assert.deepStrictEqual(victimState(sb), v, 'чужая папка цела' + dump);
+      assert(/ссылка \(junction\/symlink\)/.test(r.out) && r.out.includes(l), 'ссылка названа по пути' + dump);
+      // контроль: прежний код проверял ТОЛЬКО родителя Programs (Test-HmReparse) и писал Copy-Item
+      const sc = mkSandbox('uv2c');
+      try {
+        const vendC = uvFixture(sc);
+        fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+        const lc = path.join(sc.profile, 'AppData', 'Local'); drop(lc); sc.link(sc.victim, lc);
+        const OLD_CHECK = 'try { $destParentLink = $(if ((Test-Path -LiteralPath $destParent) -and (Test-HmReparse $destParent)) { $destParent } else { $null }) }';
+        const rc = uvRun(sc, vendC, { neutral: true, edit: (t) => t.replace('try { $destParentLink = Find-HmLinkOnPath -Path $destParent -Anchor (Get-HmTrustAnchor -Path $destParent) }', OLD_CHECK) });
+        assert(fs.existsSync(path.join(sc.victim, 'Programs', 'uv', 'uv.exe')), 'КОНТРОЛЬ: без проверки всей цепочки uv.exe лёг в чужую папку: ' + relTree(sc.victim).join(' | ') + '\n' + rc.out + rc.err);
+      } finally { sc.cleanup(); }
+    } finally { sb.cleanup(); }
+    // fail-closed: проверка цепочки сама упала с исключением (атрибуты звена не прочитались) — отказ, ничего не записано
+    const se = mkSandbox('uv2e');
+    try {
+      const vend = uvFixture(se);
+      const r = uvRun(se, vend, { pre: 'function Find-HmLinkOnPath { throw "simulated attribute failure" }' });
+      assert.strictEqual(r.status, 1, 'проверка не удалась — код 1\n' + r.out + r.err);
+      assert(/проверка не удалась: simulated attribute failure/.test(r.out) && !/CUT-DONE/.test(r.out), 'причина названа\n' + r.out);
+      assert(!fs.existsSync(uvDest(se)), 'ничего не записано (каталога uv нет)');
+    } finally { se.cleanup(); }
+    const sb0 = mkSandbox('uv2probe');
+    const can = canFileSymlink(sb0); sb0.cleanup();
+    if (can) {
+      const sd = mkSandbox('uv3');
+      try {
+        const vend = uvFixture(sd);
+        sd.mk(uvDest(sd));
+        const target = path.join(sd.victim, 'victim.bin'); fs.writeFileSync(target, 'VICTIM-BYTES');
+        fs.symlinkSync(target, path.join(uvDest(sd), 'uv.exe'), 'file');
+        const r = uvRun(sd, vend);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'VICTIM-BYTES', 'файл-цель цел: ' + r.out + r.err);
+        assert.strictEqual(r.status, 1, 'отказ: код 1\n' + r.out + r.err);
+        assert(/не удалось скопировать uv/.test(r.out), 'отказ назван');
+        const sc = mkSandbox('uv3c');
+        try {
+          const vendC = uvFixture(sc);
+          sc.mk(uvDest(sc));
+          const targetC = path.join(sc.victim, 'victim.bin'); fs.writeFileSync(targetC, 'VICTIM-BYTES');
+          fs.symlinkSync(targetC, path.join(uvDest(sc), 'uv.exe'), 'file');
+          uvRun(sc, vendC, { neutral: true });
+          assert.notStrictEqual(fs.readFileSync(targetC, 'utf8'), 'VICTIM-BYTES', 'КОНТРОЛЬ: прежняя запись по имени переписала файл-цель');
+        } finally { sc.cleanup(); }
+      } finally { sd.cleanup(); }
+    }
+  });
+
+  // ---- 8.5 pydeps.ps1: копия браузеров Playwright в %LOCALAPPDATA%\ms-playwright --------------------------------------
+  const PW_FROM = "$dst = Join-Path $env:LOCALAPPDATA 'ms-playwright'";
+  const PW_TO = '    # Вшитый набор может не совпасть с колесом playwright';
+  function pwFixture(sb) {
+    const b = sb.mk(sb.base, 'vendor', 'playwright-browsers', 'chromium-1234', 'chrome-win');
+    fs.writeFileSync(path.join(b, 'chrome.exe'), 'MZ-chrome'); fs.writeFileSync(path.join(sb.base, 'vendor', 'playwright-browsers', '.links.json'), '{}');
+    return path.join(sb.base, 'vendor', 'playwright-browsers');
+  }
+  function pwRun(sb, pwb, o) {
+    o = o || {};
+    let cut = cutText(rawWin('pydeps.ps1'), PW_FROM, PW_TO);
+    if (o.edit) { const e = o.edit(cut); assert(e !== cut, 'мутация применилась'); cut = e; }
+    const text = [LIB_PRELUDE(sb), o.neutral ? NEUTRAL_LIB : '', o.pre || '', '$pwb = ' + q(pwb), cut, "Write-Output 'CUT-DONE'"].join('\r\n');
+    return runPs(sb, text, cutEnv(sb, o.env));
+  }
+  const pwDest = (sb) => path.join(sb.profile, 'AppData', 'Local', 'ms-playwright');
+
+  ok('u10b pydeps.ps1: браузеры Playwright копируются в ms-playwright как раньше, папка закреплена на время копирования (переименовать её в разгар копии нельзя), после копии закрепки нет; junction на папку или её родителя — отказ с предупреждением, чужая папка цела', () => {
+    needPs();
+    const sb = mkSandbox('pw1');
+    try {
+      const pwb = pwFixture(sb);
+      // Во время копирования пробуем переименовать папку назначения и её родителя: закрепка не даёт. Журнал — по заглушке Copy-Item.
+      const pre = [
+        'function Copy-Item {',
+        '  $pos = @(); for ($i = 0; $i -lt $args.Count; $i++) { $a = $args[$i]; if ($a -is [string] -and $a -match "^-") { if ($a -eq "-ErrorAction") { $i++ }; continue }; $pos += $a }',
+        '  $Path = $pos[0]; $Destination = $pos[1]',
+        '  foreach ($t in @($Destination, (Split-Path -Parent $Destination))) {',
+        "    $r = 'MOVED'; try { Rename-Item -LiteralPath $t -NewName ((Split-Path -Leaf $t) + '-moved') -ErrorAction Stop; Rename-Item -LiteralPath ($t + '-moved') -NewName (Split-Path -Leaf $t) -ErrorAction Stop } catch { $r = 'BLOCKED' }",
+        '    Add-Content -LiteralPath $env:HM_T_LOG -Value ("RENAME " + (Split-Path -Leaf $t) + " " + $r)',
+        '  }',
+        '  Microsoft.PowerShell.Management\\Copy-Item -Path $Path -Destination $Destination -Recurse -Force',
+        '}',
+      ].join('\r\n');
+      const r = pwRun(sb, pwb, { pre });
+      const dump = '\n' + r.out + r.err;
+      assert(/CUT-DONE/.test(r.out) && r.status === 0, 'вырезка отработала' + dump);
+      assert(fs.existsSync(path.join(pwDest(sb), 'chromium-1234', 'chrome-win', 'chrome.exe')), 'браузеры скопированы: ' + (names(pwDest(sb)) || []).join(',') + dump);
+      assert.strictEqual(fs.readFileSync(path.join(pwDest(sb), 'chromium-1234', 'chrome-win', 'chrome.exe'), 'utf8'), 'MZ-chrome', 'браузеры скопированы' + dump);
+      assert.deepStrictEqual(logOf(sb), ['RENAME ms-playwright BLOCKED', 'RENAME Local BLOCKED'], 'в разгар копии ни папку, ни её родителя переименовать нельзя' + dump);
+      assert.deepStrictEqual(pinsIn(pwDest(sb)), [], 'после копии закрепки нет');
+    } finally { sb.cleanup(); }
+    const cases = [
+      ['сама ms-playwright', (sb) => { sb.link(sb.victim, pwDest(sb)); }],
+      ['родитель (AppData\\Local)', (sb) => { const l = path.join(sb.profile, 'AppData', 'Local'); drop(l); sb.link(sb.victim, l); }],
+    ];
+    cases.forEach(([label, setup]) => {
+      const sc = mkSandbox('pw2');
+      try {
+        const pwb = pwFixture(sc);
+        fs.writeFileSync(path.join(sc.victim, 'keep.txt'), 'чужое');
+        setup(sc);
+        const v = victimState(sc);
+        const r = pwRun(sc, pwb);
+        assert(/CUT-DONE/.test(r.out) && r.status === 0, label + ': шаг не падает (итог решает playwright install ниже)\n' + r.out + r.err);
+        assert.deepStrictEqual(victimState(sc), v, label + ': чужая папка цела\n' + r.out + r.err);
+        assert(/встроенные браузеры Playwright не скопированы/.test(r.out) && /ссылк|junction/.test(r.out), label + ': предупреждение названо\n' + r.out);
+        const sd = mkSandbox('pw2c');
+        try {
+          const pwbC = pwFixture(sd);
+          fs.writeFileSync(path.join(sd.victim, 'keep.txt'), 'чужое');
+          setup(sd);
+          // прежний вид: New-Item -Force + Copy-Item -Recurse -Force без проверок
+          pwRun(sd, pwbC, { edit: (t) => { const i = t.indexOf('    $pwPin = $null'); assert(i > 0, 'блок закрепки найден'); return t.slice(0, i) + "    New-Item -ItemType Directory -Force $dst | Out-Null\r\n    Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue\r\n"; } });
+          assert(relTree(sd.victim).some((p) => /chrome\.exe$/.test(p)), label + ': КОНТРОЛЬ: прежний код положил браузеры в чужую папку: ' + relTree(sd.victim).join(' | '));
+        } finally { sd.cleanup(); }
+      } finally { sc.cleanup(); }
+    });
+  });
+
+  // ---- 8.6 гигиена: кто подключает библиотеку, кодировка, разбор --------------------------------------------------------
+  ok('u10b: скрипты, зовущие функции _linksafe.ps1, подключают её (иначе вызов упал бы с ошибкой — команда не найдена — в самый нужный момент); сама библиотека — без exit, без компиляции и без кода верхнего уровня', () => {
+    const FUNCS = ['Write-HmUserFile', 'New-HmUserDir', 'Open-HmPinnedDir', 'Remove-HmTreeNoFollow', 'Expand-HmZipSafe', 'Get-HmZipTopNames', 'Find-HmLinkOnPath', 'Get-HmTrustAnchor'];
+    const users = fs.readdirSync(WIN).filter((f) => f.endsWith('.ps1') && f !== '_linksafe.ps1').filter((f) => {
+      const code = codeOnly(readText(path.join(WIN, f)));
+      return FUNCS.some((fn) => new RegExp('(^|[^\\w-])' + fn + '(?![\\w-])').test(code));
+    });
+    assert.deepStrictEqual(users.sort(), ['bridge.ps1', 'config.ps1', 'course.ps1', 'extension.ps1', 'nomad.ps1', 'pydeps.ps1', 'uv.ps1'], 'круг пользователей библиотеки известен (новый — осознанно дописать сюда)');
+    users.forEach((f) => {
+      const code = codeOnly(readText(path.join(WIN, f)));
+      const dotAt = code.search(/^\s*\.\s+\(Join-Path \$PSScriptRoot '_linksafe\.ps1'\)/m);
+      assert(dotAt >= 0, f + ': подключает _linksafe.ps1 точкой');
+      FUNCS.forEach((fn) => { const m = new RegExp('(^|[^\\w-])' + fn + '(?![\\w-])').exec(code); if (m) assert(m.index > dotAt, f + ': ' + fn + ' зовётся ПОСЛЕ подключения библиотеки'); });
+    });
+    // контроль: вызов раньше подключения этой проверкой ловится
+    const fcode = codeOnly("Write-HmUserFile -Path x\n. (Join-Path $PSScriptRoot '_linksafe.ps1')\n");
+    const fDot = fcode.search(/^\s*\.\s+\(Join-Path \$PSScriptRoot '_linksafe\.ps1'\)/m);
+    const fUse = fcode.search(/Write-HmUserFile/);
+    assert(fUse >= 0 && fDot > fUse, 'контроль: вызов раньше подключения виден проверке');
+    const lib = readText(LIB);
+    const lcode = codeOnly(lib);
+    assert(!/^\s*exit\b/m.test(lcode), 'в библиотеке нет exit');
+    assert(!/Add-Type|\[System\.Reflection\.Assembly\]::(Load|LoadFrom|LoadWithPartialName)|csc\.exe|Add-Type -AssemblyName/.test(lcode), 'ни компиляции, ни загрузки сборки по пути');
+    // верхний уровень: только using, дот-сорс и function
+    const top = lcode.split(/\r?\n/).filter((l) => l.trim() && !/^\s/.test(l) && !/^}/.test(l));
+    const bad = top.filter((l) => !/^(using assembly |\. \(Join-Path \$PSScriptRoot '_userpath\.ps1'\)|function [\w-]+)/.test(l));
+    assert.deepStrictEqual(bad, [], 'верхний уровень библиотеки — только using, дот-сорс и объявления функций: ' + bad.join(' | '));
+  });
+
+  ok('u10b: новые и изменённые PowerShell-скрипты — UTF-8 с BOM и CRLF, Windows PowerShell 5.1 разбирает их без ошибок; изменённые shell-скрипты проходят bash -n', () => {
+    const wins = ['_linksafe.ps1', '_touchups.ps1', 'bridge.ps1', 'config.ps1', 'course.ps1', 'extension.ps1', 'nomad.ps1', 'pydeps.ps1', 'uv.ps1', 'verify.ps1'];
+    wins.forEach((n) => {
+      const b = fs.readFileSync(path.join(WIN, n));
+      assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, n + ': первые байты — UTF-8 BOM');
+      const s = b.toString('latin1');
+      assert.strictEqual(s.split('\n').length, s.split('\r\n').length, n + ': каждый LF — часть CRLF');
+      assert(!/\u2028|\u2029|\u0085/.test(b.toString('utf8')), n + ': нет невидимых разделителей строк U+2028/U+2029/U+0085 (PowerShell считает их концом строки)');
+    });
+    ['_touchups.sh', 'verify.sh'].forEach((n) => {
+      const b = fs.readFileSync(path.join(MACD, n));
+      assert(!(b[0] === 0xEF && b[1] === 0xBB), n + ': без BOM'); assert(!b.includes(13), n + ': LF без CR');
+    });
+    needPs();
+    const sb = mkSandbox('parse');
+    try {
+      const body = ['$bad = 0', 'foreach ($f in $args) {', '  $e = $null', '  [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$e)',
+        '  if ($e -and $e.Count -gt 0) { $bad++; foreach ($x in $e) { Write-Output ("PARSE-ERR " + $f + ": " + $x.Message) } }', '}', "Write-Output ('BAD=' + $bad)"].join('\r\n');
+      const f = path.join(sb.base, 'parse.ps1'); fs.writeFileSync(f, BOM + body);
+      const r = spawnSync(PS51, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', f].concat(wins.map((n) => path.join(WIN, n))), { encoding: 'utf8', timeout: 120000 });
+      assert(/BAD=0/.test(r.stdout || ''), 'ParseFile без ошибок: ' + (r.stdout || '') + (r.stderr || ''));
+    } finally { sb.cleanup(); }
+    const bash = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (!bash.error && bash.status === 0) {
+      ['_touchups.sh', 'verify.sh'].forEach((n) => {
+        const r = spawnSync('bash', ['-n', path.join(MACD, n).replace(/\\/g, '/')], { encoding: 'utf8', timeout: 30000 });
+        assert.strictEqual(r.status, 0, n + ': bash -n: ' + r.stderr);
+      });
+    }
+  });
+
+  ok('u10b: строки отказов про ссылку на пути во всех правленых скриптах не попадают в правила разбора причины main.js — человеку не объяснят чужую беду (занятый файл, подлинность, доступ)', () => {
+    const files = ['course.ps1', 'config.ps1', 'nomad.ps1', 'bridge.ps1', 'extension.ps1', 'uv.ps1', 'pydeps.ps1', '_touchups.ps1'];
+    let total = 0;
+    files.forEach((f) => {
+      // Write-Host-строки с названной причиной (ссылка/junction/symlink или пропуск имени touch-up-а); переменные и подвыражения вырезаны.
+      const lns = codeOnly(readText(path.join(WIN, f))).split(/\r?\n/)
+        .filter((l) => /Write-Host/.test(l) && /ссылк|junction|symlink|не строгое/.test(l))
+        .map((l) => l.replace(/^.*?Write-Host\s*\(?\s*/, '').replace(/\$\([^)]*\)/g, '').replace(/\$\{?\w+\}?/g, ''));
+      total += lns.length;
+      assert.strictEqual(FE().explainScriptFailure(lns), null, f + ': разбор причины в main.js не подменяет строки отказа чужим объяснением: ' + JSON.stringify(FE().explainScriptFailure(lns)));
+    });
+    assert(total >= 12, 'строк отказа найдено достаточно (иначе проверка пуста): ' + total);
+    // контроль: разбор причины умеет подменять — строка гейта подлинности узнаётся
+    assert.notStrictEqual(FE().explainScriptFailure(['БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256']), null, 'контроль: разбор узнаёт известную беду, то есть проверка способна покраснеть');
+  });
+
+
+  // =========================================================================
+  // 9. F19: диспетчер touch-up'ов запускает файлы по СПИСКУ ИМЁН из вызова в verify, а не всё, что совпало с touchup-*
+  // =========================================================================
+  // Имена из вызова диспетчера: Windows — литеральный массив в -Names, macOS — слова после лимита в hm_run_touchups.
+  const listFromVerifyPs = (text) => {
+    const m = /Invoke-HmTouchups -Dir \$PSScriptRoot -Names @\(((?:\s*'touchup-[A-Za-z0-9-]+'\s*,?)+)\)\s+-TimeoutSec 30/.exec(codeOnly(text));
+    return m ? (m[1].match(/touchup-[A-Za-z0-9-]+/g) || []) : null;
+  };
+  const listFromVerifySh = (text) => {
+    const m = /hm_run_touchups "\$DIR" 30 \\\n((?:[ \t]+touchup-[A-Za-z0-9-]+)+)[ \t]*\)/.exec(codeOnly(text));
+    return m ? (m[1].match(/touchup-[A-Za-z0-9-]+/g) || []) : null;
+  };
+  // Сверка списка с файлами: «забытые» (файл есть, в списке нет) и «призраки» (в списке есть, файла нет).
+  const diffTouchupLists = (listed, files) => ({
+    forgotten: files.filter((f) => !listed.includes(f)),
+    phantom: listed.filter((l) => !files.includes(l)),
+    duplicates: listed.filter((l, i) => listed.indexOf(l) !== i),
+  });
+  const touchupFiles = (dir, ext) => fs.readdirSync(dir).filter((n) => /^touchup-[A-Za-z0-9-]+\.(ps1|sh)$/.test(n) && n.endsWith(ext));
+
+  ok('u10b F19: список имён в вызове диспетчера (verify.ps1, verify.sh) равен touchup-* в репозитории — забытый файл или лишнее имя красят тест, порядок стабилен (Windows — по алфавиту, macOS — как давал глоб в локали C)', () => {
+    const ps = listFromVerifyPs(rawWin('verify.ps1'));
+    assert(ps && ps.length, 'в verify.ps1 найден литеральный список -Names: ' + ps);
+    const sh = listFromVerifySh(fs.readFileSync(path.join(MACD, 'verify.sh'), 'utf8'));
+    assert(sh && sh.length, 'в verify.sh найден список имён после лимита: ' + sh);
+    // Windows
+    const winFiles = touchupFiles(WIN, '.ps1').map((n) => n.replace(/\.ps1$/, ''));
+    assert(winFiles.length >= 2, 'touchup-*.ps1 в репозитории найдены (иначе сверка пуста): ' + winFiles);
+    assert.deepStrictEqual(diffTouchupLists(ps, winFiles), { forgotten: [], phantom: [], duplicates: [] }, 'verify.ps1: список == файлам touchup-*.ps1');
+    assert.deepStrictEqual(ps, ps.slice().sort(), 'verify.ps1: порядок по алфавиту (как было у сортировки по имени)');
+    // macOS: глоб расширял touchup-*.sh в порядке байтов локали C ПО ИМЕНИ ФАЙЛА С РАСШИРЕНИЕМ: «-» (0x2D) раньше «.» (0x2E),
+    // поэтому touchup-vscode-owner.sh шёл перед touchup-vscode.sh.
+    const macFiles = touchupFiles(MACD, '.sh');
+    assert(macFiles.length >= 5, 'touchup-*.sh в репозитории найдены: ' + macFiles);
+    const macOrder = macFiles.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).map((n) => n.replace(/\.sh$/, ''));
+    assert.deepStrictEqual(diffTouchupLists(sh, macOrder), { forgotten: [], phantom: [], duplicates: [] }, 'verify.sh: список == файлам touchup-*.sh');
+    assert.deepStrictEqual(sh, macOrder, 'verify.sh: порядок такой же, какой давал глоб в локали C: ' + sh.join(' '));
+    assert(sh.indexOf('touchup-vscode-owner') < sh.indexOf('touchup-vscode'), 'vscode-owner (владелец файлов) идёт перед vscode, как и раньше');
+    // Контроль: сверка умеет краснеть — забытый файл, призрак и дубль.
+    assert.deepStrictEqual(diffTouchupLists(['touchup-a'], ['touchup-a', 'touchup-b']).forgotten, ['touchup-b'], 'контроль: забытый файл виден');
+    assert.deepStrictEqual(diffTouchupLists(['touchup-a', 'touchup-x'], ['touchup-a']).phantom, ['touchup-x'], 'контроль: имя без файла видно');
+    assert.deepStrictEqual(diffTouchupLists(['touchup-a', 'touchup-a'], ['touchup-a']).duplicates, ['touchup-a'], 'контроль: дубль виден');
+    // Контроль: прежний вид вызова (без списка) разбор не принимает — тест не засчитает возврат к глобу.
+    assert.strictEqual(listFromVerifyPs(rawWin('verify.ps1').replace(/ -Names @\([^)]*\)/, '')), null, 'контроль: вызов без -Names не принят');
+    assert.strictEqual(listFromVerifyPs(rawWin('verify.ps1').replace(/-Names @\([^)]*\)/, '-Names (Get-ChildItem $PSScriptRoot -Filter touchup-*.ps1).BaseName')), null, 'контроль: список из каталога вместо литерала не принят');
+    assert.strictEqual(listFromVerifySh(fs.readFileSync(path.join(MACD, 'verify.sh'), 'utf8').replace(/hm_run_touchups "\$DIR" 30 \\\n[^)]*\)/, 'hm_run_touchups "$DIR" 30 )')), null, 'контроль: вызов macOS без имён не принят');
+  });
+
+  // Прежний поиск файлов (cca497e): глоб по каталогу, строгое имя, сортировка по имени — как контроль на тех же входах.
+  const OLD_TOUCHUP_GLOB = String.raw`
+function Get-HmTouchupFilesOld {
+    param([string]$Dir)
+    $found = @()
+    try {
+        $found = @(Get-ChildItem -LiteralPath $Dir -File -ErrorAction Stop |
+            Where-Object { $_.Name -match '^touchup-[A-Za-z0-9-]+\.ps1$' } |
+            Sort-Object Name)
+    } catch { $found = @() }
+    return ,$found
+}
+`;
+
+  ok('u10b F19: PS 5.1 — запускаются только перечисленные touch-up-ы, в порядке списка; лишний файл со строгим именем не исполняется никогда, кривые имена в списке и отсутствующие файлы называются в журнале и не мешают остальным (контроль: прежний глоб находит лишний файл)', () => {
+    needPs();
+    const sb = mkSandbox('f19ps');
+    try {
+      const dir = sb.mk(sb.base, 'unpack', 'O’Brien Тест');
+      const mark = path.join(sb.base, 'mark');
+      const w = (n, body, d) => fs.writeFileSync(path.join(d || dir, n), BOM + body.replace(/\r?\n/g, '\r\n'));
+      const tu = (tag, text, code) => "[IO.File]::WriteAllText($env:HM_T_MARK + '." + tag + "', 'ran')\nWrite-Host '" + text + "'\nexit " + (code || 0) + '\n';
+      w('touchup-a.ps1', tu('a', 'ОБНОВЛЕНО: первый — привет', 5));      // код выхода не учитывается
+      w('touchup-b.ps1', tu('b', 'ОБНОВЛЕНО: второй'));
+      w('touchup-stray.ps1', tu('stray', 'ЛИШНИЙ ФАЙЛ ЗАПУЩЕН'));          // строгое имя, но в списке нет: слот исполнения из F19
+      w('touchup-bad_name.ps1', tu('bad', 'ЛИШНИЙ ФАЙЛ ЗАПУЩЕН'));
+      w('evil.ps1', tu('evil', 'ВЫШЛИ ИЗ КАТАЛОГА'), path.dirname(dir));    // файл на уровень выше
+      sb.mk(dir, 'touchup-x');                                              // существующая папка с «touchup-» в имени: по ней имя с .. дошло бы до evil.ps1
+      const GOOD = ['touchup-b', 'touchup-a'];
+      const BAD = ['touchup-missing', '..\\evil', 'touchup-x\\..\\..\\evil', 'touchup-a.ps1', 'touchup_x', "touchup-q'uote", 'touchup-q\u2019uote', 'C:\\Windows\\touchup-z', '', 'touchup-a\nx', 'touchup-a\n'];
+      const names = GOOD.concat(BAD).map((n) => q(n)).join(', ');
+      const r = runPs(sb, ['. ' + q(path.join(WIN, '_touchups.ps1')),
+        'Invoke-HmTouchups -Dir ' + q(dir) + ' -Names @(' + names + ') -TimeoutSec 60', "Write-Host 'КОНЕЦ'"].join('\r\n'), { HM_T_MARK: mark });
+      const dump = '\n' + r.out + r.err;
+      const out = lines(r.out).map((s) => s.trim()).filter(Boolean);
+      const first = out.slice(0, 2);
+      assert.deepStrictEqual(first, ['ОБНОВЛЕНО: второй', 'ОБНОВЛЕНО: первый — привет'], 'порядок — как в списке (b, a), а не по алфавиту; кириллица без мусора' + dump);
+      assert.strictEqual(out[out.length - 1], 'КОНЕЦ', 'диспетчер вернул управление' + dump);
+      assert(!/ЛИШНИЙ|ВЫШЛИ/.test(r.out), 'файлы вне списка и вне каталога не запускались' + dump);
+      assert.deepStrictEqual(fs.readdirSync(sb.base).filter((n) => /^mark\./.test(n)).sort(), ['mark.a', 'mark.b'], 'исполнены ровно два скрипта (по следам на диске)' + dump);
+      // Каждое отвергнутое имя названо; управляющие знаки не печатаются как есть.
+      const skipped = out.filter((l) => /^\[touchups\] пропущено:/.test(l));
+      assert.strictEqual(skipped.length, BAD.length, 'на каждое отвергнутое имя — своя строка (в том числе пустое и с переводом строки на конце): ' + skipped.join(' | '));
+      assert(skipped.some((l) => l.includes('«touchup-missing»')), 'отсутствующий файл назван' + dump);
+      assert(skipped.some((l) => l.includes('«..\\evil»')) && skipped.some((l) => l.includes('«touchup-a.ps1»')), 'путь и расширение в имени отвергнуты' + dump);
+      assert(skipped.some((l) => /«touchup-a\?+x»/.test(l)) && skipped.some((l) => /«touchup-a\?+»/.test(l)), 'перевод строки в имени (посреди и на конце) заменён знаком вопроса — журнал не подделать: ' + skipped.join(' | '));
+      assert(skipped.every((l) => /имя не строгое или файла нет рядом с verify\.ps1$/.test(l)), 'причина названа одной формулой');
+      // Контроль: прежний глоб на том же каталоге находит лишние файлы со строгим именем.
+      const rc = runPs(sb, OLD_TOUCHUP_GLOB + "\r\n(Get-HmTouchupFilesOld -Dir " + q(dir) + ") | ForEach-Object { Write-Output ('OLD=' + $_.Name) }");
+      const old = lines(rc.out).filter((l) => /^OLD=/.test(l)).map((l) => l.slice(4));
+      assert.deepStrictEqual(old, ['touchup-a.ps1', 'touchup-b.ps1', 'touchup-stray.ps1'], 'КОНТРОЛЬ: прежний глоб выбирает и touchup-stray.ps1 — готовый слот исполнения' + rc.out + rc.err);
+      // Каталога нет — диспетчер не бросает, всё названо.
+      const rm = runPs(sb, ['. ' + q(path.join(WIN, '_touchups.ps1')), 'Invoke-HmTouchups -Dir ' + q(path.join(sb.base, 'нет-такого')) + " -Names @('touchup-a') -TimeoutSec 20", "Write-Host 'ЖИВ'"].join('\r\n'));
+      assert(/\[touchups\] пропущено: «touchup-a»/.test(rm.out) && /ЖИВ/.test(rm.out), 'отсутствующий каталог не роняет verify: ' + rm.out + rm.err);
+    } finally { sb.cleanup(); }
+  });
+
+  ok('u10b F19: диспетчер требует список (параметр -Names обязателен), а _touchups.ps1 не перечисляет каталог — Get-ChildItem/Get-Item -Filter по каталогу touch-up-ов не осталось', () => {
+    const lib = readText(path.join(WIN, '_touchups.ps1'));
+    const code = codeOnly(lib);
+    assert(/\[Parameter\(Mandatory = \$true\)\](?:\[AllowEmptyString\(\)\])?\[string\[\]\]\$Names/.test(code), 'Names — обязательный параметр (пустая строка в списке допустима: её назовёт журнал, а не оборвёт весь вызов)');
+    assert(!/Get-ChildItem/.test(code) && !/Get-HmTouchupFiles/.test(code), 'перечисления каталога и старой функции нет');
+    assert(!/-Filter|\[System\.IO\.Directory\]::(Get|Enumerate)/.test(code), 'и другого способа перечислить каталог нет');
+    // Контроль: прежний текст эту проверку не прошёл бы.
+    assert(/Get-ChildItem/.test(codeOnly(OLD_TOUCHUP_GLOB)), 'контроль: прежний вид содержит перечисление');
+    const sh = fs.readFileSync(path.join(MACD, '_touchups.sh'), 'utf8');
+    assert(!/for f in "\$dir"\/touchup-\*\.sh/.test(codeOnly(sh)) && !/\/touchup-\*/.test(codeOnly(sh)), 'macOS: глоба по каталогу нет');
+    assert(/for name in "\$@"/.test(codeOnly(sh)), 'macOS: цикл идёт по переданным именам');
+  });
+
+  ok('u10b F19: bash — hm_run_touchups запускает перечисленные имена в порядке списка; лишний файл, кривое имя, путь и расширение не исполняются, отсутствующий файл назван, зависший прерван', () => {
+    const probe = spawnSync('bash', ['--version'], { encoding: 'utf8' });
+    if (probe.error || probe.status !== 0) SKIP('нет bash');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u10b-sh-'));
+    const dir = path.join(base, 'unpack'); fs.mkdirSync(dir);
+    try {
+      const w = (n, body, d) => fs.writeFileSync(path.join(d || dir, n), body, 'utf8');
+      w('touchup-b.sh', "echo 'ОБНОВЛЕНО: второй'\nexit 0\n");
+      w('touchup-a.sh', "echo 'ОБНОВЛЕНО: первый'\nexit 7\n");
+      w('touchup-hang.sh', "sleep 30\necho 'ОБНОВЛЕНО: не успел'\n");
+      w('touchup-stray.sh', "echo 'ЛИШНИЙ ФАЙЛ ЗАПУЩЕН'\n");
+      w('touchup-bad_name.sh', "echo 'ЛИШНИЙ ФАЙЛ ЗАПУЩЕН'\n");
+      w('evil.sh', "echo 'ВЫШЛИ ИЗ КАТАЛОГА'\n", path.dirname(dir));
+      const lib = path.join(MACD, '_touchups.sh').replace(/\\/g, '/');
+      const d = dir.replace(/\\/g, '/');
+      // Имена — в файле-драйвере (в аргументах командной строки bash под Windows съедает одиночные кавычки: «touchup-q'x»).
+      const shQ = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+      const names = ['touchup-b', 'touchup-a', 'touchup-missing', '../evil', 'touchup-a.sh', 'touchup_x', "touchup-q'x", 'touchup-hang', ''];
+      const drv = path.join(base, 'drv.sh');
+      fs.writeFileSync(drv, '. ' + shQ(lib) + '\nhm_run_touchups ' + shQ(d) + ' 3 ' + names.map(shQ).join(' ') + '\necho КОНЕЦ\n');
+      const t0 = Date.now();
+      const r = spawnSync('bash', [drv.replace(/\\/g, '/')], { encoding: 'utf8', timeout: 90000 });
+      const sec = (Date.now() - t0) / 1000;
+      const out = String(r.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      const dump = '\n' + r.stdout + r.stderr;
+      assert.deepStrictEqual(out.slice(0, 2), ['ОБНОВЛЕНО: второй', 'ОБНОВЛЕНО: первый'], 'порядок как в списке' + dump);
+      assert(!/ЛИШНИЙ|ВЫШЛИ/.test(r.stdout), 'файлы вне списка и вне каталога не запускались' + dump);
+      assert(out.includes('[touchup-missing] пропущено: нет файла touchup-missing.sh рядом с verify.sh'), 'отсутствующий файл назван' + dump);
+      ['../evil', 'touchup-a.sh', 'touchup_x', "touchup-q'x", ''].forEach((n) => assert(out.includes('[touchups] пропущено: имя «' + n + '» не строгое (нужно touchup-<буквы-цифры-дефис>)'), 'кривое имя названо: ' + JSON.stringify(n) + dump));
+      assert(out.includes('[touchup-hang] прервано: не уложился в 3 с') && out[out.length - 1] === 'КОНЕЦ', 'зависший прерван, диспетчер вернул управление' + dump);
+      assert(sec < 60, 'зависший touch-up держал диспетчер ' + sec + ' с');
+      // Без имён — ничего не запускается и ничего не бросается (раньше без имён был бы глоб).
+      const r0 = spawnSync('bash', ['-c', '. "$1"; hm_run_touchups "$2" 3; echo КОНЕЦ', 'x', lib, d], { encoding: 'utf8', timeout: 60000 });
+      assert.deepStrictEqual(String(r0.stdout).split(/\r?\n/).map((s) => s.trim()).filter(Boolean), ['[touchups] пропущено: список имён пуст', 'КОНЕЦ'], 'вызов без имён не запускает ничего и говорит об этом: ' + r0.stdout + r0.stderr);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  });
+
 })();

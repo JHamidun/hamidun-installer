@@ -18,8 +18,16 @@
 # Запуск — ОТДЕЛЬНЫМ powershell.exe по абсолютному пути из System32, как главный процесс
 # запускает скрипты компонентов: консоль переводится в UTF-8 ДО скрипта (иначе кириллица в
 # его выводе превращается в мусор), а `exit` внутри touch-up'а не может оборвать verify.
-# Файлы берутся только из каталога самого verify.ps1 и только по строгому имени
-# touchup-<буквы-цифры-дефис>.ps1: ничего нового в доверии к каталогу скриптов это не вносит.
+#
+# КАКИЕ ФАЙЛЫ ЗАПУСКАТЬ — решает СПИСОК ИМЁН, вшитый в вызов в verify.ps1 (параметр -Names), а не содержимое каталога
+# (F19, разбор безопасности). Раньше диспетчер запускал ВСЁ, что совпало с touchup-*.ps1 рядом с verify.ps1, отдельными
+# процессами под администратором: новый файл, положенный в каталог распаковки, был всегда готовым слотом исполнения,
+# причём мимо любой проверки, которая закрепит известные скрипты. Теперь лишний файл не запускается никогда, а
+# забытый в списке ловит тест (список обязан совпасть с touchup-*.ps1 в репозитории: test/run-tests.js, раздел u10b).
+# Порядок запуска — порядок списка (в verify.ps1 он алфавитный, как был у сортировки по имени). Имя в списке проходит строгую
+# проверку touchup-<буквы-цифры-дефис> (без пути и расширения), файл ищется только в каталоге самого verify.ps1.
+# Чего это НЕ делает: файл из списка по-прежнему исполняется под администратором из каталога распаковки (принятый владельцем
+# остаток F12), и сами touch-up'ы по-прежнему идут с токеном verify — запуск без повышения прав отдельная задача.
 # Здесь нет `exit`: это библиотека.
 
 # Одиночные кавычки внутри '…' удваиваем все пять видов: PowerShell считает ограничителем и
@@ -30,27 +38,31 @@ function ConvertTo-HmTouchupLiteral {
     return [regex]::Replace([string]$Text, $pattern, '$0$0')
 }
 
-# Какие touch-up'ы лежат в каталоге — в алфавитном порядке (порядок виден в журнале и стабилен).
-function Get-HmTouchupFiles {
-    param([string]$Dir)
-    $found = @()
-    try {
-        $found = @(Get-ChildItem -LiteralPath $Dir -File -ErrorAction Stop |
-            Where-Object { $_.Name -match '^touchup-[A-Za-z0-9-]+\.ps1$' } |
-            Sort-Object Name)
-    } catch { $found = @() }
-    return ,$found
+# Файл touch-up'а по ИМЕНИ из списка: объект FileInfo либо $null, если имя не строгое или файла нет. Имя — без пути и без
+# расширения: «..\evil», «touchup-x.ps1», «touchup_x», «touchup-q'uote» не проходят.
+function Resolve-HmTouchupFile {
+    param([string]$Dir, [string]$Name)
+    if ($Name -notmatch '\Atouchup-[A-Za-z0-9-]+\z') { return $null }
+    $p = [System.IO.Path]::Combine($Dir, $Name + '.ps1')
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return $null }
+    return (Get-Item -LiteralPath $p -Force)
 }
 
 function Invoke-HmTouchups {
-    param([Parameter(Mandatory = $true)][string]$Dir, [int]$TimeoutSec = 60)
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Names, [int]$TimeoutSec = 60)
     $sysRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
     $psExe = [System.IO.Path]::Combine($sysRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     if (-not (Test-Path -LiteralPath $psExe)) {
         Write-Host '[touchups] пропущено: нет powershell.exe в System32'
         return
     }
-    foreach ($f in (Get-HmTouchupFiles -Dir $Dir)) {
+    foreach ($listed in $Names) {
+        $f = Resolve-HmTouchupFile -Dir $Dir -Name $listed
+        if (-not $f) {
+            # Не молча: пропажа файла из списка или кривое имя — это ошибка упаковки, и она должна быть видна в журнале.
+            Write-Host ('[touchups] пропущено: «' + ([string]$listed -replace '[\x00-\x1F\x7F-\x9F\u2028\u2029]', '?') + '» — имя не строгое или файла нет рядом с verify.ps1')
+            continue
+        }
         $name = $f.BaseName
         $proc = $null
         try {
