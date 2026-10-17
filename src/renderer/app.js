@@ -3122,6 +3122,7 @@ const PROXY_FAIL_TEXT = {
   'env-not-object': 'в ~/.claude/settings.json поле env устроено необычно — не трогал файл',
   'not-object': 'файл ~/.claude/settings.json устроен необычно — не трогал его',
   'not-regular-file': 'файл настроек — ссылка или папка, а не обычный файл — не трогал его',
+  'link-in-path': 'папка .claude (или путь к ней) — ссылка (junction/symlink), а не обычная папка — писать через ссылку не стал, ничего не изменил',
   'read-failed': 'не получилось прочитать ~/.claude/settings.json — ничего не записал',
   'write-failed': 'не получилось записать ~/.claude/settings.json',
 };

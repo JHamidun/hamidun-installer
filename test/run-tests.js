@@ -8273,6 +8273,11 @@ if (process.platform === 'win32') {
     const lc = {
       fs: fakeFs, logDirReady: false, logFd: null,
       LOG_DIR: 'd', LOG_PATH: 'p', Date: Date, console: console,
+      // u10a: перед открытием журнал проверяет цепочку пути на ссылки (src/link-guard.js); здесь цепочка чистая,
+      // а сам запрет на ссылки проверяют тесты «u10a/B install.log …». fstatSync в подменённом fs нет — после
+      // открытия проверка дескриптора тихо пропускается, как и задумано (не вышло fstat — решает цепочка).
+      LOG_HOME: 'h', logBlocked: '', blockLog: () => {},
+      linkGuard: { checkChain: () => ({ ok: true }), describe: () => '' },
     };
     vm.createContext(lc);
     vm.runInContext(body + '\n}\n; this.__log = logToFile;', lc);
@@ -8556,10 +8561,11 @@ ok('config.json в репозитории без сборочных маркер
         on(ev, fn) { (this.handlers[ev] = this.handlers[ev] || []).push(fn); }
         flashFrame() {}
       }
-      const api = new Function('BrowserWindow', 'IS_WIN', 'IS_MAC', 'path', '__dirname', 'bringToFront',
+      // windowGuards — охрана окна (u10a/D, src/window-guards.js): createWindow её ставит, здесь она не нужна — подставной пустышкой
+      const api = new Function('BrowserWindow', 'IS_WIN', 'IS_MAC', 'path', '__dirname', 'bringToFront', 'windowGuards',
         'let mainWindow = null; let _frontedForInstall = false;\n' + decl[0] + '\n' + src +
         '\n; return { createWindow, setBusy: (v) => { _installBusy = v; } };'
-      )(FakeWindow, isWin, !isWin, path, path.join(ROOT, 'src'), () => {});
+      )(FakeWindow, isWin, !isWin, path, path.join(ROOT, 'src'), () => {}, { install() {} });
       api.createWindow();
       const w = wins[0];
       // Возвращает, сколько раз обработчик запретил сессии закончиться при данном замке.
@@ -23204,9 +23210,12 @@ ok('config.json в репозитории без сборочных маркер
       const callLine = 'removeTreeNoFollow(quarantine, { force: false, maxRetries: 5, retryDelay: 200, onLink: (lp) => links.push(lp) });';
       assert(oldSrc.indexOf(callLine) !== -1, 'контроль применим: в removeDirTree есть вызов removeTreeNoFollow');
       const oldUx = path.join(base, 'uninstall-exec.old.js');
+      // (u10a: symlinkFreeChain переехал в src/link-guard.js — копия в scratch берёт его по абсолютному пути, как и fs-compat)
+      assert(oldSrc.indexOf("require('./link-guard')") !== -1, 'контроль применим: uninstall-exec берёт symlinkFreeChain из link-guard');
       fs.writeFileSync(oldUx, oldSrc
         .replace(callLine, 'fs.rmSync(quarantine, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });')
-        .replace("require('./fs-compat')", 'require(' + JSON.stringify(FCP) + ')'));
+        .replace("require('./fs-compat')", 'require(' + JSON.stringify(FCP) + ')')
+        .replace("require('./link-guard')", 'require(' + JSON.stringify(path.join(ROOT, 'src', 'link-guard.js')) + ')'));
       const env = Object.assign({}, process.env, {
         HM_COMPAT: FCP, HM_UX: UXP, HM_UX_OLD: oldUx, HM_BASE: path.join(base, 'w'), HM_VOLGUID: volumeGuidOf(base),
       });
@@ -34066,5 +34075,1753 @@ public static class HmConv {
     const r = spawnSync('git', ['grep', '-n', '-I', '-E', '^(<<<<<<<|>>>>>>>) |^[|]{7} ', '--', '.', ':!node_modules'], { cwd: ROOT, encoding: 'utf8', timeout: 120000 });
     if (r.error || (r.status !== 0 && r.status !== 1)) SKIP('git grep недоступен (не репозиторий или нет git): ' + String(r.error ? r.error.message : r.stderr).slice(0, 200));
     assert.strictEqual(r.status, 1, 'маркеры конфликта в файлах репозитория:\n' + String(r.stdout).split('\n').slice(0, 12).join('\n'));
+  });
+})();
+
+// ===========================================================================
+// u10a, часть A (рецензия безопасности, находки F14 и F13b): повышенные дочерние процессы установщика
+// (npm install -g, git clone, `npm config get prefix` в claude.ps1/verify.ps1) читали настройки САМОГО
+// человека — %USERPROFILE%\.npmrc, %APPDATA%\npm\etc\npmrc, ~/.gitconfig, ~/.config/git/config — и проектный
+// .npmrc из текущей папки, а текущей папкой у них был каталог распаковки portable-exe в %TEMP%. Файл
+// `registry=http://127.0.0.1:…` превращал онлайн-фолбэк в «жизненный цикл чужого пакета под администратором»,
+// `prefix=` уводил `npm config get prefix` (а с ним — список каталогов, где claude.ps1 удаляет файлы).
+// Раздел самодостаточен (run_section.js). Настоящие npm и git запускаются на ВЫМЫШЛЕННОМ профиле внутри
+// scratch-каталога: ни один путь настоящего профиля не читается и не пишется (первое утверждение каждого такого
+// теста — все корни профиля лежат внутри scratch). Окружение берётся из НАСТОЯЩЕЙ buildInstallEnv (текст функции
+// вырезается из main.js), контрольный вариант — то же окружение без ключей изоляции (прежнее поведение).
+// ===========================================================================
+(function u10aToolConfigIsolation() {
+  console.log('\n== u10a/A: дочерние скрипты не читают npm/git-настройки человека и не стартуют из каталога распаковки ==');
+  const { spawnSync } = require('child_process');
+  const IS_WIN = process.platform === 'win32';
+  const IE = require(path.join(ROOT, 'src', 'install-env.js'));
+  const MAINJS = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const inside = (child, parent) => {
+    const r = path.relative(path.resolve(parent), path.resolve(String(child || '')));
+    return !!r && !r.startsWith('..') && !path.isAbsolute(r);
+  };
+  const needWin = () => { if (!IS_WIN) SKIP('нужен Windows (npm/git для Windows и путь System32)'); };
+
+  // --- вырезать куски настоящего main.js (Electron-точку входа из теста не поднять) ---
+  const cutBlock = (src, needle) => {
+    const i = src.indexOf(needle);
+    assert(i !== -1, 'в main.js не найдено: ' + needle);
+    let depth = 0;
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}' && --depth === 0) return src.slice(i, k + 1);
+    }
+    throw new Error('не нашлась закрывающая скобка для: ' + needle);
+  };
+  const cutUntil = (src, needle, endNeedle) => {
+    const i = src.indexOf(needle);
+    assert(i !== -1, 'в main.js не найдено: ' + needle);
+    const j = src.indexOf(endNeedle, i);
+    assert(j !== -1, 'в main.js не найден конец для: ' + needle);
+    return src.slice(i, j + endNeedle.length);
+  };
+  // buildInstallEnv (Windows-ветка) с подставным process.env и «валидированным» корнем Windows.
+  const loadBuild = (procEnv, sysRoot, srcOverride) => {
+    const m = srcOverride || MAINJS();
+    const code = cutUntil(m, 'const WIN_SYS_ENV_KEYS = [', '\n];') + '\n' +
+      cutUntil(m, 'const NONINTERACTIVE_ENV = {', '\n};') + '\n' +
+      cutBlock(m, 'function buildInstallEnv(rendererEnv)') + '\nreturn buildInstallEnv;';
+    return new Function('installEnv', 'process', 'path', 'remoteFetch', 'IS_WIN', code)(
+      IE, { env: procEnv }, path.win32, { winSystemRoot: () => sysRoot }, true);
+  };
+
+  // --- вымышленный профиль человека в scratch ---
+  const mkScratch = (name) => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u10a-' + name + '-'));
+  const mkProfile = (root) => {
+    const prof = path.join(root, 'prof');
+    const appData = path.join(prof, 'AppData', 'Roaming');
+    const localAppData = path.join(prof, 'AppData', 'Local');
+    const tmp = path.join(root, 'tmp');
+    [path.join(appData, 'npm', 'etc'), localAppData, tmp, path.join(prof, '.config', 'git')]
+      .forEach((d) => fs.mkdirSync(d, { recursive: true }));
+    const drv = path.parse(prof).root.replace(/[\\/]+$/, '');
+    return { prof, appData, localAppData, tmp,
+      env: { USERPROFILE: prof, HOMEDRIVE: drv, HOMEPATH: prof.slice(drv.length), APPDATA: appData, LOCALAPPDATA: localAppData, TEMP: tmp, TMP: tmp, USERNAME: 'tester' } };
+  };
+  // ПЕРВОЕ утверждение каждого теста с настоящими инструментами: все корни профиля — внутри scratch.
+  const assertScratch = (env, root) => {
+    ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'].forEach((k) => assert(inside(env[k], root), k + ' вне scratch: ' + env[k]));
+    assert(inside(String(env.HOMEDRIVE) + String(env.HOMEPATH), root), 'HOMEDRIVE+HOMEPATH вне scratch');
+  };
+  // Что враждебная программа того же пользователя кладёт в окружение процесса установщика.
+  const HOSTILE = {
+    npm_config_registry: 'http://evil.invalid/', NPM_CONFIG_PREFIX: 'C:\\evil', NPM_CONFIG_USERCONFIG: 'C:\\Users\\x\\.npmrc',
+    npm_config_script_shell: 'C:\\evil\\sh.exe', GIT_CONFIG_GLOBAL: 'C:\\evil\\gitconfig', GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'C:\\evil\\m.exe', GIT_EXEC_PATH: 'C:\\evil',
+    HOME: 'C:\\evil', XDG_CONFIG_HOME: 'C:\\evil', NODE_OPTIONS: '--require C:\\evil\\x.js', PATH: 'C:\\evil'
+  };
+  const lc = (o) => Object.keys(o).map((k) => k.toLowerCase());
+
+  ok('u10a/A: buildInstallEnv (настоящий main.js, Windows) задаёт изоляцию npm и git поверх чужих значений; два РАЗНЫХ пустых файла для npm', () => {
+    const SYS = 'C:\\Windows';
+    const proc = Object.assign({ SystemRoot: SYS, windir: SYS, USERPROFILE: 'C:\\Users\\tester', APPDATA: 'C:\\Users\\tester\\AppData\\Roaming',
+      LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local', TEMP: 'C:\\Users\\tester\\AppData\\Local\\Temp', TMP: 'C:\\Users\\tester\\AppData\\Local\\Temp' }, HOSTILE);
+    const build = loadBuild(proc, SYS);
+    // и renderer, и окружение процесса пытаются подставить своё — побеждает только main
+    const env = build({ HM_SELECTED: 'config,claude', NPM_CONFIG_USERCONFIG: 'C:\\r\\evil.npmrc', GIT_CONFIG_GLOBAL: 'C:\\r\\evil', npm_config_registry: 'http://renderer.invalid/' });
+    const W = path.win32;
+    const S32 = SYS + '\\System32';
+    assert(env.NPM_CONFIG_USERCONFIG && env.NPM_CONFIG_GLOBALCONFIG, 'заданы оба файла настроек npm');
+    assert.strictEqual(W.dirname(env.NPM_CONFIG_USERCONFIG).toLowerCase(), S32.toLowerCase(), 'userconfig — в System32 (каталог только для администраторов)');
+    assert.strictEqual(W.dirname(env.NPM_CONFIG_GLOBALCONFIG).toLowerCase(), S32.toLowerCase(), 'globalconfig — в System32');
+    // npm 11 отказывается грузить ОДИН файл дважды («double-loading config … as global, previously loaded as user») —
+    // поэтому пути обязаны различаться (проверено на настоящем npm 11.3.0)
+    assert.notStrictEqual(env.NPM_CONFIG_USERCONFIG.toLowerCase(), env.NPM_CONFIG_GLOBALCONFIG.toLowerCase(), 'пути userconfig и globalconfig различаются');
+    assert.strictEqual(env.GIT_CONFIG_GLOBAL, 'NUL', 'глобальный конфиг git — устройство NUL (проверено на настоящем git 2.50)');
+    assert.strictEqual(env.GIT_CONFIG_NOSYSTEM, '1');
+    // системный конфиг (http.sslBackend=schannel у новых установок Git for Windows) отключён целиком, поэтому нативный TLS
+    // возвращаем явной настройкой: иначе люди с антивирусом, перехватывающим HTTPS, теряли бы клон конфига
+    assert.strictEqual(env.GIT_CONFIG_COUNT, '1');
+    assert.strictEqual(env.GIT_CONFIG_KEY_0, 'http.sslBackend');
+    assert.strictEqual(env.GIT_CONFIG_VALUE_0, 'schannel');
+    // чужое не просочилось: из npm_config_* — только наши три, из GIT_* — только наши пять
+    assert.deepStrictEqual(lc(env).filter((k) => /^npm_config_/.test(k)).sort(), ['npm_config_globalconfig', 'npm_config_userconfig', 'npm_config_yes'], 'npm_config_*: ' + JSON.stringify(Object.keys(env)));
+    assert.deepStrictEqual(lc(env).filter((k) => /^git_/.test(k)).filter((k) => !/^git_(terminal_prompt|askpass)$/.test(k)).sort(),
+      ['git_config_count', 'git_config_global', 'git_config_key_0', 'git_config_nosystem', 'git_config_value_0'], 'GIT_*: ' + JSON.stringify(Object.keys(env)));
+    ['HOME', 'XDG_CONFIG_HOME', 'NODE_OPTIONS', 'GIT_EXEC_PATH', 'npm_config_registry', 'NPM_CONFIG_PREFIX', 'npm_config_script_shell'].forEach((k) => assert(!(k in env), 'не должно быть ' + k));
+    assert.strictEqual(env.HM_SELECTED, 'config,claude', 'ключи установщика от renderer по-прежнему проходят');
+    // наши имена — ровно по одному разу (в env Windows регистр не различается — дубль по регистру был бы неопределённым)
+    ['NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_GLOBALCONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']
+      .forEach((k) => assert.strictEqual(lc(env).filter((x) => x === k.toLowerCase()).length, 1, k + ' задан ровно один раз'));
+  });
+
+  ok('u10a/A: изоляционные файлы npm в System32 на деле отсутствуют (пусто = нет файла; создать их без прав администратора нельзя)', () => {
+    needWin();
+    const sys = process.env.SystemRoot || 'C:\\Windows';
+    const env = loadBuild({ SystemRoot: sys, windir: sys, USERPROFILE: 'C:\\Users\\t', APPDATA: 'C:\\Users\\t\\a', LOCALAPPDATA: 'C:\\Users\\t\\l', TEMP: 'C:\\t', TMP: 'C:\\t' }, sys)({});
+    [env.NPM_CONFIG_USERCONFIG, env.NPM_CONFIG_GLOBALCONFIG].forEach((f) => {
+      assert(!fs.existsSync(f), 'файл уже существует (его кто-то создал?): ' + f);
+      assert(fs.existsSync(path.dirname(f)), 'каталог файла существует: ' + path.dirname(f));
+    });
+  });
+
+  ok('u10a/A: компонент git оставляет git-настройки человека доступными (git.ps1 ПИШЕТ глобальный конфиг), npm-изоляция при этом остаётся; прочие компоненты изолированы', () => {
+    const SYS = 'C:\\Windows';
+    const env = loadBuild({ SystemRoot: SYS, windir: SYS, USERPROFILE: 'C:\\U', APPDATA: 'C:\\U\\a', LOCALAPPDATA: 'C:\\U\\l', TEMP: 'C:\\t', TMP: 'C:\\t' }, SYS)({});
+    assert.strictEqual(typeof IE.withoutGitConfigIsolation, 'function', 'install-env экспортирует withoutGitConfigIsolation');
+    const g = IE.withoutGitConfigIsolation(Object.assign({}, env), 'git');
+    ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'].forEach((k) => assert(!(k in g), k + ' у git-компонента убран'));
+    assert(g.NPM_CONFIG_USERCONFIG && g.NPM_CONFIG_GLOBALCONFIG, 'у git-компонента npm изолирован по-прежнему');
+    assert.strictEqual(g.GIT_TERMINAL_PROMPT, '0', 'запрет интерактива остаётся');
+    for (const id of ['config', 'claude', 'node', 'nomad', 'pydeps', 'verify', 'course', 'uv', 'vscode']) {
+      assert.deepStrictEqual(IE.withoutGitConfigIsolation(Object.assign({}, env), id), env, id + ': изоляция полная');
+    }
+    // регистр и пробелы в id не открывают лазейку для чужого компонента
+    assert.deepStrictEqual(IE.withoutGitConfigIsolation(Object.assign({}, env), 'GIT '), env);
+    // main.js зовёт это для КАЖДОГО запуска, после buildInstallEnv и до spawn
+    const m = MAINJS();
+    assertOrder(m, 'const childEnv = buildInstallEnv(rendererEnv);', 'installEnv.withoutGitConfigIsolation(childEnv, id)', 'исключение для git — после сборки окружения');
+    assertOrder(m, 'installEnv.withoutGitConfigIsolation(childEnv, id)', 'child = spawn(cmd, args, spawnOpts);', 'и до запуска');
+  });
+
+  // --- рабочая папка потомка ---
+  // Кусок run-component, где собираются параметры запуска, исполняется с подставным spawn.
+  const captureSpawn = (src, stubs) => {
+    const body = cutUntil(src, 'const spawnOpts = {', 'child = spawn(cmd, args, spawnOpts);');
+    let seen = null;
+    const fn = new Function('IS_WIN', 'remoteFetch', 'childEnv', 'cmd', 'args', 'spawn', 'let child;\n' + body + '\nreturn child;');
+    fn(stubs.IS_WIN, stubs.remoteFetch, { MARK: '1' }, 'cmd.exe', ['x'], (c, a, o) => { seen = { cmd: c, args: a, opts: o }; return {}; });
+    return seen;
+  };
+  const SYS32_STUB = 'C:\\Windows\\System32';
+
+  ok('u10a/A: run-component запускает потомка с cwd = проверенный System32 (не каталог распаковки), без cwd — отказ', () => {
+    const seen = captureSpawn(MAINJS(), { IS_WIN: true, remoteFetch: { winSystem32: () => SYS32_STUB } });
+    assert.strictEqual(seen.opts.cwd, SYS32_STUB, 'cwd = System32 из remoteFetch.winSystem32() (валидированный корень, не переменные окружения)');
+    assert.deepStrictEqual(seen.opts.env, { MARK: '1' }, 'окружение передаётся как раньше');
+    assert.strictEqual(seen.opts.windowsHide, true);
+    assert.deepStrictEqual(seen.opts.stdio, ['ignore', 'pipe', 'pipe'], 'stdin закрыт, как раньше');
+    // System32 не подтверждён → запуск отклоняется (try/catch вокруг spawn превращает это в {ok:false}), а не уходит «куда придётся»
+    assert.throws(() => captureSpawn(MAINJS(), { IS_WIN: true, remoteFetch: { winSystem32: () => null } }), /System32/, 'без подтверждённого System32 запуск отклонён');
+    // негативный контроль: прежний код (параметры без cwd) тем же утверждением отвергается
+    const base = MAINJS().replace(/\n\s*if \(IS_WIN\) \{[^}]*spawnOpts\.cwd[^}]*\}/, '');
+    assert.notStrictEqual(base, MAINJS(), 'контрольный вариант действительно вырезал блок с cwd');
+    const old = captureSpawn(base, { IS_WIN: true, remoteFetch: { winSystem32: () => SYS32_STUB } });
+    assert.strictEqual(old.opts.cwd, undefined, 'у прежнего кода cwd нет — тест на cwd его отвергает');
+  });
+
+  ok('u10a/A: настоящий дочерний процесс, запущенный с параметрами run-component, стоит в System32', () => {
+    needWin();
+    const real = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+    const s32 = real.winSystem32();
+    assert(s32, 'на этой машине System32 подтверждён');
+    const seen = captureSpawn(MAINJS(), { IS_WIN: true, remoteFetch: real });
+    const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.cwd())'],
+      { cwd: seen.opts.cwd, env: Object.assign({}, process.env), encoding: 'utf8', timeout: 60000, windowsHide: true });
+    assert.strictEqual(r.status, 0, String(r.stderr));
+    assert.strictEqual(r.stdout.toLowerCase(), s32.toLowerCase(), 'cwd потомка = System32');
+  });
+
+  // --- настоящий git ---
+  const findGit = () => {
+    const c = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], 'C:\\Program Files'].filter(Boolean)
+      .map((p) => path.join(p, 'Git', 'cmd', 'git.exe'));
+    return c.find((p) => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } }) || '';
+  };
+
+  ok('u10a/A: настоящий git — ~/.gitconfig и ~/.config/git/config человека (url.insteadOf, fsmonitor, filter) не видны с окружением установщика; без него видны', () => {
+    needWin();
+    const GIT = findGit();
+    if (!GIT) SKIP('Git for Windows не найден');
+    const root = mkScratch('git');
+    try {
+      const P = mkProfile(root);
+      const sys = process.env.SystemRoot || 'C:\\Windows';
+      const procEnv = Object.assign({ SystemRoot: sys, windir: sys }, P.env);
+      const build = loadBuild(procEnv, sys);
+      const env = build({});
+      assertScratch(env, root);                                   // ПЕРВОЕ утверждение: ни шага вне scratch
+      // два каталога-репозитория: «хороший» (на него указывает адрес) и «чужой» (куда его перенаправляет настройка человека)
+      const good = path.join(root, 'good').replace(/\\/g, '/');
+      const evil = path.join(root, 'evil').replace(/\\/g, '/');
+      const quiet = Object.assign({}, env, { GIT_CONFIG_GLOBAL: 'NUL', GIT_CONFIG_NOSYSTEM: '1' });
+      const git = (args, e, cwd) => spawnSync(GIT, args, { env: e, cwd: cwd || path.join(sys, 'System32'), encoding: 'utf8', timeout: 120000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const sha = {};
+      for (const [name, dir] of [['good', good], ['evil', evil]]) {
+        fs.mkdirSync(dir, { recursive: true });
+        assert.strictEqual(git(['init', '-q', '-b', 'main'], quiet, dir).status, 0, 'init ' + name);
+        assert.strictEqual(git(['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', name], quiet, dir).status, 0, 'commit ' + name);
+        sha[name] = git(['rev-parse', 'HEAD'], quiet, dir).stdout.trim();
+      }
+      assert(sha.good && sha.evil && sha.good !== sha.evil, 'репозитории различимы');
+      fs.writeFileSync(path.join(P.prof, '.gitconfig'),
+        '[url "' + evil + '"]\n\tinsteadOf = ' + good + '\n[core]\n\tfsmonitor = C:/evil/fsmonitor.exe\n[filter "x"]\n\tsmudge = C:/evil/smudge.exe\n[user]\n\tname = EVIL\n');
+      fs.writeFileSync(path.join(P.prof, '.config', 'git', 'config'), '[user]\n\temail = xdg-evil@example.invalid\n');
+
+      // контроль: то же окружение без ключей изоляции (прежнее поведение) — настройка человека работает
+      const control = Object.assign({}, env);
+      ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'].forEach((k) => delete control[k]);
+      const c1 = git(['ls-remote', good, 'HEAD'], control);
+      assert.strictEqual(c1.stdout.split(/\s+/)[0], sha.evil, 'КОНТРОЛЬ: адрес перенаправлен настройкой человека (insteadOf), stderr=' + c1.stderr);
+      assert(/EVIL/.test(git(['config', '--global', '--list'], control).stdout), 'КОНТРОЛЬ: глобальный конфиг человека читается');
+
+      // с окружением установщика: настройка не видна
+      const r1 = git(['ls-remote', good, 'HEAD'], env);
+      assert.strictEqual(r1.status, 0, r1.stderr);
+      assert.strictEqual(r1.stdout.split(/\s+/)[0], sha.good, 'адрес НЕ перенаправлен: клонировался бы тот репозиторий, на который указывает адрес');
+      const lst = git(['config', '--global', '--list'], env);
+      assert(!/EVIL|evil|fsmonitor|smudge/.test(lst.stdout), 'глобальный конфиг пуст: ' + lst.stdout);
+      assert.strictEqual(git(['config', '--get', 'user.name'], env).stdout.trim(), '', 'user.name человека не виден');
+      assert.strictEqual(git(['config', '--get', 'user.email'], env).stdout.trim(), '', 'XDG-конфиг человека не виден');
+      assert.strictEqual(git(['config', '--get', 'core.fsmonitor'], env).stdout.trim(), '');
+      // системный конфиг отключён целиком, а нативный TLS возвращён явной настройкой
+      assert.strictEqual(git(['config', '--get', 'http.sslbackend'], env).stdout.trim(), 'schannel', 'sslBackend=schannel из окружения');
+      assert(!/Program Files/i.test(git(['config', '--show-origin', '--list'], env).stdout.split('command line:')[0]), 'файлы настроек системы не читаются');
+
+      // исключение для git-компонента: его скрипт ПИШЕТ глобальный конфиг человека (longpaths, user.name по умолчанию…)
+      const gitComp = IE.withoutGitConfigIsolation(Object.assign({}, env), 'git');
+      const w = git(['config', '--global', 'init.defaultBranch', 'main'], gitComp);
+      assert.strictEqual(w.status, 0, w.stderr);
+      assert(/defaultBranch\s*=\s*main/i.test(fs.readFileSync(path.join(P.prof, '.gitconfig'), 'utf8')), 'git-компонент записал настройку в глобальный конфиг человека (scratch)');
+      // контроль-наоборот: с полной изоляцией запись НЕ доходит до файла человека — поэтому git-компоненту изоляцию давать нельзя
+      const before = fs.readFileSync(path.join(P.prof, '.gitconfig'), 'utf8');
+      git(['config', '--global', 'core.longpaths', 'true'], env, root);   // cwd — scratch: git кладёт NUL.lock в текущую папку
+      assert.strictEqual(fs.readFileSync(path.join(P.prof, '.gitconfig'), 'utf8'), before, 'с полной изоляцией глобальный конфиг человека не меняется');
+    } finally { drop(root); }
+  });
+
+  // --- настоящий npm ---
+  const npmCli = () => {
+    const c = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    return fs.existsSync(c) ? c : '';
+  };
+  const npmRun = (cli, args, env, cwd) => spawnSync(process.execPath, [cli].concat(args),
+    { env, cwd, encoding: 'utf8', timeout: 280000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const npmCfg = (cli, env, cwd) => {
+    const r = npmRun(cli, ['config', 'ls', '-l', '--json'], env, cwd);
+    assert.strictEqual(r.status, 0, 'npm config: ' + String(r.stderr).slice(0, 400));
+    return JSON.parse(r.stdout);
+  };
+
+  ok('u10a/A: настоящий npm — .npmrc человека (registry/prefix/script-shell) и проектный .npmrc каталога распаковки не определяют настройки; `npm config get prefix` не уводится (F13b)', () => {
+    needWin();
+    const cli = npmCli();
+    if (!cli) SKIP('npm рядом с node не найден');
+    const root = mkScratch('npm');
+    try {
+      const P = mkProfile(root);
+      const sys = process.env.SystemRoot || 'C:\\Windows';
+      const procEnv = Object.assign({ SystemRoot: sys, windir: sys }, P.env);
+      const env = loadBuild(procEnv, sys)({});
+      assertScratch(env, root);                                   // ПЕРВОЕ утверждение
+      const evilUser = path.join(root, 'evil-user-prefix');
+      const evilProj = path.join(root, 'evil-project-prefix');
+      fs.writeFileSync(path.join(P.prof, '.npmrc'), 'registry=http://127.0.0.1:9/user/\nscript-shell=C:\\evil\\user-sh.exe\nprefix=' + evilUser + '\n');
+      fs.writeFileSync(path.join(P.appData, 'npm', 'etc', 'npmrc'), 'registry=http://127.0.0.1:8/global/\n');
+      const unpack = path.join(root, 'unpack');                   // «каталог распаковки portable-exe»: текущая папка прежних потомков
+      fs.mkdirSync(unpack, { recursive: true });
+      fs.writeFileSync(path.join(unpack, '.npmrc'), 'registry=http://127.0.0.1:7/project/\nprefix=' + evilProj + '\n');
+      const control = Object.assign({}, env);
+      delete control.NPM_CONFIG_USERCONFIG; delete control.NPM_CONFIG_GLOBALCONFIG;
+
+      // КОНТРОЛЬ (прежнее поведение: окружение без изоляции, cwd = каталог распаковки): настройки подменены
+      const before = npmCfg(cli, control, unpack);
+      assert.strictEqual(before.registry, 'http://127.0.0.1:7/project/', 'КОНТРОЛЬ: registry взят из проектного .npmrc каталога распаковки');
+      assert.strictEqual(path.resolve(before.prefix), path.resolve(evilProj), 'КОНТРОЛЬ: `npm config get prefix` уведён в каталог злоумышленника');
+      const beforeUser = npmCfg(cli, control, path.join(sys, 'System32'));
+      assert.strictEqual(beforeUser.registry, 'http://127.0.0.1:9/user/', 'КОНТРОЛЬ: без изоляции registry берётся из ~/.npmrc человека');
+      assert.strictEqual(beforeUser['script-shell'], 'C:\\evil\\user-sh.exe');
+
+      // С изоляцией и cwd = System32 (как у run-component): настройки npm по умолчанию
+      const s32 = require(path.join(ROOT, 'src', 'remote-fetch.js')).winSystem32();
+      const after = npmCfg(cli, env, s32);
+      assert.strictEqual(after.registry, 'https://registry.npmjs.org/', 'registry — по умолчанию (прежний кэш поставки лежит именно под этим адресом)');
+      assert.strictEqual(path.resolve(after.prefix), path.resolve(path.join(P.appData, 'npm')), '`npm config get prefix` — штатный %APPDATA%\\npm (он и так в списке Test-HmOurClaudeDir)');
+      assert.strictEqual(after['script-shell'], null, 'script-shell человека не виден');
+      assert.strictEqual(path.resolve(after.userconfig), path.resolve(env.NPM_CONFIG_USERCONFIG));
+      assert.strictEqual(path.resolve(after.globalconfig), path.resolve(env.NPM_CONFIG_GLOBALCONFIG));
+      // Одной изоляции файлов мало: проектный .npmrc из текущей папки перебивает всё — поэтому cwd обязателен
+      const noCwd = npmCfg(cli, env, unpack);
+      assert.strictEqual(noCwd.registry, 'http://127.0.0.1:7/project/', 'изоляция файлов БЕЗ смены cwd проектный .npmrc не останавливает — cwd = System32 нужен');
+      assert(!fs.existsSync(evilUser) && !fs.existsSync(evilProj), 'каталоги злоумышленника не созданы проверкой');
+    } finally { drop(root); }
+  });
+
+  ok('u10a/A: настоящий npm install -g (офлайн, из кэша) с изоляцией ставит в штатный prefix; с .npmrc человека без изоляции — в каталог из его prefix=', () => {
+    needWin();
+    const cli = npmCli();
+    if (!cli) SKIP('npm рядом с node не найден');
+    const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+    if (!fs.existsSync(tar)) SKIP('нет tar.exe для сборки пробного пакета');
+    const root = mkScratch('npmi');
+    try {
+      const P = mkProfile(root);
+      const sys = process.env.SystemRoot || 'C:\\Windows';
+      const env = loadBuild(Object.assign({ SystemRoot: sys, windir: sys }, P.env), sys)({});
+      assertScratch(env, root);                                   // ПЕРВОЕ утверждение
+      // пробный пакет без зависимостей и скриптов, собранный tar.exe в scratch
+      const pk = path.join(root, 'pkg', 'package');
+      fs.mkdirSync(pk, { recursive: true });
+      fs.writeFileSync(path.join(pk, 'package.json'), JSON.stringify({ name: 'hm-u10a-fixture', version: '1.0.0', main: 'index.js' }));
+      fs.writeFileSync(path.join(pk, 'index.js'), 'module.exports = 1;\n');
+      const tgz = path.join(root, 'hm-u10a-fixture-1.0.0.tgz');
+      const t = spawnSync(tar, ['-czf', tgz, '-C', path.join(root, 'pkg'), 'package'], { encoding: 'utf8', timeout: 120000, windowsHide: true, env: { SystemRoot: sys } });
+      assert.strictEqual(t.status, 0, String(t.stderr));
+      const evilPrefix = path.join(root, 'evil-prefix');
+      fs.writeFileSync(path.join(P.prof, '.npmrc'), 'registry=http://127.0.0.1:9/user/\nprefix=' + evilPrefix + '\n');
+      const s32 = require(path.join(ROOT, 'src', 'remote-fetch.js')).winSystem32();
+      const install = (e, name) => npmRun(cli, ['install', '-g', tgz, '--offline', '--cache', path.join(root, 'cache-' + name), '--no-audit', '--no-fund'], e, s32);
+      const control = Object.assign({}, env);
+      delete control.NPM_CONFIG_USERCONFIG; delete control.NPM_CONFIG_GLOBALCONFIG;
+      const defaultPkg = path.join(P.appData, 'npm', 'node_modules', 'hm-u10a-fixture', 'package.json');
+      const evilPkg = path.join(evilPrefix, 'node_modules', 'hm-u10a-fixture', 'package.json');
+
+      const rc = install(control, 'control');
+      assert.strictEqual(rc.status, 0, 'контроль: ' + String(rc.stderr).slice(0, 400));
+      assert(fs.existsSync(evilPkg) && !fs.existsSync(defaultPkg), 'КОНТРОЛЬ: без изоляции пакет ушёл в prefix из ~/.npmrc человека (так же уходил бы чужой пакет с его lifecycle-скриптом)');
+      drop(evilPrefix);
+
+      const ri = install(env, 'iso');
+      assert.strictEqual(ri.status, 0, 'с изоляцией офлайн-установка из кэша работает: ' + String(ri.stderr).slice(0, 400));
+      assert(fs.existsSync(defaultPkg), 'пакет встал в штатный prefix (%APPDATA%\\npm)');
+      assert(!fs.existsSync(evilPrefix), 'prefix из ~/.npmrc человека не тронут');
+    } finally { drop(root); }
+  });
+})();
+
+// ===========================================================================
+// u10a, часть B (рецензия безопасности, находка F16): записи фиксированных имён из процесса с правами
+// администратора шли по ПУТИ, а не по дескриптору: junction на каталоге-родителе (home\.claude,
+// home\.hamidun-setup, …\hermes) уводил mkdir, копию и rename в чужой каталог, хотя lstat самого файла видел
+// обычный файл. Раздел проверяет общий модуль src/link-guard.js и каждого писателя на НАСТОЯЩИХ junction в
+// scratch-каталоге: жертва (каталог «по ту сторону») обязана остаться побайтно нетронутой, ответ — отказ с
+// причиной. Негативный контроль у каждого писателя один и тот же: копия src/ с ОТКЛЮЧЁННОЙ проверкой
+// (прежнее поведение) на том же стенде ДОЛЖНА дописать в жертву — иначе стенд ничего не доказывает.
+// Правило COMMON: тесты не трогают профиль человека — все пути внутри scratch (первое утверждение каждого).
+// ===========================================================================
+(function u10aLinkFreeWriters() {
+  console.log('\n== u10a/B: записи под администратором не идут сквозь junction/symlink в цепочке пути ==');
+  const IS_WIN = process.platform === 'win32';
+  const LG = require(path.join(ROOT, 'src', 'link-guard.js'));
+  const SRC = path.join(ROOT, 'src');
+  const MAINJS = () => fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const needWin = () => { if (!IS_WIN) SKIP('нужен Windows (junction без прав администратора)'); };
+  const mkScratch = (name) => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u10a-' + name + '-'));
+  const inside = (child, parent) => {
+    const r = path.relative(path.resolve(parent), path.resolve(String(child || '')));
+    return !!r && !r.startsWith('..') && !path.isAbsolute(r);
+  };
+  const junction = (link, target) => fs.symlinkSync(target, link, 'junction');
+  // Трассировка обращений к каталогу за ссылкой. «Жертва цела» проверяет итог, но не всё: временный файл, созданный в чужом
+  // каталоге и тут же убранный, mkdir по ссылке или чтение через неё итога не меняют, а проверка цепочки обязана остановить
+  // писателя именно ДО этого. Поэтому на время вызова операции ФС оборачиваются и записываются те, что пришлись на путь
+  // `prefix` (текстом, то есть «сквозь» ссылку). Изменяющие операции пишутся всегда; чтения (readFileSync, readdirSync) — по
+  // opts.reads: у писателей секретов и у обхода каталога отметок они запрещены тоже, а у манифеста и отметок установки чтение
+  // сквозь ссылку остаётся (граница привилегий — запись; содержимое профиля и так подделывает любая программа пользователя).
+  const traced = (prefix, fn, opts) => {
+    const o = opts || {};
+    const norm = (p) => path.resolve(String(p)).toLowerCase();
+    const pre = norm(prefix);
+    const calls = [];
+    const orig = {};
+    const names = ['mkdirSync', 'openSync', 'writeFileSync', 'appendFileSync', 'renameSync', 'copyFileSync', 'rmSync', 'unlinkSync', 'rmdirSync']
+      .concat(o.reads ? ['readFileSync', 'readdirSync'] : []);
+    names.forEach((name) => {
+      orig[name] = fs[name];
+      fs[name] = function (p, second) {
+        let hit = false;
+        try { const n = norm(p); hit = n === pre || n.startsWith(pre + path.sep); } catch (e) { hit = false; }   // не путь (дескриптор) — не наш случай
+        if (hit && o.armed && !o.armed()) hit = false;   // opts.armed: считать обращения только с того мига, когда она вернула true (гонка: ссылку подставляют по ходу вызова)
+        if (hit && !(name === 'openSync' && (second === undefined || second === 'r'))) calls.push(name + ' ' + String(p));   // открытие на чтение изменением не считается
+        return orig[name].apply(this, arguments);
+      };
+    });
+    try { fn(); } finally { names.forEach((name) => { fs[name] = orig[name]; }); }
+    return calls;
+  };
+  // Снимок каталога: относительные имена и содержимое файлов (каталоги — пометкой «/»).
+  const snapshot = (dir) => {
+    const out = {};
+    const walk = (rel) => {
+      for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const r = rel ? path.join(rel, e.name) : e.name;
+        if (e.isDirectory()) { out[r + '/'] = ''; walk(r); } else out[r] = fs.readFileSync(path.join(dir, r), 'utf8');
+      }
+    };
+    walk('');
+    return out;
+  };
+  // Копия src/ с отключённой проверкой ссылок: checkChain всегда «чисто» (так вели себя писатели до u10a).
+  let unguardedCopy = null;
+  const unguarded = () => {
+    if (unguardedCopy) return unguardedCopy;
+    const root = mkScratch('unguarded');
+    const dst = path.join(root, 'src');
+    fs.mkdirSync(dst, { recursive: true });
+    for (const f of fs.readdirSync(SRC)) if (f.endsWith('.js')) fs.copyFileSync(path.join(SRC, f), path.join(dst, f));
+    const real = fs.readFileSync(path.join(SRC, 'link-guard.js'), 'utf8');
+    const mutated = real.replace('function checkChain(target, anchor, opts) {', 'function checkChain(target, anchor, opts) { return { ok: true };');
+    assert.notStrictEqual(mutated, real, 'в link-guard.js нашлась сигнатура checkChain для контрольной копии');
+    fs.writeFileSync(path.join(dst, 'link-guard.js'), mutated);
+    unguardedCopy = { root, dst, load: (name) => require(path.join(dst, name)) };
+    return unguardedCopy;
+  };
+  process.on('exit', () => { if (unguardedCopy) drop(unguardedCopy.root); });
+
+  // ---- junction «через том» (рецензия безопасности, раунд 2) ----
+  // `mklink /J ссылка \\?\Volume{guid}\каталог` создаётся без прав администратора, а libuv за ссылку её НЕ считает: lstat
+  // не может разобрать цель, повторяет вызов как stat — ПО ссылке — и отдаёт статистику самой цели (isDirectory() истинно,
+  // isSymbolicLink() ложно). Ловушка описана в src/fs-compat.js и в заголовке src/link-guard.js; обычная junction из
+  // fs.symlinkSync(..., 'junction') её не воспроизводит, поэтому все тесты выше этой ловушки не видели. Цели — только внутри scratch.
+  // Тесты с такой ссылкой честно пропускаются (⏭), когда GUID тома или mklink недоступны: зелёная галочка обязана значить,
+  // что случай БЫЛ.
+  const cp = require('child_process');
+  const canon = (p) => { try { return fs.realpathSync.native(p); } catch (e) { return p; } };
+  // scratch в каноническом виде: на раннере TEMP бывает в виде 8.3 (RUNNER~1), а symlinkFreeChain сверяет путь целиком.
+  const mkScratchC = (name) => canon(mkScratch(name));
+  const volGuids = new Map();
+  const volumeGuidOf = (dir) => {
+    const rootDir = path.parse(path.resolve(dir)).root;
+    if (volGuids.has(rootDir)) return volGuids.get(rootDir);
+    let guid = '';
+    try {
+      const r = cp.spawnSync('mountvol.exe', [rootDir, '/L'], { encoding: 'utf8', timeout: 20000 });
+      const m = /\\\\\?\\Volume\{[0-9a-fA-F-]+\}\\/.exec(String(r.stdout || ''));
+      guid = m ? m[0] : '';
+    } catch (e) { guid = ''; }
+    volGuids.set(rootDir, guid);
+    return guid;
+  };
+  const needVol = (dir) => {
+    needWin();
+    if (!volumeGuidOf(dir)) SKIP('не удалось узнать GUID тома (mountvol): junction «через том» не создать');
+  };
+  const volLinks = [];   // созданные ссылки: перед сносом дерева снимаются rmdir-ом (рекурсивный rmSync мог бы пойти сквозь них)
+  // Бросает обычную Error, а не SKIP: зовётся и из подменённого fs.openSync, где писатель проглотил бы пропуск.
+  const makeLink = (link, target) => {
+    const r = cp.spawnSync('cmd.exe', ['/d', '/c', 'mklink', '/J', link, target], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error('mklink /J не создал ссылку: ' + String(r.stdout || r.stderr).slice(0, 160));
+    volLinks.push(link);
+  };
+  const volJunction = (link, victimDir) => {
+    makeLink(link, volumeGuidOf(path.dirname(link)).replace(/\\?$/, '\\') + victimDir.slice(path.parse(victimDir).root.length));
+  };
+  const dropV = (root) => {
+    for (let i = volLinks.length - 1; i >= 0; i--) {
+      if (!inside(volLinks[i], root)) continue;
+      try { fs.rmdirSync(volLinks[i]); } catch (e) { /* ignore */ }
+      volLinks.splice(i, 1);
+    }
+    drop(root);
+  };
+  // Копия src/ с link-guard БЕЗ сверки канонических имён: ровно прежнее (до раунда 2) поведение — один lstat на компонент.
+  // Обычную junction она по-прежнему ловит; пропускает только то, что lstat не отличает от каталога.
+  let lstatOnlyCopy = null;
+  const lstatOnly = () => {
+    if (lstatOnlyCopy) return lstatOnlyCopy;
+    const root = mkScratch('lstatonly');
+    const dst = path.join(root, 'src');
+    fs.mkdirSync(dst, { recursive: true });
+    for (const f of fs.readdirSync(SRC)) if (f.endsWith('.js')) fs.copyFileSync(path.join(SRC, f), path.join(dst, f));
+    const real = fs.readFileSync(path.join(SRC, 'link-guard.js'), 'utf8');
+    const mutated = real.replace('function sameName(a, b) { return a.toLowerCase() === b.toLowerCase(); }', 'function sameName() { return true; }');
+    assert.notStrictEqual(mutated, real, 'в link-guard.js нашлась сверка канонических имён для контрольной копии');
+    fs.writeFileSync(path.join(dst, 'link-guard.js'), mutated);
+    lstatOnlyCopy = { root, dst, load: (name) => require(path.join(dst, name)) };
+    return lstatOnlyCopy;
+  };
+  process.on('exit', () => { if (lstatOnlyCopy) drop(lstatOnlyCopy.root); });
+
+  // ---- сам модуль ----
+  ok('u10a/B link-guard: чистая цепочка (в т.ч. ещё не созданная) проходит, junction/не-папка/выход из профиля — отказ с указанием места', () => {
+    needWin();
+    const root = mkScratch('lg');
+    try {
+      const home = path.join(root, 'home');
+      const victim = path.join(root, 'victim');
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      fs.mkdirSync(victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: всё внутри scratch');
+      fs.writeFileSync(path.join(home, '.claude', 'a.txt'), 'x');
+      assert.strictEqual(LG.checkChain(path.join(home, '.claude', 'a.txt'), home).ok, true, 'существующий файл в обычных каталогах');
+      assert.strictEqual(LG.checkChain(path.join(home, '.claude', 'нет', 'ещё', 'b.txt'), home).ok, true, 'цепочка, которой ещё нет, — не отказ (писатель создаст и перепроверит)');
+      assert.strictEqual(LG.checkChain(path.join(home, 'новая', 'b.txt'), home).ok, true);
+      // junction в середине
+      junction(path.join(home, 'link'), victim);
+      const j = LG.checkChain(path.join(home, 'link', 'x', 'y.json'), home);
+      assert.deepStrictEqual([j.ok, j.reason, j.at], [false, 'link', path.join(home, 'link')], 'junction в середине пути: ' + JSON.stringify(j));
+      // сам файл — ссылка (symlink на файл нужен режим разработчика/права; не вышло — эта часть не выполняется)
+      fs.writeFileSync(path.join(victim, 'secret.txt'), 'S');
+      let fileLink = false;
+      try { fs.symlinkSync(path.join(victim, 'secret.txt'), path.join(home, '.claude', 'k.env'), 'file'); fileLink = true; } catch (e) { /* нет права на symlink-файлы */ }
+      if (fileLink) {
+        const f = LG.checkChain(path.join(home, '.claude', 'k.env'), home);
+        assert.deepStrictEqual([f.ok, f.reason], [false, 'link'], 'ссылка-файл как последний компонент — отказ');
+      }
+      // файл на месте каталога
+      fs.writeFileSync(path.join(home, 'plain'), 'file');
+      const nd = LG.checkChain(path.join(home, 'plain', 'x.json'), home);
+      assert.deepStrictEqual([nd.ok, nd.reason], [false, 'not-dir'], 'не-папка посреди пути');
+      // выход из профиля
+      for (const out of [victim, path.join(home, '..', 'victim'), home]) {
+        const r = LG.checkChain(out, home);
+        assert.deepStrictEqual([r.ok, r.reason], [false, 'outside-anchor'], 'вне корня или сам корень: ' + out);
+      }
+      assert.strictEqual(LG.checkChain(path.join(home, 'x'), '').ok, false, 'без корня — отказ (fail-closed)');
+      // булев вариант и исключение
+      assert.strictEqual(LG.isLinkFree(path.join(home, '.claude', 'a.txt'), home), true);
+      assert.strictEqual(LG.isLinkFree(path.join(home, 'link', 'a'), home), false);
+      let err = null;
+      try { LG.assertNoLinkInChain(path.join(home, 'link', 'a'), home, undefined, 'файлу ключей'); } catch (e) { err = e; }
+      assert(err && err.code === 'EHMLINK' && /^ЗАЩИТА:/.test(err.message) && /файлу ключей/.test(err.message) && /ссылк/.test(err.message), 'исключение по-русски с кодом EHMLINK: ' + (err && err.message));
+      assert.strictEqual(err.detail.at, path.join(home, 'link'));
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B link-guard: законные раскладки не ломаются — корень-junction (профиль на другом диске), кириллица/пробелы/’ в имени профиля, не-Windows не проверяется', () => {
+    needWin();
+    const root = mkScratch('lg2');
+    try {
+      const realHome = path.join(root, 'real-home');
+      fs.mkdirSync(path.join(realHome, '.claude'), { recursive: true });
+      const junctionHome = path.join(root, 'Иван Петров’s home');   // кириллица, пробелы, U+2019
+      junction(junctionHome, realHome);
+      assert(inside(junctionHome, root), 'ПЕРВОЕ: внутри scratch');
+      // сам корень — ссылка: это доверенная опора (профиль по токену), проверяется только то, что ниже
+      assert.strictEqual(LG.checkChain(path.join(junctionHome, '.claude', 'settings.json'), junctionHome).ok, true, 'корень-junction допустим');
+      // и тот же путь, написанный другим регистром
+      assert.strictEqual(LG.checkChain(path.join(junctionHome, '.CLAUDE', 'settings.json'), junctionHome.toUpperCase()).ok, true, 'регистр не важен на Windows');
+      // не-Windows: защита выключена целиком (там нет повышения привилегий; ~/.claude как ссылка на dotfiles — обычное дело)
+      fs.mkdirSync(path.join(root, 'victim'));
+      junction(path.join(realHome, 'dot'), path.join(root, 'victim'));
+      const mac = LG.checkChain(path.join(realHome, 'dot', 'f'), realHome, { platform: 'darwin' });
+      assert.deepStrictEqual([mac.ok, mac.skipped], [true, true], 'macOS/Linux: пропуск проверки');
+      assert.strictEqual(LG.checkChain(path.join(realHome, 'dot', 'f'), realHome, { platform: 'win32' }).ok, false, 'тот же путь на Windows — отказ');
+    } finally { drop(root); }
+  });
+
+  // ---- junction на путь тома: lstat её не видит, сверка канонических имён — видит ----
+  ok('u10a/B link-guard, том: junction на путь тома lstat принимает за обычный каталог — цепочка всё равно отказывает (в середине, последним компонентом, то же имя в чужом профиле, другой регистр); корень-junction и кириллица целы; без сверки канонических имён она проходила', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vg1');
+    try {
+      const home = path.join(root, 'home');
+      const victim = path.join(root, 'victim');
+      fs.mkdirSync(path.join(home, 'real'), { recursive: true });
+      fs.mkdirSync(path.join(victim, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(victim, 'x.json'), '{}');
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: всё внутри scratch');
+      volJunction(path.join(home, 'vj'), victim);                            // в середине пути
+      volJunction(path.join(home, '.claude'), path.join(victim, '.claude')); // то же имя, что у настоящей папки, но в чужом профиле
+      volJunction(path.join(home, 'real', 'deep'), victim);                  // ниже обычного каталога
+      // ПОСЫЛКА: lstat по-прежнему принимает такую ссылку за обычный каталог (ловушка libuv). Перестанет — тест ничего не
+      // доказывает, и link-guard надо пересматривать осознанно, а не обнаруживать это случайно (как контроль «голого rmSync»).
+      for (const p of [path.join(home, 'vj'), path.join(home, '.claude'), path.join(home, 'real', 'deep')]) {
+        const st = fs.lstatSync(p);
+        assert(!st.isSymbolicLink() && st.isDirectory(), 'посылка: lstat видит обычный каталог, а не ссылку: ' + p);
+      }
+      const refuse = (target, at, label) => {
+        const r = LG.checkChain(target, home);
+        assert.deepStrictEqual([r.ok, r.reason, r.at], [false, 'link', at], label + ': ' + JSON.stringify(r));
+      };
+      refuse(path.join(home, 'vj', 'новая', 'y.json'), path.join(home, 'vj'), 'junction на путь тома в середине пути (за ней ещё ничего нет)');
+      refuse(path.join(home, 'vj', 'x.json'), path.join(home, 'vj'), 'и когда файл за ней существует');
+      refuse(path.join(home, 'vj'), path.join(home, 'vj'), 'последний компонент — сама ссылка');
+      refuse(path.join(home, 'VJ', 'x.json'), path.join(home, 'VJ'), 'другой регистр имени ссылку обычной не делает');
+      refuse(path.join(home, '.claude', 'settings.json'), path.join(home, '.claude'), 'то же имя .claude, но каталог чужого профиля');
+      refuse(path.join(home, 'real', 'deep', 'f.json'), path.join(home, 'real', 'deep'), 'ссылка ниже настоящего каталога');
+      assert.strictEqual(LG.isLinkFree(path.join(home, 'vj', 'x.json'), home), false, 'булев вариант');
+      let err = null;
+      try { LG.assertNoLinkInChain(path.join(home, 'vj', 'x.json'), home, undefined, 'файлу ключей'); } catch (e) { err = e; }
+      assert(err && err.code === 'EHMLINK' && /^ЗАЩИТА:/.test(err.message) && /ссылк/.test(err.message) && err.detail.reason === 'link', 'исключение по-русски: ' + (err && err.message));
+      // symlinkFreeChain (removeMascotHooks): та же слепота и тот же отказ; обычная цепочка и другой регистр проходят
+      const s = LG.symlinkFreeChain(path.join(home, 'vj', 'x.json'));
+      assert(s.ok === false && !s.absent && /перенаправлен/.test(s.error), 'symlinkFreeChain: отказ с причиной: ' + JSON.stringify(s));
+      fs.writeFileSync(path.join(home, 'real', 'a.json'), '{}');
+      assert.deepStrictEqual(LG.symlinkFreeChain(path.join(home, 'real', 'a.json')), { ok: true, isFile: true }, 'обычная цепочка как раньше');
+      assert.deepStrictEqual(LG.symlinkFreeChain(path.join(home, 'REAL', 'A.JSON')), { ok: true, isFile: true }, 'регистр не важен');
+      assert.deepStrictEqual(LG.symlinkFreeChain(path.join(home, 'real', 'нет.json')), { ok: false, absent: true }, 'нет цели — не отказ защиты');
+      // законные раскладки: профиль целиком за junction на путь тома (перенос на другой том), кириллица, пробел, U+2019
+      const realHome = path.join(root, 'real-home');
+      fs.mkdirSync(path.join(realHome, '.claude'), { recursive: true });
+      fs.mkdirSync(path.join(realHome, 'AppData', 'Local'), { recursive: true });
+      const volHome = path.join(root, 'Иван Петров’s home');
+      volJunction(volHome, realHome);
+      assert(inside(volHome, root), 'ПЕРВОЕ: внутри scratch');
+      assert.strictEqual(LG.checkChain(path.join(volHome, '.claude', 'settings.json'), volHome).ok, true, 'корень — сама junction на путь тома: опора, запись разрешена');
+      assert.strictEqual(LG.checkChain(path.join(volHome, 'AppData', 'Local', 'hermes', 'config.yaml'), volHome).ok, true, 'и ещё не созданная цепочка под таким корнем');
+      assert.strictEqual(LG.checkChain(path.join(volHome, '.CLAUDE', 'Settings.JSON'), volHome.toUpperCase()).ok, true, 'и в другом регистре');
+      volJunction(path.join(realHome, 'inner'), victim);                    // а ссылка НИЖЕ такого корня — по-прежнему отказ
+      const inner = LG.checkChain(path.join(volHome, 'inner', 'f.json'), volHome);
+      assert.deepStrictEqual([inner.ok, inner.reason, inner.at], [false, 'link', path.join(volHome, 'inner')], 'ниже корня-junction: ' + JSON.stringify(inner));
+      // КОНТРОЛЬ: link-guard без сверки канонических имён (прежний код) пропускает ровно эти ссылки
+      const OLD = lstatOnly().load('link-guard.js');
+      for (const p of [['vj', 'x.json'], ['.claude', 'settings.json'], ['real', 'deep', 'f.json']]) {
+        assert.deepStrictEqual(OLD.checkChain(path.join(home, ...p), home), { ok: true }, 'КОНТРОЛЬ: прежний код пропускает ' + p.join('\\'));
+      }
+      assert.strictEqual(OLD.symlinkFreeChain(path.join(home, 'vj', 'x.json')).ok, true, 'КОНТРОЛЬ: и symlinkFreeChain пропускает');
+      junction(path.join(home, 'pj'), victim);                               // обычная junction в контрольной копии по-прежнему ловится
+      assert.strictEqual(OLD.checkChain(path.join(home, 'pj', 'x.json'), home).ok, false, 'контроль контроля: обычная junction ловится и без сверки');
+    } finally { dropV(root); }
+  });
+
+  ok('u10a/B link-guard, том: ту же ссылку можно записать через имя устройства тома (GLOBALROOT) — lstat снова видит каталог, итоговое имя выдаёт перенаправление', () => {
+    needWin();
+    const root = mkScratchC('vg2');
+    try {
+      const home = path.join(root, 'home');
+      const victim = path.join(root, 'victim');
+      fs.mkdirSync(home, { recursive: true });
+      fs.mkdirSync(victim, { recursive: true });
+      fs.writeFileSync(path.join(victim, 'x.json'), '{}');
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: всё внутри scratch');
+      // имя устройства тома узнаём пробой существующего файла (QueryDosDevice без P/Invoke не вызвать)
+      let device = '';
+      for (let n = 1; n <= 64 && !device; n++) {
+        const cand = '\\\\?\\GLOBALROOT\\Device\\HarddiskVolume' + n;
+        try { if (fs.existsSync(cand + victim.slice(2) + '\\x.json')) device = cand; } catch (e) { /* следующий */ }
+      }
+      if (!device) SKIP('имя устройства тома (GLOBALROOT\\Device\\HarddiskVolumeN) не нашлось пробой');
+      makeLink(path.join(home, 'gr'), device + victim.slice(2));
+      const st = fs.lstatSync(path.join(home, 'gr'));
+      assert(!st.isSymbolicLink() && st.isDirectory(), 'посылка: lstat видит обычный каталог, а не ссылку');
+      const r = LG.checkChain(path.join(home, 'gr', 'x.json'), home);
+      assert.deepStrictEqual([r.ok, r.reason, r.at], [false, 'link', path.join(home, 'gr')], JSON.stringify(r));
+      assert.strictEqual(LG.symlinkFreeChain(path.join(home, 'gr', 'x.json')).ok, false, 'symlinkFreeChain тоже');
+      const OLD = lstatOnly().load('link-guard.js');
+      assert.deepStrictEqual(OLD.checkChain(path.join(home, 'gr', 'x.json'), home), { ok: true }, 'КОНТРОЛЬ: без сверки имён такая запись проходила');
+    } finally { dropV(root); }
+  });
+
+  ok('u10a/B link-guard: сбой lstat или канонизации — отказ (fail-closed), а не пропуск; пустой корень и пустая цель — отказ', () => {
+    needWin();
+    const root = mkScratchC('vg3');
+    try {
+      const home = path.join(root, 'home');
+      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      assert(inside(home, root), 'ПЕРВОЕ: внутри scratch');
+      const file = path.join(home, '.claude', 'settings.json');
+      const dir = path.join(home, '.claude');
+      const eacces = () => Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+      const withPatch = (obj, name, impl, fn) => { const orig = obj[name]; obj[name] = impl(orig); try { return fn(); } finally { obj[name] = orig; } };
+      // lstat одного компонента падает не с ENOENT: не смогли убедиться, что ссылки нет → считаем, что она есть
+      let r = withPatch(fs, 'lstatSync', (orig) => function (p) { if (same(p, dir)) throw eacces(); return orig.apply(this, arguments); }, () => LG.checkChain(file, home));
+      assert.deepStrictEqual([r.ok, r.reason, r.at, r.error], [false, 'lstat-failed', dir, 'EACCES'], 'lstat: ' + JSON.stringify(r));
+      assert(/не удалось проверить путь/.test(LG.describe(r, 'файлу ключей')) && /EACCES/.test(LG.describe(r, 'файлу ключей')), 'текст для человека: ' + LG.describe(r, 'файлу ключей'));
+      // канонизация каталога падает
+      r = withPatch(fs.realpathSync, 'native', (orig) => function (p) { if (same(p, dir)) throw eacces(); return orig.apply(this, arguments); }, () => LG.checkChain(file, home));
+      assert.deepStrictEqual([r.ok, r.reason, r.at, r.error], [false, 'lstat-failed', dir, 'EACCES'], 'realpath каталога: ' + JSON.stringify(r));
+      // канонизация корня падает
+      r = withPatch(fs.realpathSync, 'native', (orig) => function (p) { if (same(p, home)) throw eacces(); return orig.apply(this, arguments); }, () => LG.checkChain(file, home));
+      assert.deepStrictEqual([r.ok, r.reason, r.at], [false, 'lstat-failed', dir], 'realpath корня: ' + JSON.stringify(r));
+      // realpathSync.native нет вовсе: JS-вариант realpath идёт по lstat и ту самую ссылку не видит — тихо на него не откатываемся
+      r = withPatch(fs.realpathSync, 'native', () => undefined, () => LG.checkChain(file, home));
+      assert.deepStrictEqual([r.ok, r.reason], [false, 'lstat-failed'], 'нет realpathSync.native: ' + JSON.stringify(r));
+      // symlinkFreeChain: сбой канонизации цели — отказ с причиной, не «чисто»
+      fs.writeFileSync(file, '{}');
+      const s = withPatch(fs.realpathSync, 'native', (orig) => function (p) { if (same(p, file)) throw eacces(); return orig.apply(this, arguments); }, () => LG.symlinkFreeChain(file));
+      assert(s.ok === false && !s.absent && /канонизация не удалась/.test(s.error) && /EACCES/.test(s.error), 'symlinkFreeChain: ' + JSON.stringify(s));
+      // пустой корень и пустая цель — отказ; цель под текущим каталогом процесса не становится «внутри» пустого корня
+      assert.deepStrictEqual([LG.checkChain(path.join(process.cwd(), 'x'), '').ok, LG.checkChain(path.join(process.cwd(), 'x'), '').reason], [false, 'outside-anchor'], 'пустой корень');
+      assert.strictEqual(LG.checkChain('', home).ok, false, 'пустая цель');
+      // без сбоев всё как раньше (контроль самих подмен выше)
+      assert.strictEqual(LG.checkChain(file, home).ok, true);
+      assert.deepStrictEqual(LG.symlinkFreeChain(file), { ok: true, isFile: true });
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B link-guard под настоящим Electron 44 (как Node и как main-процесс): fs.realpathSync.native на месте, junction на путь тома отказана, обычный каталог проходит', () => {
+    needVol(os.tmpdir());
+    const found = require(path.join(ROOT, 'test', 'find-electron.js')).findElectron(ROOT);
+    if (!found) SKIP('Electron не найден (node_modules/electron или NODE_PATH)');
+    const root = mkScratchC('vg-el');
+    try {
+      const home = path.join(root, 'prof', 'home');
+      const victim = path.join(root, 'prof', 'victim');
+      fs.mkdirSync(path.join(home, 'real'), { recursive: true });
+      fs.mkdirSync(victim, { recursive: true });
+      fs.writeFileSync(path.join(victim, 'x.json'), '{}');
+      fs.writeFileSync(path.join(home, 'real', 'x.json'), '{}');
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: всё внутри scratch');
+      volJunction(path.join(home, 'vj'), victim);
+      const child = path.join(root, 'child.js');
+      fs.writeFileSync(child, [
+        "'use strict';",
+        "const fs = require('fs'), path = require('path');",
+        "const LG = require(process.env.HM_LG);",
+        "function run() {",
+        "  const home = process.env.HM_HOME;",
+        "  return {",
+        "    runtime: process.versions.electron ? 'electron ' + process.versions.electron : 'node',",
+        "    type: process.type || 'node-mode',",
+        "    native: typeof fs.realpathSync.native,",
+        "    lstatBlind: (() => { const st = fs.lstatSync(path.join(home, 'vj')); return !st.isSymbolicLink() && st.isDirectory(); })(),",
+        "    vol: LG.checkChain(path.join(home, 'vj', 'x.json'), home),",
+        "    plain: LG.checkChain(path.join(home, 'real', 'x.json'), home),",
+        "    sfcVol: LG.symlinkFreeChain(path.join(home, 'vj', 'x.json')),",
+        "    sfcPlain: LG.symlinkFreeChain(path.join(home, 'real', 'x.json'))",
+        "  };",
+        "}",
+        "function done() { let o; try { o = run(); } catch (e) { o = { error: String((e && e.stack) || e) }; } fs.writeFileSync(process.env.HM_OUT, JSON.stringify(o)); }",
+        "if (process.versions.electron && process.type === 'browser') {",
+        "  const { app } = require('electron');",
+        "  app.whenReady().then(() => { done(); app.quit(); });",
+        "} else done();"
+      ].join('\n'));
+      const prof = path.join(root, 'prof');
+      const dirs = [path.join(prof, 'AppData', 'Roaming'), path.join(prof, 'AppData', 'Local'), path.join(root, 'tmp')];
+      dirs.forEach((d) => fs.mkdirSync(d, { recursive: true }));
+      const baseEnv = Object.assign({}, process.env, {
+        USERPROFILE: prof, HOME: prof, APPDATA: dirs[0], LOCALAPPDATA: dirs[1], TEMP: dirs[2], TMP: dirs[2],
+        HM_LG: path.join(SRC, 'link-guard.js'), HM_HOME: home
+      });
+      ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'].forEach((k) => assert(inside(baseEnv[k], root), k + ' вне scratch'));
+      for (const mode of ['node-mode', 'browser']) {
+        const out = path.join(root, 'out-' + mode + '.json');
+        const env = Object.assign({}, baseEnv, { HM_OUT: out });
+        delete env.ELECTRON_RUN_AS_NODE;
+        if (mode === 'node-mode') env.ELECTRON_RUN_AS_NODE = '1';
+        const args = mode === 'node-mode' ? [child] : [child, '--user-data-dir=' + path.join(root, 'ud-' + mode), '--disable-gpu'];
+        const r = cp.spawnSync(found.exe, args, { env, encoding: 'utf8', timeout: 120000, windowsHide: true });
+        let res = null;
+        try { res = JSON.parse(fs.readFileSync(out, 'utf8')); } catch (e) { /* ниже */ }
+        assert(res && !res.error, mode + ': дочерний сценарий отработал (exit=' + r.status + '): ' + (res ? res.error : String(r.stderr || r.error).slice(0, 300)));
+        assert.strictEqual(res.type, mode, mode + ': режим запуска');
+        assert(/^electron /.test(res.runtime), mode + ': это Electron: ' + res.runtime);
+        assert.strictEqual(res.native, 'function', mode + ': fs.realpathSync.native есть под Electron (иначе все писатели отказывали бы всем)');
+        assert.strictEqual(res.lstatBlind, true, mode + ': посылка — lstat и под Electron видит обычный каталог');
+        assert.deepStrictEqual([res.vol.ok, res.vol.reason], [false, 'link'], mode + ': junction на путь тома отказана: ' + JSON.stringify(res.vol));
+        assert.strictEqual(res.plain.ok, true, mode + ': обычный каталог проходит: ' + JSON.stringify(res.plain));
+        assert(res.sfcVol.ok === false && /перенаправлен/.test(res.sfcVol.error), mode + ': symlinkFreeChain отказывает: ' + JSON.stringify(res.sfcVol));
+        assert.deepStrictEqual(res.sfcPlain, { ok: true, isFile: true }, mode + ': и пропускает обычную цепочку');
+      }
+    } finally { dropV(root); }
+  });
+
+  // ---- прокси (net-check) ----
+  ok('u10a/B net-check: ~/.claude — junction → прокси НЕ записан и копии нет, чужой каталог цел; без проверки (прежнее поведение) он изменён', () => {
+    needWin();
+    const root = mkScratch('net');
+    try {
+      const home = path.join(root, 'home'); const victim = path.join(root, 'victim');
+      fs.mkdirSync(home); fs.mkdirSync(victim);
+      fs.writeFileSync(path.join(victim, 'settings.json'), '{"model":"opus"}');
+      junction(path.join(home, '.claude'), victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+      const before = snapshot(victim);
+      const NC = require(path.join(SRC, 'net-check.js'));
+      let r;
+      const touched = traced(path.join(home, '.claude'), () => { r = NC.writeProxyEnv('http://127.0.0.1:18080', { home }); }, { reads: true });
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.strictEqual(r.reason, 'link-in-path', 'причина, которую знает окно (app.js PROXY_FAIL_TEXT)');
+      assert(/ссылк/.test(r.error), 'текст по-русски: ' + r.error);
+      assert.deepStrictEqual(snapshot(victim), before, 'чужой каталог не тронут: ни settings.json, ни копии рядом');
+      assert.deepStrictEqual(touched, [], 'к каталогу за ссылкой не было ни одного обращения — ни чтения settings.json, ни mkdir, ни временного файла: ' + JSON.stringify(touched));
+      // КОНТРОЛЬ: тот же стенд, проверка выключена → прежнее поведение, жертва изменена
+      const old = unguarded().load('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home });
+      assert.strictEqual(old.ok, true, 'КОНТРОЛЬ: без проверки запись «удалась»');
+      assert(/HTTPS_PROXY/.test(fs.readFileSync(path.join(victim, 'settings.json'), 'utf8')), 'КОНТРОЛЬ: settings.json жертвы изменён');
+      assert(Object.keys(snapshot(victim)).some((k) => /hamidun-bak/.test(k)), 'КОНТРОЛЬ: копия появилась в жертве');
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B net-check: обычный ~/.claude (в т.ч. профиль с кириллицей/’ и профиль-junction) — запись проходит как раньше', () => {
+    needWin();
+    const root = mkScratch('net2');
+    try {
+      const NC = require(path.join(SRC, 'net-check.js'));
+      const plain = path.join(root, 'Иван Петров’s'); fs.mkdirSync(path.join(plain, '.claude'), { recursive: true });
+      assert(inside(plain, root), 'ПЕРВОЕ: внутри scratch');
+      fs.writeFileSync(path.join(plain, '.claude', 'settings.json'), JSON.stringify({ model: 'opus' }));
+      const r = NC.writeProxyEnv('http://127.0.0.1:18080', { home: plain });
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(plain, '.claude', 'settings.json'), 'utf8')).env.HTTPS_PROXY, 'http://127.0.0.1:18080');
+      // профиль целиком за junction (перенос на другой диск): корень — опора, запись идёт
+      const realHome = path.join(root, 'real'); fs.mkdirSync(realHome);
+      const jh = path.join(root, 'profile-link'); junction(jh, realHome);
+      const r2 = NC.writeProxyEnv('http://127.0.0.1:18081', { home: jh });
+      assert.strictEqual(r2.ok, true, JSON.stringify(r2));
+      assert(fs.existsSync(path.join(realHome, '.claude', 'settings.json')), 'файл лёг в настоящий каталог профиля');
+      // нет каталога вовсе — создаётся, как раньше
+      const empty = path.join(root, 'empty'); fs.mkdirSync(empty);
+      assert.strictEqual(NC.writeProxyEnv('http://127.0.0.1:1', { home: empty }).ok, true);
+    } finally { drop(root); }
+  });
+
+  // ---- ключи (credentials-merge) ----
+  ok('u10a/B credentials-merge: ~/.claude — junction → ключи НЕ сохранены с понятной причиной, жертва цела; без проверки ключи уезжают в чужой каталог', () => {
+    needWin();
+    const root = mkScratch('cred');
+    try {
+      const home = path.join(root, 'home'); const victim = path.join(root, 'victim');
+      fs.mkdirSync(home); fs.mkdirSync(victim);
+      fs.writeFileSync(path.join(victim, 'other.txt'), 'victim file');
+      junction(path.join(home, '.claude'), victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+      const before = snapshot(victim);
+      const CM = require(path.join(SRC, 'credentials-merge.js'));
+      let r;
+      const touched = traced(path.join(home, '.claude'), () => { r = CM.saveCredentials({ SOME_API_KEY: 'sk-secret-123' }, { home }); }, { reads: true });
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert(/ссылк/.test(r.error) && /Ключи НЕ сохранены/.test(r.error) && !/^Error/.test(r.error), 'причина человеку: ' + r.error);
+      assert.deepStrictEqual(snapshot(victim), before, 'в жертву не легло ни файла ключей, ни временного файла');
+      assert.deepStrictEqual(touched, [], 'к каталогу за ссылкой не было ни одного обращения (чтение, mkdir, временный файл): ' + JSON.stringify(touched));
+      // КОНТРОЛЬ
+      const old = unguarded().load('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret-123' }, { home });
+      assert.strictEqual(old.ok, true, 'КОНТРОЛЬ: без проверки ключи «сохранены» — по ту сторону ссылки');
+      assert(/sk-secret-123/.test(fs.readFileSync(path.join(victim, '.credentials.master.env'), 'utf8')), 'КОНТРОЛЬ: секрет лежит в чужом каталоге');
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B credentials-merge: ссылка-файл на месте файла ключей не читается (чужое содержимое не копируется в наш файл); обычный путь работает как раньше', () => {
+    needWin();
+    const root = mkScratch('cred2');
+    try {
+      const home = path.join(root, 'home'); fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+      const CM = require(path.join(SRC, 'credentials-merge.js'));
+      assert(inside(home, root), 'ПЕРВОЕ: внутри scratch');
+      // обычный путь
+      const ok1 = CM.saveCredentials({ A_KEY: 'v1' }, { home });
+      assert.strictEqual(ok1.ok, true, JSON.stringify(ok1));
+      assert.strictEqual(fs.readFileSync(path.join(home, '.claude', '.credentials.master.env'), 'utf8'), 'A_KEY=v1\n');
+      // ссылка-файл (нужны права/режим разработчика; нет — эта часть не выполняется)
+      const secret = path.join(root, 'foreign-secret.txt'); fs.writeFileSync(secret, 'TOP_SECRET=1\n');
+      const target = path.join(home, '.claude', '.credentials.master.env');
+      fs.rmSync(target);
+      let linked = false;
+      try { fs.symlinkSync(secret, target, 'file'); linked = true; } catch (e) { /* нет права на symlink-файлы */ }
+      if (linked) {
+        const r = CM.saveCredentials({ B_KEY: 'v2' }, { home });
+        assert.strictEqual(r.ok, false, JSON.stringify(r));
+        assert.strictEqual(fs.readFileSync(secret, 'utf8'), 'TOP_SECRET=1\n', 'чужой файл не изменён');
+        assert(fs.lstatSync(target).isSymbolicLink(), 'ссылка осталась ссылкой (мы её не заменяли обычным файлом с чужим содержимым)');
+        const old = unguarded().load('credentials-merge.js').saveCredentials({ B_KEY: 'v2' }, { home });
+        assert.strictEqual(old.ok, true);
+        assert(/TOP_SECRET=1/.test(fs.readFileSync(target, 'utf8')), 'КОНТРОЛЬ: без проверки чужое содержимое скопировано в наш файл ключей');
+      }
+    } finally { drop(root); }
+  });
+
+  // ---- ключ агента (nomad-key) ----
+  ok('u10a/B nomad-key: junction на hermes, на AppData выше и на HERMES_HOME внутри профиля → ключ НЕ записан, жертва цела; без проверки config.yaml уезжает в чужой каталог', () => {
+    needWin();
+    const root = mkScratch('nomad');
+    try {
+      const NK = require(path.join(SRC, 'nomad-key.js'));
+      const KEY = 'nmd_live_aaaaaaaaaaaaaaaa';
+      const mkHome = (name) => { const h = path.join(root, name); fs.mkdirSync(path.join(h, 'AppData', 'Local'), { recursive: true }); return h; };
+      const run = (mod, h, env) => mod.writeNomadKey(KEY, { config: {}, home: h, platform: 'win32', env, newline: '\n' });
+      // то же, но с трассировкой: к пути за ссылкой не должно быть ни одного обращения (чтение, mkdir, временный файл)
+      const runT = (link, h, env) => {
+        let res;
+        const touched = traced(link, () => { res = run(NK, h, env); }, { reads: true });
+        assert.deepStrictEqual(touched, [], 'к каталогу за ссылкой не было ни одного обращения: ' + JSON.stringify(touched));
+        return res;
+      };
+      // 1) hermes -> victim
+      const h1 = mkHome('h1'); const v1 = path.join(root, 'v1'); fs.mkdirSync(v1);
+      junction(path.join(h1, 'AppData', 'Local', 'hermes'), v1);
+      assert(inside(h1, root) && inside(v1, root), 'ПЕРВОЕ: внутри scratch');
+      const env1 = { LOCALAPPDATA: path.join(h1, 'AppData', 'Local') };
+      let r = runT(path.join(h1, 'AppData', 'Local', 'hermes'), h1, env1);
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert(/ссылк/.test(r.message) && /Ключ НЕ записан/.test(r.message), 'текст человеку: ' + r.message);
+      assert.deepStrictEqual(fs.readdirSync(v1), [], 'жертва пуста');
+      // 2) AppData -> victim (ссылка выше по цепочке)
+      const h2 = path.join(root, 'h2'); fs.mkdirSync(h2); const v2 = path.join(root, 'v2'); fs.mkdirSync(path.join(v2, 'Local'), { recursive: true });
+      junction(path.join(h2, 'AppData'), v2);
+      r = runT(path.join(h2, 'AppData'), h2, { LOCALAPPDATA: path.join(h2, 'AppData', 'Local') });
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.deepStrictEqual(snapshot(v2), { 'Local/': '' }, 'жертва 2 цела');
+      // 3) HERMES_HOME внутри профиля, но сам — junction (текстовая проверка «внутри профиля» его пропускает)
+      const h3 = mkHome('h3'); const v3 = path.join(root, 'v3'); fs.mkdirSync(v3);
+      junction(path.join(h3, 'agent'), v3);
+      r = runT(path.join(h3, 'agent'), h3, { HERMES_HOME: path.join(h3, 'agent'), LOCALAPPDATA: path.join(h3, 'AppData', 'Local') });
+      assert.strictEqual(r.ok, false, JSON.stringify(r));
+      assert.deepStrictEqual(fs.readdirSync(v3), [], 'жертва 3 пуста');
+      // КОНТРОЛЬ: тот же стенд без проверки — ключ в чужом каталоге
+      const old = run(unguarded().load('nomad-key.js'), h1, env1);
+      assert.strictEqual(old.ok, true, 'КОНТРОЛЬ: без проверки запись удалась');
+      assert(/api_key: "nmd_live_a+"/.test(fs.readFileSync(path.join(v1, 'config.yaml'), 'utf8')), 'КОНТРОЛЬ: секрет лёг по ту сторону ссылки');
+      // обычный путь
+      const h4 = mkHome('h4');
+      r = run(NK, h4, { LOCALAPPDATA: path.join(h4, 'AppData', 'Local') });
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert(/api_key: "nmd_live_a+"/.test(fs.readFileSync(path.join(h4, 'AppData', 'Local', 'hermes', 'config.yaml'), 'utf8')));
+      const h5 = mkHome('h5'); const ag = path.join(h5, 'мой агент'); fs.mkdirSync(ag);
+      r = run(NK, h5, { HERMES_HOME: ag, LOCALAPPDATA: path.join(h5, 'AppData', 'Local') });
+      assert.strictEqual(r.ok, true, 'HERMES_HOME внутри профиля (кириллица, пробел) работает: ' + JSON.stringify(r));
+    } finally { drop(root); }
+  });
+
+  // ---- манифест и отметки установки ----
+  ok('u10a/B install-manifest: ~/.hamidun-setup — junction → запись бросает ЗАЩИТА, жертва цела, .bak из неё не возвращается; без проверки манифест лёг в чужой каталог', () => {
+    needWin();
+    const root = mkScratch('man');
+    try {
+      const home = path.join(root, 'home'); const victim = path.join(root, 'victim');
+      fs.mkdirSync(home); fs.mkdirSync(victim);
+      fs.writeFileSync(path.join(victim, 'installed.json.deadbeef.bak'), '{"schemaVersion":1,"components":{"git":{"version":"9"}}}');
+      junction(path.join(home, '.hamidun-setup'), victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+      const before = snapshot(victim);
+      const MF = require(path.join(SRC, 'install-manifest.js'));
+      let m;
+      const touched = traced(path.join(home, '.hamidun-setup'), () => {
+        assert.throws(() => MF.recordInstall(home, 'uv', '1.0', 'bundled'), /ЗАЩИТА/, 'запись бросает (main.js ловит и пишет строку в журнал)');
+        assert.throws(() => MF.writeManifest(home, { schemaVersion: 1, components: {} }), /ЗАЩИТА/);
+        m = MF.readManifest(home);                               // recoverBak внутри чтения
+      });
+      assert.deepStrictEqual(m.components, {}, 'чужой манифест за ссылкой не подхвачен');
+      assert.deepStrictEqual(touched, [], 'в каталог за ссылкой не было ни одной изменяющей операции (mkdir, временный файл, rename .bak): ' + JSON.stringify(touched));
+      assert.deepStrictEqual(snapshot(victim), before, 'жертва цела: ни installed.json, ни переименованного .bak');
+      // КОНТРОЛЬ
+      const OLD = unguarded().load('install-manifest.js');
+      OLD.readManifest(home);
+      assert(fs.existsSync(path.join(victim, 'installed.json')), 'КОНТРОЛЬ: без проверки чтение «воскресило» .bak в чужом каталоге (rename)');
+      OLD.recordInstall(home, 'uv', '1.0', 'bundled');
+      assert(/"uv"/.test(fs.readFileSync(path.join(victim, 'installed.json'), 'utf8')), 'КОНТРОЛЬ: и запись легла по ту сторону');
+      // обычный путь
+      const h2 = path.join(root, 'h2'); fs.mkdirSync(h2);
+      assert.strictEqual(MF.recordInstall(h2, 'uv', '1.0', 'bundled').ok, true);
+      assert.strictEqual(MF.getEntry(h2, 'uv').version, '1.0');
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B install-receipts: ~/.hamidun-setup — junction → маркер не пишется и не переименовывается, tombstone не возвращается; без проверки чужие файлы переименованы', () => {
+    needWin();
+    const root = mkScratch('rc');
+    try {
+      const home = path.join(root, 'home'); const victim = path.join(root, 'victim');
+      fs.mkdirSync(home); fs.mkdirSync(path.join(victim, 'receipts'), { recursive: true });
+      const rec = (id) => JSON.stringify({ schemaVersion: 2, id, platform: 'win32', version: '1', installedAt: 'x' });
+      fs.writeFileSync(path.join(victim, 'receipts', 'uv.json'), rec('uv'));
+      fs.writeFileSync(path.join(victim, 'receipts', 'git.json.uninst'), rec('git'));
+      junction(path.join(home, '.hamidun-setup'), victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+      const before = snapshot(victim);
+      const RC = require(path.join(SRC, 'install-receipts.js'));
+      const link = path.join(home, '.hamidun-setup');
+      const touched = traced(link, () => {
+        assert.throws(() => RC.writeReceipt(home, 'node', RC.buildReceipt('node', 'win32', '1')), /ЗАЩИТА/, 'запись бросает');
+        const d = RC.deactivateReceipt(home, 'uv');
+        assert.strictEqual(d.ok, false, 'деактивация не идёт через ссылку: ' + JSON.stringify(d));
+        assert.strictEqual(RC.restoreReceipt(home, 'git').ok, false, 'возврат tombstone тоже');
+        assert.strictEqual(RC.finalizeRemoval(home, 'uv').ok, false);
+        assert.strictEqual(RC.removeReceipt(home, 'uv').ok, false);
+      });
+      assert.deepStrictEqual(touched, [], 'в каталог за ссылкой не было ни одной изменяющей операции (mkdir, временный файл, rename, rm): ' + JSON.stringify(touched));
+      // обход каталога отметок не должен даже ЧИТАТЬ чужой каталог: возврат каждого tombstone сам отказал бы, но список файлов мы не берём
+      let orphans;
+      const listed = traced(path.join(link, 'receipts'), () => { orphans = RC.recoverOrphanTombstones(home); }, { reads: true });
+      assert.deepStrictEqual(orphans, { ok: true, restored: [] }, 'осиротевшие tombstone за ссылкой не возвращаются');
+      assert.deepStrictEqual(listed, [], 'каталог за ссылкой даже не перечисляется: ' + JSON.stringify(listed));
+      assert.deepStrictEqual(snapshot(victim), before, 'жертва побайтно цела');
+      // КОНТРОЛЬ
+      const OLD = unguarded().load('install-receipts.js');
+      assert.strictEqual(OLD.deactivateReceipt(home, 'uv').ok, true, 'КОНТРОЛЬ: без проверки чужой маркер переименован');
+      assert(fs.existsSync(path.join(victim, 'receipts', 'uv.json.uninst')) && !fs.existsSync(path.join(victim, 'receipts', 'uv.json')), 'КОНТРОЛЬ: в жертве uv.json стал .uninst');
+      OLD.recoverOrphanTombstones(home);
+      assert(fs.existsSync(path.join(victim, 'receipts', 'git.json')), 'КОНТРОЛЬ: и осиротевший tombstone возвращён');
+      // обычный путь: полный цикл
+      const h2 = path.join(root, 'h2'); fs.mkdirSync(h2);
+      assert.strictEqual(RC.writeReceipt(h2, 'uv', RC.buildReceipt('uv', 'win32', '1')).ok, true);
+      assert.strictEqual(RC.hasReceipt(h2, 'uv'), true);
+      assert.strictEqual(RC.deactivateReceipt(h2, 'uv').ok, true);
+      assert.strictEqual(RC.restoreReceipt(h2, 'uv').ok, true);
+      assert.strictEqual(RC.deactivateReceipt(h2, 'uv').ok, true);
+      assert.strictEqual(RC.finalizeRemoval(h2, 'uv').ok, true);
+    } finally { drop(root); }
+  });
+
+  // ---- журнал установки (main.js) ----
+  // Настоящий logToFile из main.js (Electron-точку входа не поднять): текст блока вырезается и исполняется с подставным
+  // профилем. Проверки цепочки — настоящий link-guard; контрольный вариант получает «слепой» link-guard.
+  const loadLogger = (home, guardModule, sink) => {
+    const m = MAINJS();
+    const a = m.indexOf("const LOG_DIR = path.join(os.homedir(), '.hamidun-setup');");
+    const b = m.indexOf('function logToFile(id, line) {');
+    assert(a !== -1 && b !== -1, 'блок журнала найден в main.js');
+    let depth = 0; let end = -1;
+    for (let k = m.indexOf('{', b); k < m.length; k++) {
+      if (m[k] === '{') depth++;
+      else if (m[k] === '}' && --depth === 0) { end = k + 1; break; }
+    }
+    const code = m.slice(a, end) + '\nreturn { logToFile, state: () => ({ blocked: logBlocked, note: logBlockedNote, fd: logFd }), paths: () => ({ LOG_PATH, LOG_DIR }) };';
+    return new Function('fs', 'path', 'os', 'linkGuard', 'console', code)(fs, path, { homedir: () => home }, guardModule, sink || console);
+  };
+
+  ok('u10a/B install.log: ~/.hamidun-setup — junction → журнал на диск не пишется, жертва цела, ОДНА строка причины в консоль и в окно; обычный путь пишет; без проверки журнал уезжает в чужой каталог', () => {
+    needWin();
+    const root = mkScratch('log');
+    try {
+      const home = path.join(root, 'home'); const victim = path.join(root, 'victim');
+      fs.mkdirSync(home); fs.mkdirSync(victim);
+      junction(path.join(home, '.hamidun-setup'), victim);
+      assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+      const errs = [];
+      const L = loadLogger(home, LG, { error: (s) => errs.push(String(s)) });
+      const touched = traced(path.join(home, '.hamidun-setup'), () => {
+        L.logToFile('git', 'первая строка'); L.logToFile('git', 'вторая строка'); L.logToFile('git', 'третья');
+      });
+      assert.deepStrictEqual(fs.readdirSync(victim), [], 'в жертву не записан ни install.log, ни что-либо ещё');
+      assert.deepStrictEqual(touched, [], 'к каталогу за ссылкой не было ни одной изменяющей операции (mkdir, открытие install.log): ' + JSON.stringify(touched));
+      const st = L.state();
+      assert(st.blocked && /ссылк/.test(st.blocked), 'причина запомнена: ' + st.blocked);
+      assert(/^\[журнал\] install\.log на диск не пишется/.test(st.note), 'строка для окна: ' + st.note);
+      assert.strictEqual(errs.length, 1, 'в консоль — ровно одна строка, а не по строке на запись: ' + JSON.stringify(errs));
+      assert.strictEqual(st.fd, null, 'дескриптор не оставлен открытым');
+      // КОНТРОЛЬ: «слепой» link-guard = прежний код
+      const blind = Object.assign({}, LG, { checkChain: () => ({ ok: true }) });
+      const OLD = loadLogger(home, blind, { error: () => {} });
+      OLD.logToFile('git', 'старое поведение');
+      assert(/старое поведение/.test(fs.readFileSync(path.join(victim, 'install.log'), 'utf8')), 'КОНТРОЛЬ: без проверки журнал дописан по ту сторону ссылки');
+      if (OLD.state().fd !== null) fs.closeSync(OLD.state().fd);
+      // обычный путь
+      const h2 = path.join(root, 'h2'); fs.mkdirSync(h2);
+      const N = loadLogger(h2, LG, { error: () => { throw new Error('на обычном пути в консоль ничего писать не должны'); } });
+      N.logToFile('git', 'строка один'); N.logToFile('git', 'строка два');
+      const text = fs.readFileSync(path.join(h2, '.hamidun-setup', 'install.log'), 'utf8');
+      assert(/\[git\] строка один\n/.test(text) && /\[git\] строка два\n/.test(text), 'журнал пишется: ' + text);
+      assert.strictEqual(N.state().blocked, '');
+      fs.closeSync(N.state().fd);
+    } finally { drop(root); }
+  });
+
+  ok('u10a/B install.log: жёсткая ссылка на чужой файл под именем журнала → дописывание отказывает (nlink != 1), чужой файл цел', () => {
+    needWin();
+    const root = mkScratch('log2');
+    try {
+      const home = path.join(root, 'home'); fs.mkdirSync(path.join(home, '.hamidun-setup'), { recursive: true });
+      const foreign = path.join(root, 'foreign.txt'); fs.writeFileSync(foreign, 'ЧУЖОЙ ФАЙЛ\n');
+      assert(inside(home, root) && inside(foreign, root), 'ПЕРВОЕ: внутри scratch');
+      try { fs.linkSync(foreign, path.join(home, '.hamidun-setup', 'install.log')); }
+      catch (e) { SKIP('жёсткие ссылки на этом томе недоступны: ' + e.code); }
+      const L = loadLogger(home, LG, { error: () => {} });
+      L.logToFile('x', 'строка');
+      assert.strictEqual(fs.readFileSync(foreign, 'utf8'), 'ЧУЖОЙ ФАЙЛ\n', 'чужой файл не дописан');
+      assert(/жёстк/.test(L.state().blocked), 'причина: ' + L.state().blocked);
+    } finally { drop(root); }
+  });
+
+  // ---- гонка: ссылка подставляется МЕЖДУ проверкой и созданием временного файла ----
+  // Проверка цепочки и открытие файла — два вызова, между ними программа того же пользователя успевает заменить
+  // настоящий каталог junction-ом. Писатели перепроверяют цепочку сразу ПОСЛЕ создания временного файла: подмена
+  // после этого уже не может увести rename (временный файл остался по эту сторону), подмена до — видна и ловится.
+  // Гонка воспроизводится детерминированно: подменённый fs.openSync на первом 'wx'-открытии *.tmp в нужном каталоге
+  // переименовывает настоящий каталог в сторону и ставит на его место junction на «жертву».
+  ok('u10a/B гонка: ссылка подставлена между проверкой и созданием временного файла — писатели замечают её сразу после создания, убирают свой файл и отказывают; без проверки запись уходит в чужой каталог', () => {
+    needWin();
+    const root = mkScratch('race');
+    try {
+      const rig = (name, dirRel) => {
+        const home = path.join(root, name, 'home'); const victim = path.join(root, name, 'victim');
+        fs.mkdirSync(path.join(home, dirRel), { recursive: true }); fs.mkdirSync(victim, { recursive: true });
+        return { home, victim, dir: path.join(home, dirRel) };
+      };
+      const withRace = (r, fn) => {
+        const realOpen = fs.openSync; let swapped = false;
+        fs.openSync = function (p, flags) {
+          if (!swapped && flags === 'wx' && typeof p === 'string' && /\.tmp$/.test(p) && p.indexOf(r.dir) === 0) {
+            swapped = true;
+            fs.renameSync(r.dir, r.dir + '-real');
+            junction(r.dir, r.victim);
+          }
+          return realOpen.apply(this, arguments);
+        };
+        try { const out = fn(); return { out, swapped }; } catch (e) { return { err: e, swapped }; } finally { fs.openSync = realOpen; }
+      };
+      const KEY = 'nmd_live_aaaaaaaaaaaaaaaa';
+      const writers = {
+        'net-check': { dirRel: '.claude', run: (mod, r) => mod.load('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home: r.home }), refused: (x) => x.out && x.out.ok === false },
+        'credentials-merge': { dirRel: '.claude', run: (mod, r) => mod.load('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret' }, { home: r.home }), refused: (x) => x.out && x.out.ok === false },
+        'nomad-key': { dirRel: path.join('AppData', 'Local', 'hermes'), run: (mod, r) => mod.load('nomad-key.js').writeNomadKey(KEY, { config: {}, home: r.home, platform: 'win32', env: { LOCALAPPDATA: path.join(r.home, 'AppData', 'Local') }, newline: '\n' }), refused: (x) => x.out && x.out.ok === false },
+        'install-manifest': { dirRel: '.hamidun-setup', run: (mod, r) => mod.load('install-manifest.js').recordInstall(r.home, 'uv', '1.0', 'bundled'), refused: (x) => x.err && /ЗАЩИТА/.test(x.err.message) },
+        'install-receipts': { dirRel: path.join('.hamidun-setup', 'receipts'), run: (mod, r) => { const M = mod.load('install-receipts.js'); return M.writeReceipt(r.home, 'uv', M.buildReceipt('uv', 'win32', '1')); }, refused: (x) => x.err && /ЗАЩИТА/.test(x.err.message) }
+      };
+      const real = { load: (n) => require(path.join(SRC, n)) };
+      for (const [name, w] of Object.entries(writers)) {
+        const r = rig('g-' + name, w.dirRel);
+        assert(inside(r.home, root) && inside(r.victim, root), 'ПЕРВОЕ: внутри scratch');
+        const x = withRace(r, () => w.run(real, r));
+        assert.strictEqual(x.swapped, true, name + ': гонка сработала (временный файл открывали)');
+        assert(w.refused(x), name + ': отказ после подмены, а не успех: ' + JSON.stringify({ out: x.out, err: x.err && x.err.message }));
+        assert.deepStrictEqual(fs.readdirSync(r.victim), [], name + ': в чужой каталог не легло ничего — ни файла, ни временного файла');
+        // КОНТРОЛЬ: тот же стенд и та же гонка, но проверка выключена — запись попадает в жертву
+        const c = rig('c-' + name, w.dirRel);
+        const xc = withRace(c, () => w.run(unguarded(), c));
+        assert.strictEqual(xc.swapped, true, name + ' (контроль): гонка сработала');
+        assert(fs.readdirSync(c.victim).length > 0, 'КОНТРОЛЬ ' + name + ': без проверки запись ушла в жертву: ' + JSON.stringify(xc.err && xc.err.message));
+      }
+    } finally { drop(root); }
+  });
+
+  // ---- писатели и junction на путь тома (рецензия безопасности, раунд 2) ----
+  // Те же стенды, что выше, но ссылка — `mklink /J … \\?\Volume{guid}\…`: lstat видит в ней обычный каталог, и до раунда 2
+  // ВСЕ писатели и журнал писали сквозь неё. Контроль у каждого — копия src/ с link-guard без сверки канонических имён
+  // (lstatOnly(): прежнее поведение); на том же стенде она обязана записать в жертву, иначе стенд ничего не доказывает.
+  const call = (fn) => { try { return { res: fn() }; } catch (e) { return { err: e }; } };
+  const REAL = (name) => require(path.join(SRC, name));
+  const OLDM = (name) => lstatOnly().load(name);
+  // Стенд: root\name\home и root\name\victim; parents — каталоги под home, создаваемые заранее; prep — наполнение жертвы;
+  // linkRel — где под home встаёт junction на путь тома, ведущая в жертву.
+  const standV = (root, name, linkRel, prep, parents) => {
+    const home = path.join(root, name, 'home');
+    const victim = path.join(root, name, 'victim');
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(victim, { recursive: true });
+    assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+    (parents || []).forEach((p) => fs.mkdirSync(path.join(home, p), { recursive: true }));
+    if (prep) prep(victim, home);
+    const link = path.join(home, linkRel);
+    volJunction(link, victim);
+    const st = fs.lstatSync(link);
+    assert(!st.isSymbolicLink() && st.isDirectory(), 'посылка: lstat видит обычный каталог, а не ссылку: ' + link);
+    return { home, victim, link };
+  };
+  // Отказ: к каталогу за ссылкой не было ни одного обращения (по трассировке fs), а жертва побайтно цела.
+  const guardedV = (label, s, fn, trOpts) => {
+    const before = snapshot(s.victim);
+    let out;
+    const touched = traced(s.link, () => { out = fn(); }, trOpts);
+    assert.deepStrictEqual(touched, [], label + ': к каталогу за ссылкой не было ни одного обращения: ' + JSON.stringify(touched));
+    assert.deepStrictEqual(snapshot(s.victim), before, label + ': жертва цела');
+    return out;
+  };
+
+  ok('u10a/B том, секреты: ~/.claude, hermes, AppData и HERMES_HOME — junction на путь тома → прокси, ключи и ключ агента НЕ записаны, обращений за ссылкой нет, жертва цела; без сверки имён всё уходит в чужой каталог', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vgs');
+    try {
+      // 1) прокси (net-check)
+      const mkNet = (n) => standV(root, n, '.claude', (v) => fs.writeFileSync(path.join(v, 'settings.json'), '{"model":"opus"}'));
+      let s = mkNet('net');
+      let r = guardedV('net-check', s, () => REAL('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home: s.home }), { reads: true });
+      assert(r.ok === false && r.reason === 'link-in-path' && /ссылк/.test(r.error), 'net-check: отказ с причиной, которую знает окно: ' + JSON.stringify(r));
+      s = mkNet('net-c');
+      r = OLDM('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home: s.home });
+      assert.strictEqual(r.ok, true, 'КОНТРОЛЬ net-check: без сверки имён запись «удалась»');
+      assert(/HTTPS_PROXY/.test(fs.readFileSync(path.join(s.victim, 'settings.json'), 'utf8')), 'КОНТРОЛЬ net-check: чужой settings.json изменён');
+      assert(Object.keys(snapshot(s.victim)).some((k) => /hamidun-bak/.test(k)), 'КОНТРОЛЬ net-check: и копия легла в чужой каталог');
+
+      // 2) ключи (credentials-merge)
+      const mkCred = (n) => standV(root, n, '.claude', (v) => fs.writeFileSync(path.join(v, 'other.txt'), 'victim file'));
+      s = mkCred('cred');
+      r = guardedV('credentials-merge', s, () => REAL('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret-123' }, { home: s.home }), { reads: true });
+      assert(r.ok === false && /ссылк/.test(r.error) && /Ключи НЕ сохранены/.test(r.error) && !/^Error/.test(r.error), 'credentials-merge: причина человеку: ' + JSON.stringify(r));
+      s = mkCred('cred-c');
+      r = OLDM('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret-123' }, { home: s.home });
+      assert.strictEqual(r.ok, true, 'КОНТРОЛЬ credentials-merge: без сверки имён ключи «сохранены»');
+      assert(/sk-secret-123/.test(fs.readFileSync(path.join(s.victim, '.credentials.master.env'), 'utf8')), 'КОНТРОЛЬ credentials-merge: секрет лежит в чужом каталоге');
+
+      // 3) ключ агента (nomad-key): ссылка на hermes, на AppData выше по цепочке и на HERMES_HOME внутри профиля
+      const KEY = 'nmd_live_aaaaaaaaaaaaaaaa';
+      const nomadCases = [
+        { name: 'hermes', linkRel: path.join('AppData', 'Local', 'hermes'), parents: [path.join('AppData', 'Local')], prep: null,
+          env: (h) => ({ LOCALAPPDATA: path.join(h, 'AppData', 'Local') }), leaked: path.join('config.yaml') },
+        { name: 'appdata', linkRel: 'AppData', parents: [], prep: (v) => fs.mkdirSync(path.join(v, 'Local'), { recursive: true }),
+          env: (h) => ({ LOCALAPPDATA: path.join(h, 'AppData', 'Local') }), leaked: path.join('Local', 'hermes', 'config.yaml') },
+        { name: 'hermes-home', linkRel: 'agent', parents: [path.join('AppData', 'Local')], prep: null,
+          env: (h) => ({ HERMES_HOME: path.join(h, 'agent'), LOCALAPPDATA: path.join(h, 'AppData', 'Local') }), leaked: path.join('config.yaml') }
+      ];
+      for (const c of nomadCases) {
+        const run = (mod, st) => mod.writeNomadKey(KEY, { config: {}, home: st.home, platform: 'win32', env: c.env(st.home), newline: '\n' });
+        s = standV(root, 'nomad-' + c.name, c.linkRel, c.prep, c.parents);
+        r = guardedV('nomad-key (' + c.name + ')', s, () => run(REAL('nomad-key.js'), s), { reads: true });
+        assert(r.ok === false && /ссылк/.test(r.message) && /Ключ НЕ записан/.test(r.message), 'nomad-key (' + c.name + '): текст человеку: ' + JSON.stringify(r));
+        s = standV(root, 'nomad-c-' + c.name, c.linkRel, c.prep, c.parents);
+        r = run(OLDM('nomad-key.js'), s);
+        assert.strictEqual(r.ok, true, 'КОНТРОЛЬ nomad-key (' + c.name + '): без сверки имён запись удалась');
+        assert(/api_key: "nmd_live_a+"/.test(fs.readFileSync(path.join(s.victim, c.leaked), 'utf8')), 'КОНТРОЛЬ nomad-key (' + c.name + '): секрет лёг по ту сторону ссылки');
+      }
+    } finally { dropV(root); }
+  });
+
+  ok('u10a/B том, манифест, отметки установки и install.log: ~/.hamidun-setup — junction на путь тома → ничего не пишется, не переименовывается и не возвращается из .bak, жертва цела; без сверки имён чужие файлы тронуты', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vgb');
+    try {
+      // 1) манифест установки
+      const mkMan = (n) => standV(root, n, '.hamidun-setup', (v) => fs.writeFileSync(path.join(v, 'installed.json.deadbeef.bak'), '{"schemaVersion":1,"components":{"git":{"version":"9"}}}'));
+      let s = mkMan('man');
+      const MF = REAL('install-manifest.js');
+      let m;
+      guardedV('install-manifest', s, () => {
+        assert.throws(() => MF.recordInstall(s.home, 'uv', '1.0', 'bundled'), /ЗАЩИТА/, 'запись бросает (main.js ловит и пишет строку в журнал)');
+        assert.throws(() => MF.writeManifest(s.home, { schemaVersion: 1, components: {} }), /ЗАЩИТА/);
+        m = MF.readManifest(s.home);                                       // recoverBak внутри чтения
+      });
+      assert.deepStrictEqual(m.components, {}, 'чужой манифест за ссылкой не подхвачен, .bak не возвращён');
+      s = mkMan('man-c');
+      const OLDMF = OLDM('install-manifest.js');
+      OLDMF.readManifest(s.home);
+      assert(fs.existsSync(path.join(s.victim, 'installed.json')), 'КОНТРОЛЬ: без сверки имён чтение «воскресило» .bak в чужом каталоге');
+      OLDMF.recordInstall(s.home, 'uv', '1.0', 'bundled');
+      assert(/"uv"/.test(fs.readFileSync(path.join(s.victim, 'installed.json'), 'utf8')), 'КОНТРОЛЬ: и запись легла по ту сторону');
+
+      // 2) отметки установки (receipts)
+      const rec = (id) => JSON.stringify({ schemaVersion: 2, id, platform: 'win32', version: '1', installedAt: 'x' });
+      const mkRc = (n) => standV(root, n, '.hamidun-setup', (v) => {
+        fs.mkdirSync(path.join(v, 'receipts'), { recursive: true });
+        fs.writeFileSync(path.join(v, 'receipts', 'uv.json'), rec('uv'));
+        fs.writeFileSync(path.join(v, 'receipts', 'git.json.uninst'), rec('git'));
+      });
+      s = mkRc('rc');
+      const RC = REAL('install-receipts.js');
+      guardedV('install-receipts', s, () => {
+        assert.throws(() => RC.writeReceipt(s.home, 'node', RC.buildReceipt('node', 'win32', '1')), /ЗАЩИТА/, 'запись бросает');
+        assert.strictEqual(RC.deactivateReceipt(s.home, 'uv').ok, false, 'деактивация не идёт через ссылку');
+        assert.strictEqual(RC.restoreReceipt(s.home, 'git').ok, false, 'возврат tombstone тоже');
+        assert.strictEqual(RC.finalizeRemoval(s.home, 'uv').ok, false);
+        assert.strictEqual(RC.removeReceipt(s.home, 'uv').ok, false);
+      });
+      const orphans = guardedV('install-receipts (обход каталога)', s, () => RC.recoverOrphanTombstones(s.home), { reads: true });
+      assert.deepStrictEqual(orphans, { ok: true, restored: [] }, 'осиротевшие tombstone за ссылкой не возвращаются, каталог даже не перечисляется');
+      s = mkRc('rc-c');
+      const OLDRC = OLDM('install-receipts.js');
+      assert.strictEqual(OLDRC.deactivateReceipt(s.home, 'uv').ok, true, 'КОНТРОЛЬ: без сверки имён чужой маркер переименован');
+      assert(fs.existsSync(path.join(s.victim, 'receipts', 'uv.json.uninst')) && !fs.existsSync(path.join(s.victim, 'receipts', 'uv.json')), 'КОНТРОЛЬ: в жертве uv.json стал .uninst');
+      OLDRC.recoverOrphanTombstones(s.home);
+      assert(fs.existsSync(path.join(s.victim, 'receipts', 'git.json')), 'КОНТРОЛЬ: и осиротевший tombstone возвращён');
+      // осиротевший .bak за ссылкой на место маркера не возвращается (recoverBak при чтении маркера)
+      const mkBak = (n) => standV(root, n, '.hamidun-setup', (v) => {
+        fs.mkdirSync(path.join(v, 'receipts'), { recursive: true });
+        fs.writeFileSync(path.join(v, 'receipts', 'uv.json.deadbeef.bak'), rec('uv'));
+      });
+      s = mkBak('rcb');
+      const bakRead = guardedV('install-receipts (recoverBak)', s, () => RC.readReceipt(s.home, 'uv'));
+      assert.strictEqual(bakRead, null, 'чужой .bak за ссылкой не воскрешён в маркер');
+      s = mkBak('rcb-c');
+      OLDRC.readReceipt(s.home, 'uv');
+      assert(fs.existsSync(path.join(s.victim, 'receipts', 'uv.json')) && !fs.existsSync(path.join(s.victim, 'receipts', 'uv.json.deadbeef.bak')), 'КОНТРОЛЬ: без сверки имён .bak возвращён на место в чужом каталоге');
+
+      // 3) install.log (настоящий logToFile из main.js)
+      s = standV(root, 'log', '.hamidun-setup');
+      const errs = [];
+      const L = loadLogger(s.home, LG, { error: (e) => errs.push(String(e)) });
+      guardedV('install.log', s, () => { L.logToFile('git', 'первая строка'); L.logToFile('git', 'вторая строка'); L.logToFile('git', 'третья'); });
+      assert(L.state().blocked && /ссылк/.test(L.state().blocked), 'причина запомнена: ' + L.state().blocked);
+      assert.strictEqual(L.state().fd, null, 'дескриптор не оставлен открытым');
+      assert.strictEqual(errs.length, 1, 'в консоль — ровно одна строка, а не по строке на запись: ' + JSON.stringify(errs));
+      s = standV(root, 'log-c', '.hamidun-setup');
+      const OLDL = loadLogger(s.home, lstatOnly().load('link-guard.js'), { error: () => {} });
+      OLDL.logToFile('git', 'старое поведение');
+      assert(/старое поведение/.test(fs.readFileSync(path.join(s.victim, 'install.log'), 'utf8')), 'КОНТРОЛЬ: без сверки имён журнал дописан по ту сторону ссылки');
+      if (OLDL.state().fd !== null) fs.closeSync(OLDL.state().fd);
+    } finally { dropV(root); }
+  });
+
+  ok('u10a/B том, removeMascotHooks: ~/.claude — junction на путь тома → правка хуков отказана, чужой settings.json цел; без сверки имён он переписан', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vgu');
+    try {
+      const UX = REAL('uninstall-exec.js');
+      const PORT = 45832;
+      const settings = JSON.stringify({ env: { A: '1' }, hooks: { Stop: [{ matcher: '', hooks: [{ type: 'http', url: 'http://127.0.0.1:' + PORT + '/hook?src=claude-mascot', timeout: 1 }] }] } }, null, 2) + '\n';
+      const mk = (n) => standV(root, n, '.claude', (v) => fs.writeFileSync(path.join(v, 'settings.json'), settings));
+      let s = mk('ux');
+      const file = (st) => path.join(st.home, '.claude', 'settings.json');
+      const r = UX.removeMascotHooks(file(s), PORT, { home: s.home, platform: 'win32' });
+      assert(r.status === 'failed' && /ЗАЩИТА/.test(r.message) && /перенаправлен/.test(r.message), 'отказ с причиной: ' + JSON.stringify(r));
+      assert.strictEqual(fs.readFileSync(path.join(s.victim, 'settings.json'), 'utf8'), settings, 'чужой settings.json не тронут');
+      assert.deepStrictEqual(Object.keys(snapshot(s.victim)), ['settings.json'], 'и временных файлов рядом нет');
+      // КОНТРОЛЬ: без сверки имён правка проходит сквозь ссылку и переписывает чужой файл
+      s = mk('ux-c');
+      const old = OLDM('uninstall-exec.js').removeMascotHooks(file(s), PORT, { home: s.home, platform: 'win32' });
+      assert.strictEqual(old.status, 'removed', 'КОНТРОЛЬ: без сверки имён хуки «сняты» в чужом файле: ' + JSON.stringify(old));
+      assert.notStrictEqual(fs.readFileSync(path.join(s.victim, 'settings.json'), 'utf8'), settings, 'КОНТРОЛЬ: чужой settings.json переписан');
+      // обычный ~/.claude работает как раньше
+      const plain = path.join(root, 'plain-home');
+      fs.mkdirSync(path.join(plain, '.claude'), { recursive: true });
+      fs.writeFileSync(path.join(plain, '.claude', 'settings.json'), settings);
+      const ok1 = UX.removeMascotHooks(path.join(plain, '.claude', 'settings.json'), PORT, { home: plain, platform: 'win32' });
+      assert.strictEqual(ok1.status, 'removed', 'обычный путь: ' + JSON.stringify(ok1));
+    } finally { dropV(root); }
+  });
+
+  // Висячая junction на путь тома: цель удалена после mklink. lstat отдаёт для неё ENOENT (libuv повторяет вызов как stat), поэтому
+  // проверка цепочки считает такой компонент отсутствующим. Безопасность держится на том, что писатель следом упирается в mkdir
+  // (ENOENT) и не пишет ничего. Тест закрепляет именно это наблюдаемое поведение: если рантайм когда-нибудь начнёт создавать каталоги
+  // сквозь такую ссылку, он покраснеет, а не промолчит.
+  ok('u10a/B том, висячая junction: lstat даёт ENOENT, цепочка считает компонент отсутствующим, но писатели упираются в mkdir — за ссылкой ничего не создано и не записано', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vgd');
+    try {
+      const mk = (n, linkRel, parents) => {
+        const home = path.join(root, n, 'home'); const gone = path.join(root, n, 'victim', 'gone');
+        fs.mkdirSync(home, { recursive: true }); fs.mkdirSync(gone, { recursive: true });
+        assert(inside(home, root) && inside(gone, root), 'ПЕРВОЕ: внутри scratch');
+        (parents || []).forEach((p) => fs.mkdirSync(path.join(home, p), { recursive: true }));
+        const link = path.join(home, linkRel);
+        volJunction(link, gone);
+        fs.rmdirSync(gone);                                                    // цель исчезла: ссылка висячая
+        let code = null;
+        try { fs.lstatSync(link); } catch (e) { code = e.code; }
+        assert.strictEqual(code, 'ENOENT', 'посылка: lstat висячей junction на путь тома отдаёт ENOENT, хотя запись в каталоге есть');
+        assert(fs.readdirSync(path.dirname(link)).indexOf(path.basename(link)) !== -1, 'посылка: запись в списке каталога есть');
+        return { home, link, parent: path.dirname(gone) };
+      };
+      const untouched = (s, label) => {
+        assert.deepStrictEqual(fs.readdirSync(s.parent), [], label + ': в каталоге за ссылкой ничего не появилось');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(s.link)), [path.basename(s.link)], label + ': рядом со ссылкой тоже (ни временных файлов, ни копий)');
+      };
+      let s = mk('d1', '.claude');
+      let r = REAL('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home: s.home });
+      assert.strictEqual(r.ok, false, 'net-check: ' + JSON.stringify(r));
+      untouched(s, 'net-check');
+      s = mk('d2', '.claude');
+      r = REAL('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret' }, { home: s.home });
+      assert.strictEqual(r.ok, false, 'credentials-merge: ' + JSON.stringify(r));
+      untouched(s, 'credentials-merge');
+      s = mk('d3', path.join('AppData', 'Local', 'hermes'), [path.join('AppData', 'Local')]);
+      r = REAL('nomad-key.js').writeNomadKey('nmd_live_aaaaaaaaaaaaaaaa', { config: {}, home: s.home, platform: 'win32', env: { LOCALAPPDATA: path.join(s.home, 'AppData', 'Local') }, newline: '\n' });
+      assert.strictEqual(r.ok, false, 'nomad-key: ' + JSON.stringify(r));
+      untouched(s, 'nomad-key');
+      s = mk('d4', '.hamidun-setup');
+      assert.throws(() => REAL('install-manifest.js').recordInstall(s.home, 'uv', '1.0', 'bundled'), 'install-manifest: запись бросает');
+      untouched(s, 'install-manifest');
+      s = mk('d5', '.hamidun-setup');
+      const RC = REAL('install-receipts.js');
+      assert.throws(() => RC.writeReceipt(s.home, 'uv', RC.buildReceipt('uv', 'win32', '1')), 'install-receipts: запись бросает');
+      untouched(s, 'install-receipts');
+    } finally { dropV(root); }
+  });
+
+  // Гонка из теста выше, но подмена — junction на путь тома, и точек подмены больше. Выше каталог подменяется на первом
+  // открытии временного файла; здесь ещё и (mkdir) сразу ПОСЛЕ настоящего mkdirSync — до перепроверки цепочки, которую писатели
+  // делают именно для этого случая; (backup) прямо перед записью копии настроек рядом с файлом; (open) прямо перед открытием
+  // install.log на дописывание. Результат тот же, что и в остальных тестах: подмена замечена, за ссылкой ничего не изменено
+  // (для точек, где обращение за ссылкой не неизбежно) или своё убрано (временный файл, копия), жертва пуста.
+  ok('u10a/B гонка, том: каталог подменён junction-ом на путь тома сразу после mkdir, перед копией настроек, при создании временного файла или перед открытием журнала — подмена замечена, за ссылкой не пишут и свой файл убирают; без сверки имён запись уходит в чужой каталог', () => {
+    needVol(os.tmpdir());
+    const root = mkScratchC('vgr');
+    try {
+      const samePath = (a, b) => path.resolve(String(a)).toLowerCase() === path.resolve(String(b)).toLowerCase();
+      const rig = (name, dirRel, prep) => {
+        const home = path.join(root, name, 'home'); const victim = path.join(root, name, 'victim');
+        fs.mkdirSync(path.join(home, dirRel), { recursive: true }); fs.mkdirSync(victim, { recursive: true });
+        assert(inside(home, root) && inside(victim, root), 'ПЕРВОЕ: внутри scratch');
+        const r = { home, victim, dir: path.join(home, dirRel) };
+        if (prep) prep(r);
+        return r;
+      };
+      // Выполняет fn, подменяя r.dir junction-ом на путь тома в точке when. Возвращает {out|err, swapped, swapError, behind}:
+      // behind — изменяющие обращения к r.dir С ТОГО МИГА, как ссылка встала (трассировка fs, см. traced).
+      const race = (r, when, fn) => {
+        let started = false; let armed = false; let swapError = null;
+        const swap = () => {
+          started = true;
+          try { fs.renameSync(r.dir, r.dir + '-real'); volJunction(r.dir, r.victim); }
+          catch (e) { swapError = e; throw e; }
+          armed = true;
+        };
+        const undo = [];
+        const hook = (name, match, afterReal) => {
+          const orig = fs[name];
+          fs[name] = function (p) {
+            if (!started && match(p, arguments)) {
+              if (afterReal) { const ret = orig.apply(this, arguments); swap(); return ret; }
+              swap();
+            }
+            return orig.apply(this, arguments);
+          };
+          undo.push(() => { fs[name] = orig; });
+        };
+        let out; let err = null;
+        const behind = traced(r.dir, () => {
+          if (when === 'mkdir') hook('mkdirSync', (p) => samePath(p, r.dir), true);
+          else if (when === 'backup') hook('writeFileSync', (p) => typeof p === 'string' && p.toLowerCase().indexOf(r.dir.toLowerCase() + path.sep) === 0 && /\.hamidun-bak-/.test(p), false);
+          else if (when === 'tmp') hook('openSync', (p, a) => a[1] === 'wx' && typeof p === 'string' && /\.tmp$/.test(p) && p.indexOf(r.dir) === 0, false);
+          else if (when === 'open') hook('openSync', (p, a) => a[1] === 'a' && samePath(p, path.join(r.dir, 'install.log')), false);
+          else throw new Error('неизвестная точка гонки: ' + when);
+          try { out = fn(); } catch (e) { err = e; } finally { undo.reverse().forEach((u) => u()); }
+        }, { armed: () => armed });
+        return { out, err, swapped: started, swapError, behind };
+      };
+      const KEY = 'nmd_live_aaaaaaaaaaaaaaaa';
+      const refusedRes = (x) => x.out && x.out.ok === false;
+      const refusedThrow = (x) => x.err && /ЗАЩИТА/.test(x.err.message);
+      const writers = [
+        { name: 'net-check', dirRel: '.claude', whens: ['mkdir', 'backup', 'tmp'],
+          prep: (r, when) => { if (when === 'backup') fs.writeFileSync(path.join(r.dir, 'settings.json'), '{"model":"opus"}'); },   // копия настроек пишется, только если файл уже есть
+          run: (m, r) => m.load('net-check.js').writeProxyEnv('http://127.0.0.1:18080', { home: r.home }), refused: refusedRes },
+        { name: 'credentials-merge', dirRel: '.claude', whens: ['mkdir', 'tmp'],
+          run: (m, r) => m.load('credentials-merge.js').saveCredentials({ SOME_API_KEY: 'sk-secret' }, { home: r.home }), refused: refusedRes },
+        { name: 'nomad-key', dirRel: path.join('AppData', 'Local', 'hermes'), whens: ['mkdir', 'tmp'],
+          run: (m, r) => m.load('nomad-key.js').writeNomadKey(KEY, { config: {}, home: r.home, platform: 'win32', env: { LOCALAPPDATA: path.join(r.home, 'AppData', 'Local') }, newline: '\n' }), refused: refusedRes },
+        { name: 'install-manifest', dirRel: '.hamidun-setup', whens: ['mkdir', 'tmp'],
+          run: (m, r) => m.load('install-manifest.js').recordInstall(r.home, 'uv', '1.0', 'bundled'), refused: refusedThrow },
+        { name: 'install-receipts', dirRel: path.join('.hamidun-setup', 'receipts'), whens: ['mkdir', 'tmp'],
+          run: (m, r) => { const M = m.load('install-receipts.js'); return M.writeReceipt(r.home, 'uv', M.buildReceipt('uv', 'win32', '1')); }, refused: refusedThrow }
+      ];
+      const real = { load: REAL };
+      const old = { load: OLDM };
+      for (const w of writers) {
+        for (const when of w.whens) {
+          const label = w.name + ' (подмена: ' + when + ')';
+          const r = rig('g-' + w.name + '-' + when, w.dirRel, (rr) => { if (w.prep) w.prep(rr, when); });
+          const x = race(r, when, () => w.run(real, r));
+          assert.strictEqual(x.swapError, null, label + ': подмена выполнена без ошибок: ' + (x.swapError && x.swapError.message));
+          assert.strictEqual(x.swapped, true, label + ': гонка сработала');
+          assert(w.refused(x), label + ': отказ после подмены, а не успех: ' + JSON.stringify({ out: x.out, err: x.err && x.err.message }));
+          assert.deepStrictEqual(fs.readdirSync(r.victim), [], label + ': в чужой каталог не легло ничего — ни файла, ни временного файла, ни копии');
+          // после mkdir ссылка видна сразу: проверка обязана остановить писателя ДО первого обращения за ссылкой
+          if (when === 'mkdir') assert.deepStrictEqual(x.behind, [], label + ': за ссылкой не было ни одной изменяющей операции: ' + JSON.stringify(x.behind));
+          // КОНТРОЛЬ: тот же стенд и та же подмена, но сверки канонических имён нет — запись попадает в жертву
+          const c = rig('c-' + w.name + '-' + when, w.dirRel, (rr) => { if (w.prep) w.prep(rr, when); });
+          const xc = race(c, when, () => w.run(old, c));
+          assert.strictEqual(xc.swapped, true, 'КОНТРОЛЬ ' + label + ': гонка сработала');
+          assert(fs.readdirSync(c.victim).length > 0, 'КОНТРОЛЬ ' + label + ': без сверки имён запись ушла в жертву: ' + JSON.stringify(xc.err && xc.err.message));
+        }
+      }
+      // install.log: перепроверка после mkdir(LOG_DIR) и после открытия файла (дескриптор не должен остаться открытым за ссылкой)
+      for (const when of ['mkdir', 'open']) {
+        const label = 'install.log (подмена: ' + when + ')';
+        const r = rig('g-log-' + when, '.hamidun-setup');
+        const errs = [];
+        const L = loadLogger(r.home, LG, { error: (e) => errs.push(String(e)) });
+        const x = race(r, when, () => { L.logToFile('git', 'строка во время гонки'); L.logToFile('git', 'вторая строка'); });
+        assert.strictEqual(x.swapError, null, label + ': подмена выполнена без ошибок');
+        assert.strictEqual(x.swapped, true, label + ': гонка сработала');
+        assert(L.state().blocked && /ссылк/.test(L.state().blocked), label + ': журнал заблокирован с причиной: ' + L.state().blocked);
+        assert.strictEqual(L.state().fd, null, label + ': дескриптор не оставлен открытым');
+        assert.strictEqual(errs.length, 1, label + ': одна строка в консоль: ' + JSON.stringify(errs));
+        if (when === 'mkdir') assert.deepStrictEqual(x.behind, [], label + ': за ссылкой не было ни одной изменяющей операции: ' + JSON.stringify(x.behind));
+        // при подмене перед открытием 'a' создаёт пустой файл за ссылкой (до проверки это неизбежно) — но записи в него нет
+        for (const n of fs.readdirSync(r.victim)) assert.strictEqual(fs.readFileSync(path.join(r.victim, n), 'utf8'), '', label + ': в чужой файл ' + n + ' ничего не записано');
+        const c = rig('c-log-' + when, '.hamidun-setup');
+        const OL = loadLogger(c.home, lstatOnly().load('link-guard.js'), { error: () => {} });
+        const xc = race(c, when, () => { OL.logToFile('git', 'строка во время гонки'); });
+        assert.strictEqual(xc.swapped, true, 'КОНТРОЛЬ ' + label + ': гонка сработала');
+        assert(/строка во время гонки/.test(fs.readFileSync(path.join(c.victim, 'install.log'), 'utf8')), 'КОНТРОЛЬ ' + label + ': без сверки имён журнал дописан за ссылкой');
+        if (OL.state().fd !== null) fs.closeSync(OL.state().fd);
+      }
+    } finally { dropV(root); }
+  });
+
+  // ---- проводка в main.js и uninstall-exec.js (статически: порядок и места вызова) ----
+  ok('u10a/B main.js и uninstall-exec.js: журнал проверяет цепочку ДО mkdir и open и после open; строка про блокировку уходит в окно; symlinkFreeChain живёт в link-guard', () => {
+    const m = MAINJS();
+    const fn = m.slice(m.indexOf('function logToFile(id, line) {'));
+    assertOrder(fn, 'linkGuard.checkChain(LOG_PATH, LOG_HOME)', 'fs.mkdirSync(LOG_DIR', 'проверка — до создания каталога');
+    assertOrder(fn, 'fs.mkdirSync(LOG_DIR', "fs.openSync(LOG_PATH, 'a')", 'каталог — до открытия');
+    assertOrder(fn, "fs.openSync(LOG_PATH, 'a')", 'fs.fstatSync(logFd)', 'и дескриптор проверяется сразу после открытия');
+    assertOrder(m, "logLine('=== start ===');", 'if (logBlockedNote) { send(logBlockedNote)', 'строка про блокировку — в окно на старте шага');
+    assert(/const LOG_DIR = path\.join\(os\.homedir\(\), '\.hamidun-setup'\);\s*\n\s*const LOG_HOME = path\.dirname\(LOG_DIR\);/.test(m), 'корень проверки — профиль (os.homedir() после замка), LOG_DIR строится как прежде');
+    const ue = fs.readFileSync(path.join(SRC, 'uninstall-exec.js'), 'utf8');
+    assert(/require\('\.\/link-guard'\)/.test(ue) && !/function symlinkFreeChain/.test(ue), 'uninstall-exec импортирует symlinkFreeChain, своей копии нет');
+    assert(/symlinkFreeChain\(settingsFile\)/.test(ue), 'removeMascotHooks по-прежнему им пользуется');
+    // writeProxyEnv зовётся с профилем, а не с путём из renderer
+    assert(/netCheck\.writeProxyEnv\(px\.url, \{ home: os\.homedir\(\) \}\)/.test(m), 'apply-proxy передаёт профиль');
+    assert(/nomadKey\.writeNomadKey\(key, \{ config: readJson\('config\.json', \{\}\) \}\)/.test(m) && /credentialsMerge\.saveCredentials\(obj\)/.test(m), 'ключи пишутся без путей от renderer');
+    // окно знает причину
+    const app = fs.readFileSync(path.join(SRC, 'renderer', 'app.js'), 'utf8');
+    assert(/'link-in-path':\s*'[^']*ссылк/.test(app), "PROXY_FAIL_TEXT знает причину 'link-in-path'");
+  });
+})();
+
+// ===========================================================================
+// u10a, часть D (рецензия безопасности, находка F18): окно установщика — Chromium с preload.js, который отдаёт
+// странице весь IPC установщика, а сам установщик работает с токеном администратора. Раньше окно создавалось с
+// sandbox:false, без will-navigate / will-redirect / setWindowOpenHandler: уход окна на чужой адрес оставлял бы
+// чужой странице тот же preload (под настоящим Electron 44.5.1 проверено: страница http://127.0.0.1 получила
+// window.installer), а процесс страницы жил без песочницы ОС. Теперь sandbox:true (проверено живым запуском:
+// preload работает, обмен с main проходит, процесс страницы в песочнице ОС) и охрана окна src/window-guards.js.
+// Живые прогоны идут в test/window-guards-probe.js под настоящим Electron в scratch-профиле, окно скрыто.
+// ===========================================================================
+(function u10aWindowGuards() {
+  console.log('\n== u10a/D: окно установщика — sandbox:true, навигация и новые окна под запретом ==');
+  const { spawnSync } = require('child_process');
+  const { pathToFileURL } = require('url');
+  const IS_WIN = process.platform === 'win32';
+  const SRC = path.join(ROOT, 'src');
+  const MAINJS = () => fs.readFileSync(path.join(SRC, 'main.js'), 'utf8');
+  const WG = require(path.join(SRC, 'window-guards.js'));
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const mkScratch = (name) => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u10a-' + name + '-'));
+  const inside = (child, parent) => {
+    const r = path.relative(path.resolve(parent), path.resolve(String(child || '')));
+    return !!r && !r.startsWith('..') && !path.isAbsolute(r);
+  };
+
+  // --- охрана на подставном webContents: ровно те события, что вешает main ---
+  const INDEX = path.join(SRC, 'renderer', 'index.html');
+  const fakeWc = () => {
+    const h = {}; let openHandler = null;
+    return {
+      on: (ev, fn) => { (h[ev] = h[ev] || []).push(fn); },
+      setWindowOpenHandler: (fn) => { openHandler = fn; },
+      // forms: 'object' — адрес в event.url (Electron 25+); 'legacy' — вторым аргументом (старая форма)
+      emit: (ev, url, form) => {
+        const e = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+        if (form !== 'legacy') e.url = url;
+        (h[ev] || []).forEach((fn) => (form === 'legacy' ? fn(e, url) : fn(e)));
+        return e.defaultPrevented;
+      },
+      open: (url) => openHandler({ url }),
+      events: () => Object.keys(h).sort(),
+      hasOpenHandler: () => typeof openHandler === 'function'
+    };
+  };
+  const OWN = pathToFileURL(INDEX).href;
+  const ROWS = [
+    // [адрес, разрешён?, пояснение]
+    [OWN, true, 'своя страница'],
+    [OWN + '#step-2', true, 'якорь на своей странице'],
+    [OWN + '?x=1', true, 'запрос на своей странице'],
+    ['https://example.com/', false, 'веб'],
+    ['http://127.0.0.1:8080/nav', false, 'локальный сервер'],
+    ['file:///C:/Windows/win.ini', false, 'чужой файл'],
+    [pathToFileURL(path.join(SRC, 'renderer', 'app.js')).href, false, 'другой файл рядом'],
+    [OWN + '.evil', false, 'имя с хвостом'],
+    ['file://attacker-server/share/index.html', false, 'UNC: file с хостом'],
+    ['file:////attacker-server/share/index.html', false, 'UNC: четыре слэша'],
+    ['about:blank', false, 'about:blank'],
+    ['javascript:alert(1)', false, 'javascript:'],
+    ['data:text/html,<script>1</script>', false, 'data:'],
+    ['ms-msdt:/id', false, 'протокол-обработчик'],
+    ['', false, 'пусто'],
+    ['not a url', false, 'не адрес']
+  ];
+
+  ok('u10a/D window-guards: на will-navigate, will-redirect и will-frame-navigate чужие адреса получают preventDefault, своя страница (с якорем) — нет; window.open всегда deny', () => {
+    const wc = fakeWc();
+    const blocked = [];
+    WG.install(wc, { indexFile: INDEX, onBlock: (kind, url) => blocked.push(kind + '|' + url) });
+    assert.deepStrictEqual(wc.events(), ['will-frame-navigate', 'will-navigate', 'will-redirect'], 'охрана вешается на все три события');
+    assert(wc.hasOpenHandler(), 'и обработчик window.open');
+    for (const ev of ['will-navigate', 'will-redirect', 'will-frame-navigate']) {
+      for (const form of ['object', 'legacy']) {
+        for (const [url, allowed, why] of ROWS) {
+          assert.strictEqual(wc.emit(ev, url, form), !allowed, ev + '/' + form + ': «' + why + '» ' + url + (allowed ? ' должен пройти' : ' должен быть остановлен'));
+        }
+      }
+    }
+    assert(blocked.length > 0 && blocked.every((x) => /^(will-navigate|will-redirect|will-frame-navigate)\|/.test(x)), 'каждый отказ доложен в onBlock');
+    assert(!blocked.some((x) => x.endsWith('|' + OWN) || x.endsWith('#step-2')), 'на своей странице onBlock молчит');
+    for (const u of ['https://example.com/', 'file:///C:/x.html', 'about:blank', OWN, '']) {
+      assert.deepStrictEqual(wc.open(u), { action: 'deny' }, 'window.open(' + u + ') — deny');
+    }
+    // без обратного вызова охрана тоже работает (журнал необязателен)
+    const wc2 = fakeWc(); WG.install(wc2, { indexFile: INDEX });
+    assert.strictEqual(wc2.emit('will-navigate', 'https://example.com/', 'object'), true);
+    assert.throws(() => WG.install(fakeWc(), {}), /indexFile/, 'без indexFile охрана не ставится молча');
+  });
+
+  ok('u10a/D window-guards: на Windows регистр пути не важен, на POSIX — важен; негативный контроль: слабые проверки (любой file:, без хоста, пустая) таблицей отвергаются', () => {
+    const idx = 'C:\\App\\src\\renderer\\index.html';
+    const asUrl = 'file:///C:/APP/SRC/RENDERER/INDEX.HTML';
+    assert.strictEqual(WG.isOwnIndexUrl(asUrl, idx, 'win32'), true, 'Windows: тот же файл в другом регистре — своя страница');
+    assert.strictEqual(WG.isOwnIndexUrl(asUrl, idx, 'linux'), false, 'Linux: регистр различает файлы');
+    // слабые варианты, которых НЕ должно быть: каждый обязан ошибиться хотя бы в одной строке таблицы
+    const weak = {
+      'любой file:': (u) => /^file:/i.test(u),
+      'file: без хоста': (u) => { try { const x = new URL(u); return x.protocol === 'file:' && !x.hostname; } catch (e) { return false; } },
+      'префикс каталога': (u) => String(u).indexOf(pathToFileURL(path.dirname(INDEX)).href) === 0,
+      'всё разрешено': () => true,
+      'всё запрещено': () => false
+    };
+    for (const [name, fn] of Object.entries(weak)) {
+      const miss = ROWS.filter(([u, allowed]) => fn(u) !== allowed);
+      assert(miss.length > 0, 'слабая проверка «' + name + '» таблицей НЕ отвергнута — таблица ничего не доказывает');
+    }
+    // а настоящая — не ошибается ни в одной строке
+    assert.deepStrictEqual(ROWS.filter(([u, allowed]) => WG.isOwnIndexUrl(u, INDEX) !== allowed).map((r) => r[0]), [], 'настоящая проверка совпала с таблицей');
+  });
+
+  ok('u10a/D main.js: sandbox:true, охрана ставится ДО loadFile, отказы идут в журнал очищенной строкой; preload использует только electron; в разметке нет ссылок, которым нужно новое окно', () => {
+    const m = MAINJS();
+    const cwFull = m.slice(m.indexOf('function createWindow() {'), m.indexOf('// M1: подняли ли окно на передний план'));
+    const cw = cwFull.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');   // комментарии не считаем: в них слова «sandbox:false» есть
+    assert(/webPreferences:\s*\{[\s\S]*?sandbox:\s*true[\s\S]*?\}/.test(cw), 'sandbox: true в webPreferences окна');
+    assert(!/sandbox:\s*false/.test(cw), 'sandbox:false в createWindow больше нет');
+    assert(/contextIsolation:\s*true/.test(cw) && /nodeIntegration:\s*false/.test(cw), 'contextIsolation и nodeIntegration:false на месте');
+    assertOrder(cw, 'windowGuards.install(mainWindow.webContents', "mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'))", 'охрана — до загрузки страницы');
+    assert(/indexFile:\s*path\.join\(__dirname,\s*'renderer',\s*'index\.html'\)/.test(cw), 'охраняется ровно та страница, что грузится');
+    assert(/profileEnv\.cleanForLog\(url\)/.test(cw), 'адрес в журнал — через cleanForLog (управляющие символы и длина)');
+    const pre = fs.readFileSync(path.join(SRC, 'preload.js'), 'utf8');
+    const reqs = (pre.match(/require\(['"]([^'"]+)['"]\)/g) || []).map((x) => x.replace(/require\(['"]|['"]\)/g, ''));
+    assert.deepStrictEqual(Array.from(new Set(reqs)), ['electron'], 'preload тянет только electron (в песочнице доступны лишь electron, events, timers, url)');
+    // внешние ссылки живут через open-external (проверка схем в main), а не через новые окна — иначе deny их убил бы молча
+    const renderer = ['app.js', 'finish-link.js', 'run-status.js', 'deps.js', 'index.html'].map((f) => fs.readFileSync(path.join(SRC, 'renderer', f), 'utf8')).join('\n');
+    assert(!/window\.open\s*\(/.test(renderer) && !/target\s*=\s*["']_blank["']/.test(renderer), 'в renderer нет window.open и target=_blank');
+    assert(/ipcMain\.handle\('open-external'[\s\S]*?\['http:', 'https:', 'mailto:', 'tg:'\]\.includes\(u\.protocol\)[\s\S]*?shell\.openExternal\(u\.href\)/.test(m), 'open-external с прежним списком схем на месте');
+  });
+
+  // createWindow из настоящего main.js, но с подставным Electron: текст функции вырезается и исполняется со шпионами. Текстовая
+  // проверка выше не отличает рабочий вызов от мёртвого кода (`if (false) windowGuards.install(...)` проходит её), а живая проба
+  // ставит охрану сама и до main.js не добирается — поэтому поведение createWindow проверяется здесь.
+  ok('u10a/D createWindow из настоящего main.js (подставной Electron): sandbox:true, охрана ставится один раз ДО loadFile на ту же страницу, отказ уходит в журнал очищенной строкой', () => {
+    const m = MAINJS();
+    const a = m.indexOf('function createWindow() {');
+    const b = m.indexOf('\n}\n', a);
+    assert(a !== -1 && b !== -1, 'createWindow найдена в main.js');
+    const events = []; const created = []; const installs = []; const logged = [];
+    class FakeWindow {
+      constructor(opts) { this.opts = opts; this.webContents = { tag: 'wc' }; created.push(this); events.push('new BrowserWindow'); }
+      loadFile(f) { events.push('loadFile'); this.file = f; }
+      once() {}
+      on() {}
+    }
+    const guards = { install: (wc, o) => { events.push('install'); installs.push({ wc, o }); } };
+    const code = 'let mainWindow = null; let _frontedForInstall = false; let _installBusy = false; const bringToFront = () => {};\n' +
+      m.slice(a, b + 2) + '\nreturn { run: createWindow, win: () => mainWindow };';
+    const api = new Function('BrowserWindow', 'IS_MAC', 'IS_WIN', 'path', '__dirname', 'windowGuards', 'logToFile', 'profileEnv', code)(
+      FakeWindow, false, true, path, SRC, guards, (id, line) => logged.push([id, line]), require(path.join(SRC, 'profile-env.js')));
+    api.run();
+    const w = api.win();
+    assert.strictEqual(created.length, 1, 'окно создано один раз');
+    const wp = w.opts.webPreferences;
+    assert.strictEqual(wp.sandbox, true, 'sandbox: true');
+    assert.strictEqual(wp.contextIsolation, true);
+    assert.strictEqual(wp.nodeIntegration, false);
+    assert.strictEqual(wp.preload, path.join(SRC, 'preload.js'), 'preload — настоящий');
+    assert.strictEqual(installs.length, 1, 'охрана поставлена ровно один раз');
+    assert.strictEqual(installs[0].wc, w.webContents, 'охрана повешена на webContents этого окна');
+    assert.strictEqual(installs[0].o.indexFile, path.join(SRC, 'renderer', 'index.html'), 'охраняется страница установщика');
+    assert.strictEqual(w.file, installs[0].o.indexFile, 'грузится ровно та страница, что охраняется');
+    assert.deepStrictEqual(events, ['new BrowserWindow', 'install', 'loadFile'], 'охрана — после создания окна и ДО загрузки страницы');
+    // отказ охраны → одна строка в журнал, адрес очищен от управляющих символов и обрезан
+    installs[0].o.onBlock('will-navigate', 'http://127.0.0.1/\u0000\u0085evil\n' + 'x'.repeat(500));
+    assert.strictEqual(logged.length, 1);
+    assert.strictEqual(logged[0][0], 'window');
+    assert(/^заблокирован will-navigate: http:\/\/127\.0\.0\.1\//.test(logged[0][1]), logged[0][1]);
+    assert(!/[\u0000-\u001f\u007f-\u009f]/.test(logged[0][1]) && logged[0][1].length < 400, 'строка однострочная, без управляющих символов, ограниченной длины');
+  });
+
+  // --- живой Electron ---
+  const labelKeys = () => {
+    const pre = fs.readFileSync(path.join(SRC, 'preload.js'), 'utf8');
+    const body = pre.slice(pre.indexOf('exposeInMainWorld'));
+    return Array.from(new Set((body.match(/^  ([A-Za-z]+): /gm) || []).map((s) => s.trim().replace(/:$/, '')))).sort();
+  };
+  const runProbe = (name, extraEnv, probeRoot) => {
+    if (!IS_WIN) SKIP('живой прогон Electron — только Windows');
+    const found = require(path.join(ROOT, 'test', 'find-electron.js')).findElectron(ROOT);
+    if (!found) SKIP('Electron не найден (node_modules/electron или NODE_PATH)');
+    const scratch = mkScratch('probe-' + name);
+    try {
+      const prof = path.join(scratch, 'prof');
+      const dirs = [path.join(prof, 'AppData', 'Roaming'), path.join(prof, 'AppData', 'Local'), path.join(scratch, 'tmp')];
+      dirs.forEach((d) => fs.mkdirSync(d, { recursive: true }));
+      const out = path.join(scratch, 'result.json');
+      const env = Object.assign({}, process.env, {
+        USERPROFILE: prof, HOME: prof, APPDATA: dirs[0], LOCALAPPDATA: dirs[1], TEMP: dirs[2], TMP: dirs[2],
+        HM_PROBE_ROOT: probeRoot || ROOT, HM_PROBE_OUT: out
+      }, extraEnv || {});
+      delete env.ELECTRON_RUN_AS_NODE;
+      // ПЕРВОЕ: профиль и данные Chromium — внутри scratch
+      ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP'].forEach((k) => assert(inside(env[k], scratch), k + ' вне scratch'));
+      const r = spawnSync(found.exe, [path.join(ROOT, 'test', 'window-guards-probe.js'), '--user-data-dir=' + path.join(scratch, 'ud'), '--disable-gpu'],
+        { env, encoding: 'utf8', timeout: 170000, windowsHide: true });
+      let res = null;
+      try { res = JSON.parse(fs.readFileSync(out, 'utf8')); } catch (e) { /* ниже */ }
+      assert(res && res.stage === 'done', 'проба дошла до конца (exit=' + r.status + ', signal=' + r.signal + '): ' + JSON.stringify(res && { stage: res.stage, error: res.error }));
+      assert.strictEqual(r.status, 0, 'код выхода пробы: ' + r.status);
+      return res;
+    } finally { drop(scratch); }
+  };
+
+  ok('u10a/D живой Electron (sandbox:true из настоящего main.js): window.installer есть, один обмен с main проходит, процесс страницы в песочнице ОС; чужие адреса и window.open не доходят', () => {
+    const res = runProbe('prod', {});
+    assert.strictEqual(res.webPreferencesFromMain.sandbox, true, 'в main.js — sandbox:true');
+    assert.strictEqual(res.lastWebPreferencesSandbox, true);
+    assert.strictEqual(res.rendererSandboxedByOS, true, 'процесс страницы — в песочнице ОС (ProcessMetric.sandboxed)');
+    assert.strictEqual(res.page.hasInstaller, true, 'preload под песочницей отработал: window.installer есть');
+    assert.deepStrictEqual(res.page.keys, labelKeys(), 'страница видит ровно тот интерфейс, что описан в preload.js (ничего не потеряно песочницей)');
+    assert.deepStrictEqual(res.page.pong, { probe: 'pong' }, 'ipcRenderer.invoke → ipcMain.handle → ответ дошёл');
+    assert.strictEqual(res.page.noNode, true, 'в странице нет require/process/module');
+    assert.deepStrictEqual(res.hits, [], 'ни один запрос на «чужой» адрес не дошёл до сервера');
+    assert.strictEqual(res.sameDocument, true, 'окно осталось на своей странице: ' + res.finalUrl);
+    assert.strictEqual(res.openReturnedNull, true, 'window.open вернул null');
+    assert.strictEqual(res.extraWindows, 0, 'новых окон нет');
+    assert.strictEqual(res.allWindows, 1);
+    assert(/#probe-anchor$/.test(res.afterHash), 'якорь на своей странице допустим: ' + res.afterHash);
+    assert(res.blocked.length >= 5, 'отказы доложены охраной: ' + JSON.stringify(res.blocked));
+    assert(res.blocked.some((b) => /^window-open /.test(b)) && res.blocked.some((b) => /^will-(frame-)?navigate /.test(b)), 'и навигация, и window.open');
+  });
+
+  // Упакованная сборка читает страницу и preload ИЗНУТРИ app.asar (electron-builder кладёт туда src/): адрес окна —
+  // file:///…/app.asar/src/renderer/index.html, и охрана сверяет его с тем же путём, по которому грузит main.js. Это
+  // другая раскладка, чем в рабочем дереве, поэтому ту же пробу гоняем на копии src/, упакованной настоящим упаковщиком.
+  ok('u10a/D живой Electron, приложение из app.asar (как в упакованной сборке): sandbox:true с preload из архива, window.installer и обмен с main работают, чужие адреса и окна не доходят', () => {
+    if (!IS_WIN) SKIP('живой прогон Electron — только Windows');
+    const dirs = [path.join(ROOT, 'node_modules')].concat(String(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean));
+    const asarCli = dirs.map((d) => path.join(d, '@electron', 'asar', 'bin', 'asar.js')).find((p) => fs.existsSync(p));
+    if (!asarCli) SKIP('нет упаковщика @electron/asar (node_modules или NODE_PATH) — упакованную раскладку не собрать');
+    const pack = mkScratch('asar');
+    try {
+      fs.mkdirSync(path.join(pack, 'app'), { recursive: true });
+      fs.cpSync(SRC, path.join(pack, 'app', 'src'), { recursive: true });
+      fs.writeFileSync(path.join(pack, 'app', 'package.json'), '{"name":"hm-probe","version":"0.0.0","main":"src/main.js"}');
+      const archive = path.join(pack, 'app.asar');
+      const pk = spawnSync(process.execPath, [asarCli, 'pack', path.join(pack, 'app'), archive], { encoding: 'utf8', timeout: 120000, windowsHide: true });
+      assert.strictEqual(pk.status, 0, 'asar pack отработал: ' + String(pk.stderr || pk.stdout).slice(0, 300));
+      assert(fs.statSync(archive).size > 100000, 'архив не пустой');
+      const res = runProbe('asar', {}, archive);
+      assert(/app\.asar[\\/]src[\\/]renderer[\\/]index\.html$/i.test(decodeURIComponent(res.url.replace(/^file:\/\/\//, '').split('#')[0])),
+        'страница действительно грузится из архива: ' + res.url);
+      assert.strictEqual(res.webPreferencesFromMain.sandbox, true);
+      assert.strictEqual(res.rendererSandboxedByOS, true, 'процесс страницы из архива — в песочнице ОС');
+      assert.strictEqual(res.page.hasInstaller, true, 'preload из архива под песочницей отработал');
+      assert.deepStrictEqual(res.page.keys, labelKeys());
+      assert.deepStrictEqual(res.page.pong, { probe: 'pong' }, 'обмен с main проходит');
+      assert.deepStrictEqual(res.hits, [], 'чужие запросы не дошли');
+      assert.strictEqual(res.sameDocument, true, 'окно осталось на странице из архива: ' + res.finalUrl);
+      assert.strictEqual(res.extraWindows, 0);
+      assert(/#probe-anchor$/.test(res.afterHash), 'якорь на своей странице допустим: ' + res.afterHash);
+      assert(res.blocked.length >= 5, 'отказы доложены охраной: ' + JSON.stringify(res.blocked));
+    } finally { drop(pack); }
+  });
+
+  ok('u10a/D контроль живого Electron: БЕЗ охраны окно уходит на чужой адрес, получает window.installer и открывает новые окна; при sandbox:false процесс страницы не в песочнице ОС', () => {
+    const noGuards = runProbe('noguards', { HM_PROBE_NO_GUARDS: '1' });
+    assert(noGuards.hits.length >= 3, 'КОНТРОЛЬ: чужие запросы дошли: ' + JSON.stringify(noGuards.hits));
+    assert.strictEqual(noGuards.sameDocument, false, 'КОНТРОЛЬ: окно ушло со своей страницы: ' + noGuards.finalUrl);
+    assert(/^object\|http:$/.test(noGuards.pageAfterHttpNav), 'КОНТРОЛЬ (суть F18): чужая страница по http получила тот же window.installer: ' + noGuards.pageAfterHttpNav);
+    assert(noGuards.extraWindows >= 1 && noGuards.openReturnedNull === false, 'КОНТРОЛЬ: window.open / target=_blank открывают окна');
+    assert.deepStrictEqual(noGuards.blocked, []);
+    // sandbox:false (прежняя настройка) — признак «песочница ОС» отличается, то есть проверка выше не пустая
+    const noSandbox = runProbe('nosandbox', { HM_PROBE_SANDBOX: '0' });
+    assert.strictEqual(noSandbox.rendererSandboxedByOS, false, 'КОНТРОЛЬ: при sandbox:false процесс страницы без песочницы ОС');
+    assert.strictEqual(noSandbox.page.hasInstaller, true);
   });
 })();

@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const linkGuard = require('./link-guard');
 
 const SCHEMA_VERSION = 2;
 const DIR_NAME = '.hamidun-setup';
@@ -72,6 +73,14 @@ function tombstonePath(homedir, id) {
   return receiptPath(homedir, id) + TOMBSTONE_SUFFIX;
 }
 
+// u10a/F16: маркеры пишет и переименовывает процесс с правами администратора, а ~/.hamidun-setup доступен любой
+// программе того же пользователя. Ссылка (junction) на нём — не пишем и не переименовываем через неё: бросаем
+// (writeReceipt: main.js ловит и пишет одну строку в журнал) либо отдаём {ok:false} (остальные операции
+// и так возвращают ответ). Установка из-за справочного маркера не падает, но и чужого каталога не касается.
+function assertLinkFree(homedir, target) {
+  linkGuard.assertNoLinkInChain(target, homedir, undefined, 'отметке установки');
+}
+
 // Разбор строки 'HM-RECEIPT <type> <value>' (только для фильтрации из UI-лога).
 function parseReceiptLine(line) {
   const m = /^HM-RECEIPT\s+([a-z]+)\s+(.+)$/.exec(String(line == null ? '' : line).trim());
@@ -95,9 +104,10 @@ function buildReceipt(id, platform, version) {
 
 // P2: восстановление после краха rollback-а — если основной файл пропал, а рядом
 // остался *.bak (см. writeReceipt fallback), возвращаем самый свежий .bak на место.
-function recoverBak(dir, dstBaseName) {
+function recoverBak(dir, dstBaseName, homedir) {
   try {
     const dst = path.join(dir, dstBaseName);
+    if (homedir && !linkGuard.isLinkFree(dst, homedir)) return;   // чужой каталог за ссылкой: «.bak» оттуда не возвращаем
     if (fs.existsSync(dst)) return;
     // P1-1: идёт (или упала посреди) деинсталляция — маркер деактивирован в
     // tombstone. «Удалённый» компонент НЕ воскрешаем из осиротевшего .bak.
@@ -147,11 +157,19 @@ function writeReceipt(homedir, id, receipt, opts) {
   const dst = receiptPath(homedir, id);
   if (opts.dryRun) return { ok: true, path: dst, dryRun: true };
   const dir = receiptsDir(homedir);
+  assertLinkFree(homedir, dst);
   fs.mkdirSync(dir, { recursive: true });
+  assertLinkFree(homedir, dst);                 // каталог мог стать ссылкой между проверкой и созданием
   const json = JSON.stringify(receipt, null, 2);
   const ex = openExclTmp(dir, String(id) + '.json');
   const tmp = ex.tmp;
   const fd = ex.fd;
+  try { assertLinkFree(homedir, dst); }          // сразу после создания временного файла (см. src/link-guard.js)
+  catch (e) {
+    try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
+    throw e;
+  }
   try {
     fs.writeFileSync(fd, json, 'utf8');
     try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
@@ -187,7 +205,7 @@ function writeReceipt(homedir, id, receipt, opts) {
 // Легаси-схема (v1 c artifacts) — валидный маркер; artifacts НЕ экспонируются.
 function readReceipt(homedir, id) {
   try {
-    recoverBak(receiptsDir(homedir), String(id) + '.json');
+    recoverBak(receiptsDir(homedir), String(id) + '.json', homedir);
   } catch (e) { /* ignore */ }
   try {
     const raw = fs.readFileSync(receiptPath(homedir, id), 'utf8');
@@ -216,6 +234,7 @@ function deactivateReceipt(homedir, id) {
   const src = receiptPath(homedir, id);
   const dst = tombstonePath(homedir, id);
   try {
+    assertLinkFree(homedir, src);
     try { fs.rmSync(dst, { force: true }); } catch (e) { /* хвост прошлого краша */ }
     fs.renameSync(src, dst);
     return { ok: true, tombstone: dst };
@@ -229,6 +248,7 @@ function restoreReceipt(homedir, id) {
   const src = tombstonePath(homedir, id);
   const dst = receiptPath(homedir, id);
   try {
+    assertLinkFree(homedir, src);
     fs.renameSync(src, dst);
     return { ok: true };
   } catch (e) {
@@ -248,6 +268,7 @@ function restoreReceipt(homedir, id) {
 function recoverOrphanTombstones(homedir) {
   const dir = receiptsDir(homedir);
   const restored = [];
+  if (!linkGuard.isLinkFree(dir, homedir)) return { ok: true, restored };   // за ссылкой — чужой каталог, не трогаем
   let names;
   try { names = fs.readdirSync(dir); }
   catch (e) { return { ok: true, restored }; }        // каталога нет — нечего чинить
@@ -290,6 +311,7 @@ function finalizeRemoval(homedir, id) {
   const dir = receiptsDir(homedir);
   const base = String(id) + '.json';
   try {
+    assertLinkFree(homedir, t);
     try { fs.rmSync(t, { force: true }); }
     catch (e) { return { ok: false, error: 'снятие tombstone: ' + String((e && e.code) || e) }; }
     const deb = listReceiptDebris(dir, base);
@@ -314,6 +336,7 @@ function finalizeRemoval(homedir, id) {
 function removeReceipt(homedir, id) {
   const p = receiptPath(homedir, id);
   try {
+    assertLinkFree(homedir, p);
     fs.rmSync(p, { force: true });
     if (fs.existsSync(p)) return { ok: false, error: 'файл остался: ' + p };
     return { ok: true };

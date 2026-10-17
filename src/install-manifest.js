@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const linkGuard = require('./link-guard');
 
 const SCHEMA_VERSION = 1;
 const DIR_NAME = '.hamidun-setup';
@@ -37,6 +38,8 @@ function emptyManifest() {
 function recoverBak(homedir) {
   try {
     const dst = manifestPath(homedir);
+    // u10a/F16: ~/.hamidun-setup, подменённый ссылкой, — чужой каталог: возвращать из него «.bak» на место нельзя.
+    if (!linkGuard.isLinkFree(dst, homedir || os.homedir())) return;
     if (fs.existsSync(dst)) return;
     const dir = setupDir(homedir);
     const cands = fs.readdirSync(dir)
@@ -110,10 +113,22 @@ function writeManifest(homedir, data, opts) {
   if (opts.dryRun) return { ok: true, path: dst, dryRun: true };
   const dir = setupDir(homedir);
   const json = JSON.stringify(obj, null, 2);
+  // u10a/F16: запись идёт из процесса с правами администратора, а ~/.hamidun-setup доступен любой программе того же
+  // пользователя. Ссылка (junction) на нём — отказ: бросаем, как и при любой невозможности записи (вызывающий
+  // main.js ловит и пишет одну строку в журнал; установка из-за справочного манифеста не падает).
+  const guard = () => linkGuard.assertNoLinkInChain(dst, homedir || os.homedir(), undefined, 'манифесту установки');
+  guard();
   fs.mkdirSync(dir, { recursive: true });
+  guard();
   const ex = openExclTmp(dir, FILE_NAME);
   const tmp = ex.tmp;
   const fd = ex.fd;
+  try { guard(); }
+  catch (e) {
+    try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
+    throw e;
+  }
   try {
     fs.writeFileSync(fd, json, 'utf8');
     try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
