@@ -19,10 +19,12 @@
     "url": "http://127.0.0.1:9119"
   },
   "bridge": {
-    "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер. ПОКА ПУСТО — карточка моста в установщике честно помечена «не настроен» и несёт предупреждение: компонент требует прав администратора, и молча предлагать его как рабочий нельзя. Связь объявлена данными, а не кодом: components.json → bridge.needsConfig = \"bridge.enrollEndpoint\". Впишешь адрес — пометка и предупреждение исчезнут сами, править код не нужно.",
+    "_comment": "AI-мост: стабильный IP только для ИИ-доменов через SSH. enrollEndpoint пуст => агент простаивает, пока бот не выдаст доступ. Впиши адрес bridge enroll-сервиса (server/enroll-ssh-server.js), когда купишь сервер. ПОКА ПУСТО — моста нет в списке компонентов вовсе (components.json → bridge.hideWhileUnconfigured, логика в src/component-visibility.js): без сервера он только простаивал бы, а права администратора просит. Исключение — у кого мост уже стоит от нашего установщика (квитанция): им карточка видна с пометкой «не настроен» и кнопкой «Удалить» (bridge.needsConfig = \"bridge.enrollEndpoint\"). Связь объявлена данными, а не кодом: впишешь адрес — мост вернётся в список сам, править код не нужно.",
     "enrollEndpoint": "",
     "pacDomains": [
       "claude.ai",
+      "claude.com",
+      "platform.claude.com",
       "anthropic.com",
       "openai.com",
       "chatgpt.com",
@@ -43,7 +45,7 @@
     "shortcutName": "Курс вайбкодинг (Claude Code)"
   },
   "telemetry": {
-    "_comment": "Статистика установки (opt-out чекбоксом на экране выбора). События: install_started / installed / open_editor. Тело: {event, platform, edition, ok, failed[], skipped[], errors[{id,stage,error}], duration_sec, uid}. uid — идентификатор в Telegram, если человек пришёл по персональной ссылке бота (main берёт его из имени скачанного файла); тексты ошибок чистятся от ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
+    "_comment": "Статистика установки (opt-out чекбоксом на экране выбора). События: install_started / installed / open_editor. Тело: {event, platform, edition, mode, ok, failed[], skipped[], selected[], errors[{id,stage,error}], duration_sec, uid}. mode: install (обычная установка) или repair (кнопка «Проверить и починить»: в прогоне только verify, ничего не ставилось). uid — идентификатор в Telegram, если человек пришёл по персональной ссылке бота (main берёт его из имени скачанного файла); тексты ошибок чистятся от ПД. Пустой url = телеметрия выключена. Отправляет main (send-telemetry), таймаут 5с, ошибки глотаются.",
     "url": "https://academy.hamidun.com/api/lead"
   },
   "finish": {

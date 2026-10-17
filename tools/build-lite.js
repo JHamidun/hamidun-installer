@@ -245,6 +245,19 @@ function assertRegistryMatchesChecksums(platform) {
     console.log('            но НЕ против устаревшей публикации. Для «config» возраст проверен штампом выше.');
   }
 
+  // Обязательные члены архивов (release-check.js REQUIRED_GATED): vscode обязан нести vsix
+  // панели Claude. Запись, опубликованная до этого правила, проходит все сверки выше — и
+  // молча возвращает lite к установке панели только из Marketplace. Ловим до сборки.
+  const missReq = require('./release-check.js').missingRequiredGated(reg, platform);
+  if (missReq.length) {
+    const ids = [...new Set(missReq.map((m) => m.remoteId))];
+    throw new Error(
+      `опубликованные архивы не несут обязательные файлы: ${missReq.map((m) => m.remoteId + '/' + m.member).join(', ')} ` +
+      `(архив стал составным после публикации). Перепубликуй: python tools/publish-vendor.py --platform ${platform} --only ${ids.join(',')} — ` +
+      `и только потом собирай lite.`
+    );
+  }
+
   // Ни одной записи своей платформы = lite-сборка, которой НЕЧЕГО качать: все тяжёлые
   // компоненты у пользователя уйдут в «нет сборки для платформы». Ловим до сборки.
   if (!entries) {
@@ -360,6 +373,32 @@ function main() {
     // Node 22 на Windows НЕ спавнит .cmd напрямую через execFileSync (EINVAL, CVE-фикс) —
     // нужен shell:true (тогда 'npx' резолвится шеллом в npx.cmd). На macOS безвреден.
     execFileSync('npx', ['electron-builder'].concat(t.builderArgs), { cwd: ROOT, stdio: 'inherit', shell: true });
+
+    // 4a. Fuse-проводка упакованного Electron: RunAsNode, NODE_OPTIONS и --inspect выключены.
+    // Гасит их хук afterPack (tools/after-pack.js) до подписи; здесь — независимая сверка
+    // результата прямо по байтам готового бинаря (lite-exe — тот же подписанный requireAdministrator).
+    // Код выхода ≠ 0 роняет сборку, finally ниже вернёт дерево. На macOS смотрим .app из
+    // electron-builder: release/mac-universal.
+    execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-fuses.js')]
+      .concat(target === 'mac' ? [path.join(ROOT, 'release', 'mac-universal')] : []), { cwd: ROOT, stdio: 'inherit' });
+
+    // 4b. Упакованный vendor-lite побайтно равен своему checksums.json. Подписанная сборка
+    // переписала бы uv/uvx, и на машине человека Confirm-HmArtifact остановил бы их как
+    // «подменённые» (хук подписи теперь обходит чужие файлы — это страховка от возврата).
+    // Манифест здесь ПОЛНЫЙ, а вшиты только uv и курс — поэтому --source: обязательны записи, чьи файлы
+    // лежат в vendor-lite (иначе проверка требовала бы Git, Cursor и прочее, которых в lite нет).
+    if (target !== 'mac') {
+      execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-packed-vendor.js'),
+        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'vendor'), '--source', VENDOR_LITE],
+      { cwd: ROOT, stdio: 'inherit' });
+      // 4c. Итоговые exe подписаны НАШИМ сертификатом (S-8): хук подписи в CI, не на Windows и при
+      // HM_WIN_SIGN=0 молча пропускает подпись, а electron-builder всё равно рапортует успех. Последним
+      // шагом цепочки, после проверки vendor. HM_WIN_SIGN=0 — единственный осознанный пропуск (громкий).
+      execFileSync(process.execPath, [path.join(ROOT, 'tools', 'verify-signature.js'),
+        path.join(ROOT, 'release', 'win-unpacked', require('./sign-win.js').PRODUCT_EXE),
+        path.join(ROOT, 'release', 'win-unpacked', 'resources', 'elevate.exe'),
+        path.join(ROOT, 'release', t.artifactFile)], { cwd: ROOT, stdio: 'inherit' });
+    }
 
     // 5. size-assert — страховка от случайного вшивания полного vendor
     const art = findLiteArtifact(t);

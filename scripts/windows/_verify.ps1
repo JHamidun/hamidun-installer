@@ -23,7 +23,9 @@ function Get-HmFileSha256 {
 # (верифицирует). Self-contained (не зависит от Get-HmFileSha256).
 function Get-HmTreeSha256 {
     param([string]$Root)
-    $root = (Resolve-Path -LiteralPath $Root).Path
+    # Resolve-Path оставляет короткое написание 8.3 как есть, а FullName потомков Windows PowerShell 5.1 раскрывает: срез по длине корня
+    # съезжал бы, и хеш дерева зависел от написания пути. Корень берём тем же способом, каким получены потомки.
+    $root = (Get-Item -LiteralPath (Resolve-Path -LiteralPath $Root).Path).FullName
     $lines = New-Object System.Collections.Generic.List[string]
     $sha1 = [System.Security.Cryptography.SHA256]::Create()
     try {

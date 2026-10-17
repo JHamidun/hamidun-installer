@@ -34,6 +34,11 @@ on:
   push:
     branches: ['e2e/**']
 
+# Права токена по умолчанию — только чтение: джобы ниже ничего не пишут в репозиторий (скриншоты
+# уезжают артефактом через токен рантайма, `git checkout` реестра — локальный).
+permissions:
+  contents: read
+
 # Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
 # бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
 concurrency:
@@ -46,15 +51,18 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Проверка прав (E2E требует элевации для staging докачки)
         shell: pwsh
@@ -183,7 +191,7 @@ jobs:
 
       - name: Артефакты (скриншоты GUI всех сценариев)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-screenshots-win
           path: release/e2e-*.png
@@ -198,15 +206,18 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         shell: pwsh
@@ -228,7 +239,7 @@ jobs:
 
       - name: Артефакты (скриншоты GUI)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-screenshots-win-full
           path: release/e2e-*.png
@@ -243,15 +254,18 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Подготовка офлайн-издания (vendor/config-pack из публичного репо)
         run: |
@@ -298,7 +312,7 @@ jobs:
 
       - name: Артефакты (скриншоты GUI всех сценариев)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-screenshots-mac
           path: release/e2e-*.png
@@ -316,15 +330,18 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      - name: Electron binary (Electron >= 42 no longer downloads it in postinstall)
+        run: npx install-electron --no
 
       - name: Подготовка lite-издания (edition=lite + вшитый checksums.json)
         run: |
@@ -374,7 +391,7 @@ jobs:
 
       - name: Артефакты (скриншоты GUI)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-screenshots-mac-lite
           path: release/e2e-*.png

@@ -38,6 +38,20 @@
 #
 # ИНВАРИАНТ: elevated-процесс НИКОГДА не исполняет user-writable editor-бинарь at high
 # integrity; НИ ОДНОГО user-writable control/attestation-файла в решении о доверии.
+#
+# ЗАПАСНОЙ ПУТЬ (Invoke-HmDeElevatedSafe, внизу файла). Одноразовая задача — общая точка
+# отказа сразу для пяти шагов: панели VS Code, pip и самопроверка моста, разрешение
+# микрофона Handy, проверка claude. В присланном журнале все они отказали разом за 7 секунд
+# с «Last Result» 0x80070005: действие задачи (powershell) не стартовало вовсе — так режут
+# запуск из планировщика антивирусы. Когда ДОКАЗАНО, что задача ничего не запустила, то же
+# действие выполняется с ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же пользователь — проверяется
+# по самому токену до запуска). Почему не «explorer.exe <лаунчер>», как делали скрепка, трей
+# моста и «Войти в Claude» до 09.10.2026: если оболочки в этот момент нет (её может прибить
+# малварь того же юзера), наш elevated explorer.exe обрабатывает запуск САМ, под админом, и
+# выбирает обработчик по HKCU\Software\Classes (lnkfile/cmdfile/exefile — пишется без UAC)
+# раньше любого гейта внутри лаунчера. Токен оболочки проверяется ДО запуска, ассоциаций
+# файлов не касается. Теперь и эти три запуска идут через Invoke-HmAsShellUser (-NoWait;
+# «Войти в Claude» — с -CmdScript и -WorkingDirectory, то есть вообще без файла-лаунчера).
 
 # --- Integrity текущего (родительского) процесса через АБСОЛЮТНЫЙ whoami (не user-writable). ---
 function Get-HmSelfIntegrity {
@@ -356,6 +370,66 @@ function New-HmSecureStagingDir {
     }
 }
 
+# --- Корни доверия МАШИНЫ: отпечатки сертификатов из LocalMachine\Root. ---
+# Отдельной функцией, чтобы тест подставил свой набор: настоящий стор ему трогать нельзя.
+function Get-HmMachineRootThumbprints {
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+    $out = New-Object System.Collections.Generic.List[string]
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        foreach ($c in $store.Certificates) { [void]$out.Add([string]$c.Thumbprint) }
+    } finally { try { $store.Close() } catch { } }
+    return $out.ToArray()
+}
+
+# --- Цепочка сертификата подписанта БЕЗ оценки сроков годности. Возвращает объект {Root; Why; OutOfWindow}:
+#     Root — корень цепочки (X509Certificate2), Why — причина отказа (пусто = цепочка выстроилась),
+#     OutOfWindow — истина, если срок ХОТЯ БЫ ОДНОГО звена (лист, промежуточный УЦ, корень) на «сейчас» вышел
+#     или ещё не наступил.
+#     Срок годности не проверяем «на сегодня» СОЗНАТЕЛЬНО (S-11): это решает Status='Valid' из
+#     Get-AuthenticodeSignature, а он считает срок по МЕТКЕ ВРЕМЕНИ подписи (см. шапку Test-HmTrustedSigner).
+#     Всё остальное — подпись звеньев, EKU Code Signing, basic constraints — движок проверяет как раньше.
+#     IgnoreNotTimeValid снимает оценку срока у ВСЕХ звеньев сразу, а не только у листа, поэтому «есть ли
+#     звено вне срока» считаем сами (OutOfWindow): для такой цепочки вызывающий обязан потребовать метку
+#     времени от TSA, которому доверяет машина. Годный лист под просроченным промежуточным УЦ (утёкший ключ
+#     УЦ) иначе выглядел бы «в сроке» и обходил бы эту проверку.
+#     -Eku — какое назначение обязана допускать вся цепочка: по умолчанию Code Signing (лист подписи), для
+#     метки времени — Time Stamping (1.3.6.1.5.5.7.3.8).
+#     -ExtraCerts и -ExtraFlags нужны только тесту (подложить тестовую цепочку и объяснить движку, что её
+#     тестовый корень — «известный»); боевой вызов их не задаёт, и там движок доверяет только тому, чему
+#     доверяет сама Windows.
+function Get-HmSignerChainRoot {
+    param(
+        [Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert,
+        [string]$Eku = '1.3.6.1.5.5.7.3.3',
+        [System.Security.Cryptography.X509Certificates.X509Certificate2[]]$ExtraCerts = @(),
+        [System.Security.Cryptography.X509Certificates.X509VerificationFlags]$ExtraFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+    )
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
+    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid -bor $ExtraFlags
+    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid($Eku)))  # по умолчанию EKU Code Signing
+    foreach ($x in @($ExtraCerts)) { if ($x) { [void]$chain.ChainPolicy.ExtraStore.Add($x) } }
+    $built = $false
+    try { $built = $chain.Build($Cert) } catch { return [pscustomobject]@{ Root = $null; Why = "не удалось построить цепочку: $($_.Exception.Message)" } }
+    if (-not $built) {
+        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
+        return [pscustomobject]@{ Root = $null; Why = "цепочка сертификатов не выстроилась ($st)" }
+    }
+    $elems = $chain.ChainElements
+    if (-not $elems -or $elems.Count -lt 1) { return [pscustomobject]@{ Root = $null; Why = 'пустая цепочка сертификатов'; OutOfWindow = $true } }
+    $root = $elems[$elems.Count - 1].Certificate
+    if (-not $root -or -not $root.Thumbprint) { return [pscustomobject]@{ Root = $null; Why = 'не удалось определить корень цепочки'; OutOfWindow = $true } }
+    # Срок КАЖДОГО звена по часам «сейчас» (UTC): движку велено срок не оценивать, поэтому считаем сами.
+    $nowUtc = [DateTime]::UtcNow
+    $outOfWindow = $false
+    foreach ($el in @($elems)) {
+        $c = $el.Certificate
+        if (-not $c -or $c.NotAfter.ToUniversalTime() -lt $nowUtc -or $c.NotBefore.ToUniversalTime() -gt $nowUtc) { $outOfWindow = $true }
+    }
+    return [pscustomobject]@{ Root = $root; Why = ''; OutOfWindow = $outOfWindow }
+}
+
 # --- НАДЁЖНЫЙ гейт Authenticode для ОНЛАЙН-скачанных установщиков (git/node/cursor/python).
 #     Возвращает '' если бинарь ДОВЕРЕН, иначе строку-причину отказа (вызывающий → fail-closed).
 #
@@ -367,16 +441,35 @@ function New-HmSecureStagingDir {
 #     уважает HKCU-прокси WinINET (тоже без UAC). Итог: same-user малварь могла подсунуть
 #     свой установщик с Status='Valid' и получить исполнение под АДМИНОМ.
 #     Поэтому ТРЕБУЕМ: корень цепочки лежит в LocalMachine\Root + EKU Code Signing.
-#     Тот же принцип уже применён в claude-desktop.ps1/chatgpt-desktop.ps1 (там ещё и точное O=);
-#     здесь пин издателя ОПЦИОНАЛЕН (-ExpectedOrg/-ExpectedSubjectMatch), т.к. точные RDN
-#     сторонних издателей (Git for Windows/Node/Cursor) не подтверждены на реальных артефактах,
-#     а слепой пин ломал бы легитимную установку. Обязательная (непереборчивая) половина —
+#     Ту же функцию зовут claude-desktop.ps1 (точное O='Anthropic, PBC' + необязательный отпечаток листа) и
+#     chatgpt-desktop.ps1 (O='Microsoft Corporation' для winget.exe): раньше у каждого из них была СВОЯ копия
+#     этой логики, копии разошлись с общей, и именно они держали два дефекта (срок «на сегодня» и пин
+#     'Anthropic, PBC', не совпадавший никогда из-за кавычек). Решение одно на все скрипты.
+#     Для git/node/cursor пин издателя ОПЦИОНАЛЕН (-ExpectedOrg/-ExpectedSubjectMatch/-ExpectedThumbprint),
+#     т.к. точные RDN сторонних издателей (Git for Windows/Node/Cursor) не подтверждены на реальных
+#     артефактах, а слепой пин ломал бы легитимную установку. Обязательная (непереборчивая) половина —
 #     цепочка к МАШИННОМУ корню — закрывает описанный privesc сама по себе.
+#
+#     СРОК ГОДНОСТИ ЛИСТА здесь НЕ оценивается «на сегодня» (S-11, 09.10.2026). Издатели подписывают
+#     короткоживущими сертификатами (Microsoft Artifact Signing — 72 часа) и ставят метку времени;
+#     у Git for Windows, Node, Cursor, Handy и uv лист ко дню проверки уже истёк, у python.org — ещё
+#     в 2025. Status='Valid' срок УЖЕ учёл — по метке времени подписи. А цепочка, построенная без
+#     флагов на «сегодня», видела просроченный лист и отказывала КАЖДОМУ настоящему установщику
+#     (NotTimeValid): онлайн-фолбэки git/node/cursor/python были вечно красными. Теперь доверие
+#     держат три вещи, не зависящие от часов: Status='Valid' (по метке времени), корень цепочки в
+#     LocalMachine\Root, EKU Code Signing — и пин издателя там, где вызывающий его задал. Просроченный
+#     лист без метки времени отсекается раньше, на Status (он тогда не 'Valid'). А цепочке со звеном вне
+#     срока (просрочен лист, промежуточный УЦ или корень) метка времени нужна не просто годная для Status,
+#     а от TSA, чей корень тоже лежит в LocalMachine\Root (шаг b2): иначе малварь подписала бы украденным
+#     просроченным ключом любого издателя и «датировала» подпись своим корнем TSA из HKCU — тем самым
+#     ходом, ради которого весь этот гейт и написан. Смотреть при этом надо на ВСЕ звенья, не на лист:
+#     годный лист, выпущенный просроченным промежуточным УЦ, — тот же ход с утёкшим ключом УЦ.
 function Test-HmTrustedSigner {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [string]$ExpectedOrg = '',
-        [string]$ExpectedSubjectMatch = ''
+        [string]$ExpectedSubjectMatch = '',
+        [string]$ExpectedThumbprint = ''
     )
     if (-not (Test-Path -LiteralPath $Path)) { return 'файл не найден' }
     # (a) Authenticode: подпись есть И хеш файла не подменён.
@@ -387,28 +480,33 @@ function Test-HmTrustedSigner {
     $cert = $sig.SignerCertificate
     if (-not $cert) { return 'нет сертификата подписанта' }
     # (b) Цепочка ОБЯЗАНА выстраиваться до корня в LocalMachine\Root (CurrentUser\Root НЕ доверяем).
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
-    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))  # EKU Code Signing
-    $built = $false
-    try { $built = $chain.Build($cert) } catch { return "не удалось построить цепочку: $($_.Exception.Message)" }
-    if (-not $built) {
-        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
-        return "цепочка сертификатов не выстроилась ($st)"
+    #     Сроки годности звеньев не оцениваются (см. шапку): их уже оценил Status='Valid' по метке времени.
+    $anchor = Get-HmSignerChainRoot -Cert $cert
+    if (-not $anchor) { return 'не удалось построить цепочку' }
+    if ($anchor.Why) { return [string]$anchor.Why }
+    $root = $anchor.Root
+    $machineRoots = $null
+    try { $machineRoots = @(Get-HmMachineRootThumbprints) } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
+    if ($machineRoots -notcontains [string]$root.Thumbprint) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
+    # (b2) Звено цепочки вне срока (лист, промежуточный УЦ или корень: просрочено либо ещё не вступило в
+    #      силу) принимаем ТОЛЬКО по метке времени — а метке можно верить, лишь если её издатель (TSA)
+    #      доверен МАШИНЕ, а не пользователю. Status='Valid' проверил метку тем же пользовательским
+    #      chain-engine: medium-малварь кладёт СВОЙ корень TSA в HKCU\...\Root и «датирует» подпись
+    #      украденным просроченным ключом прошлым числом — ключом издателя ИЛИ утёкшим ключом уже
+    #      просроченного промежуточного УЦ (тогда сам лист свежий, и по его датам проверка не сработала бы).
+    #      Поэтому цепочка метки времени тоже обязана заканчиваться в LocalMachine\Root (с EKU Time Stamping).
+    #      Сам сертификат TSA вправе быть просроченным — как и лист, он оценён по времени подписи.
+    #      Цепочке, где все звенья в сроке, этой проверки не нужно: у неё поведение прежнее.
+    #      Срок всех звеньев считает помощник (OutOfWindow). «Не $false» — значит и «ответа нет»: без ответа
+    #      считаем «вне срока», то есть ошибаемся в сторону строгости, а не пропуска.
+    if ($anchor.OutOfWindow -ne $false) {
+        $tsCert = $sig.TimeStamperCertificate
+        if (-not $tsCert) { return 'сертификат подписанта или звено его цепочки вне срока годности, а метки времени нет' }
+        $tsAnchor = Get-HmSignerChainRoot -Cert $tsCert -Eku '1.3.6.1.5.5.7.3.8'
+        if (-not $tsAnchor) { return 'не удалось построить цепочку метки времени' }
+        if ($tsAnchor.Why) { return ('метка времени: ' + [string]$tsAnchor.Why) }
+        if ($machineRoots -notcontains [string]$tsAnchor.Root.Thumbprint) { return "корень метки времени НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($tsAnchor.Root.Subject)" }
     }
-    $elems = $chain.ChainElements
-    if (-not $elems -or $elems.Count -lt 1) { return 'пустая цепочка сертификатов' }
-    $root = $elems[$elems.Count - 1].Certificate
-    if (-not $root -or -not $root.Thumbprint) { return 'не удалось определить корень цепочки' }
-    $inMachine = $false
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-    try {
-        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-        foreach ($c in $store.Certificates) { if ($c.Thumbprint -eq $root.Thumbprint) { $inMachine = $true; break } }
-    } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
-    finally { try { $store.Close() } catch { } }
-    if (-not $inMachine) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
     # (c) EKU Code Signing у leaf-серта.
     $hasCodeSigning = $false
     foreach ($ext in $cert.Extensions) {
@@ -425,11 +523,26 @@ function Test-HmTrustedSigner {
                 if ($ln -match '^\s*O=') { $org = ($ln -replace '^\s*O=', '').Trim(); break }
             }
         } catch { }
-        if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
+        # .NET берёт значение в кавычки, если в нём запятая, «+», «;», «=» или пробелы по краям
+        # (O="Anthropic, PBC"), а кавычку внутри самого значения удваивает. Без снятия этого обрамления пин
+        # «Anthropic, PBC» не совпал бы НИКОГДА (так и было в claude-desktop.ps1). Снимаем ровно одно обрамление и
+        # раздваиваем кавычки обратно, а не Trim('"'): значение, в котором кавычки есть на самом деле, не должно
+        # сойти за значение без них.
+        if ($org.Length -ge 2 -and $org.StartsWith('"') -and $org.EndsWith('"')) { $org = $org.Substring(1, $org.Length - 2).Replace('""', '"') }
+        # Порядковое сравнение без учёта регистра, а не -ne: оператор сравнивает с учётом культуры, и мягкий перенос (U+00AD) в
+        # имени издателя «не слышен» (проверено на PowerShell 5.1) — O="Microsoft Corporation\u00AD" проходило бы как пин.
+        if (-not [string]::Equals($org, $ExpectedOrg, [StringComparison]::OrdinalIgnoreCase)) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
     }
     # (e) Опциональный (более мягкий) пин по Subject — для издателей, у кого RDN не подтверждён.
     if ($ExpectedSubjectMatch -and ("$($cert.Subject)" -notmatch $ExpectedSubjectMatch)) {
         return "Subject подписи не совпал с ожидаемым издателем ($($cert.Subject))"
+    }
+    # (f) Опциональный пин отпечатка листа (SHA-1; регистр, пробелы, двоеточия не важны). Пусто — пин выключен;
+    #     без единой hex-цифры — отказ, а не «выключен». ОСТОРОЖНО: лист меняется при каждом перевыпуске (у
+    #     Artifact Signing — раз в 72 часа), пин протухнет и молча сделает установку пропуском; стабильный — O= (d).
+    if ($ExpectedThumbprint -and $ExpectedThumbprint.Trim()) {
+        $wantThumb = ($ExpectedThumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        if (([string]$cert.Thumbprint).ToUpperInvariant() -ne $wantThumb) { return 'отпечаток сертификата подписанта не совпал с пином' }
     }
     return ''
 }
@@ -521,8 +634,111 @@ function Remove-HmOrphanTasks {
     return $removed
 }
 
+# --- «Last Result» задачи → вердикт. ЧИСТАЯ функция (без планировщика), тестируется напрямую. ---
+#
+# Раньше ЛЮБОЕ итоговое значение считалось кодом выхода обёртки (Gate='medium'). Для двух
+# классов значений это неправда, и именно на них падали люди:
+#   • HRESULT-ошибки самого планировщика: 0x8007xxxx (Win32-ошибка запуска — 0x80070005
+#     «отказано в доступе», 0x800704DD «пользователь не вошёл», …) и SCHED_E_* 0x800413xx.
+#     Это не код программы: ДЕЙСТВИЕ задачи (powershell) вообще не стартовало. Шаги печатали
+#     такое число как свой результат — «pip exit=-2147024891», «reg.exe вернул -2147024891».
+#   • SCHED_S_* 0x413xx — статусы ЗАДАЧИ: 267014 = прервана по лимиту (что-то из запущенного
+#     могло остаться жить), остальные ничего не доказывают.
+# Gate: 'medium' — обёртка отработала на medium, Code = код программы;
+#       'refused' — обёртка увидела НЕ medium и бинарь НЕ запускала (exit 210);
+#       'not-started' — действие задачи не стартовало, бинарь НЕ запускался;
+#       'terminated' — прервана по лимиту времени; 'unknown' — итога нет / служебный статус.
+# Значения ≥ 0x80000000 сравниваются как long (суффикс L): в PowerShell 5.1 литерал
+# 0x80070000 без суффикса — это ОТРИЦАТЕЛЬНЫЙ Int32, и сравнение молча не совпадало бы.
+function Get-HmTaskVerdict {
+    param([AllowNull()][AllowEmptyString()][string]$LastResult)
+    $n = 0L
+    if ([string]::IsNullOrWhiteSpace($LastResult) -or -not [long]::TryParse($LastResult.Trim(), [ref]$n) -or
+        $n -lt -2147483648L -or $n -gt 4294967295L) {
+        return [pscustomobject]@{ Gate = 'unknown'; Code = -1; Hex = ''; Kind = 'no-result' }
+    }
+    $u = [uint32]($n -band 0xFFFFFFFFL)
+    $signed = [BitConverter]::ToInt32([BitConverter]::GetBytes($u), 0)
+    $hex = '0x{0:X8}' -f $u
+    if ($u -eq 210) { return [pscustomobject]@{ Gate = 'refused'; Code = -1; Hex = $hex; Kind = 'refused' } }
+    if ($u -eq 0x41306) { return [pscustomobject]@{ Gate = 'terminated'; Code = $signed; Hex = $hex; Kind = 'sched-terminated' } }
+    if ($u -ge 0x41300 -and $u -le 0x413FF) { return [pscustomobject]@{ Gate = 'unknown'; Code = $signed; Hex = $hex; Kind = 'sched-status' } }
+    if ((($u -band 0xFFFF0000L) -eq 0x80070000L) -or (($u -band 0xFFFFFF00L) -eq 0x80041300L)) {
+        return [pscustomobject]@{ Gate = 'not-started'; Code = $signed; Hex = $hex; Kind = 'launch-failed' }
+    }
+    return [pscustomobject]@{ Gate = 'medium'; Code = $signed; Hex = $hex; Kind = 'exit' }
+}
+
+# --- Куда дочерний процесс пишет СВОЙ вывод (диагностика, НЕ аттестация). ---
+# ~/.hamidun-setup/deelev/<метка>.log — рядом с install.log: поддержка просит одну папку.
+# Пишет ТОЛЬКО де-элевированный ребёнок (medium) — elevated-процесс в этот user-writable
+# каталог не пишет и НЕ ЧИТАЕТ его (подмену пути ссылкой нечем использовать). Итог шага
+# решает проверка по диску/реестру у вызывающего, а не этот файл.
+function Get-HmDeElevLogPath {
+    param([string]$Label)
+    $safe = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
+    if (-not $safe) { $safe = 'deelev' }
+    if ($safe.Length -gt 80) { $safe = $safe.Substring(0, 80) }
+    $prof = ''
+    try { $prof = [Environment]::GetFolderPath('UserProfile') } catch { $prof = '' }
+    if (-not $prof) { return '' }
+    return [System.IO.Path]::Combine($prof, '.hamidun-setup', 'deelev', $safe + '.log')
+}
+
+# Тело одинарно-кавыченного литерала PowerShell (БЕЗ внешних кавычек). Разбор считает
+# ограничителями не только ASCII ' , но и четыре типографские кавычки U+2018 U+2019 U+201A
+# U+201B, а удвоение любой пары даёт один литеральный знак. Удвоения одного лишь ASCII хватало
+# для «O'Brien», но не для «O’Brien»: незакрытый литерал ломал разбор обёртки целиком, и задача
+# отчитывалась ошибкой программы, которая на деле не запускалась. Удваиваем каждую из пяти.
+# Парная функция на стороне Node — deelev-route.psQuoteBody (одна и та же таблица знаков).
+function ConvertTo-HmPsLiteral {
+    param([AllowEmptyString()][AllowNull()][string]$Value)
+    if ($null -eq $Value) { return '' }
+    return [regex]::Replace($Value, "['‘’‚‛]", '$0$0')
+}
+
+# Тело обёртки, которую планировщик исполняет от имени пользователя, — ЧИСТАЯ функция (строка).
+# Вынесена из Invoke-HmDeElevated, чтобы тест мог разобрать её настоящим парсером PowerShell на путях
+# с «O’Brien» и сверить, что литералы означают ровно те значения, что были.
+# Литералы — single-quoted, удвоение всех пяти знаков-ограничителей (ConvertTo-HmPsLiteral).
+function New-HmDeElevWrapperBody {
+    param([string]$S32, [string]$SysRoot, [string]$Whoami, [string]$Exe, [string[]]$Arguments = @(), [string]$Label = '', [string]$LogPath = '')
+    $s32Lit = ConvertTo-HmPsLiteral $S32
+    $srLit  = ConvertTo-HmPsLiteral $SysRoot
+    $whoLit = ConvertTo-HmPsLiteral $Whoami
+    $exeLit = ConvertTo-HmPsLiteral $Exe
+    $argLit = ''
+    $argList = @($Arguments | Where-Object { $null -ne $_ })      # $null вместо списка — «аргументов нет»
+    if ($argList.Count -gt 0) {
+        $argLit = ' ' + (($argList | ForEach-Object { "'" + (ConvertTo-HmPsLiteral $_) + "'" }) -join ' ')
+    }
+    $logLit = ConvertTo-HmPsLiteral $LogPath
+
+    # Тело обёртки. СТРОГО ПЕРВЫМИ — присваивания чистых env ЛИТЕРАЛАМИ (ни одного cmdlet до
+    # них). Затем integrity-self-check через АБСОЛЮТНЫЙ System32\whoami: НЕ medium -> exit 210
+    # ДО всего остального. Exit-код обёртки станет «Last Result» задачи (доверенный сигнал).
+    # Дальше — уже на medium: вывод программы уходит в диагностический журнал ребёнка
+    # (раньше он терялся целиком, и причину отказа code.cmd было не восстановить ничем).
+    # Сбой записи журнала программу не останавливает: журнал — диагностика, а не условие.
+    $body =
+        "`$env:PSModulePath='$s32Lit\WindowsPowerShell\v1.0\Modules'`n" +
+        "`$env:Path='$s32Lit;$srLit;$s32Lit\WindowsPowerShell\v1.0'`n" +
+        "if(-not (@(& '$whoLit' /groups 2>`$null) -match 'S-1-16-8192')){ exit 210 }`n" +
+        "`$l='$logLit'`n" +
+        "if(`$l){ try{ `$d=[IO.Path]::GetDirectoryName(`$l); if(-not [IO.Directory]::Exists(`$d)){ [void][IO.Directory]::CreateDirectory(`$d) }; if([IO.File]::Exists(`$l) -and (New-Object IO.FileInfo(`$l)).Length -gt 524288){ [IO.File]::Delete(`$l) }; [IO.File]::AppendAllText(`$l, ('=== '+(Get-Date -Format s)+' route=task label=$Label ===' + [Environment]::NewLine)) }catch{ `$l='' } }`n" +
+        "`$o=@(& '$exeLit'$argLit 2>&1 | ForEach-Object { [string]`$_ })`n" +
+        "`$c=`$LASTEXITCODE; if(`$null -eq `$c){`$c=0}`n" +
+        "if(`$l){ try{ [IO.File]::AppendAllText(`$l, ((`$o + ('=== exit '+`$c+' ===')) -join [Environment]::NewLine) + [Environment]::NewLine) }catch{} }`n" +
+        "exit `$c`n"
+    return $body
+}
+
 function Invoke-HmDeElevated {
-    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @())
+    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @(), [string]$Label = '')
+
+    # Этап, на котором примитив сейчас. Вызывающему (Invoke-HmDeElevatedSafe) он отвечает на
+    # вопрос «могла ли задача что-то запустить»: $null до /Run — не могла, после — могла.
+    $script:HmDeElevStage = 'prereq'
 
     # --- Абсолютные системные бинари (fail-closed, если чего-то нет) ---
     $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
@@ -553,26 +769,12 @@ function Invoke-HmDeElevated {
     $selfLvl  = Get-HmSelfIntegrity -WhoamiExe $whoami
     $elevated = ($selfLvl -ne 'medium' -and $selfLvl -ne 'low')
 
-    # --- Литералы (single-quoted, '->'' экранирование) для ВБИВАНИЯ в тело обёртки ---
-    $s32Lit = ($s32   -replace "'", "''")
-    $srLit  = ($sysRoot -replace "'", "''")
-    $whoLit = ($whoami -replace "'", "''")
-    $exeLit = ($Exe    -replace "'", "''")
-    $argLit = ''
-    if ($Arguments.Count -gt 0) {
-        $argLit = ' ' + (($Arguments | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' ')
-    }
-
-    # Тело обёртки. СТРОГО ПЕРВЫМИ — присваивания чистых env ЛИТЕРАЛАМИ (ни одного cmdlet до
-    # них). Затем integrity-self-check через АБСОЛЮТНЫЙ System32\whoami. Бинарь — ТОЛЬКО при
-    # medium; иначе exit 210. Exit-код обёртки станет «Last Result» задачи (доверенный сигнал).
-    $body =
-        "`$env:PSModulePath='$s32Lit\WindowsPowerShell\v1.0\Modules'`n" +
-        "`$env:Path='$s32Lit;$srLit;$s32Lit\WindowsPowerShell\v1.0'`n" +
-        "if(@(& '$whoLit' /groups 2>`$null) -match 'S-1-16-8192'){`n" +
-        "& '$exeLit'$argLit`n" +
-        "`$c=`$LASTEXITCODE; if(`$null -eq `$c){`$c=0}; exit `$c`n" +
-        "} else { exit 210 }`n"
+    if (-not $Label) { $Label = [System.IO.Path]::GetFileNameWithoutExtension($Exe) }
+    # Метка вшивается в тело обёртки как литерал — только безопасные символы (кавычка в ней
+    # сломала бы разбор обёртки, и задача «упала» бы с кодом, не имеющим отношения к программе).
+    $Label  = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
+    $body = New-HmDeElevWrapperBody -S32 $s32 -SysRoot $sysRoot -Whoami $whoami -Exe $Exe -Arguments $Arguments `
+        -Label $Label -LogPath (Get-HmDeElevLogPath -Label $Label)
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($body))
     $wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $b64
 
@@ -580,6 +782,7 @@ function Invoke-HmDeElevated {
     $dir     = $null
     $xmlFile = $null
     try {
+        $script:HmDeElevStage = 'staging'
         $dir = New-HmSecureStagingDir -ProgramData $progData -Icacls $icacls -Elevated $elevated
         if (-not $dir) { return $null }   # elevated и каталог не заперт -> fail-closed
         $xmlFile = Join-Path $dir 'task.xml'
@@ -623,6 +826,7 @@ function Invoke-HmDeElevated {
   </Actions>
 </Task>
 "@
+        $script:HmDeElevStage = 'create'
         Set-Content -LiteralPath $xmlFile -Value $taskXml -Encoding Unicode
 
         # Создать задачу через АБСОЛЮТНЫЙ schtasks.exe по XML. Провал -> fail-closed.
@@ -631,8 +835,12 @@ function Invoke-HmDeElevated {
         # XML больше не нужен (определение задачи — в БД планировщика). Удаляем сразу.
         Remove-Item -LiteralPath $xmlFile -Force -ErrorAction SilentlyContinue; $xmlFile = $null
 
+        $script:HmDeElevStage = 'run'
         & $schtasks '/Run' '/TN' $tag 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { return $null }
+        # С этого места задача МОГЛА стартовать: любой сбой ниже (исключение, нет итога) —
+        # не повод запускать то же действие вторым путём поверх возможно живого первого.
+        $script:HmDeElevStage = 'running'
 
         # Ждём завершения по ЛОКАЛЬ-НЕЗАВИСИМОМУ «Last Result» (поле #6 CSV /HRESULT):
         # 267009=выполняется, 267011=ещё не запускалась, иначе=exit-код обёртки.
@@ -668,10 +876,13 @@ function Invoke-HmDeElevated {
             }
         }
 
-        if ($null -eq $lastResult) { $gate = 'unknown'; $code = -1 }
-        elseif ($lastResult -eq '210') { $gate = 'refused'; $code = -1 }   # обёртка увидела НЕ medium
-        else { $gate = 'medium'; $code = 0; [void][int]::TryParse($lastResult, [ref]$code) }
-        $result = [pscustomobject]@{ Gate = $gate; Code = $code }
+        # Классификация — в чистой Get-HmTaskVerdict (тестируется без планировщика):
+        # 210 -> refused (обёртка увидела НЕ medium), HRESULT планировщика -> not-started,
+        # 267014 -> terminated, нет итога/служебный статус -> unknown, иначе medium + код.
+        $v = Get-HmTaskVerdict -LastResult $lastResult
+        $script:HmDeElevStage = 'done'
+        $result = [pscustomobject]@{ Gate = $v.Gate; Code = $v.Code; Hex = $v.Hex; Kind = $v.Kind
+                                     LastResult = [string]$lastResult }
     } catch {
         $result = $null
     } finally {
@@ -686,16 +897,627 @@ function Invoke-HmDeElevated {
     return $result
 }
 
+# =====================================================================================
+# ЗАПАСНОЙ ПУТЬ: то же действие с токеном оболочки Explorer (см. шапку файла)
+# =====================================================================================
+
+# Можно ли пускать запасной путь — ЧИСТАЯ функция. Только когда ДОКАЗАНО, что задача ничего
+# не запустила: иначе второй запуск пошёл бы поверх живого первого (две установки в один
+# ~/.vscode/extensions портят каталог). $null до /Run (prereq/staging/create/run) — задача
+# не стартовала; 'not-started' — планировщик не смог запустить действие; 'refused' —
+# обёртка увидела НЕ medium и программу не запускала. 'medium' (отработало), 'unknown',
+# 'terminated' и сбой после /Run (может ещё идти) — нет.
+function Test-HmShellFallbackAllowed {
+    param([AllowNull()][object]$TaskResult, [string]$Stage = '')
+    if ($null -eq $TaskResult) { return (@('prereq', 'staging', 'create', 'run') -contains $Stage) }
+    return (@('not-started', 'refused') -contains [string]$TaskResult.Gate)
+}
+
+# Автоповтор — ЧИСТАЯ функция: только если НИ ОДИН запуск попытки не может ещё идти
+# (Finished у каждого). Ничего не запускали — повторять безопасно.
+function Test-HmDeElevRetryAllowed {
+    param([object[]]$Attempts = @())
+    foreach ($a in @($Attempts)) {
+        if ($null -eq $a) { continue }
+        if (-not [bool]$a.Finished) { return $false }
+    }
+    return $true
+}
+
+# Был ли в какой-то из попыток отказ по политике — ЧИСТАЯ функция по итогам Merge-HmDeElevResult.
+# Gate 'refused' = запуск не получил обычного уровня прав (UAC выключен, встроенный
+# администратор, оболочка другой учётной записи): через минуту будет тот же отказ, и автоповтор
+# лишь удлиняет шаг. Недоступность ('unavailable') и неподтверждённый запуск ('medium', но
+# расширения нет) отказом по политике НЕ считаются — там повтор иногда помогает.
+function Test-HmDeElevRefused {
+    param([object[]]$Attempts = @())
+    foreach ($a in @($Attempts)) {
+        if ($null -eq $a) { continue }
+        if ([string]$a.Gate -eq 'refused' -or [string]$a.ShellGate -eq 'refused') { return $true }
+    }
+    return $false
+}
+
+# Аргумент командной строки Windows в кавычках (правила CommandLineToArgvW/MSVCRT): хвостовые
+# «\» перед закрывающей кавычкой удваиваются, иначе они её экранируют. Кавычки ВНУТРИ значения
+# сюда не доходят — их отвергают New-HmWinCommandLine/New-HmShellCmdLine.
+function ConvertTo-HmWinArg {
+    param([AllowEmptyString()][string]$Value)
+    if ($null -eq $Value) { $Value = '' }
+    $m = [regex]::Match($Value, '\\+$')
+    if ($m.Success) { $Value = $Value + $m.Value }
+    return '"' + $Value + '"'
+}
+
+# Прямой запуск exe (без cmd). '' — если значение нельзя передать однозначно (кавычка,
+# перевод строки, NUL): лучше отказ, чем программа получит другой аргумент.
+function New-HmWinCommandLine {
+    param([string]$Exe, [string[]]$Arguments = @())
+    $all = @($Exe) + @($Arguments)
+    foreach ($a in $all) { if ([string]$a -match "[`"`r`n`0]") { return '' } }
+    return (($all | ForEach-Object { ConvertTo-HmWinArg $_ }) -join ' ')
+}
+
+# ПРЕДЕЛ длины lpCommandLine у CreateProcessWithTokenW — 1024 знака (документация Microsoft:
+# «The maximum length of this string is 1024 characters»). Прежняя строка с каталогом журнала,
+# ротацией, заголовком и ДВУМЯ копиями программы («если журнал есть — с записью, иначе без»)
+# для pip с офлайн-колёсами выходила за 1100, для Handy — за 1040 даже при имени пользователя
+# из одной буквы, и запасной путь отказывал именно там, где был нужен. Теперь программа в строке
+# ОДНА, а всё про журнал живёт в отдельной короткой строке New-HmShellLogPrepLine.
+$script:HmMaxTokenCmdLine = 1024
+
+# Командная строка cmd.exe для запуска, где вывод программы дописывается в её журнал (пишет сам
+# ребёнок, на medium): ОДНА копия программы и одно перенаправление. LogPath пуст — без записи
+# (так запускают .cmd/.bat: CreateProcess сам их не исполняет, нужен cmd /c). /d — без AutoRun из
+# реестра, /e:on — расширения, /v:off — «!» в путях остаётся буквой. «%» отвергается: в cmd /c он
+# раскрывает переменные даже внутри кавычек, и путь «…%PATH%…» стал бы другим путём.
+function New-HmShellCmdLine {
+    param([string]$CmdExe, [string]$Exe, [string[]]$Arguments = @(), [string]$LogPath = '')
+    $all = @($CmdExe, $Exe, $LogPath) + @($Arguments)
+    foreach ($a in $all) { if ([string]$a -match "[`"%`r`n`0]") { return '' } }
+    $target = ((@($Exe) + @($Arguments)) | ForEach-Object { ConvertTo-HmWinArg $_ }) -join ' '
+    if ($LogPath) { $target += ' >>"' + $LogPath + '" 2>&1' }
+    return (ConvertTo-HmWinArg $CmdExe) + ' /d /e:on /v:off /s /c "' + $target + '"'
+}
+
+# Командная строка cmd.exe для ГОТОВОГО текста команды (несколько команд через «&») — так
+# открывают окно терминала БЕЗ файла-лаунчера: писать файл в пользовательскую папку из-под
+# админа незачем, а значит, нечего подменять и некуда вести ссылке. В отличие от
+# New-HmShellCmdLine («%» там отвергается: это ДАННЫЕ — путь, и «%PATH%» в нём стал бы другим
+# путём), здесь текст НАШ и фиксированный, а «%USERPROFILE%» нужен именно как переменная,
+# которую раскроет cmd у ребёнка — уже под токеном пользователя, а не под нашим. Поэтому «%» и
+# кавычки внутри текста остаются как написаны, а чужих данных в текст не подставляют: путь
+# профиля сюда не попадает, рабочая папка едет отдельным параметром CreateProcessWithTokenW.
+# Ключ /s снимает ровно внешнюю пару кавычек. Перевод строки и NUL отвергаются: cmd читает
+# командную строку до первого из них, остальное молча пропало бы.
+function New-HmShellScriptLine {
+    param([string]$CmdExe, [string]$Script)
+    if (-not $CmdExe -or -not $Script) { return '' }
+    if ([string]$CmdExe -match "[`"`r`n`0]") { return '' }
+    if ([string]$Script -match "[`r`n`0]") { return '' }
+    return (ConvertTo-HmWinArg $CmdExe) + ' /d /e:on /v:off /s /c "' + $Script + '"'
+}
+
+# Короткая подготовка журнала ПЕРЕД запуском (отдельным дождавшимся процессом): каталог,
+# ротация (файл больше 512 КБ удаляется), заголовок. Код выхода 0 — журнал открывается на запись;
+# иначе перенаправление в основной строке сорвало бы запуск самой программы (cmd не исполняет
+# команду, если не может открыть файл вывода), и тогда программу запускают напрямую, без журнала.
+function New-HmShellLogPrepLine {
+    param([string]$CmdExe, [string]$LogPath, [string]$Label = '')
+    if (-not $LogPath) { return '' }
+    foreach ($a in @($CmdExe, $LogPath)) { if ([string]$a -match "[`"%`r`n`0]") { return '' } }
+    $dir = [System.IO.Path]::GetDirectoryName($LogPath)
+    if (-not $dir) { return '' }
+    $safeLabel = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
+    $inner = '(if not exist "' + $dir + '\" mkdir "' + $dir + '") >nul 2>&1' +
+        ' & (if exist "' + $LogPath + '" for %I in ("' + $LogPath + '") do @if %~zI GTR 524288 del /f /q "' + $LogPath + '") >nul 2>&1' +
+        ' & (echo === %DATE% %TIME% route=shell-token label=' + $safeLabel + ' ===) >>"' + $LogPath + '" 2>nul && exit 0 || exit 1'
+    return (ConvertTo-HmWinArg $CmdExe) + ' /d /e:on /v:off /s /c "' + $inner + '"'
+}
+
+# Как запускать дожидаемое действие запасным путём — ЧИСТАЯ функция (ничего не запускает).
+#   Mode 'logged' — Prep (подготовка журнала) + Main (программа с записью вывода), обе ≤ 1024;
+#   Mode 'direct' — только Main: программа напрямую, вывод НЕ записывается; Note — почему;
+#   Mode ''       — запускать нельзя (Error): значение не выразить аргументом, строка длиннее предела.
+# DirectApp/DirectLine — прямая форма (запасная, если журнал окажется недоступен). .cmd/.bat
+# CreateProcess сам не исполняет — для них «прямая» форма это cmd /c без записи вывода.
+# NoLog — журнал не предполагался (запуск окна редактора): Note пуст.
+# CmdScript — вместо Exe/Arguments готовый текст команды для cmd.exe (окно терминала без
+# файла-лаунчера, New-HmShellScriptLine): всегда прямая форма, журнала у такого запуска нет.
+function Get-HmShellLaunchPlan {
+    param([string]$CmdExe, [string]$Exe, [string[]]$Arguments = @(), [string]$LogPath = '', [string]$Label = '', [switch]$NoLog,
+          [string]$CmdScript = '')
+    $max = 1024
+    if ($script:HmMaxTokenCmdLine) { $max = [int]$script:HmMaxTokenCmdLine }
+    $plan = [pscustomobject]@{ Mode = ''; App = ''; Main = ''; Prep = ''; DirectApp = ''; DirectLine = ''; Note = ''; Error = '' }
+    $isBatch = ([string]$Exe -match '\.(cmd|bat)$')
+    if ($CmdScript) {
+        $plan.DirectApp  = $CmdExe
+        $plan.DirectLine = New-HmShellScriptLine -CmdExe $CmdExe -Script $CmdScript
+    } elseif ($isBatch) {
+        $plan.DirectApp  = $CmdExe
+        $plan.DirectLine = New-HmShellCmdLine -CmdExe $CmdExe -Exe $Exe -Arguments $Arguments
+    } else {
+        $plan.DirectApp  = $Exe
+        $plan.DirectLine = New-HmWinCommandLine -Exe $Exe -Arguments $Arguments
+    }
+    if (-not $plan.DirectLine) {
+        $plan.Error = if ($CmdScript) { 'текст команды пуст либо содержит перевод строки или нулевой знак' } else {
+            'путь или аргумент содержит символ, который нельзя безопасно передать (кавычка' +
+            $(if ($isBatch) { ', «%»' } else { '' }) + ' или перевод строки)' }
+        return $plan
+    }
+    if ($plan.DirectLine.Length -gt $max) {
+        $plan.Error = 'командная строка запуска (' + $plan.DirectLine.Length + ' знаков) длиннее предела ' + $max + ' у CreateProcessWithTokenW'
+        return $plan
+    }
+    $plan.Mode = 'direct'; $plan.App = $plan.DirectApp; $plan.Main = $plan.DirectLine
+    if ($NoLog -or $CmdScript) { return $plan }
+    if (-not $LogPath) { $plan.Note = 'каталог журнала не определён'; return $plan }
+    $main = New-HmShellCmdLine -CmdExe $CmdExe -Exe $Exe -Arguments $Arguments -LogPath $LogPath
+    $prep = New-HmShellLogPrepLine -CmdExe $CmdExe -LogPath $LogPath -Label $Label
+    if (-not $main -or -not $prep) { $plan.Note = 'в пути журнала или программы есть «%» либо кавычка'; return $plan }
+    if ($main.Length -gt $max) { $plan.Note = 'строка запуска с записью вывода (' + $main.Length + ' знаков) длиннее предела ' + $max; return $plan }
+    if ($prep.Length -gt $max) { $plan.Note = 'строка подготовки журнала (' + $prep.Length + ' знаков) длиннее предела ' + $max; return $plan }
+    $plan.Mode = 'logged'; $plan.App = $CmdExe; $plan.Main = $main; $plan.Prep = $prep
+    return $plan
+}
+
+# Системные вызовы для запасного пути — БЕЗ компиляции. Add-Type зовёт csc.exe, который
+# пишет сборку в %TEMP% и затем ГРУЗИТ её: medium-малварь того же юзера успела бы подменить
+# DLL между записью и загрузкой — код под админом. Сборка рождается в памяти
+# (Reflection.Emit, AssemblyBuilderAccess.Run): ни файла, ни компилятора, ни модулей.
+function Get-HmNativeApi {
+    if ($script:HmNativeApi) { return $script:HmNativeApi }
+    $an  = New-Object System.Reflection.AssemblyName('HmShellToken')
+    $asm = [AppDomain]::CurrentDomain.DefineDynamicAssembly($an, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $mod = $asm.DefineDynamicModule('HmShellToken')
+    $tb  = $mod.DefineType('HmShellToken.Native', [System.Reflection.TypeAttributes]'Public, Class, Abstract, Sealed')
+    $dia = [System.Runtime.InteropServices.DllImportAttribute]
+    $ctor   = $dia.GetConstructor([Type[]]@([string]))
+    $fields = [System.Reflection.FieldInfo[]]@($dia.GetField('SetLastError'), $dia.GetField('CharSet'), $dia.GetField('ExactSpelling'))
+    $values = [object[]]@($true, [System.Runtime.InteropServices.CharSet]::Unicode, $true)
+    $u32r = [UInt32].MakeByRefType()
+    $ipr  = [IntPtr].MakeByRefType()
+    $sigs = @(
+        @('user32.dll',   'GetShellWindow',           [IntPtr], [Type[]]@()),
+        @('user32.dll',   'GetWindowThreadProcessId', [UInt32], [Type[]]@([IntPtr], $u32r)),
+        @('kernel32.dll', 'OpenProcess',              [IntPtr], [Type[]]@([UInt32], [bool], [UInt32])),
+        @('advapi32.dll', 'OpenProcessToken',         [bool],   [Type[]]@([IntPtr], [UInt32], $ipr)),
+        @('advapi32.dll', 'GetTokenInformation',      [bool],   [Type[]]@([IntPtr], [Int32], [IntPtr], [UInt32], $u32r)),
+        @('advapi32.dll', 'DuplicateTokenEx',         [bool],   [Type[]]@([IntPtr], [UInt32], [IntPtr], [Int32], [Int32], $ipr)),
+        @('advapi32.dll', 'CreateProcessWithTokenW',  [bool],   [Type[]]@([IntPtr], [UInt32], [string], [System.Text.StringBuilder], [UInt32], [IntPtr], [string], [IntPtr], [IntPtr])),
+        @('kernel32.dll', 'WaitForSingleObject',      [UInt32], [Type[]]@([IntPtr], [UInt32])),
+        @('kernel32.dll', 'GetExitCodeProcess',       [bool],   [Type[]]@([IntPtr], $u32r)),
+        @('kernel32.dll', 'CloseHandle',              [bool],   [Type[]]@([IntPtr]))
+    )
+    foreach ($s in $sigs) {
+        $pt = [Type[]]$s[3]
+        $mb = $tb.DefineMethod($s[1], [System.Reflection.MethodAttributes]'Public, Static, PinvokeImpl', $s[2], $pt)
+        for ($i = 0; $i -lt $pt.Length; $i++) {
+            if ($pt[$i].IsByRef) { [void]$mb.DefineParameter($i + 1, [System.Reflection.ParameterAttributes]::Out, $null) }
+        }
+        $mb.SetCustomAttribute((New-Object System.Reflection.Emit.CustomAttributeBuilder($ctor, [object[]]@($s[0]), $fields, $values)))
+    }
+    $script:HmNativeApi = $tb.CreateType()
+    return $script:HmNativeApi
+}
+
+function Get-HmLastWin32Text {
+    param([int]$Code)
+    try { return ('код ' + $Code + ': ' + (New-Object System.ComponentModel.Win32Exception($Code)).Message) }
+    catch { return ('код ' + $Code) }
+}
+
+# SID из токена: класс 1 = TokenUser, 25 = TokenIntegrityLevel. '' — не удалось прочитать.
+function Get-HmTokenSid {
+    param([IntPtr]$Token, [int]$Class)
+    $N = Get-HmNativeApi
+    $need = [uint32]0
+    [void]$N::GetTokenInformation($Token, $Class, [IntPtr]::Zero, [uint32]0, [ref]$need)
+    if ($need -eq 0) { return '' }
+    $buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal([int]$need)
+    try {
+        if (-not $N::GetTokenInformation($Token, $Class, $buf, $need, [ref]$need)) { return '' }
+        $psid = [System.Runtime.InteropServices.Marshal]::ReadIntPtr($buf)
+        return (New-Object System.Security.Principal.SecurityIdentifier($psid)).Value
+    } catch { return '' }
+    finally { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($buf) }
+}
+
+# Токен процесса оболочки Explorer (окно GetShellWindow): TOKEN_QUERY|TOKEN_DUPLICATE, плюс
+# его пользователь и уровень целостности. Вызывающий ОБЯЗАН закрыть Handle (если не Zero).
+function Open-HmShellToken {
+    $o = [pscustomobject]@{ Handle = [IntPtr]::Zero; ProcessId = 0; UserSid = ''; IntegritySid = ''; Reason = '' }
+    $N = Get-HmNativeApi
+    $hwnd = $N::GetShellWindow()
+    if ($hwnd -eq [IntPtr]::Zero) { $o.Reason = 'оболочка Windows (Проводник) сейчас не запущена'; return $o }
+    $sp = [uint32]0
+    [void]$N::GetWindowThreadProcessId($hwnd, [ref]$sp)
+    if ($sp -eq 0) { $o.Reason = 'не удалось определить процесс оболочки Windows'; return $o }
+    $o.ProcessId = [int]$sp
+    $hProc = $N::OpenProcess([uint32]0x1000, $false, $sp)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if ($hProc -eq [IntPtr]::Zero) {
+        $e = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $o.Reason = 'нет доступа к процессу оболочки (' + (Get-HmLastWin32Text $e) + ')'
+        return $o
+    }
+    try {
+        $hTok = [IntPtr]::Zero
+        if (-not $N::OpenProcessToken($hProc, [uint32]0x000A, [ref]$hTok)) {   # TOKEN_QUERY | TOKEN_DUPLICATE
+            $e = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $o.Reason = 'нет доступа к токену оболочки (' + (Get-HmLastWin32Text $e) + ')'
+            return $o
+        }
+        $o.Handle = $hTok
+        $o.UserSid = Get-HmTokenSid -Token $hTok -Class 1
+        $o.IntegritySid = Get-HmTokenSid -Token $hTok -Class 25
+        if (-not $o.UserSid -or -not $o.IntegritySid) { $o.Reason = 'не удалось прочитать токен оболочки' }
+        return $o
+    } finally { [void]$N::CloseHandle($hProc) }
+}
+
+# Только чтение (диагностика, тесты): ничего не запускает, прав администратора не требует.
+function Get-HmShellTokenInfo {
+    $o = $null
+    try { $o = Open-HmShellToken }
+    catch { return [pscustomobject]@{ ProcessId = 0; UserSid = ''; IntegritySid = ''; Reason = $_.Exception.Message } }
+    if ($o.Handle -ne [IntPtr]::Zero) { $N = Get-HmNativeApi; [void]$N::CloseHandle($o.Handle) }
+    return [pscustomobject]@{ ProcessId = $o.ProcessId; UserSid = $o.UserSid; IntegritySid = $o.IntegritySid; Reason = $o.Reason }
+}
+
+# Политика для токена оболочки — ЧИСТАЯ функция: '' = можно запускать, иначе причина отказа.
+# Тот же инвариант, что у гейта обёртки задачи: user-writable бинарь — ТОЛЬКО на medium.
+# Другой владелец оболочки = установщик запущен от имени другой учётной записи: программы
+# лежат в ЕГО профиле, а за компьютером другой человек — ставить «от него» нельзя.
+function Test-HmShellTokenAcceptable {
+    param([string]$UserSid, [string]$IntegritySid, [string]$ExpectedUserSid)
+    if ($IntegritySid -ne 'S-1-16-8192') {
+        if ($IntegritySid -eq 'S-1-16-12288' -or $IntegritySid -eq 'S-1-16-16384') {
+            return ('оболочка Windows работает с правами администратора (' + $IntegritySid + '), обычного уровня нет: ' +
+                'похоже, выключен контроль учётных записей (UAC) или это встроенная учётная запись «Администратор»')
+        }
+        return ('уровень оболочки Windows — ' + $(if ($IntegritySid) { $IntegritySid } else { 'не определён' }) +
+            ', а нужен обычный (S-1-16-8192)')
+    }
+    if (-not $ExpectedUserSid -or $UserSid -ne $ExpectedUserSid) {
+        # Совет «запусти установщик из своей учётной записи» обычному пользователю не выполнить:
+        # установщик просит права администратора и после ввода чужого пароля работает от ТОЙ
+        # учётки. Поэтому — формулировка из main.js (предупреждение о «другой учётке»): сделать
+        # свою учётную запись администратором и запустить установщик заново.
+        return 'установщик запущен от другой учётной записи, чем та, под которой вы вошли в Windows: сделайте свою учётную запись ' +
+            'администратором (Параметры → Учётные записи → Семья и другие пользователи) и запустите установщик заново'
+    }
+    return ''
+}
+
+# Один запуск процесса с готовым ПЕРВИЧНЫМ токеном (CreateProcessWithTokenW). STARTUPINFOW и
+# PROCESS_INFORMATION — вручную, без объявления структур: смещения x64/x86. Возвращает
+# { Started; Error; Handle; ProcessId }; дескриптор процесса закрывает ВЫЗЫВАЮЩИЙ.
+# Hidden — без окна (CREATE_NO_WINDOW + SW_HIDE): для дожидаемых действий; окно редактора — видимое.
+function Start-HmTokenProcess {
+    param([IntPtr]$Token, [string]$App, [string]$Line, [string]$Cwd, [bool]$Hidden)
+    $r = [pscustomobject]@{ Started = $false; Error = ''; Handle = [IntPtr]::Zero; ProcessId = 0 }
+    $Marshal = [System.Runtime.InteropServices.Marshal]
+    $N = Get-HmNativeApi
+    $si = [IntPtr]::Zero; $pi = [IntPtr]::Zero; $desk = [IntPtr]::Zero
+    try {
+        $P = [IntPtr]::Size
+        if ($P -eq 8) { $siSize = 104; $offFlags = 60; $offShow = 64 } else { $siSize = 68; $offFlags = 44; $offShow = 48 }
+        $si = $Marshal::AllocHGlobal($siSize)
+        for ($i = 0; $i -lt $siSize; $i++) { $Marshal::WriteByte($si, $i, [byte]0) }
+        $Marshal::WriteInt32($si, 0, $siSize)
+        $desk = $Marshal::StringToHGlobalUni('winsta0\default')
+        $Marshal::WriteIntPtr($si, 2 * $P, $desk)                 # lpDesktop
+        $flags = 0x00000400                                       # CREATE_UNICODE_ENVIRONMENT
+        if ($Hidden) {
+            $Marshal::WriteInt32($si, $offFlags, 1)               # STARTF_USESHOWWINDOW
+            $Marshal::WriteInt16($si, $offShow, [int16]0)         # SW_HIDE
+            $flags = $flags -bor 0x08000000                       # CREATE_NO_WINDOW
+        }
+        $piSize = 2 * $P + 8
+        $pi = $Marshal::AllocHGlobal($piSize)
+        for ($i = 0; $i -lt $piSize; $i++) { $Marshal::WriteByte($pi, $i, [byte]0) }
+        $sb = New-Object System.Text.StringBuilder -ArgumentList $Line, ([Math]::Max(1024, $Line.Length + 16))
+        # LOGON_WITH_PROFILE (1): ветка HKCU пользователя гарантированно загружена.
+        $ok = $N::CreateProcessWithTokenW($Token, [uint32]1, $App, $sb, [uint32]$flags, [IntPtr]::Zero, $Cwd, $si, $pi)
+        if (-not $ok) {
+            $e = $Marshal::GetLastWin32Error()
+            $r.Error = 'запуск с токеном оболочки не удался (' + (Get-HmLastWin32Text $e) + ')'
+            return $r
+        }
+        $r.Handle    = $Marshal::ReadIntPtr($pi, 0)
+        $hThread     = $Marshal::ReadIntPtr($pi, $P)
+        $r.ProcessId = $Marshal::ReadInt32($pi, 2 * $P)
+        if ($hThread -ne [IntPtr]::Zero) { [void]$N::CloseHandle($hThread) }
+        $r.Started = $true
+        return $r
+    } finally {
+        if ($si -ne [IntPtr]::Zero) { $Marshal::FreeHGlobal($si) }
+        if ($pi -ne [IntPtr]::Zero) { $Marshal::FreeHGlobal($pi) }
+        if ($desk -ne [IntPtr]::Zero) { $Marshal::FreeHGlobal($desk) }
+    }
+}
+
+# Профиль пользователя — от системы (SHGetFolderPath), а не из переменной среды USERPROFILE:
+# её значение берётся из HKCU\Volatile Environment, куда пишет любая программа пользователя.
+# Отдельной функцией — чтобы тест мог подставить песочницу.
+function Get-HmUserProfileDir {
+    $p = ''
+    try { $p = [Environment]::GetFolderPath('UserProfile') } catch { $p = '' }
+    return [string]$p
+}
+
+# Проверка рабочей папки запускаемого процесса ДО передачи системе. Возвращает
+# { Path; Reason }: Reason пуст — папку можно, Path — её полный нормализованный путь.
+# Правила: путь полный (диск, не UNC и не относительный) и без знаков, которых в путях не бывает;
+# лежит ВНУТРИ профиля пользователя (или это сам профиль); каждая папка ниже корня профиля —
+# настоящий каталог, не junction/symlink (reparse point) и существует. Корень профиля берётся
+# как есть: профиль, перенесённый ссылкой на другой диск, — законная настройка. Папка пустого
+# значения не требует — тогда запуск идёт из профиля, как раньше.
+function Resolve-HmShellWorkingDirectory {
+    param([string]$Path, [string]$ProfileDir)
+    $r = [pscustomobject]@{ Path = ''; Reason = '' }
+    if (-not $Path) { return $r }
+    if (-not $ProfileDir) { $r.Reason = 'профиль пользователя не определён'; return $r }
+    if ($Path.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0 -or $Path.IndexOfAny([char[]]'*?') -ge 0) {
+        $r.Reason = 'в пути есть знак, которого в путях не бывает'; return $r
+    }
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') { $r.Reason = 'нужен полный путь на диске (не относительный и не сетевой)'; return $r }
+    $full = ''; $root = ''
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $root = [System.IO.Path]::GetFullPath($ProfileDir).TrimEnd('\')
+    } catch { $r.Reason = 'путь не разобрать: ' + $_.Exception.Message; return $r }
+    if (-not $root) { $r.Reason = 'профиль пользователя не определён'; return $r }
+    $cur = $root
+    if (-not $full.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $r.Reason = 'папка лежит вне профиля пользователя'; return $r
+        }
+        foreach ($part in $full.Substring($root.Length + 1).Split('\')) {
+            if (-not $part) { continue }
+            $cur = $cur + '\' + $part
+            $attr = $null
+            try { $attr = [System.IO.File]::GetAttributes($cur) } catch { $r.Reason = 'папка не найдена: ' + $cur; return $r }
+            if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $r.Reason = 'на пути есть ссылка (junction или symlink): ' + $cur; return $r
+            }
+            if (($attr -band [System.IO.FileAttributes]::Directory) -eq 0) { $r.Reason = 'это не папка: ' + $cur; return $r }
+        }
+    } elseif (-not [System.IO.Directory]::Exists($root)) { $r.Reason = 'папка не найдена: ' + $root; return $r }
+    $r.Path = $full
+    return $r
+}
+
+# Запуск с токеном оболочки Explorer (CreateProcessWithTokenW). Возвращает
+# { Route='shell-token'; Gate; Code; Reason; ProcessId; Logged; LogNote }:
+#   Gate 'medium'      — процесс запущен с ПРОВЕРЕННЫМ medium-токеном; Code — его код выхода
+#                        (для -NoWait: 0, если за 3 с не упал);
+#   Gate 'refused'     — токен оболочки не medium или чужой учётной записи: НЕ запускаем;
+#   Gate 'unavailable' — запустить не удалось (нет оболочки, нет службы «Вторичный вход»,
+#                        нет прав, строка длиннее предела, рабочая папка не прошла проверку) —
+#                        ничего не запущено;
+#   Gate 'unknown'     — процесс запущен, но не завершился за TimeoutSec (может ещё идти).
+#   Logged             — вывод программы дописан в её журнал (Get-HmShellLaunchPlan: 'logged');
+#                        иначе LogNote объясняет, почему вывода нет (журнал недоступен, строка
+#                        с журналом длиннее 1024 знаков).
+# Что запускать — ЛИБО Exe (+ Arguments), ЛИБО CmdScript: готовый текст команды для cmd.exe
+# (окно терминала без файла-лаунчера, New-HmShellScriptLine). WorkingDirectory — рабочая папка
+# процесса (по умолчанию профиль); проверяется Resolve-HmShellWorkingDirectory.
+# Требует SeImpersonatePrivilege (есть у elevated-администратора) и службу seclogon.
+function Invoke-HmAsShellUser {
+    param([string]$Exe = '', [string[]]$Arguments = @(), [string]$Label = '',
+          [switch]$NoWait, [int]$TimeoutSec = 600, [string]$CmdScript = '', [string]$WorkingDirectory = '')
+    $res = [pscustomobject]@{ Route = 'shell-token'; Gate = 'unavailable'; Code = -1; Reason = ''; ProcessId = 0; Logged = $false; LogNote = '' }
+    $sysRoot = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $cmdExe  = [System.IO.Path]::Combine($sysRoot, 'System32', 'cmd.exe')
+    if ($CmdScript -and $Exe) { $res.Reason = 'передан и файл, и текст команды — какой из них запускать, неясно'; return $res }
+    if (-not $CmdScript -and -not $Exe) { $res.Reason = 'не указано, что запускать'; return $res }
+    if (-not $Label) { $Label = if ($CmdScript) { 'script' } else { [System.IO.Path]::GetFileNameWithoutExtension($Exe) } }
+    $Label = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
+    $logPath = if ($NoWait -or $CmdScript) { '' } else { Get-HmDeElevLogPath -Label $Label }
+    $plan = Get-HmShellLaunchPlan -CmdExe $cmdExe -Exe $Exe -Arguments $Arguments -CmdScript $CmdScript -LogPath $logPath -Label $Label -NoLog:($NoWait -or [bool]$CmdScript)
+    if ($plan.Error) { $res.Reason = $plan.Error; return $res }
+    if (-not (Test-Path -LiteralPath $plan.App)) { $res.Reason = 'не найден ' + $plan.App; return $res }
+    $profDir = Get-HmUserProfileDir
+    $cwd = $profDir
+    if (-not $cwd -or -not (Test-Path -LiteralPath $cwd)) { $cwd = $sysRoot }
+
+    $Marshal = [System.Runtime.InteropServices.Marshal]
+    $N = $null
+    try { $N = Get-HmNativeApi } catch { $res.Reason = 'не удалось подготовить системные вызовы: ' + $_.Exception.Message; return $res }
+    $sh = $null; $hDup = [IntPtr]::Zero; $hProcess = [IntPtr]::Zero
+    try {
+        $sh = Open-HmShellToken
+        if ($sh.Handle -eq [IntPtr]::Zero) { $res.Reason = $sh.Reason; return $res }
+        $me = ''
+        try { $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $me = '' }
+        $why = Test-HmShellTokenAcceptable -UserSid $sh.UserSid -IntegritySid $sh.IntegritySid -ExpectedUserSid $me
+        if ($why) { $res.Gate = 'refused'; $res.Reason = $why; return $res }
+        # Первичный токен: TOKEN_QUERY|ASSIGN_PRIMARY|DUPLICATE|ADJUST_DEFAULT|ADJUST_SESSIONID;
+        # SecurityImpersonation (2), TokenPrimary (1).
+        if (-not $N::DuplicateTokenEx($sh.Handle, [uint32]0x018B, [IntPtr]::Zero, 2, 1, [ref]$hDup)) {
+            $e = $Marshal::GetLastWin32Error()
+            $res.Reason = 'не удалось подготовить токен оболочки (' + (Get-HmLastWin32Text $e) + ')'
+            return $res
+        }
+        # Уровень проверяем на ТОМ токене, с которым запускаем, а не только на исходном.
+        $dupIl = Get-HmTokenSid -Token $hDup -Class 25
+        if ($dupIl -ne 'S-1-16-8192') { $res.Gate = 'refused'; $res.Reason = 'копия токена оболочки не на обычном уровне (' + $dupIl + ')'; return $res }
+
+        # Рабочая папка проверяется ПОСЛЕ токена и непосредственно ПЕРЕД запуском: окно между
+        # «проверили» и «используем» — один системный вызов. Не прошла — ничего не запущено.
+        if ($WorkingDirectory) {
+            $wd = Resolve-HmShellWorkingDirectory -Path $WorkingDirectory -ProfileDir $profDir
+            if ($wd.Reason) { $res.Reason = 'рабочая папка не прошла проверку: ' + $wd.Reason; return $res }
+            $cwd = $wd.Path
+        }
+
+        # Журнал: короткий дождавшийся шаг (каталог, ротация, заголовок). Не открылся на запись —
+        # программа запускается напрямую, без журнала: запись вывода — диагностика, не условие.
+        if ($plan.Mode -eq 'logged') {
+            $prep = Start-HmTokenProcess -Token $hDup -App $plan.App -Line $plan.Prep -Cwd $cwd -Hidden $true
+            if (-not $prep.Started) { $res.Reason = $prep.Error; return $res }
+            $prepCode = [uint32]1
+            try {
+                if ($N::WaitForSingleObject($prep.Handle, [uint32]20000) -eq 0) { [void]$N::GetExitCodeProcess($prep.Handle, [ref]$prepCode) }
+            } finally { [void]$N::CloseHandle($prep.Handle) }
+            if ($prepCode -ne 0) {
+                $plan.Mode = 'direct'; $plan.App = $plan.DirectApp; $plan.Main = $plan.DirectLine
+                $plan.Note = 'журнал недоступен (каталог не создался или файл занят)'
+            }
+        }
+        $res.Logged  = ($plan.Mode -eq 'logged')
+        $res.LogNote = [string]$plan.Note
+
+        $main = Start-HmTokenProcess -Token $hDup -App $plan.App -Line $plan.Main -Cwd $cwd -Hidden (-not $NoWait)
+        if (-not $main.Started) { $res.Reason = $main.Error; return $res }
+        $hProcess = $main.Handle
+        $res.ProcessId = $main.ProcessId
+        $exit = [uint32]0
+        if ($NoWait) {
+            # Окно приложения живёт дальше: ждём пару секунд — поймать лишь мгновенный отказ.
+            if ($N::WaitForSingleObject($hProcess, [uint32]3000) -eq 0) {
+                [void]$N::GetExitCodeProcess($hProcess, [ref]$exit)
+                $res.Code = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$exit), 0)
+            } else { $res.Code = 0 }
+            $res.Gate = 'medium'
+            return $res
+        }
+        $start = Get-Date; $deadline = $start.AddSeconds($TimeoutSec); $next = $start.AddSeconds(60); $done = $false
+        while ((Get-Date) -lt $deadline) {
+            $w = $N::WaitForSingleObject($hProcess, [uint32]1000)
+            if ($w -eq 0) { $done = $true; break }
+            if ($w -ne 0x102) { break }                           # не WAIT_TIMEOUT = WAIT_FAILED
+            if ((Get-Date) -ge $next) {
+                Write-Host "  …выполняется (запасной путь), прошло $([int]((Get-Date) - $start).TotalMinutes) мин (лимит $([int]($TimeoutSec / 60)) мин)"
+                $next = (Get-Date).AddSeconds(60)
+            }
+        }
+        if (-not $done) {
+            $res.Gate = 'unknown'
+            $res.Reason = 'процесс не завершился за ' + $TimeoutSec + ' с — второй запуск поверх не делаю'
+            return $res
+        }
+        [void]$N::GetExitCodeProcess($hProcess, [ref]$exit)
+        $res.Code = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$exit), 0)
+        $res.Gate = 'medium'
+        return $res
+    } catch {
+        # Процесс уже создан — значит он, возможно, ещё идёт: это 'unknown', а не «не запускали».
+        if ($res.ProcessId -gt 0) { $res.Gate = 'unknown' }
+        $res.Reason = 'сбой запасного пути: ' + $_.Exception.Message
+        return $res
+    } finally {
+        if ($hProcess -ne [IntPtr]::Zero) { [void]$N::CloseHandle($hProcess) }
+        if ($hDup -ne [IntPtr]::Zero) { [void]$N::CloseHandle($hDup) }
+        if ($sh -and $sh.Handle -ne [IntPtr]::Zero) { [void]$N::CloseHandle($sh.Handle) }
+    }
+}
+
+# Итог двух путей — ЧИСТАЯ функция. Gate 'medium' = действие ОТРАБОТАЛО на medium (Code — код
+# программы) задачей или запасным путём. Finished = доказано, что ничего из запущенного уже
+# не идёт: только тогда вызывающему можно повторять (Test-HmDeElevRetryAllowed).
+function Merge-HmDeElevResult {
+    param([AllowNull()][object]$Task, [string]$Stage = '', [AllowNull()][object]$Shell, [string]$LogPath = '')
+    $r = [pscustomobject]@{ Gate = 'unavailable'; Code = -1; Route = 'none'; Finished = $true
+                            TaskGate = ''; TaskHex = ''; TaskCode = -1; TaskStage = $Stage
+                            ShellGate = ''; ShellReason = ''; ShellLogged = $false; ShellLogNote = ''; LogPath = $LogPath }
+    if ($null -ne $Task) { $r.TaskGate = [string]$Task.Gate; $r.TaskHex = [string]$Task.Hex; $r.TaskCode = $Task.Code }
+    if ($null -ne $Task -and $Task.Gate -eq 'medium') { $r.Gate = 'medium'; $r.Code = $Task.Code; $r.Route = 'task'; return $r }
+    if (($null -ne $Task -and @('unknown', 'terminated') -contains [string]$Task.Gate) -or
+        ($null -eq $Task -and -not (@('prereq', 'staging', 'create', 'run') -contains $Stage))) {
+        $r.Gate = if ($null -ne $Task) { [string]$Task.Gate } else { 'unknown' }
+        $r.Route = 'task'; $r.Finished = $false
+        return $r
+    }
+    if ($null -ne $Shell) {
+        $r.ShellGate = [string]$Shell.Gate; $r.ShellReason = [string]$Shell.Reason
+        $r.ShellLogged = [bool]$Shell.Logged; $r.ShellLogNote = [string]$Shell.LogNote
+        if ($Shell.Gate -eq 'medium') { $r.Gate = 'medium'; $r.Code = $Shell.Code; $r.Route = 'shell-token'; return $r }
+        if ($Shell.Gate -eq 'unknown') { $r.Gate = 'unknown'; $r.Route = 'shell-token'; $r.Finished = $false; return $r }
+        $r.Gate = if ($null -ne $Task -and $Task.Gate -eq 'refused') { 'refused' } else { [string]$Shell.Gate }
+        return $r
+    }
+    if ($null -ne $Task) { $r.Gate = [string]$Task.Gate }
+    return $r
+}
+
+# Одна строка в журнал установки на каждое де-элевированное действие — ЧИСТАЯ функция.
+# Gate, «Last Result» в hex, какой путь сработал и где вывод программы. Это диагностика:
+# итог шага решает проверка по диску/реестру у вызывающего.
+function Format-HmDeElevSummary {
+    param([string]$Label, [object]$Result)
+    $stageText = @{ prereq = 'нет системных программ'; staging = 'не создан защищённый каталог'
+                    create = 'задача не создалась'; run = 'задача не запустилась'; running = 'сбой после запуска' }
+    $s = '[де-элевация] ' + $Label + ': задача планировщика — '
+    if ($Result.TaskGate) {
+        $s += 'Gate=' + $Result.TaskGate
+        if ($Result.TaskHex) { $s += ', Last Result=' + $Result.TaskHex }
+        switch ($Result.TaskGate) {
+            'medium'      { $s += ', код ' + $Result.TaskCode }
+            'not-started' { $s += ' (действие задачи не запустилось)' }
+            'refused'     { $s += ' (обёртка увидела не обычный уровень — программу не запускала)' }
+            'terminated'  { $s += ' (прервана по лимиту времени)' }
+            'unknown'     { $s += ' (итога нет — возможно, ещё идёт)' }
+        }
+    } else {
+        $st = [string]$Result.TaskStage
+        $s += 'не отработала (' + $(if ($stageText.ContainsKey($st)) { $stageText[$st] } else { 'этап ' + $st }) + ')'
+    }
+    if ($Result.ShellGate) {
+        $s += '; запасной путь (токен оболочки Explorer) — Gate=' + $Result.ShellGate
+        if ($Result.ShellGate -eq 'medium') { $s += ', код ' + $Result.Code }
+        if ($Result.ShellReason) { $s += ': ' + $Result.ShellReason }
+    } elseif (-not $Result.Finished) {
+        $s += '; запасной путь не запускаю: первый запуск, возможно, ещё идёт'
+    }
+    # Где вывод программы. Запасной путь мог запустить её БЕЗ записи (журнал недоступен или строка
+    # с журналом длиннее предела CreateProcessWithTokenW): тогда файла нет, и называть его нельзя.
+    if (@('medium', 'unknown') -contains [string]$Result.ShellGate -and -not $Result.ShellLogged) {
+        $s += '; вывод программы не записан' + $(if ($Result.ShellLogNote) { ': ' + $Result.ShellLogNote } else { '' })
+    } elseif ($Result.LogPath) {
+        $s += '; вывод программы: ' + $Result.LogPath
+    }
+    return $s
+}
+
+# Де-элевированный запуск С ЗАПАСНЫМ ПУТЁМ: сначала задача планировщика; если доказано, что
+# она ничего не запустила (Test-HmShellFallbackAllowed) — то же действие с токеном оболочки.
+# Печатает строку диагностики и возвращает Merge-HmDeElevResult. Никогда не $null.
+function Invoke-HmDeElevatedSafe {
+    param([Parameter(Mandatory = $true)][string]$Exe, [string[]]$Arguments = @(), [string]$Label = '', [int]$TimeoutSec = 600)
+    if (-not $Label) { $Label = [System.IO.Path]::GetFileNameWithoutExtension($Exe) }
+    $Label = ([string]$Label) -replace '[^A-Za-z0-9._-]', '-'
+    $script:HmDeElevStage = 'prereq'
+    $task = $null
+    try { $task = Invoke-HmDeElevated -Exe $Exe -Arguments $Arguments -Label $Label } catch { $task = $null }
+    $stage = [string]$script:HmDeElevStage
+    $shell = $null
+    if (Test-HmShellFallbackAllowed -TaskResult $task -Stage $stage) {
+        $shell = Invoke-HmAsShellUser -Exe $Exe -Arguments $Arguments -Label $Label -TimeoutSec $TimeoutSec
+    }
+    $res = Merge-HmDeElevResult -Task $task -Stage $stage -Shell $shell -LogPath (Get-HmDeElevLogPath -Label $Label)
+    Write-Host ('  ' + (Format-HmDeElevSummary -Label $Label -Result $res))
+    return $res
+}
+
 # --- АВТО-УБОРКА при КАЖДОЙ загрузке примитива (дот-сорс из vscode.ps1/extension.ps1). ---
 # Сироты появляются, когда установщик убили посреди установки — finally выше не исполнился.
 # Подметаем их здесь, на СЛЕДУЮЩЕМ запуске: живые задачи параллельных экземпляров защищены
 # состоянием/возрастом внутри Test-HmTaskIsOrphan. Best-effort: любой сбой не мешает
 # установке. ВАЖНО: вызов стоит ПОСЛЕДНИМ в файле — все функции уже объявлены (в этом
 # файле уже был баг «функция вызвана до объявления», порядок здесь не случаен).
-try {
-    $hmOrphanTags = @(Remove-HmOrphanTasks)
-    if ($hmOrphanTags.Count -gt 0) {
-        Write-Host ("Планировщик: убраны осиротевшие задачи прерванных установок (" +
-            $hmOrphanTags.Count + "): " + ($hmOrphanTags -join ', '))
-    }
-} catch { }
+# Вызывающий, которому уборка ни к чему (mascot.ps1 берёт из файла один запуск токеном оболочки и с
+# задачами не работает), ставит $script:HmSkipOrphanSweep = $true ДО подключения файла: COM планировщика
+# тогда не открывается вовсе. Флага нет — уборка идёт, как и шла.
+if (-not $script:HmSkipOrphanSweep) {
+    try {
+        $hmOrphanTags = @(Remove-HmOrphanTasks)
+        if ($hmOrphanTags.Count -gt 0) {
+            Write-Host ("Планировщик: убраны осиротевшие задачи прерванных установок (" +
+                $hmOrphanTags.Count + "): " + ($hmOrphanTags -join ', '))
+        }
+    } catch { }
+}

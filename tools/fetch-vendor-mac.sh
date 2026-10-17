@@ -33,6 +33,22 @@ dl() {
   fi
 }
 
+# Транзиентный сбой реестра npm не должен валить многогигабайтную сборку: после шага
+# «пара одной версии для обеих арх» ниже любой промах кладёт всю сборку (FATAL), поэтому
+# каждое обращение к реестру — три попытки с растущей паузой. Вывод глушится, как и был.
+retry3() {
+  local n=1
+  while [ "$n" -le 3 ]; do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    if [ "$n" -lt 3 ]; then
+      echo "    попытка $n/3 не удалась — повтор через $((n * 5)) с: ${1:-} ${2:-} ${3:-}"
+      sleep $((n * 5))
+    fi
+    n=$((n + 1))
+  done
+  return 1
+}
+
 # Вызов api.github.com С аутентификацией, если задан GITHUB_TOKEN (в CI = github.token).
 # Анонимный GitHub API на shared-IP раннера жёстко лимитируется → транзиентные 403
 # (маскот/шрифт «не нашлись» → FATAL). С токеном — лимит 1000-5000/ч. bash 3.2 + set -u
@@ -90,7 +106,10 @@ dl "https://update.code.visualstudio.com/latest/darwin-universal/stable" "$APPS/
 
 echo "[vendor-mac] Claude Code CLI -> npm cache (офлайн -g, ОБА arch)..."
 CACHE="$ROOT/vendor/npm-cache"; TMP="$ROOT/vendor/_claudetmp"; mkdir -p "$TMP"
-npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund >/dev/null 2>&1 || true
+# --ignore-scripts — как в fetch-vendor.ps1 (там же разобрано, почему и что проверено): цель шага —
+# наполнить КЕШ архивами, а скрипты установки пакета с «плавающей» версией исполнялись бы на машине
+# сборки, где лежат ключи подписи. Содержимое кеша от флага не зависит (проверено офлайн).
+retry3 npm install '@anthropic-ai/claude-code' --prefix "$TMP" --cache "$CACHE" --no-audit --no-fund --ignore-scripts || true
 # ГЛАВНОЕ: настоящий бинарь Claude Code едет НЕ в основном пакете, а в платформенном
 # optionalDependency (@anthropic-ai/claude-code-darwin-arm64 | -darwin-x64). `npm install`
 # качает optionalDependency ТОЛЬКО под платформу раннера, а раннер macos-latest — Apple
@@ -109,7 +128,7 @@ except Exception:
 if [ -n "$CC_VER" ]; then
   echo "  версия Claude Code: $CC_VER — докладываю платформенные пакеты обеих арх"
   for CCA in arm64 x64; do
-    if npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER" --cache "$CACHE" >/dev/null 2>&1; then
+    if retry3 npm cache add "@anthropic-ai/claude-code-darwin-$CCA@$CC_VER" --cache "$CACHE"; then
       echo "    ok claude-code-darwin-$CCA@$CC_VER"
     else
       echo "    ! claude-code-darwin-$CCA@$CC_VER не лёг в кеш — на этой арх офлайн-установка Claude Code работать НЕ будет"
@@ -225,10 +244,44 @@ WH="$ROOT/vendor/pywheels"; rm -rf "$WH"; mkdir -p "$WH"
 REQ="$ROOT/vendor/config-pack/requirements.txt"
 # Honest-репорт Intel-паритета (см. итоговую сводку ниже) — init до if (set -u).
 ARM64_NATIVE_COUNT=0; X64_NATIVE_COUNT=0; X64_NATIVE_MISSING=""
+# Провал скачивания колёс на хостовой арх — в сводку полноты ниже (add_missing определён позже).
+# Раньше сбой был невидим: gate смотрел только «в каталоге есть хоть один файл».
+WHEELS_FAIL=""
 if [ -f "$REQ" ]; then
+  # ТОЛЬКО КОЛЁСА (находка S-6, зеркало fetch-vendor.ps1 — там разобрано подробно): `pip download`
+  # обычного sdist ИСПОЛНЯЕТ его setup.py на машине сборки, где лежат ключи подписи. Поэтому
+  # --only-binary=:all:, а единственный пакет без колеса (pyaes, зависимость telethon) качается
+  # отдельным вызовом с --require-hashes и затем идёт в общий вызов прямой ссылкой file://…#sha256=…
+  # — индекс про него не спрашивают. Пин лежит в tools/vendor-signers.json (pythonSdists).
+  # Что закрыто и что НЕТ: setup.py подменённого pyaes и пакета без колеса не исполняются (отказ по sha256 / по
+  # --only-binary до сборки). Остаётся: метаданные sdist pyaes pip собирает в изолированном окружении, куда ставит
+  # сборочный бэкенд (setuptools) из PyPI БЕЗ хеша — его код исполняется; поэтому --no-binary стоит ТОЛЬКО на pyaes
+  # (с :all: бэкенд собирался бы ещё и из sdist). Доверие остаётся к PyPI и TLS до него (то же у playwright).
+  PYAES_VER="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["pythonSdists"]["pyaes"]["version"])' "$ROOT/tools/vendor-signers.json" 2>/dev/null)"
+  PYAES_SHA="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["pythonSdists"]["pyaes"]["sha256"])' "$ROOT/tools/vendor-signers.json" 2>/dev/null)"
+  PYAES_FILE="$WH/pyaes-$PYAES_VER.tar.gz"
   # 1) Host-arch (arm64 раннер): pip тянет arm64-колёса + pure-python py3-none-any (годятся везде).
-  "$PY" -m pip download pip setuptools wheel -d "$WH" >/dev/null 2>&1 || true
-  "$PY" -m pip download -r "$REQ" pystray pillow -d "$WH" 2>&1 | tail -2
+  "$PY" -m pip download pip setuptools wheel --only-binary=:all: -d "$WH" >/dev/null 2>&1 || WHEELS_FAIL="$WHEELS_FAIL pip/setuptools/wheel не скачались;"
+  if [ -z "$PYAES_VER" ] || [ -z "$PYAES_SHA" ]; then
+    WHEELS_FAIL="$WHEELS_FAIL нет пина pyaes в tools/vendor-signers.json (pythonSdists);"
+  else
+    PYAES_PIN="$(mktemp)"
+    printf 'pyaes==%s --hash=sha256:%s\n' "$PYAES_VER" "$PYAES_SHA" > "$PYAES_PIN"
+    if "$PY" -m pip download --no-deps --no-binary pyaes --require-hashes -r "$PYAES_PIN" -d "$WH" 2>&1 | tail -3; then
+      PYAES_URI="$("$PY" -c 'import pathlib,sys;print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$PYAES_FILE")#sha256=$PYAES_SHA"
+      if ! "$PY" -m pip download -r "$REQ" pystray pillow "pyaes @ $PYAES_URI" --only-binary=:all: -d "$WH" 2>&1 | tail -2; then
+        WHEELS_FAIL="$WHEELS_FAIL pip download (requirements.txt + pystray/pillow) завершился с ошибкой;"
+      fi
+      # Результат — по файлу, а не по тексту pip: в pywheels лежит ровно тот pyaes, что закреплён.
+      if [ "$(shasum -a 256 "$PYAES_FILE" 2>/dev/null | awk '{print $1}')" != "$PYAES_SHA" ]; then
+        rm -f "$PYAES_FILE"
+        WHEELS_FAIL="$WHEELS_FAIL pyaes в pywheels не совпал с пином sha256 (или не скачан);"
+      fi
+    else
+      WHEELS_FAIL="$WHEELS_FAIL pyaes с пином sha256 не принят (остальные пакеты не качались);"
+    fi
+    rm -f "$PYAES_PIN"
+  fi
   # 2) x86_64-колёса для НАТИВНЫХ пакетов, чтобы офлайн-install встал на Intel (--find-links
   #    выберет колесо по тегу хоста). --platform требует --only-binary; pure-python уже выше.
   #    pillow — известный нативный (pystray = py3-none-any). Полный req — best-effort сверху
@@ -262,7 +315,7 @@ echo "[vendor-mac] Playwright Chromium (mac, host-arch = arm64 раннер)..."
 # папки нет → pydeps.sh уходит в онлайн-докачку chromium (единственный не-офлайн шаг на x64;
 # кросс-скачать x64-Chromium на arm64-раннере playwright штатно не умеет).
 PW="$ROOT/vendor/playwright-browsers-arm64"; mkdir -p "$PW"
-"$PY" -m pip install --quiet playwright >/dev/null 2>&1 || true
+"$PY" -m pip install --quiet --only-binary=:all: playwright >/dev/null 2>&1 || true
 PLAYWRIGHT_BROWSERS_PATH="$PW" "$PY" -m playwright install chromium >/dev/null 2>&1 || true
 
 echo "[vendor-mac] Git: вшитый портативный dugite-native (офлайн, без Apple CLT-диалога)..."
@@ -398,7 +451,99 @@ fi
 # Юридическое имя из сертификата Apple и Team ID добавлены после того, как ученик
 # увидел это имя у себя. Поимённое удаление файла (1b) проблему не закрывает: то же
 # имя приезжает в любой новый документ про подпись или в лог сборки.
-NOMAD_LEAK_RE='95\.179\.242\.167|transform-ai\.online|[Jj]emal[ _-]*[Mm]ohamed[ _-]*[Ll]emine|3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+# Паттерны деанона/секретов для экспорт-фильтра. РЕПОЗИТОРИЙ ПУБЛИЧНЫЙ (находка S-3, зеркало
+# fetch-vendor.ps1 — там разобрано подробно), поэтому здесь только ОБЩИЕ паттерны — ключи и токены.
+# Личные (имя владельца, его адреса и домены) читаются из НЕОТСЛЕЖИВАЕМОГО файла
+# tools/leak-patterns.local.json (он в .gitignore) либо из переменной окружения HM_LEAK_PATTERNS
+# (тот же JSON целиком — под секрет CI). Формат:
+#   { "patterns": [ { "re": "<regex, годный и для .NET, и для POSIX ERE>", "scrub": "<чем заменить>" }, ... ] }
+# Нет личного списка:
+#   - локально — работаем по общим паттернам и громко об этом говорим;
+#   - в РЕЛИЗНОЙ сборке (CI=true / GITHUB_ACTIONS=true / HM_RELEASE=1) — стоп: фильтр, «предупредивший» и
+#     пропустивший имя владельца в раздаваемый dmg, хуже отсутствующего фильтра. Осознанный обход —
+#     HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 (баннер в журнале). Как CI получает список — спека «Обслуживание vendor».
+# Список есть, но битый или пустой — стоп.
+NOMAD_LEAK_GENERIC_RE='3VN93XA9DY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{36}|sk-[A-Za-z0-9_-]{40}|xoxb-[0-9]{8}'
+# leak_patterns_load <файл>: выставляет NOMAD_LEAK_RE (общие + личные через |), NOMAD_LEAK_SCRUBS
+# (строки «regex<TAB>замена», по одной на паттерн со scrub), NOMAD_LEAK_PRIVATE (0/1), NOMAD_LEAK_COUNT,
+# NOMAD_LEAK_SOURCE. Возвращает 1 на битом списке; значения паттернов в сообщения не попадают.
+# bash 3.2 (macOS): без mapfile и ассоциативных массивов.
+leak_patterns_load() {
+  local file="${1:-}" json="" tab p s parsed n=0
+  tab="$(printf '\t')"
+  NOMAD_LEAK_RE="$NOMAD_LEAK_GENERIC_RE"; NOMAD_LEAK_SCRUBS=""; NOMAD_LEAK_PRIVATE=0; NOMAD_LEAK_COUNT=0; NOMAD_LEAK_SOURCE=""
+  if [ -n "${HM_LEAK_PATTERNS:-}" ]; then
+    json="$HM_LEAK_PATTERNS"; NOMAD_LEAK_SOURCE="переменная HM_LEAK_PATTERNS"
+  elif [ -n "$file" ] && [ -f "$file" ]; then
+    json="$(cat "$file")"; NOMAD_LEAK_SOURCE="$(basename "$file")"
+  fi
+  [ -n "$json" ] || return 0
+  # JSON разбирает python (он уже нужен этому скрипту): строки «re<TAB>scrub», либо код 3 и причина.
+  parsed="$(printf '%s' "$json" | "$PY" -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
+    items = d["patterns"]
+    assert isinstance(items, list)
+except Exception:
+    sys.stderr.write("JSON не разбирается или нет массива patterns\n"); sys.exit(3)
+for i, p in enumerate(items, 1):
+    re_ = p.get("re") if isinstance(p, dict) else None
+    sc = p.get("scrub") if isinstance(p, dict) else None
+    sc = "" if sc is None else sc
+    if not isinstance(re_, str) or not re_.strip():
+        sys.stderr.write("паттерн №%d пуст\n" % i); sys.exit(3)
+    if not isinstance(sc, str):
+        sys.stderr.write("scrub паттерна №%d не строка\n" % i); sys.exit(3)
+    for v in (re_, sc):
+        if any(c in v for c in "\t\r\n"):
+            sys.stderr.write("в паттерне №%d перевод строки или табуляция\n" % i); sys.exit(3)
+    sys.stdout.buffer.write((re_ + "\t" + sc + "\n").encode("utf-8"))
+')" || { echo "[vendor-mac] FATAL: список личных паттернов (tools/leak-patterns.local.json / HM_LEAK_PATTERNS) не годится — стоп." >&2; return 1; }
+  while IFS="$tab" read -r p s; do
+    [ -n "$p" ] || continue
+    n=$((n+1))
+    # паттерн обязан компилироваться как ERE и не совпадать с пустой строкой (иначе выбьет все файлы)
+    printf '\n' | grep -Eq -- "$p" 2>/dev/null; rc=$?
+    if [ "$rc" -ne 1 ]; then
+      echo "[vendor-mac] FATAL: личный паттерн №$n не компилируется как ERE или совпадает с пустой строкой — стоп." >&2; return 1
+    fi
+    NOMAD_LEAK_RE="$NOMAD_LEAK_RE|$p"
+    if [ -n "$s" ]; then NOMAD_LEAK_SCRUBS="$NOMAD_LEAK_SCRUBS$p$tab$s
+"; fi
+  done <<EOF
+$parsed
+EOF
+  # Пустой список — ошибка, а не «личный список есть»: пустая переменная окружения иначе заслоняла бы
+  # настоящий файл и гасила предупреждение «личный список не найден», не добавив ни одного паттерна.
+  if [ "$n" -eq 0 ]; then
+    echo "[vendor-mac] FATAL: в списке личных паттернов нет ни одного паттерна — стоп." >&2; return 1
+  fi
+  NOMAD_LEAK_PRIVATE=1; NOMAD_LEAK_COUNT=$n
+  return 0
+}
+# leak_is_release_build <CI> <GITHUB_ACTIONS> <HM_RELEASE>: 0 — сборка релизная (любое из значений
+# true/1/yes без учёта регистра). Значения приходят аргументами, а не читаются здесь, — чтобы решение
+# проверялось таблицей (зеркало Test-HmReleaseBuild в fetch-vendor.ps1). bash 3.2: без ${var,,}.
+leak_is_release_build() {
+  local v lc
+  for v in "${1:-}" "${2:-}" "${3:-}"; do
+    lc="$(printf '%s' "$v" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+    case "$lc" in true|1|yes) return 0 ;; esac
+  done
+  return 1
+}
+# leak_list_verdict <есть ли личный список 0/1> <релизная 0/1> <HM_ALLOW_NO_PRIVATE_LEAK_LIST>:
+# печатает ok | warn | fatal | allowed (зеркало Get-HmLeakListVerdict). Флаг «разрешить» действует
+# ТОЛЬКО в релизной сборке: локально он ничего не меняет — там и так предупреждение.
+leak_list_verdict() {
+  local allow
+  if [ "${1:-0}" = "1" ]; then echo ok; return 0; fi
+  if [ "${2:-0}" != "1" ]; then echo warn; return 0; fi
+  allow="$(printf '%s' "${3:-}" | tr 'A-Z' 'a-z' | tr -d '[:space:]')"
+  case "$allow" in true|1|yes) echo allowed ;; *) echo fatal ;; esac
+  return 0
+}
 nomad_src_is_critical() {
   # $1 = путь ОТНОСИТЕЛЬНО корня nomad-src. Код, нужный `uv tool install`:
   # pyproject.toml + *.py/*.toml пакетных дир (pyproject [tool.setuptools.packages.find]
@@ -417,8 +562,35 @@ nomad_src_is_critical() {
   return 1
 }
 nomad_src_sanitize() {
-  local S="$1" rel f removed=0
+  local S="$1" rel f removed=0 sre srep
   echo "  [nomad-src] экспорт-фильтр: внутренние артефакты НЕ едут пользователям..."
+  # Паттерны: общие (в репозитории) + личные (неотслеживаемый файл / HM_LEAK_PATTERNS) — см. leak_patterns_load.
+  # HM_LEAK_PATTERNS_FILE — явный путь к списку; заданный, но несуществующий — стоп (как в fetch-vendor.ps1).
+  if [ -n "${HM_LEAK_PATTERNS_FILE:-}" ] && [ ! -f "$HM_LEAK_PATTERNS_FILE" ]; then
+    echo "[vendor-mac] FATAL: HM_LEAK_PATTERNS_FILE указывает на несуществующий файл — личный список паттернов не прочитать."; return 1
+  fi
+  leak_patterns_load "${HM_LEAK_PATTERNS_FILE:-$ROOT/tools/leak-patterns.local.json}" || return 1
+  # Нет личного списка: в релизной сборке (CI / GITHUB_ACTIONS / HM_RELEASE) это стоп, локально — предупреждение
+  # (разбор — в шапке блока паттернов). HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 разрешает релиз без списка осознанно.
+  local REL=0
+  if leak_is_release_build "${CI:-}" "${GITHUB_ACTIONS:-}" "${HM_RELEASE:-}"; then REL=1; fi
+  case "$(leak_list_verdict "$NOMAD_LEAK_PRIVATE" "$REL" "${HM_ALLOW_NO_PRIVATE_LEAK_LIST:-}")" in
+    ok)
+      echo "  [nomad-src] личных паттернов: $NOMAD_LEAK_COUNT (источник: $NOMAD_LEAK_SOURCE)" ;;
+    fatal)
+      echo "[vendor-mac] FATAL: релизная сборка (CI / GITHUB_ACTIONS / HM_RELEASE) без личного списка паттернов экспорт-фильтра nomad-src."
+      echo "             Без него имя владельца, его адреса и домены не ищутся, и сборка раздала бы их покупателям, оставшись зелёной."
+      echo "             Дай список: файл tools/leak-patterns.local.json, путь в HM_LEAK_PATTERNS_FILE или JSON целиком в HM_LEAK_PATTERNS"
+      echo "             (в CI — секрет; лучше записать его файлом в \$RUNNER_TEMP и указать HM_LEAK_PATTERNS_FILE)."
+      echo "             Осознанно без списка — HM_ALLOW_NO_PRIVATE_LEAK_LIST=1 (в журнале будет баннер)."
+      return 1 ;;
+    allowed)
+      echo "  [nomad-src] !!! ВНИМАНИЕ: РЕЛИЗНАЯ СБОРКА БЕЗ ЛИЧНОГО СПИСКА ПАТТЕРНОВ (разрешено HM_ALLOW_NO_PRIVATE_LEAK_LIST) !!!"
+      echo "              Проверяются только общие ключи и токены; имя владельца, его адреса и домены в раздаваемый dmg НЕ проверены." ;;
+    *)
+      echo "  [nomad-src] ВНИМАНИЕ: личный список паттернов не найден (tools/leak-patterns.local.json или HM_LEAK_PATTERNS) —"
+      echo "              проверяются только общие ключи и токены. Имя владельца, его адреса и домены НЕ ловятся: релиз собирай на машине с локальным файлом." ;;
+  esac
   # 1) Внутренние директории целиком (отчёты процессов, планы/спеки, deploy-доки с IP).
   # docs целиком: каталог не нужен ни сборке, ни рантайму — его нет ни в MANIFEST.in, ни
   # в [tool.setuptools] (packages.find / package-data / data-files), и ни один .py дерева
@@ -477,7 +649,12 @@ EOF
   while IFS= read -r f; do
     rel="${f#$S/}"
     if nomad_src_is_critical "$rel"; then
-      /usr/bin/perl -pi -e 's/95\.179\.242\.167/REDACTED-IP/g; s/transform-ai\.online/redacted.example/g' "$f"
+      while IFS="$(printf '\t')" read -r sre srep; do
+        [ -n "$sre" ] || continue
+        HM_RE="$sre" HM_REP="$srep" /usr/bin/perl -pi -e 's/$ENV{HM_RE}/$ENV{HM_REP}/g' "$f"
+      done <<EOS
+$NOMAD_LEAK_SCRUBS
+EOS
       echo "    ~ скраб IP/домена в $rel (install-critical, файл сохранён)"
     else
       rm -f "$f"; removed=$((removed+1)); echo "    - удалил $rel (деанон/секрет-паттерн)"
@@ -516,7 +693,7 @@ echo "[vendor-mac] Исходник Nomad → vendor/nomad-src (git archive, Б�
 # nomad-src приватный, в git НЕ коммитится (.gitignore vendor/*). Нет исходника →
 # компонент Nomad у пользователя выполнит graceful skip (exit 120) — сборку НЕ валим (WARNING).
 if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
-  AGENT_REPO="${HM_NOMAD_AGENT_REPO:-/c/Vibecode/hamidun-agent}"
+  AGENT_REPO="${HM_NOMAD_AGENT_REPO:-/d/Nomad/hamidun-agent}"   # переехал 30.09.2026 с /c/Vibecode/hamidun-agent
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (иначе в
   # раздачу утечёт незакоммиченная/недоделанная работа при активной разработке агента).
   # Бамп версии = сменить дефолт здесь (и в fetch-vendor.ps1) или задать env HM_NOMAD_REF.
@@ -534,15 +711,23 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
     echo "  git archive $NOMAD_REF из локального репо $AGENT_REPO"
     git -C "$AGENT_REPO" archive --format=tar "$NOMAD_REF" | tar -x -C "$SRCOUT"
   elif [ -n "$GITURL" ]; then
-    echo "  git clone --depth 1 -b $NOMAD_REF <NOMAD_AGENT_GIT_URL> (раннер без локального репо)"
+    # Пин — КОММИТ, а `git clone -b` принимает только ветку или тег: раньше clone по SHA
+    # падал (stderr скрыт), и фолбэк молча клонировал ветку по умолчанию. Mac offline 21.09
+    # так получил Nomad 0.18.3 вместо закреплённого 0.18.1. Теперь пин берётся через
+    # `fetch <ref>` (GitHub отдаёт коммит по SHA), а недоступный пин НЕ подменяется
+    # чужой версией: Nomad пропускается громко.
+    echo "  git fetch --depth 1 $NOMAD_REF <NOMAD_AGENT_GIT_URL> (раннер без локального репо)"
     TMPC="$(mktemp -d)"
-    if git clone --depth 1 -b "$NOMAD_REF" "$GITURL" "$TMPC" 2>/dev/null || git clone --depth 1 "$GITURL" "$TMPC"; then
+    if git -C "$TMPC" init -q \
+       && git -C "$TMPC" remote add origin "$GITURL" \
+       && git -C "$TMPC" fetch -q --depth 1 origin "$NOMAD_REF" \
+       && git -C "$TMPC" checkout -q FETCH_HEAD; then
+      echo "  ok: Nomad из коммита $(git -C "$TMPC" rev-parse --short HEAD) (пин $NOMAD_REF)"
       (cd "$TMPC" && git archive --format=tar HEAD) | tar -x -C "$SRCOUT"
-      rm -rf "$TMPC"
     else
-      echo "  ! git clone не удался — проверь NOMAD_AGENT_GIT_URL/токен. Компонент Nomad → graceful skip."
-      rm -rf "$TMPC"
+      echo "  ! [vendor-mac] ПИН Nomad $NOMAD_REF недоступен (NOMAD_AGENT_GIT_URL/токен?) — другую версию НЕ подставляю. Компонент Nomad → graceful skip."
     fi
+    rm -rf "$TMPC"
   else
     echo "  ! нет локального репо ($AGENT_REPO) и не задан NOMAD_AGENT_GIT_URL — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
   fi
@@ -625,6 +810,9 @@ for CCA in arm64 x64; do
     || add_missing "npm-cache: нет архива @anthropic-ai/claude-code-darwin-$CCA — офлайн-установка Claude Code на Mac $CCA не сработает (уйдёт в онлайн)"
 done
 chk_dir "$ROOT/vendor/pywheels"    "pywheels/ (нет файлов)"
+# Колёса качаются ТОЛЬКО как колёса (S-6): пакет без колеса под эту платформу роняет вызов pip.
+# «В каталоге есть хоть один файл» этого не показывает — поэтому провал называем отдельно.
+[ -z "$WHEELS_FAIL" ] || add_missing "pywheels/ (скачивание колёс завершилось с ошибкой —$WHEELS_FAIL набор НЕПОЛНЫЙ)"
 chk_dir "$ROOT/vendor/config-pack" "config-pack/ (нет файлов)"
 # Honest-репорт Intel-паритета wheels (best-effort скачивание x86_64 выше — НЕ гейт,
 # но и НЕ молчит): сколько нативных колёс есть и каким пакетам не хватает x64-пары.
@@ -639,6 +827,22 @@ if [ -n "$MISSING" ]; then
 else
   echo "[vendor-mac] OK: все ключевые артефакты на месте."
 fi
+
+# Claude Code: «архив под арх есть» мало — нужна ПАРА одной версии. claude.sh ставит
+# офлайн ровно ту версию, для которой в кеше лежат и основной пакет, и платформенный
+# под эту арх (hm_claude_offline_version). Живой случай 23.09.2026: в кеше архивы
+# 2.1.197, а latest в метаданных 2.1.278 — на Intel ENOTCACHED, установка ушла в
+# интернет и без VPN повисла. Кеш этого же каталога едет и в lite-компонент
+# claude/darwin, поэтому валим сборку здесь, а не человека потом.
+CC_OFF_ARM="$(hm_claude_offline_version "$ROOT/vendor/npm-cache" arm64)"
+CC_OFF_X64="$(hm_claude_offline_version "$ROOT/vendor/npm-cache" x64)"
+if [ -z "$CC_OFF_ARM" ] || [ "$CC_OFF_ARM" != "$CC_OFF_X64" ] \
+   || { [ -n "${CC_VER:-}" ] && [ "$CC_OFF_ARM" != "$CC_VER" ]; }; then
+  echo "[vendor-mac] FATAL: npm-cache Claude Code неполный: пара для arm64=${CC_OFF_ARM:-нет}, для x64=${CC_OFF_X64:-нет}, основной пакет ${CC_VER:-не определён}."
+  echo "  Нужны архивы @anthropic-ai/claude-code и claude-code-darwin-arm64/-x64 ОДНОЙ версии — перезапусти tools/fetch-vendor-mac.sh."
+  exit 1
+fi
+echo "[vendor-mac] OK: npm-cache Claude Code $CC_OFF_ARM — основной пакет и оба платформенных одной версии."
 
 # Курсовое издание: архив симулятора ОБЯЗАН быть в vendor/course — без него компонент
 # «Курс интенсива» падает у КАЖДОГО покупателя. Валим сборку сразу, а не пользователя.

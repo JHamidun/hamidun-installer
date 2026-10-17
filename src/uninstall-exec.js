@@ -25,6 +25,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// Снос дерева, который НЕ идёт по ссылкам. fs.rmSync(recursive) в Electron 40+ ходит по junction
+// внутрь и стирает чужую цель — подробности и проверка в src/fs-compat.js.
+const { removeTreeNoFollow } = require('./fs-compat');
 
 // Синхронная пауза. Модуль сквозь весь файл синхронный (он крутится в main-процессе
 // до закрытия окна), поэтому await сюда не вставить, а setTimeout не сработает.
@@ -64,46 +67,11 @@ function normKey(p, platform) {
   return isCaseInsensitive(platform) ? n.toLowerCase() : n;
 }
 function pathEq(a, b, platform) { return normKey(a, platform) === normKey(b, platform); }
-/** Путь и ВСЕ его существующие предки — без symlink и junction.
- *
- *  Вынесено отдельно, потому что нужно двум разным операциям с разными целями:
- *  `checkTarget` защищает от УДАЛЕНИЯ не того каталога, `restoreHookUrl` — от
- *  ЗАПИСИ не в тот файл. Проверка одна и та же, и держать её в двух копиях
- *  значит однажды починить одну из них.
- *
- *  Возвращает {ok:false, absent:true}, когда цели просто нет: это не отказ
- *  защиты, а «править нечего», и звать это ошибкой было бы враньём.
- *  Любая другая ошибка lstat — отказ (fail-closed): не смогли убедиться, что
- *  ссылки нет, значит считаем, что она есть.
- */
-function symlinkFreeChain(target) {
-  const norm = path.resolve(String(target || ''));
-  if (!norm) return { ok: false, error: 'пустой путь' };
-  let self = null;
-  let cur = norm;
-  let prev = '';
-  while (cur && cur !== prev) {
-    let st = null;
-    try {
-      st = fs.lstatSync(cur);
-    } catch (e) {
-      const code = e && e.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        if (cur === norm) return { ok: false, absent: true };
-      } else {
-        return { ok: false, error: 'lstat(' + cur + '): ' + (code || e) };
-      }
-    }
-    if (st) {
-      if (st.isSymbolicLink()) return { ok: false, error: 'symlink/junction в цепочке: ' + cur };
-      if (cur === norm) self = st;
-    }
-    prev = cur;
-    cur = path.dirname(cur);
-  }
-  if (!self) return { ok: false, absent: true };
-  return { ok: true, isFile: self.isFile() };
-}
+// Путь и ВСЕ его существующие предки — без symlink и junction. Проверка живёт в src/link-guard.js (её же
+// используют писатели под администратором: прокси, ключи, манифест, журнал) — здесь только импорт, чтобы
+// `checkTarget` (защита от УДАЛЕНИЯ не того каталога) и `removeMascotHooks` (от ЗАПИСИ не в тот файл) и дальше
+// опирались на одну и ту же проверку, а не на две копии.
+const { symlinkFreeChain } = require('./link-guard');
 
 function isInside(child, parent, platform) {
   const c = normKey(child, platform), p = normKey(parent, platform);
@@ -303,16 +271,21 @@ function removeDirTree(p, opts, dry) {
   // ложный успех и осиротевший карантин остаётся навсегда. Если и возврат не удался —
   // путь карантина попадает в сообщение (и в install.log), мусор не невидим.
   const restore = () => renameWithRetry(quarantine, g.norm);
+  const links = [];
   try {
-    // rmSync не следует по симлинкам внутрь (удаляет саму ссылку) — содержимое чужих целей цело.
+    // БЕЗ fs.rmSync: прежний комментарий здесь («rmSync не следует по симлинкам внутрь») описывал
+    // Node 20 и с Electron 40 (Node 24, std::filesystem) стал ЛОЖЬЮ — рантайм заходит по junction
+    // внутрь и стирает содержимое чужой цели с правами администратора. Дерево лежит в месте, куда
+    // пишет любой процесс пользователя (checkTarget проверил цель и её предков, но не нутро), так
+    // что junction внутри — это не фантазия. removeTreeNoFollow снимает ссылку как ссылку.
     // maxRetries/retryDelay — против транзиентных EPERM/EBUSY на Windows (процесс ещё
     // не отпустил образ сразу после taskkill, антивирус держит хендл).
-    fs.rmSync(quarantine, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });
+    removeTreeNoFollow(quarantine, { force: false, maxRetries: 5, retryDelay: 200, onLink: (lp) => links.push(lp) });
   } catch (e) {
     if (fs.existsSync(quarantine)) {
       const back = restore();
-      return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e) +
-        (back ? ' (дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
+      return res('failed', 'не удалось удалить дерево: ' + treeFailWhy(e) +
+        (back ? ' (оставшееся дерево возвращено на место)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
     }
   }
   if (fs.existsSync(quarantine)) {
@@ -320,7 +293,28 @@ function removeDirTree(p, opts, dry) {
     return res('failed', 'дерево осталось на месте' +
       (back ? ' (возвращено)' : ' — ОСТАТОК В КАРАНТИНЕ: ' + quarantine));
   }
-  return res('removed', 'удалено дерево');
+  return res('removed', 'удалено дерево' + linksNote(links));
+}
+
+// Ссылки (symlink/junction), найденные внутри сносимого дерева, снимаются КАК ссылки, цель не
+// трогается. Это не ошибка, но и не «обычное» удаление — в install.log должна остаться строка.
+function linksNote(links) {
+  if (!links.length) return '';
+  return ' (внутри были ссылки: ' + links.length + ' — сняты как ссылки, содержимое их целей не тронуто)';
+}
+
+// Почему снос дерева отказал — для строки результата (она уходит и в UI, и в install.log). Голые коды
+// ERR_HM_TREE_CHANGED и ENOTEMPTY ничего не объясняют, а русское пояснение лежит в e.message
+// (src/fs-compat.js) и раньше терялось. Код остаётся первым: по нему ищут в логе и сверяют тесты.
+function treeFailWhy(e) {
+  const code = (e && e.code) || e;
+  const msg = String((e && e.message) || '');
+  if (code === 'ERR_HM_TREE_CHANGED') return code + ' — ' + msg.replace(/^ERR_HM_TREE_CHANGED:\s*/, '');
+  if (code === 'ENOTEMPTY') {
+    const note = /\[(это перенаправление[\s\S]*)\]$/.exec(msg);   // подпись removeLink стоит в конце сообщения; в самом пути бывают [ и ]
+    if (note) return code + ' — ' + note[1];
+  }
+  return String(code);
 }
 
 // P0-1: подтверждён ли НАШ ownership-маркер — хотя бы один из markerPaths существует
@@ -416,14 +410,16 @@ function removeDirTreeGated(p, opts, markerName, dry) {
 
   if (dry) { restore(); return res('removed', '[dry-run] WOULD remove tree (маркер подтверждён)'); }
 
-  // 5. Маркер подтверждён на ЗАХВАЧЕННОМ каталоге → удаляем quarantine.
+  // 5. Маркер подтверждён на ЗАХВАЧЕННОМ каталоге → удаляем quarantine. Снос — removeTreeNoFollow, а не
+  //    fs.rmSync: рантайм Electron 40+ ходит по junction внутрь дерева (см. removeDirTree выше).
+  const links = [];
   try {
-    fs.rmSync(quarantine, { recursive: true, force: false });
+    removeTreeNoFollow(quarantine, { force: false, onLink: (lp) => links.push(lp) });
   } catch (e) {
-    if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + ((e && e.code) || e)); }
+    if (fs.existsSync(quarantine)) { restore(); return res('failed', 'не удалось удалить дерево: ' + treeFailWhy(e)); }
   }
   if (fs.existsSync(quarantine)) { restore(); return res('failed', 'дерево осталось в карантине'); }
-  return res('removed', 'удалено дерево (карантин, маркер подтверждён)');
+  return res('removed', 'удалено дерево (карантин, маркер подтверждён)' + linksNote(links));
 }
 
 // P1: классификаторы результата launchctl — чистые, тестируемые.
@@ -496,7 +492,7 @@ function removeProfileLine(rcFile, line, opts, dry) {
 // Укреплённая перезапись СУЩЕСТВУЮЩЕГО файла новым содержимым.
 //
 // Вынесено из removeProfileLine без единого изменения логики: появился второй
-// потребитель (restoreHookUrl), а копия такого кода — гарантированный дрейф. Здесь
+// потребитель (removeMascotHooks), а копия такого кода — гарантированный дрейф. Здесь
 // каждая строка отвечает на конкретную атаку или на конкретный отказ Windows, и
 // вторая копия рано или поздно отстала бы ровно на ту защиту, которую забыли
 // перенести.
@@ -545,42 +541,142 @@ function atomicReplaceContent(norm, next) {
   }
 }
 
-// Вернуть hook-url скрепки к плейсхолдеру пака при удалении компонента.
+// ---- хуки скрепки в ~/.claude/settings.json ------------------------------------------
 //
-// ЗАЧЕМ. Установка скрепки правит ~/.claude/settings.json: подставляет её порт вместо
-// плейсхолдера (mascot.ps1 §4, `127.0.0.1:VSCODE_PORT/hook` → `127.0.0.1:45832/hook`).
-// Удаление же сносило только файлы, а хуки оставались — навсегда указывать на порт,
-// на котором больше никто не слушает.
+// Что здесь было раньше. Удаление возвращало адрес хука к «плейсхолдеру пака»
+// (`127.0.0.1:45832/hook` → `127.0.0.1:VSCODE_PORT/hook`). Такой адрес — не URL (нечисловой
+// порт, `new URL` бросает ERR_INVALID_URL), и Claude Code видит в settings.json невалидный
+// хук: «Удалить скрепку» воспроизводила ту самую поломку (Settings Error), с которой люди
+// приходили в поддержку (строки A25 и B01 разбора диалогов).
 //
-// Цена этого измерена, а не оценена: обращение на закрытый локальный порт под Windows
-// НЕ отбивается мгновенно (SYN уходит в повтор) — 2,2 с на попытку. Хуков в паке
-// четырнадцать, то есть около ПОЛУМИНУТЫ мёртвого ожидания в каждой сессии Claude
-// Code, у каждого, кто скрепку снял. Самолечению взяться неоткуда: оно живёт внутри
-// самой скрепки, а её больше не запускают.
+// Что теперь. Записи скрепки УДАЛЯЮТСЯ, и только её. Цену бездействия измерили раньше:
+// обращение на закрытый локальный порт под Windows не отбивается мгновенно (SYN уходит в
+// повтор) — 2,2 с на попытку, а хуков четырнадцать, то есть около полуминуты мёртвого
+// ожидания в каждой сессии Claude Code у того, кто скрепку снял. Самолечению взяться
+// неоткуда: оно живёт внутри самой скрепки, а её больше не запускают.
+
+const MASCOT_HOOK_MARKER = 'claude-mascot';
+
+// Чья это запись по адресу. Критерий намеренно узкий и повторяет тот, по которому свои записи
+// опознаёт само приложение скрепки (hooks.rs, is_mascot_hook_group): http, 127.0.0.1, ровно наш
+// порт, путь РОВНО /hook, а запрос пуст либо несёт метку ?src=claude-mascot (прежние версии
+// писали адрес без метки). Чужой хук на том же порту — /hook/proxy, /other-tool, / — не наш,
+// поэтому «подстрока :45832/hook» тут не годится: она ловит и /hook/proxy.
 //
-// БЕЗОПАСНОСТЬ. settings.json — весь конфиг человека, и он лежит внутри защищённого
-// ~/.claude, куда checkTarget не пускает НИЧЕГО (и правильно: там нельзя удалять).
-// Поэтому здесь свой узкий допуск, как у removeProfileLine с rc-файлами: ровно один
-// разрешённый путь, замена ТОЧНОЙ подстроки, JSON валидируется до и после, запись
-// атомарная. Ни одного пути, которым эта операция могла бы что-то удалить.
-function restoreHookUrl(settingsFile, from, to, opts, dry) {
-  if (!valueHygieneOk(from) || !valueHygieneOk(to)) return res('failed', 'ЗАЩИТА: некорректная подстрока');
+// Смотрим ТОЛЬКО поле url. Хук-команда, в тексте которой встречается адрес или слово
+// claude-mascot (`curl http://127.0.0.1:45832/hook`), записью скрепки не считается: скрепка
+// пишет http-хуки, команды в этом файле — чужие.
+function isMascotHookUrl(url, port) {
+  if (typeof url !== 'string') return false;
+  let u;
+  try { u = new URL(url.trim()); } catch (e) { return false; }
+  if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1' || u.port !== String(port)) return false;
+  if (u.username || u.password) return false;
+  if (u.pathname !== '/hook') return false;
+  return u.search === '' || u.searchParams.get('src') === MASCOT_HOOK_MARKER;
+}
+
+function hooksMapOf(settings) {
+  const h = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings.hooks : null;
+  return h && typeof h === 'object' && !Array.isArray(h) ? h : null;
+}
+
+// Обойти все записи-хуки: settings.hooks[событие][группа].hooks[запись].
+function forEachHookEntry(settings, fn) {
+  const hooks = hooksMapOf(settings);
+  if (!hooks) return;
+  for (const event of Object.keys(hooks)) {
+    const groups = hooks[event];
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) {
+      if (!g || typeof g !== 'object' || !Array.isArray(g.hooks)) continue;
+      for (const h of g.hooks) fn(h, event);
+    }
+  }
+}
+function countHookEntries(settings) {
+  let n = 0;
+  forEachHookEntry(settings, () => { n++; });
+  return n;
+}
+function countMascotHooks(settings, port) {
+  let n = 0;
+  forEachHookEntry(settings, (h) => { if (h && typeof h === 'object' && isMascotHookUrl(h.url, port)) n++; });
+  return n;
+}
+
+// Убрать записи скрепки из разобранного settings.json (объект меняется на месте).
+//
+// Единица снятия — ЗАПИСЬ, а не группа: если человек руками добавил свой хук в ту же группу,
+// что и запись скрепки, его хук остаётся. Группа уходит только когда в ней не осталось ничего.
+// Массив события уходит только если ЭТО СНЯТИЕ его опустошило, — значит в нём лежало одно
+// лишь скрепочное, и ключа без скрепки не было. Массив, пустой ещё до нас, не трогаем: он не
+// наш. Так же с самим `hooks`.
+function stripMascotHooks(settings, port) {
+  const stat = { removed: 0, groupsDropped: 0, eventsDropped: [], hooksDropped: false };
+  const hooks = hooksMapOf(settings);
+  if (!hooks) return stat;
+  const hadEvents = Object.keys(hooks).length;
+  for (const event of Object.keys(hooks)) {
+    const groups = hooks[event];
+    if (!Array.isArray(groups)) continue;
+    const before = groups.length;
+    const kept = [];
+    for (const g of groups) {
+      if (!g || typeof g !== 'object' || !Array.isArray(g.hooks)) { kept.push(g); continue; }
+      const left = g.hooks.filter((h) => !(h && typeof h === 'object' && isMascotHookUrl(h.url, port)));
+      const gone = g.hooks.length - left.length;
+      if (gone === 0) { kept.push(g); continue; }
+      stat.removed += gone;
+      if (left.length === 0) { stat.groupsDropped++; continue; }
+      g.hooks = left;
+      kept.push(g);
+    }
+    if (kept.length === 0 && before > 0) {
+      delete hooks[event];
+      stat.eventsDropped.push(event);
+    } else if (kept.length !== before) {
+      hooks[event] = kept;
+    }
+  }
+  if (stat.removed > 0 && hadEvents > 0 && Object.keys(hooks).length === 0) {
+    delete settings.hooks;
+    stat.hooksDropped = true;
+  }
+  return stat;
+}
+
+// Записать объект в том виде, в каком лежал файл: отступ первой вложенной строки, переводы
+// строк (CRLF/LF) и завершающий перевод строки сохраняются. Вид файла — не наше дело, и diff
+// у человека (у него settings.json может лежать в git) должен показывать только снятое.
+function serializeLikeOriginal(raw, obj) {
+  const lead = /^[ \t]+(?=\S)/m.exec(raw);
+  let out = JSON.stringify(obj, null, lead ? lead[0] : 0);
+  if (raw.indexOf('\r\n') !== -1) out = out.replace(/\n/g, '\r\n');
+  const tail = /\r?\n$/.exec(raw);
+  return tail ? out + tail[0] : out;
+}
+
+// Убрать записи скрепки из ~/.claude/settings.json.
+//
+// БЕЗОПАСНОСТЬ. settings.json — весь конфиг человека, и он лежит внутри защищённого ~/.claude,
+// куда checkTarget не пускает НИЧЕГО (и правильно: там нельзя удалять). Поэтому здесь свой
+// узкий допуск, как у removeProfileLine с rc-файлами: ровно один разрешённый путь, ссылки в
+// цепочке запрещены, JSON валидируется до и после, а число записей сверяется (снято ровно
+// столько, сколько признано скрепочными, чужие все на месте), запись атомарная.
+function removeMascotHooks(settingsFile, port, opts, dry) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return res('failed', 'ЗАЩИТА: некорректный порт');
   const home = path.resolve(opts.home);
   const allowed = path.join(home, '.claude', 'settings.json');
   if (!pathEq(allowed, settingsFile, opts.platform)) {
-    return res('failed', 'ЗАЩИТА: правка hook-url разрешена только для ~/.claude/settings.json, получено: ' + settingsFile);
+    return res('failed', 'ЗАЩИТА: правка хуков разрешена только для ~/.claude/settings.json, получено: ' + settingsFile);
   }
-  // checkTarget здесь НЕ применим целиком (он защищает весь ~/.claude от
-  // удаления, а мы правим файл ВНУТРИ него), но ссылку проверить обязаны:
-  // писать в файл, на который кто-то подложил ссылку, нельзя.
-  //
-  // Проверяем ВСЮ ЦЕПОЧКУ, а не только сам файл. Раньше стоял один lstat по
-  // settings.json, и этого было мало: если `~/.claude` — junction или symlink,
-  // lstat самого файла видит обычный файл, а запись уходит ПО ТУ СТОРОНУ ссылки.
-  // На Windows junction создаётся без прав администратора, и перенос профиля
-  // junction-ом — обычная практика при маленьком системном диске; тогда правка
-  // молча уезжает в чужой каталог. Комментарий здесь раньше признавал, что
-  // предков не проверяем, — но объяснение не заменяет проверку.
+  // checkTarget здесь НЕ применим целиком (он защищает весь ~/.claude от удаления, а мы правим
+  // файл ВНУТРИ него), но ссылку проверить обязаны: писать в файл, на который кто-то подложил
+  // ссылку, нельзя. Проверяем ВСЮ ЦЕПОЧКУ, а не только сам файл: если `~/.claude` — junction или
+  // symlink, lstat самого файла видит обычный файл, а запись уходит ПО ТУ СТОРОНУ ссылки. На
+  // Windows junction создаётся без прав администратора, и перенос профиля junction-ом — обычная
+  // практика при маленьком системном диске.
   const chain = symlinkFreeChain(settingsFile);
   if (!chain.ok) {
     if (chain.absent) return res('absent', 'settings.json нет — править нечего');
@@ -591,21 +687,64 @@ function restoreHookUrl(settingsFile, from, to, opts, dry) {
   let raw;
   try { raw = fs.readFileSync(settingsFile, 'utf8'); }
   catch (e) { return res('failed', 'чтение settings.json: ' + ((e && e.code) || e)); }
-  if (raw.indexOf(from) === -1) return res('absent', 'hook-url скрепки в настройках нет');
-  // Битый JSON не трогаем вовсе: чинить чужой сломанный конфиг — не наша работа,
-  // а испортить его сильнее — легко.
-  try { JSON.parse(raw); }
+  // Быстрый выход: нашего адреса в тексте нет вообще — файл не разбираем (и сломанный чужой
+  // конфиг без нашего адреса не превращается в «отказ»).
+  if (raw.indexOf(':' + port + '/hook') === -1) return res('absent', 'хуков скрепки в настройках нет');
+  // Битый JSON не трогаем вовсе: чинить чужой сломанный конфиг — не наша работа, а испортить его
+  // сильнее — легко.
+  let settings;
+  try { settings = JSON.parse(raw); }
   catch (e) { return res('failed', 'settings.json не парсится как JSON — не трогаю'); }
-  const next = raw.split(from).join(to);
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return res('failed', 'settings.json — не JSON-объект, не трогаю');
+  }
+  const entriesBefore = countHookEntries(settings);
+  const st = stripMascotHooks(settings, port);
+  if (st.removed === 0) return res('absent', 'хуков скрепки в настройках нет');
+  // Страховка от ошибки в самом отборе: чужие записи обязаны остаться все до одной.
+  if (countHookEntries(settings) !== entriesBefore - st.removed || countMascotHooks(settings, port) !== 0) {
+    return res('failed', 'ЗАЩИТА: число записей не сошлось после снятия — файл не тронут');
+  }
+  const next = serializeLikeOriginal(raw, settings);
   try { JSON.parse(next); }
-  catch (e) { return res('failed', 'после замены JSON стал невалидным — откат, файл не тронут'); }
-  if (dry) return res('removed', '[dry-run] WOULD вернуть hook-url к плейсхолдеру пака');
+  catch (e) { return res('failed', 'после снятия JSON стал невалидным — откат, файл не тронут'); }
+  const summary = 'записей хуков скрепки: ' + st.removed +
+    (st.eventsDropped.length ? ', опустевших событий убрано: ' + st.eventsDropped.length : '');
+  if (dry) return res('removed', '[dry-run] WOULD убрать ' + summary);
+  // Файл могли изменить, пока мы работали (его пишет и сам Claude Code, и скрепка): чужую свежую
+  // правку не затираем. Оставшийся зазор до rename — один системный вызов.
+  try {
+    if (fs.readFileSync(settingsFile, 'utf8') !== raw) {
+      return res('failed', 'settings.json изменился во время удаления (его пишет другой процесс) — не трогаю, повтори');
+    }
+  } catch (e) { return res('failed', 'повторное чтение settings.json: ' + ((e && e.code) || e)); }
   try {
     atomicReplaceContent(settingsFile, next);
-    return res('removed', 'hook-url скрепки возвращён к плейсхолдеру пака');
+    return res('removed', 'убрано ' + summary + '; чужие хуки и остальные настройки не тронуты');
   } catch (e) {
     return res('failed', 'перезапись settings.json не удалась: ' + String((e && e.message) || e));
   }
+}
+
+// Наша ли запись автозапуска в HKCU\...\Run: значение — путь РОВНО к нашему exe (кавычки и
+// пробелы по краям не в счёт, регистр тоже). Та же логика, что у Test-HmMascotRunValueOurs в
+// scripts/windows/_mascot.ps1: установка и удаление обязаны считать «своё» одинаково.
+function runValueIsOurs(value, exePath) {
+  if (typeof value !== 'string' || typeof exePath !== 'string') return false;
+  const v = value.trim().replace(/^"+|"+$/g, '').trim();
+  const e = exePath.trim();
+  if (!v || !e) return false;
+  return v.toUpperCase() === e.toUpperCase();
+}
+
+// Удалить файл «по возможности»: отказ защиты или сбой — не провал удаления компонента.
+// Нужен для ярлыка в меню «Пуск»: он лежит в AppData\Roaming, а профиль, где эта папка за
+// junction, установка обходит молча (ярлыка там нет), и обязательная цель превращала бы каждое
+// «Удалить» в «НЕ завершена» из-за файла, которого нет и которого мы не создавали.
+function removeFileBestEffort(p, opts, dry) {
+  const r = removeFile(p, opts, dry);
+  if (r.status === 'failed') return res('kept', 'не критично, оставлен: ' + r.message);
+  return r;
 }
 
 // Точная запись пользовательского PATH: убрать ТОЛЬКО полностью совпавшую
@@ -654,6 +793,8 @@ function verifyPostconditions(plan, opts, helpers) {
             // P0-1: gated shim — оставшийся файл ЗАКОНЕН, если нашего ownership-маркера
             // нет (значит файл не наш и мы его намеренно не трогали).
             if (t.onlyIfOwnerMarker && !anyOwnerMarker(t.onlyIfOwnerMarker)) break;
+            // bestEffort (ярлык в меню «Пуск»): остаться на месте ему законно — см. removeFileBestEffort.
+            if (t.bestEffort) break;
             problems.push('файл остался: ' + t.path);
           }
           break;
@@ -679,7 +820,11 @@ function verifyPostconditions(plan, opts, helpers) {
           if (typeof helpers.regQuery !== 'function') { problems.push('нет regQuery для пост-проверки реестра'); break; }
           const q = helpers.regQuery('HKCU\\' + t.key, t.value);
           if (!q || q.ok !== true) { problems.push('реестр не читается: ' + t.key + ' → ' + t.value + (q && q.error ? ' (' + q.error + ')' : '')); break; }
-          if (q.found) problems.push('значение реестра осталось: ' + t.key + ' → ' + t.value);
+          if (q.found) {
+            // onlyIfValueIs: значение с чужим содержимым мы намеренно не трогали — оно законно осталось.
+            if (t.onlyIfValueIs && !runValueIsOurs(q.data, t.onlyIfValueIs)) break;
+            problems.push('значение реестра осталось: ' + t.key + ' → ' + t.value);
+          }
           break;
         }
         case 'pathentry': {
@@ -711,22 +856,29 @@ function verifyPostconditions(plan, opts, helpers) {
         }
         case 'killproc':
           break;
-        case 'hookurl': {
-          // План удаления скрепки НАЧИНАЕТСЯ с этой цели (uninstall-targets.js:201-207),
-          // а пост-проверка её не знала и роняла в default — то есть КАЖДОЕ удаление
-          // скрепки рапортовало «неизвестный тип цели», даже когда всё прошло.
-          // Человек видит проблему там, где её нет, и перестаёт верить отчёту вообще.
+        case 'hookentries': {
+          // План удаления скрепки НАЧИНАЕТСЯ с этой цели (uninstall-targets.js), а пост-проверка её
+          // раньше не знала и роняла в default — то есть КАЖДОЕ удаление скрепки рапортовало
+          // «неизвестный тип цели», даже когда всё прошло. Человек видит проблему там, где её нет,
+          // и перестаёт верить отчёту вообще.
           //
-          // Проверяем то, ради чего цель существует: подстроки `from` в файле
-          // больше нет. Отсутствие файла — тоже успех: правку возвращать некуда.
+          // Проверяем то, ради чего цель существует: записей скрепки в файле больше нет.
+          // Отсутствие файла — тоже успех: править нечего.
           let text = null;
           try { text = fs.readFileSync(t.file, 'utf8'); } catch (e) {
             if (!e || e.code !== 'ENOENT') {
-              problems.push('пост-проверка hookurl: ' + t.file + ' не прочитан (' + ((e && e.code) || e) + ')');
+              problems.push('пост-проверка hookentries: ' + t.file + ' не прочитан (' + ((e && e.code) || e) + ')');
             }
           }
-          if (text !== null && t.from && text.indexOf(t.from) !== -1) {
-            problems.push('hook-url скрепки остался в ' + t.file + ': ' + t.from);
+          if (text !== null) {
+            let parsed = null;
+            try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+            if (parsed !== null) {
+              if (countMascotHooks(parsed, t.port) > 0) problems.push('хуки скрепки остались в ' + t.file);
+            } else if (text.indexOf(':' + t.port + '/hook') !== -1) {
+              // Файл не разобрать, а наш адрес в нём есть: убрать записи мы не могли — не молчим.
+              problems.push('settings.json не разобрать, хуки скрепки могли остаться в ' + t.file);
+            }
           }
           break;
         }
@@ -745,7 +897,8 @@ module.exports = {
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
   removeFileGated, removeDirTreeGated, anyOwnerMarker,
   allowedRcFiles, computeUserPathWithout,
-  classifyLaunchctlPrint, launchctlRemoveError, restoreHookUrl,
+  classifyLaunchctlPrint, launchctlRemoveError, removeMascotHooks, removeFileBestEffort,
+  isMascotHookUrl, stripMascotHooks, countMascotHooks, runValueIsOurs,
   verifyPostconditions,
   renameWithRetry // экспортируется РАДИ ТЕСТА: без него ретрай возврата из карантина
                   // проверяется только «повезло/не повезло» на живой ФС, то есть никак

@@ -21,6 +21,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const linkGuard = require('./link-guard');
 
 const SCHEMA_VERSION = 2;
 const DIR_NAME = '.hamidun-setup';
@@ -32,9 +33,29 @@ const TOMBSTONE_SUFFIX = '.uninst';
 // «Удалить» → uninstall снёс бы чужие venv/шимы). Любой ненулевой код тоже не пишет.
 const EXIT_SKIP = 120;
 function isSkipExit(code) { return code === EXIT_SKIP; }
-// Маркер установки пишем ТОЛЬКО при реальном успехе (код 0), не в dry-run, не hidden.
+// Код 121 = «частичный успех»: компонент РАБОТАЕТ, необязательной части нет. Контракт со
+// скриптами: перед выходом печатается ровно одна строка «ЧАСТИЧНО: <причина и что сделать>».
+// Первый пользователь — vscode.ps1: редактор стоит, а панель Claude или Codex не встала.
+// Раньше такой исход был красным «VS Code не встал», и человек переустанавливал то, что
+// уже стоит. Для потока установки это успех (зависимые идут дальше), а renderer получает
+// partial: true и partialReason — и рисует шаг жёлтым.
+const EXIT_PARTIAL = 121;
+function isPartialExit(code) { return code === EXIT_PARTIAL; }
+// Причина частичного успеха — последняя строка «ЧАСТИЧНО:» хвоста вывода (без префикса).
+// main.js отдаёт хвост МАССИВОМ строк (outTail), тесты и скрипты — одной строкой: принимаем
+// оба вида. String(массив) склеивал бы строки запятой, «ЧАСТИЧНО:» переставала стоять в
+// начале строки, и причина в бою всегда была пустой — человек видел общую фразу.
+function partialReason(outTail) {
+  const raw = Array.isArray(outTail) ? outTail : [outTail];
+  const lines = raw.map((x) => String(x == null ? '' : x)).join('\n').split(/\r?\n/)
+    .map((l) => l.trim()).filter((l) => /^ЧАСТИЧНО:/.test(l));
+  if (!lines.length) return '';
+  return lines[lines.length - 1].replace(/^ЧАСТИЧНО:\s*/, '').slice(0, 300);
+}
+// Маркер установки пишем ТОЛЬКО когда компонент реально встал (0, или 121 — работает без
+// необязательной части), не в dry-run, не hidden.
 function shouldRecordInstall(code, isDryRun, hidden) {
-  return code === 0 && !isDryRun && !hidden;
+  return (code === 0 || code === EXIT_PARTIAL) && !isDryRun && !hidden;
 }
 
 // Легаси-типы строк 'HM-RECEIPT <type> <value>' в stdout install-скриптов.
@@ -50,6 +71,14 @@ function receiptPath(homedir, id) {
 }
 function tombstonePath(homedir, id) {
   return receiptPath(homedir, id) + TOMBSTONE_SUFFIX;
+}
+
+// u10a/F16: маркеры пишет и переименовывает процесс с правами администратора, а ~/.hamidun-setup доступен любой
+// программе того же пользователя. Ссылка (junction) на нём — не пишем и не переименовываем через неё: бросаем
+// (writeReceipt: main.js ловит и пишет одну строку в журнал) либо отдаём {ok:false} (остальные операции
+// и так возвращают ответ). Установка из-за справочного маркера не падает, но и чужого каталога не касается.
+function assertLinkFree(homedir, target) {
+  linkGuard.assertNoLinkInChain(target, homedir, undefined, 'отметке установки');
 }
 
 // Разбор строки 'HM-RECEIPT <type> <value>' (только для фильтрации из UI-лога).
@@ -75,9 +104,10 @@ function buildReceipt(id, platform, version) {
 
 // P2: восстановление после краха rollback-а — если основной файл пропал, а рядом
 // остался *.bak (см. writeReceipt fallback), возвращаем самый свежий .bak на место.
-function recoverBak(dir, dstBaseName) {
+function recoverBak(dir, dstBaseName, homedir) {
   try {
     const dst = path.join(dir, dstBaseName);
+    if (homedir && !linkGuard.isLinkFree(dst, homedir)) return;   // чужой каталог за ссылкой: «.bak» оттуда не возвращаем
     if (fs.existsSync(dst)) return;
     // P1-1: идёт (или упала посреди) деинсталляция — маркер деактивирован в
     // tombstone. «Удалённый» компонент НЕ воскрешаем из осиротевшего .bak.
@@ -127,11 +157,19 @@ function writeReceipt(homedir, id, receipt, opts) {
   const dst = receiptPath(homedir, id);
   if (opts.dryRun) return { ok: true, path: dst, dryRun: true };
   const dir = receiptsDir(homedir);
+  assertLinkFree(homedir, dst);
   fs.mkdirSync(dir, { recursive: true });
+  assertLinkFree(homedir, dst);                 // каталог мог стать ссылкой между проверкой и созданием
   const json = JSON.stringify(receipt, null, 2);
   const ex = openExclTmp(dir, String(id) + '.json');
   const tmp = ex.tmp;
   const fd = ex.fd;
+  try { assertLinkFree(homedir, dst); }          // сразу после создания временного файла (см. src/link-guard.js)
+  catch (e) {
+    try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+    try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
+    throw e;
+  }
   try {
     fs.writeFileSync(fd, json, 'utf8');
     try { fs.fsyncSync(fd); } catch (e) { /* fsync недоступен — не фатально */ }
@@ -167,7 +205,7 @@ function writeReceipt(homedir, id, receipt, opts) {
 // Легаси-схема (v1 c artifacts) — валидный маркер; artifacts НЕ экспонируются.
 function readReceipt(homedir, id) {
   try {
-    recoverBak(receiptsDir(homedir), String(id) + '.json');
+    recoverBak(receiptsDir(homedir), String(id) + '.json', homedir);
   } catch (e) { /* ignore */ }
   try {
     const raw = fs.readFileSync(receiptPath(homedir, id), 'utf8');
@@ -196,6 +234,7 @@ function deactivateReceipt(homedir, id) {
   const src = receiptPath(homedir, id);
   const dst = tombstonePath(homedir, id);
   try {
+    assertLinkFree(homedir, src);
     try { fs.rmSync(dst, { force: true }); } catch (e) { /* хвост прошлого краша */ }
     fs.renameSync(src, dst);
     return { ok: true, tombstone: dst };
@@ -209,6 +248,7 @@ function restoreReceipt(homedir, id) {
   const src = tombstonePath(homedir, id);
   const dst = receiptPath(homedir, id);
   try {
+    assertLinkFree(homedir, src);
     fs.renameSync(src, dst);
     return { ok: true };
   } catch (e) {
@@ -228,6 +268,7 @@ function restoreReceipt(homedir, id) {
 function recoverOrphanTombstones(homedir) {
   const dir = receiptsDir(homedir);
   const restored = [];
+  if (!linkGuard.isLinkFree(dir, homedir)) return { ok: true, restored };   // за ссылкой — чужой каталог, не трогаем
   let names;
   try { names = fs.readdirSync(dir); }
   catch (e) { return { ok: true, restored }; }        // каталога нет — нечего чинить
@@ -270,6 +311,7 @@ function finalizeRemoval(homedir, id) {
   const dir = receiptsDir(homedir);
   const base = String(id) + '.json';
   try {
+    assertLinkFree(homedir, t);
     try { fs.rmSync(t, { force: true }); }
     catch (e) { return { ok: false, error: 'снятие tombstone: ' + String((e && e.code) || e) }; }
     const deb = listReceiptDebris(dir, base);
@@ -294,6 +336,7 @@ function finalizeRemoval(homedir, id) {
 function removeReceipt(homedir, id) {
   const p = receiptPath(homedir, id);
   try {
+    assertLinkFree(homedir, p);
     fs.rmSync(p, { force: true });
     if (fs.existsSync(p)) return { ok: false, error: 'файл остался: ' + p };
     return { ok: true };
@@ -304,7 +347,7 @@ function removeReceipt(homedir, id) {
 
 module.exports = {
   SCHEMA_VERSION, DIR_NAME, SUB_DIR, ALLOWED_TYPES, TOMBSTONE_SUFFIX,
-  EXIT_SKIP, isSkipExit, shouldRecordInstall,
+  EXIT_SKIP, isSkipExit, EXIT_PARTIAL, isPartialExit, partialReason, shouldRecordInstall,
   receiptsDir, receiptPath, tombstonePath, parseReceiptLine, buildReceipt,
   writeReceipt, readReceipt, hasReceipt,
   deactivateReceipt, restoreReceipt, finalizeRemoval, removeReceipt,

@@ -45,13 +45,89 @@ function filterRendererEnv(rendererEnv) {
   return out;
 }
 
+// POSIX (macOS): окружение дочерних скриптов компонентов = КОПИЯ process.env за вычетом
+// списка запретов. Allowlist, как на Windows, здесь не годится: скрипты законно ищут
+// brew/node/python/git по пользовательскому PATH, а прокси и локаль (https_proxy, LANG,
+// LC_*) обязаны дойти до curl/pip/npm. Поэтому режем только то, что ЗАПУСКАЕТ чужой код
+// или подменяет настройки инструментов ещё до первой строки скрипта.
+//
+// Зачем это нужно именно на macOS. Главный процесс и каждый скрипт компонента работают
+// от ПРОСТОГО пользователя; root появляется только внутри admin_run (osascript «with
+// administrator privileges»), и там окружение стирается `env -i` (_lib.sh). Но команду
+// для root — и тексты HM_*_INSTALL_SH — собирает НЕпривилегированный bash. Код того же
+// пользователя (launchctl setenv, LaunchAgent с EnvironmentVariables, ~/.zshenv при запуске
+// из терминала) кладёт в окружение установщика BASH_ENV/ENV/SHELLOPTS+PS4/BASH_FUNC_*, и bash
+// каждого скрипта выполняет это ДО его первой строки: `unset BASH_ENV` внутри скрипта уже
+// опоздал. Подменённый admin_run или переписанный HM_APP_INSTALL_SH уходит в окно с
+// настоящим системным запросом пароля — и человек сам вводит пароль для чужого текста.
+// Единственное место, где это закрывается целиком, — окружение, с которым bash стартует.
+//
+// Сознательно НЕ режем (остаточное, тот же пользователь = тот же доступ): PATH, HOME, прокси,
+// локаль и переменные доверия к TLS (NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, CURL_CA_BUNDLE —
+// нужны людям за корпоративным прокси; скачанное всё равно сверяется по sha256 и подписи),
+// PIP_*/UV_* (зеркала пакетов), переменные сборочных инструментов (CC, CFLAGS, RUSTFLAGS).
+// Режем же DEVELOPER_DIR/SDKROOT/TOOLCHAINS: это не «настройки сборки», а выбор исполняемого файла
+// ЗА системными шимами /usr/bin/git, /usr/bin/python3, /usr/bin/clang (xcode-select(1), xcrun(1):
+// шим запускает `$DEVELOPER_DIR/usr/bin/<tool>`) — тот же класс, что GIT_EXEC_PATH.
+//
+// Сравнение имён РЕГИСТРОНЕЗАВИСИМО: legitimate-переменных, отличающихся от этих только
+// регистром, нет, а лишний отброс безвреден.
+const POSIX_ENV_DENY_EXACT = new Set([
+  // bash/sh: что исполняется или включается при старте оболочки
+  'env', 'shellopts', 'bashopts', 'ps4', 'prompt_command', 'cdpath', 'globignore', 'ifs', 'posixly_correct',
+  // интерпретаторы: чужой код/модули до первой строки программы
+  'node_options', 'node_path',
+  'rubyopt', 'rubylib',
+  'perl5opt', 'perl5lib',
+  // JVM: -javaagent и подобное подхватывается любой java, которую запустит скрипт
+  'java_tool_options', '_java_options', 'jdk_java_options',
+  // OpenSSL: engine/provider из конфига — это загрузка чужой динамической библиотеки
+  'openssl_conf', 'openssl_modules', 'openssl_engines',
+  // xcode-select: набор инструментов за шимами /usr/bin/git, python3, clang … (см. комментарий выше)
+  'developer_dir', 'sdkroot', 'toolchains'
+]);
+const POSIX_ENV_DENY_PREFIX = [
+  'bash_',         // BASH_ENV, BASH_FUNC_<имя>%% (экспортируемые функции), BASH_XTRACEFD, BASH_LOADABLES_PATH
+  'dyld_', 'ld_',  // динамический загрузчик (DYLD_INSERT_LIBRARIES, LD_PRELOAD)
+  'python',        // PYTHONSTARTUP, PYTHONPATH, PYTHONHOME, PYTHONINSPECT, PYTHONUSERBASE, PYTHONBREAKPOINT …
+  'perl', 'ruby',  // PERL5DB, PERLLIB, RUBYPATH, RUBYSHELL … (в паре с точными именами выше)
+  'git_',          // GIT_EXEC_PATH, GIT_CONFIG*, GIT_SSH*, GIT_PROXY_COMMAND, GIT_TEMPLATE_DIR … (нужные нам
+                   // GIT_TERMINAL_PROMPT/GIT_ASKPASS main задаёт сам ПОСЛЕ — NONINTERACTIVE_ENV)
+  'npm_config_',   // как и на Windows (npm_config_yes main возвращает через NONINTERACTIVE_ENV)
+  'hm_'            // переменные установщика: те, что нужны скриптам, main задаёт сам и авторитетно
+];
+
+// Старая форма экспорта функции bash (до Shellshock-патча значение вида «() { … }» под ЛЮБЫМ
+// именем становилось функцией). Системный bash 3.2.57 её не принимает, но вложенный/чужой bash
+// в PATH мог бы; отбросить такое значение ничего не стоит.
+const LEGACY_BASH_FUNCTION_VALUE = /^\s*\(\)\s*\{/;
+
+function isDeniedPosixEnvEntry(key, value) {
+  const k = String(key).toLowerCase();
+  if (POSIX_ENV_DENY_EXACT.has(k)) return true;
+  if (POSIX_ENV_DENY_PREFIX.some((p) => k.startsWith(p))) return true;
+  return typeof value === 'string' && LEGACY_BASH_FUNCTION_VALUE.test(value);
+}
+
+// Вернуть НОВЫЙ объект: process.env без запрещённых записей (исходник не мутируем).
+function sanitizePosixEnv(src) {
+  const out = {};
+  const env = src || {};
+  for (const k of Object.keys(env)) {
+    if (!isDeniedPosixEnvEntry(k, env[k])) out[k] = env[k];
+  }
+  return out;
+}
+
 // #4 (finalize round-2) — АВТОРИТЕТНЫЕ системные path-переменные из ВАЛИДИРОВАННОГО
 // диска, а НЕ из launch-env. Update-Path в install-скриптах выводит каталоги git/node
 // из $env:ProgramFiles/$env:SystemRoot; если установщик запущен с crafted env
 // (ProgramFiles=C:\Users\...\evil), то без этой перезаписи в elevated PATH попал бы
 // evil\Git\cmd\git.exe. Диск/корень берём из validated winSystemRoot (reparse-safe).
-// Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят — они
-// по природе user-writable (abs-path fallback в user-профиль — принятый остаток).
+// Профильные переменные (USERPROFILE/LOCALAPPDATA/APPDATA) сюда НЕ входят: у них свой
+// источник истины — профиль учётной записи по ТОКЕНУ процесса (src/profile-env.js; замок стоит в
+// самом начале main.js и правит process.env до того, как отсюда что-либо копируется). Содержимое
+// самого профиля по природе user-writable — это принятый остаток; выбор КАКОГО профиля — уже нет.
 function authoritativeWinSystemEnv(winRoot, drive) {
   // Всегда win32-семантика (вызывается ТОЛЬКО из if(IS_WIN) в main.js, см. main.js:768) —
   // path.win32 явно, а не host-зависимый require('path'): иначе на CI-раннере macOS/Linux
@@ -78,4 +154,70 @@ function authoritativeWinSystemEnv(winRoot, drive) {
   };
 }
 
-module.exports = { isAllowedRendererEnvKey, filterRendererEnv, authoritativeWinSystemEnv };
+// u10a (рецензия безопасности, F14 и F13b) — Windows: потомки установщика (npm install -g, git clone,
+// `npm config get prefix` в claude.ps1/verify.ps1) идут с токеном АДМИНИСТРАТОРА, но настройки читали ЧЕЛОВЕКА:
+//   • %USERPROFILE%\.npmrc и %APPDATA%\npm\etc\npmrc (globalconfig лежит в prefix, а prefix по умолчанию —
+//     %APPDATA%\npm, то есть тоже в профиле) — `registry=http://127.0.0.1:…` превращал онлайн-фолбэк в запуск
+//     жизненного цикла чужого пакета под администратором, `prefix=` уводил `npm config get prefix`, а вместе с
+//     ним список каталогов, где claude.ps1 удаляет файлы (F13b);
+//   • ~/.gitconfig и ~/.config/git/config — `url.<чужой>.insteadOf`, `core.fsmonitor`, `filter.*.smudge` в
+//     `git clone` конфиг-пака (подмена содержимого, а smudge-фильтр — исполнение под администратором).
+// Окружение main строит по allowlist и npm_config_* переменные уже режет, но ФАЙЛЫ настроек npm и git читает сам
+// инструмент по профилю. Лечится указанием на пустое место, которое пользовательская программа создать не может.
+//
+// ЧТО ПРОВЕРЕНО НА НАСТОЯЩИХ ИНСТРУМЕНТАХ (npm 11.3.0, Git for Windows 2.50.1):
+//   • npm отказывается грузить ОДИН файл дважды — «double-loading config … as "global", previously loaded as
+//     "user"» (код 1). Поэтому для userconfig и globalconfig нужны два РАЗНЫХ пути; предложение «один пустой файл
+//     на оба» из отчёта не работает.
+//   • литерал NUL для npm не годится: путь достраивается от текущей папки (<cwd>\NUL), а не открывает устройство.
+//   • npm считает отсутствующий файл настроек пустым (так живёт каждый, у кого нет ~/.npmrc). Пути ведут в
+//     System32: туда без прав администратора файл не положить, значит «нет файла» не превратится в чужой файл;
+//     создавать ничего не нужно (ни PowerShell, ни каталога в ProgramData).
+//   • git: GIT_CONFIG_GLOBAL=NUL прячет и ~/.gitconfig, и ~/.config/git/config; одного GIT_CONFIG_NOSYSTEM мало.
+//   • проектный .npmrc из текущей папки перебивает всё (`npm config get`), поэтому рабочая папка потомка —
+//     System32 (src/main.js, run-component): без неё каталог распаковки portable-exe в %TEMP% был «проектом».
+//     `npm install -g` проектный файл игнорирует, `npm config get prefix` — нет.
+// GIT_CONFIG_NOSYSTEM отключает и системный конфиг Git (у новых установок там http.sslBackend=schannel, заметка
+// релиза Git for Windows «new installations default to the Windows-native HTTPS transport backend»), и
+// %PROGRAMDATA%\Git\config. Нативный TLS возвращаем явно через GIT_CONFIG_COUNT: иначе люди, у которых антивирус
+// подменяет HTTPS своим корневым сертификатом из хранилища Windows, теряли бы клон конфига (OpenSSL с собственным
+// набором сертификатов Git такой корень не знает).
+const NPM_ISOLATED_USERCONFIG = 'hm-setup-isolated-user.npmrc';
+const NPM_ISOLATED_GLOBALCONFIG = 'hm-setup-isolated-global.npmrc';
+const GIT_CONFIG_ISOLATION_KEYS = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'];
+
+// system32 — ВАЛИДИРОВАННЫЙ каталог System32 (main.js берёт его из remote-fetch.winSystemRoot, не из env).
+function toolConfigIsolationEnv(system32) {
+  const W = require('path').win32;
+  return {
+    NPM_CONFIG_USERCONFIG: W.join(String(system32), NPM_ISOLATED_USERCONFIG),
+    NPM_CONFIG_GLOBALCONFIG: W.join(String(system32), NPM_ISOLATED_GLOBALCONFIG),
+    GIT_CONFIG_GLOBAL: 'NUL',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.sslBackend',
+    GIT_CONFIG_VALUE_0: 'schannel'
+  };
+}
+
+// Компоненты, чей скрипт ПИШЕТ глобальную настройку git человека. git.ps1 (Set-HmGitDefaults) ставит ему
+// `git config --global` — core.longpaths, init.defaultBranch, core.autocrlf, user.name/user.email по умолчанию —
+// и это задумано: новичку не нужно настраивать git руками. С GIT_CONFIG_GLOBAL=NUL запись ушла бы в никуда.
+// Совпадение — по ТОЧНОМУ id из вшитого components.json (регистр и пробелы не прощаем: лишний отказ безопаснее).
+const USER_GIT_CONFIG_WRITERS = new Set(['git']);
+
+// Убирает git-половину изоляции у компонента из USER_GIT_CONFIG_WRITERS (npm-половина остаётся). Меняет и
+// возвращает переданный объект — так же, как main.js делает delete childEnv.HM_REMOTE_CACHE.
+function withoutGitConfigIsolation(env, componentId) {
+  if (env && USER_GIT_CONFIG_WRITERS.has(componentId)) {
+    for (const k of GIT_CONFIG_ISOLATION_KEYS) delete env[k];
+  }
+  return env;
+}
+
+module.exports = {
+  isAllowedRendererEnvKey, filterRendererEnv, authoritativeWinSystemEnv,
+  isDeniedPosixEnvEntry, sanitizePosixEnv,
+  toolConfigIsolationEnv, withoutGitConfigIsolation,
+  NPM_ISOLATED_USERCONFIG, NPM_ISOLATED_GLOBALCONFIG, GIT_CONFIG_ISOLATION_KEYS, USER_GIT_CONFIG_WRITERS
+};

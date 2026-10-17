@@ -1,0 +1,61 @@
+  // pydeps (best-effort: python + представительный пакет). Ложно-негатив безвреден —
+  // переустановка pydeps идемпотентна; ложно-позитив лишь снимает галку по умолчанию.
+  {
+    const py = resolveExecutable(IS_WIN ? ['python.exe', 'python3.exe'] : ['python3', 'python'],
+      IS_WIN ? [path.join(winLocalAppData(), 'Programs', 'Python', 'Python313'),
+                path.join(winLocalAppData(), 'Programs', 'Python', 'Python312')] : []);
+    let found = false;
+    // macOS-ГОЧА (ТОТ ЖЕ класс, что git-шим выше, стр. 1379): /usr/bin/python3 —
+    // Apple-стаб; его запуск на чистом маке БЕЗ Command Line Tools САМ открывает
+    // системный диалог «установить инструменты разработчика» — прямо в фазе
+    // детекции, до единого клика. Не пробим такой шим — считаем pydeps не
+    // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
+    // пакеты через framework/uv-python без окон Apple).
+    const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
+    // Windows: НЕ запускаем python под elevated-токеном, если он мог быть подменён medium-
+    // юзером (тот же RCE-вектор, что probeVersion; admin-owned — можно). Ложно-негатив
+    // безвреден (pydeps.ps1 идемпотентен).
+    const pyExecSafe = py && !pyShim && winSafeToExec(py);
+    if (pyExecSafe) {
+      try {
+        // `-E` + доверенный env: без них PYTHONPATH/PYTHONSTARTUP из HKCU\Environment
+        // (пишет medium-малварь того же юзера) заставили бы интерпретатор ИМПОРТИРОВАТЬ
+        // чужой PIL.py ПОД АДМИНОМ — авто-детекция на старте, до единого клика.
+        // `-I` НЕ используем: он выключает и user site-packages, а pydeps ставит пакеты
+        // через `pip install --user` → детекция стала бы вечно ложно-отрицательной.
+        // cwd в System32: для `-c` sys.path[0]='' = ТЕКУЩИЙ каталог, а portable-exe
+        // запускается из user-writable Downloads (подмена модуля по cwd).
+        const opts = { windowsHide: true, timeout: 6000, stdio: 'ignore' };
+        const pyArgs = IS_WIN ? ['-E', '-c', 'import PIL, requests'] : ['-c', 'import PIL, requests'];
+        if (IS_WIN) {
+          opts.env = detectSpawnEnv();
+          opts.cwd = path.join(remoteFetch.winSystemRoot() || 'C:\\Windows', 'System32');
+        }
+        execFileSync(py, pyArgs, opts);
+        found = true;
+      } catch (e) { found = false; }
+    }
+    // Браузер Playwright — часть этого компонента, и без него он неполон.
+    //
+    // pydeps выходит кодом 0, даже когда `playwright install chromium` не прошёл: сами
+    // Python-пакеты при этом стоят, и валить весь шаг нельзя — от pydeps зависит bridge,
+    // которому браузер не нужен. Но main на код 0 пишет квитанцию «установлено», и на
+    // СЛЕДУЮЩЕМ прогоне детекция (проверявшая только импорт PIL/requests) подтверждала
+    // это же: компонент зелёный, кнопки «Повторить» нет, а браузерные навыки молча не
+    // работают. Первый прогон ловил verify, второй не ловил никто.
+    //
+    // Поэтому «установлен» = пакеты И браузер. Каталоги — те же, куда кладёт pydeps
+    // (pydeps.ps1:174 / pydeps.sh:98). Пустой каталог не считаем: `playwright install`
+    // создаёт его до распаковки.
+    if (found) {
+      const pwRoot = IS_WIN
+        ? path.join(winLocalAppData(), 'ms-playwright')
+        : path.join(home, 'Library', 'Caches', 'ms-playwright');
+      let hasBrowser = false;
+      try {
+        hasBrowser = fs.readdirSync(pwRoot).some((n) => /^chromium/i.test(n));
+      } catch (e) { hasBrowser = false; }
+      if (!hasBrowser) found = false;
+    }
+    out.pydeps = { installed: found, detectedVersion: '' };
+  }

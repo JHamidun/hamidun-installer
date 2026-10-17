@@ -4,7 +4,8 @@
 # было ДУБЛЯ установки в VS Code (P0-A: убран второй elevated-путь к user-writable code.cmd).
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
-. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated / Invoke-HmDeElevatedSafe (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Write-HmUserFile: шрифт и стартовый settings.json Cursor пишутся без хода по ссылке
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -108,9 +109,11 @@ $script:DeElevFailed = $false
 # P0-A (privesc): этот скрипт исполняется ELEVATED (установщик requireAdministrator).
 # Прямой запуск user-writable cursor.cmd/Cursor.exe под АДМИНОМ выполнил бы то, что
 # medium-integrity малварь ТОГО ЖЕ юзера могла заранее подложить на его место. Поэтому
-# установка Cursor CLI идёт ЧЕРЕЗ единый де-элевированный примитив (Invoke-HmDeElevated,
-# _deelev.ps1). $null -> fail-closed: под админом НЕ запускаем. Аттестация — ПРЯМОЙ проверкой
-# каталога расширений Cursor (Test-HmExtInstalled), а НЕ через вывод editor CLI бинаря.
+# установка Cursor CLI идёт ЧЕРЕЗ единый де-элевированный примитив (Invoke-HmDeElevatedSafe,
+# _deelev.ps1: задача планировщика, а если доказано, что она ничего не запустила, — токен
+# оболочки Explorer; на выходе строка диагностики с Gate и «Last Result»). Ни один путь не
+# отработал -> fail-closed: под админом НЕ запускаем. Аттестация — ПРЯМОЙ проверкой каталога
+# расширений Cursor (Test-HmExtInstalled), а НЕ через вывод editor CLI бинаря.
 
 function Get-CursorExtDirs { @((Join-Path $env:USERPROFILE '.cursor\extensions')) }
 
@@ -134,17 +137,22 @@ function Install-Into($cli, $label) {
     if (Test-HmExtInstalled -ExtId $extId -Dirs (Get-CursorExtDirs)) { Write-Host "  ${label}: уже на месте."; return $true }
     $target = if ($vsix) { $vsix } else { $extId }
     if ($vsix) { Write-Host "  из вшитого vsix (офлайн): $vsix" }
-    $r = Invoke-HmDeElevated $cli @('--install-extension', $target, '--force')
-    if ($null -eq $r) {
-        Write-Host "  ${label}: не удалось безопасно (де-элевированно) установить — пропускаю (fail-closed, НЕ запускаю под админом)."
+    $r = Invoke-HmDeElevatedSafe $cli @('--install-extension', $target, '--force') -Label "cursor-$extId"
+    # Ни один путь программу НЕ запустил (а не «запустил, и она не справилась»), и ничто из
+    # запущенного уже не идёт — fail-closed. Gate 'unknown' (итога нет, возможно, ещё идёт) —
+    # не провал де-элевации: итог смотрим по каталогу ниже.
+    if ($null -eq $r -or ($r.Gate -ne 'medium' -and $r.Finished)) {
+        Write-Host "  ${label}: не удалось безопасно (от имени пользователя) установить — пропускаю (fail-closed, под администратором НЕ запускаю)."
         $script:DeElevFailed = $true
         return $false
     }
     if (Test-ExtPresent) { Write-Host "  ${label}: расширение на месте."; return $true }
-    if ($vsix) {
+    # Второй запуск (Marketplace) — только если первый ДОКАЗАННО отработал: при 'unknown' он мог
+    # ещё идти, и два редактора писали бы в один ~/.cursor/extensions.
+    if ($vsix -and $r.Gate -eq 'medium') {
         Write-Host "  ${label}: vsix не подтвердился — пробую Marketplace ($extId)..."
-        $r2 = Invoke-HmDeElevated $cli @('--install-extension', $extId, '--force')
-        if ($null -eq $r2) { $script:DeElevFailed = $true; return $false }
+        $r2 = Invoke-HmDeElevatedSafe $cli @('--install-extension', $extId, '--force') -Label "cursor-$extId"
+        if ($null -eq $r2 -or ($r2.Gate -ne 'medium' -and $r2.Finished)) { $script:DeElevFailed = $true; return $false }
         if (Test-ExtPresent) { Write-Host "  ${label}: расширение на месте (Marketplace)."; return $true }
     }
     Write-Host "  ${label}: расширение не подтвердилось."; return $false
@@ -177,9 +185,11 @@ if ($fontSrc) {
     else {
         try {
             $fontDir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts'
-            New-Item -ItemType Directory -Force $fontDir | Out-Null
             $fontDst = Join-Path $fontDir 'JetBrainsMono-Regular.ttf'
-            Copy-Item -Force $fontSrc $fontDst
+            # Запись под администратором в профиль: junction на Fonts (или выше по пути) уводил New-Item и Copy-Item в чужую
+            # папку, file-symlink на имя шрифта — запись в её цель. Каталог создаётся и проверяется по цепочке от профиля,
+            # файл ложится переносом по имени (Write-HmUserFile); шрифт — наш файл, «только чтение» с него снимается.
+            Write-HmUserFile -Path $fontDst -Bytes ([System.IO.File]::ReadAllBytes($fontSrc)) -ClearReadOnly
             $regKey = 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
             if (-not (Test-Path $regKey)) { New-Item -Path $regKey -Force | Out-Null }
             New-ItemProperty -Path $regKey -Name 'JetBrains Mono Regular (TrueType)' -Value $fontDst -PropertyType String -Force | Out-Null
@@ -196,7 +206,6 @@ if (Test-Path $cursorSettings) {
     if ($DRY) { Write-Host "  [dry-run] WOULD: создать $cursorSettings (autoSave + JetBrains Mono)" }
     else {
         try {
-            New-Item -ItemType Directory -Force (Split-Path $cursorSettings) | Out-Null
             $seed = @'
 {
   "files.autoSave": "afterDelay",
@@ -204,7 +213,10 @@ if (Test-Path $cursorSettings) {
   "terminal.integrated.fontFamily": "JetBrains Mono"
 }
 '@
-            Set-Content -Path $cursorSettings -Value $seed -Encoding UTF8
+            # Те же байты, что давал Set-Content -Encoding UTF8 (UTF-8 с BOM и перевод строки в конце), но переносом по имени
+            # и с проверкой цепочки от профиля: junction на %APPDATA%\Cursor (или выше) и symlink на settings.json уводили
+            # Set-Content в чужое место под администратором. Файл человека, которого ещё нет: «только чтение» снимать не с чего.
+            Write-HmUserFile -Path $cursorSettings -Bytes (ConvertTo-HmBomLineBytes $seed)
             Write-Host "Создал стартовый settings.json Cursor (autoSave + JetBrains Mono)."
         } catch { Write-Host "settings.json Cursor не создался: $($_.Exception.Message)" }
     }

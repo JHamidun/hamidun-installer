@@ -40,8 +40,17 @@ TOTP — в `~/.claude/.credentials.master.env`, ключи `CERTUM_SIMPLYSIGN_*
 ## Подпись при сборке
 
 `package.json` → `build.win.signtoolOptions.sign` = `tools/sign-win.js`.
-electron-builder вызывает его на каждый исполняемый файл: само приложение,
-`elevate.exe` и итоговый portable-exe (проверено сборкой 05.10). Хук:
+electron-builder отдаёт хуку каждый исполняемый файл сборки, а хук подписывает
+**ровно три своих файла по списку**: exe приложения (`Hamidun Setup.exe` прямо в
+`win-*unpacked`), `elevate.exe` прямо в `resources` и итоговый portable
+(`Hamidun-Setup-Windows[-Lite].exe`). Всё остальное пропускается со строкой в логе,
+в том числе все .exe из `resources\vendor` (вшитые установщики Git, VS Code, Cursor,
+Python, Handy, а также uv и скрепка): их SHA-256 закреплён в `vendor\checksums.json`,
+и после подписи `Confirm-HmArtifact` останавливал бы установку каждого из них как
+«файл подменён». Подписи самих вендоров остаются нетронутыми. Раньше хук держал
+чёрный список по пути; при смене раскладки он молча подписал бы вендорский файл,
+поэтому теперь работает список (`isOwn` в `tools/sign-win.js`), а имена из него
+сверяет тест с `package.json`. Хук:
 
 1. один раз за сборку входит через коннектор;
 2. подписывает: `signtool sign /sha1 <отпечаток> /fd sha256 /tr http://time.certum.pl /td sha256`,
@@ -57,6 +66,28 @@ electron-builder вызывает его на каждый исполняемы�
 | `HM_WIN_CERT_SHA1` | другой отпечаток — после перевыпуска сертификата |
 | `HM_SIGNTOOL` | путь к signtool.exe, если Windows SDK стоит не там |
 | `HM_SIMPLYSIGN_CONNECT` | своя команда входа вместо коннектора |
+
+## Проверки после сборки
+
+Хук подписи в CI, не на Windows и при `HM_WIN_SIGN=0` пропускает подпись, а
+electron-builder всё равно рапортует успех. Поэтому `npm run dist`, `dist:win` и
+Windows-ветка `build-lite.js` заканчиваются тремя независимыми проверками, и любая
+красная останавливает сборку:
+
+1. `tools/verify-fuses.js` читает готовый exe побайтно и требует выключенные
+   `RunAsNode`, `EnableNodeOptionsEnvironmentVariable` и
+   `EnableNodeCliInspectArguments` (иначе процесс того же пользователя превратил бы
+   подписанный exe с правами администратора в Node-интерпретатор);
+2. `tools/verify-packed-vendor.js` сверяет упакованный `vendor` с `checksums.json`
+   (код 0 — проверен хотя бы один файл и дефектов нет; 1 — расхождение, запись без
+   хеша или пропавший обязательный файл; 2 — проверять нечего: пустого зелёного нет);
+3. `tools/verify-signature.js`, последним: три своих файла имеют `Status = Valid`,
+   отпечаток подписанта равен `CERT_SHA1` и есть метка времени. Пропуск только по
+   `HM_WIN_SIGN=0` и громко («ПРОПУЩЕНО…»); CI и не-Windows без этого флага не пропускают.
+
+`npm run dist` и `dist:win` зовут фетчер как `fetch:vendor -- -Release`: релизная
+сборка без личного списка паттернов экспорт-фильтра Nomad останавливается так же, как
+в CI (подробности: `docs/specs/obsluzhivanie-vendor.md`, пункт 17).
 
 ## Подписать готовый файл
 
@@ -74,7 +105,8 @@ signtool verify /pa <файл.exe>
 
 `tools/publish-dist.py` не выложит exe, если Windows не считает его подпись
 действительной (`Get-AuthenticodeSignature` = Valid) или он подписан не нашим
-сертификатом. Выложить без подписи можно только осознанно — флагом
+сертификатом (то же проверяет `verify-signature.js` ещё на сборке, публикация
+страхует второй раз). Выложить без подписи можно только осознанно — флагом
 `--allow-unsigned`, и это видно в логе.
 
 ## Нельзя

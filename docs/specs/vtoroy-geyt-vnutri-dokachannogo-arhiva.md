@@ -3,14 +3,14 @@
 <!-- spec-id: vtoroy-geyt-vnutri-dokachannogo-arhiva -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:1074-1087`, `src/main.js:1103-1138`, `src/main.js:744`, `src/remote-fetch.js:897-1013`, `scripts/windows/_verify.ps1:64-118`, `scripts/macos/_lib.sh:196-260`, `remote-components.json`, `vendor/checksums.json`, `tools/push-component.py:74-124`, `tools/build-lite.js:159-239`, `tools/release-check.js:206-245`, `src/renderer/app.js:1505-1524`
+- **Код:** `src/main.js:1235-1248`, `src/main.js:1267-1302`, `src/main.js:865`, `src/remote-fetch.js:908-1024`, `scripts/windows/_verify.ps1:66-120`, `scripts/macos/_lib.sh:231-295`, `remote-components.json`, `vendor/checksums.json`, `tools/push-component.py:74-124`, `tools/build-lite.js:159-239`, `tools/release-check.js:228-267`, `src/renderer/app.js:1581-1599`
 - **Тесты:** «nomad.sh (функц.): вшитый vendor (HM_NOMAD_SRC с pyproject + аттестация) → install БЕЗ клона + брендинг, exit 0; git НЕ вызван», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «vscode.ps1: ставит ОБА расширения; no-vendor → exit 120; идемпотентно; тихая установка; fail-closed», «vscode.sh: ставит ОБА расширения; no-vendor → exit 120; установка через HM_VSCODE_INSTALL_SH (root-staging); идемпотентно; fail-closed», «каждая запись реестра докачки корректна (sha256/size/mirrors)», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
 
 ## Что обещает человеку
 
 В лёгком издании установщик качает из облака сотни мегабайт и запускает то, что скачал,
 с правами администратора. Первый гейт проверяет архив целиком: SHA-256 ZIP-а сверяется с
-реестром `remote-components.json` ещё до распаковки (`src/remote-fetch.js:911-915, 988-995`).
+реестром `remote-components.json` ещё до распаковки (`src/remote-fetch.js:922-926, 988-995`).
 Второй гейт — обещание, что и после распаковки под администратором стартует не «файл из
 скачанной папки», а конкретный, поимённо ожидаемый бинарь: перед каждым запуском
 установщика компонента его SHA-256 сверяется с манифестом, который приехал внутри самого
@@ -19,29 +19,29 @@
 Практический смысл для человека такой: если облачное хранилище отдало не то, что там
 должно лежать, — сборщик выложил не ту версию, объект подменили, кэш зеркала отдал
 чужие байты — установка останавливается со словами «БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 …»
-(`scripts/windows/_verify.ps1:91`, `scripts/macos/_lib.sh:240`), а не ставит чужое под
+(`scripts/windows/_verify.ps1:93`, `scripts/macos/_lib.sh:275`), а не ставит чужое под
 администратором. И обратная сторона того же обещания: если манифест положить в
 распакованную папку не удалось, компонент не запускается вовсе — установщик отказывается
-работать с непроверяемыми байтами (`src/main.js:1082-1085`).
+работать с непроверяемыми байтами (`src/main.js:1243-1246`).
 
 ## Как работает
 
 **1. Успешная докачка отдаёт проверенный каталог.** `remoteFetch.fetchRemote`
-(`src/remote-fetch.js:897`) отказывается работать без валидного 64-hex `sha256` в записи
+(`src/remote-fetch.js:908`) отказывается работать без валидного 64-hex `sha256` в записи
 реестра (`:911-915`), считает хеш потоково по удерживаемому дескриптору и при несовпадении
 удаляет файл и идёт на следующее зеркало (`:988-995`). Распаковка — во временный каталог с
-последующим атомарным переименованием (`freshUnpack`, `src/remote-fetch.js:855-887`).
+последующим атомарным переименованием (`freshUnpack`, `src/remote-fetch.js:866-898`).
 Возвращается `{ ok:true, path:<распакованный каталог> }`.
 
 **2. Манифест кладётся в staging — это и есть точка включения второго гейта.**
-`src/main.js:1074-1087`: после успеха `remoteCache = fr.path` (`:1073`), затем
+`src/main.js:1235-1248`: после успеха `remoteCache = fr.path` (`:1073`), затем
 
 ```
 fs.copyFileSync(path.join(bundledVendorEarly, 'checksums.json'), path.join(fr.path, 'checksums.json'));
 ```
 
 Источник — `checksums.json` из **вшитого** vendor (`bundledVendorEarly = vendorRoot()`,
-`src/main.js:974`), то есть байты, приехавшие внутри установщика. Приёмник — корень
+`src/main.js:1116`), то есть байты, приехавшие внутри установщика. Приёмник — корень
 распакованного архива. Копия кладётся поверх: если бы архив нёс собственный
 `checksums.json`, он был бы перезаписан вшитым. Сама копия — `:1079`. Не получилось
 скопировать — `cleanupSecureCache()` и выход `{ ok:false, stage:'fetch', error:'не удалось
@@ -49,8 +49,8 @@ fs.copyFileSync(path.join(bundledVendorEarly, 'checksums.json'), path.join(fr.pa
 (`:1080-1083`). Только после удачной копии выставляется `stagingVendor = fr.path` (`:1084`).
 
 **3. `HM_VENDOR` направляется на staging.** `const vroot = stagingVendor ||
-bundledVendorEarly` (`src/main.js:1103`), далее `childEnv.HM_VENDOR = vroot`
-(`src/main.js:1137`). Пути к КОНКРЕТНЫМ файлам резолвятся по факту существования через
+bundledVendorEarly` (`src/main.js:1267`), далее `childEnv.HM_VENDOR = vroot`
+(`src/main.js:1301`). Пути к КОНКРЕТНЫМ файлам резолвятся по факту существования через
 `vendorPick` (`:1109-1115`): есть в staging — оттуда, иначе из вшитого vendor. Отдельная
 ветка для `nomad` (`:1124-1134`): вшитый `apps/uv` докладывается в staging этого
 компонента, чтобы `nomad.ps1` не ушёл в онлайн-установку uv под администратором; копия
@@ -58,36 +58,36 @@ bundledVendorEarly` (`src/main.js:1103`), далее `childEnv.HM_VENDOR = vroot
 `checksums.json`.
 
 **4. Проверка внутри install-скрипта.** Windows: `Confirm-HmArtifact`
-(`scripts/windows/_verify.ps1:64-104`) берёт `basename` пути, читает
+(`scripts/windows/_verify.ps1:66-106`) берёт `basename` пути, читает
 `$env:HM_VENDOR\checksums.json`, достаёт запись регулярным выражением (`Get-HmChecksumEntry`,
 `:46-58`), считает SHA-256 на .NET и сверяет; дополнительно сверяет `bytes`, если поле есть
 (`:96-102`). Любое из пяти условий — файла нет, `HM_VENDOR` пуст, манифеста нет, записи для
 имени нет, хеш или размер не совпали — печатает строку «БЕЗОПАСНОСТЬ: …» и `exit 1`.
-macOS: `verify_artifact` (`scripts/macos/_lib.sh:219-246`) устроен ИНАЧЕ — сверяет только
+macOS: `verify_artifact` (`scripts/macos/_lib.sh:254-281`) устроен ИНАЧЕ — сверяет только
 SHA-256, размер не проверяет вовсе. `hm_expected_sha256` (`:211-216`) вытаскивает из
 манифеста регуляркой одну группу `sha256` и больше ничего; слово `bytes` встречается в
 `_lib.sh` ровно один раз — в комментарии-описании формата (`:210`). Хеш считается через
 `shasum`/`sha256sum`/`openssl` (`hm_sha256`, `:202-207`). Условий тут шесть, и набор свой:
 файла нет (`:223`), `HM_VENDOR` пуст (`:226`), манифеста нет (`:229`), записи для имени нет
 (`:233`), посчитать хеш нечем (`:237`), хеш не совпал (`:240`) — каждое даёт `exit 1`.
-Сверка `bytes` из `_verify.ps1:96-102` существует только на Windows.
+Сверка `bytes` из `_verify.ps1:98-104` существует только на Windows.
 
-Кто вызывает (проверено чтением скриптов, по 11 на платформу): `git.ps1:63`, `node.ps1:106`,
-`vscode.ps1:69,135`, `cursor.ps1:83`, `mascot.ps1:19`, `pydeps.ps1:55`, `extension.ps1:38`,
-`handy.ps1:137`, `nomad.ps1:205-206`, `course.ps1:59`, `uv.ps1:39,46`; на macOS — `git.sh:46`,
-`node.sh:27`, `vscode.sh:34,110`, `cursor.sh:27`, `mascot.sh:94`, `pydeps.sh:17`,
+Кто вызывает (проверено чтением скриптов, по 11 на платформу): `git.ps1:63`, `node.ps1:99`,
+`vscode.ps1:109,171`, `cursor.ps1:83`, `mascot.ps1:20`, `pydeps.ps1:57`, `extension.ps1:39`,
+`handy.ps1:170`, `nomad.ps1:265-266`, `course.ps1:61`, `uv.ps1:40,47`; на macOS — `git.sh:46`,
+`node.sh:27`, `vscode.sh:42,131`, `cursor.sh:27`, `mascot.sh:95`, `pydeps.sh:17`,
 `extension.sh:13`, `handy.sh:76`, `nomad.sh:54-55`, `course.sh:44`, `uv.sh:41`.
 `uv.ps1` в этом списке — тот самый скрипт, который проверяет докладку uv из п. 3: `nomad.ps1`
-вызывает его с временно подменённым `HM_VENDOR` (`nomad.ps1:148-160`), а внутри гейт стоит на
-`apps\uv\uv.exe` и `apps\uv\uvx.exe` (`uv.ps1:39,46`). На macOS `uv.sh` сверяет арх-тарболл
+вызывает его с временно подменённым `HM_VENDOR` (`nomad.ps1:208-220`), а внутри гейт стоит на
+`apps\uv\uv.exe` и `apps\uv\uvx.exe` (`uv.ps1:40,47`). На macOS `uv.sh` сверяет арх-тарболл
 `apps/uv-macos-$(arch_tag).tar.gz` (`:33`) до `tar -xzf` (`:41,46`).
 В `config.ps1`/`config.sh` и `claude.ps1`/`claude.sh` вызова гейта НЕТ — и это согласовано
 с реестром: у обеих записей `config` и обеих записей `claude` поле `gatedFiles` пустое.
 
 **5. Мягкий вариант.** Для неисполняемых best-effort артефактов есть `Test-HmArtifact`
-(`_verify.ps1:108-118`) и `verify_artifact_soft` (`_lib.sh:250-260`): возвращают ложь
+(`_verify.ps1:110-120`) и `verify_artifact_soft` (`_lib.sh:285-295`): возвращают ложь
 вместо остановки. Обе вызываются ровно по одному разу и ровно для шрифта:
-`extension.ps1:173` и `extension.sh:78`.
+`extension.ps1:181` и `extension.sh:78`.
 
 **6. `gatedFiles` — это BUILD-TIME, рантайм его не читает.** Схема прямо говорит
 «BUILD-TIME (рантайм игнорирует)» (`remote-components.json:13`), и поиск по `src/` не даёт
@@ -98,7 +98,7 @@ SHA-256, размер не проверяет вовсе. `hm_expected_sha256` (
 два разных файла с одним базовым именем (`:116-122`) — потому что рантайм-гейт ключуется
 именно базовым именем. Сверяют это перед релизом двое:
 `assertRegistryMatchesChecksums` в `tools/build-lite.js:159-239` (вызов — `:338`, до запуска
-electron-builder) и пункт 4e в `tools/release-check.js:206-245`.
+electron-builder) и пункт 4e в `tools/release-check.js:228-267`.
 
 **Фактическое состояние реестра (посчитано по файлу):** 23 записи, у 19 `gatedFiles`
 непустой. Пустые — четыре: `claude/win32`, `claude/darwin`, `config/win32`, `config/darwin`.
@@ -106,21 +106,21 @@ electron-builder) и пункт 4e в `tools/release-check.js:206-245`.
 `vendor/checksums.json`.
 
 **Ветвление, при котором второй гейт не включается вовсе:**
-- dry-run — `extension.ps1:38` (`-not $DRY`), `vscode.ps1:134` (`if ($DRY) { return $p }`),
-  `nomad.sh:48` (`if [ -z "$DRY" ]`), и сама докачка пропущена (`src/main.js:990-991`);
+- dry-run — `extension.ps1:39` (`-not $DRY`), `vscode.ps1:171` (`if ($DRY) { return $p }`),
+  `nomad.sh:48` (`if [ -z "$DRY" ]`), и сама докачка пропущена (`src/main.js:1132-1133`);
 - провал докачки у компонента из `SCRIPT_ONLINE_FALLBACK = {git, node, vscode, cursor, config}`
-  (`src/main.js:744, 1055-1063`) — `stagingVendor` остаётся пустым, скрипт уходит в свой
+  (`src/main.js:865, 1055-1063`) — `stagingVendor` остаётся пустым, скрипт уходит в свой
   онлайн-фолбэк, и там второй гейт по построению не применяется (комментарий
-  `_verify.ps1:62-63`: «Вызывать ТОЛЬКО для ВШИТЫХ артефактов … НЕ для онлайн-загрузок»).
+  `_verify.ps1:64-65`: «Вызывать ТОЛЬКО для ВШИТЫХ артефактов … НЕ для онлайн-загрузок»).
 
 **Vendor-first в этот список НЕ входит — там гейт работает в полном объёме.** При
-`useBundled` (`src/main.js:989, 990-993`) `stagingVendor` остаётся пустым, поэтому
+`useBundled` (`src/main.js:1131, 990-993`) `stagingVendor` остаётся пустым, поэтому
 `vroot = bundledVendorEarly` (`:1101`) и `childEnv.HM_VENDOR` (`:1135`) указывают на вшитый
 vendor, где `checksums.json` лежит изначально (`vendor/checksums.json`, 15 записей: `uv.exe`,
 `git-setup.exe`, `node-lts.msi`, `vibecoding-course.zip` и далее). Вызовы гейта в
 install-скриптах не смотрят ни на `stagingVendor`, ни на издание — только на
-`$env:HM_VENDOR` и наличие файла (`git.ps1:63`, `node.ps1:106`, `handy.ps1:137`,
-`course.ps1:59`, `mascot.ps1:19`, `uv.ps1:39,46`); снимает их единственное условие —
+`$env:HM_VENDOR` и наличие файла (`git.ps1:63`, `node.ps1:99`, `handy.ps1:170`,
+`course.ps1:61`, `mascot.ps1:20`, `uv.ps1:40,47`); снимает их единственное условие —
 dry-run. На этой ветке не выполняется только копирование манифеста в staging (п. 2),
 потому что staging'а нет. Офлайн-издание держится именно этим гейтом — см. инвариант 5.
 
@@ -128,33 +128,33 @@ dry-run. На этой ветке не выполняется только ко�
 
 1. **`stagingVendor` выставляется только после успешного копирования манифеста.** Присвоение
    `stagingVendor = fr.path` стоит в том же `else`-блоке ПОСЛЕ `try/catch` с `copyFileSync`
-   (`src/main.js:1080-1086`); ветка `catch` возвращает управление раньше.
+   (`src/main.js:1241-1247`); ветка `catch` возвращает управление раньше.
 2. **Провал копирования манифеста останавливает компонент.** `catch` вызывает
    `cleanupSecureCache()` и возвращает `{ ok:false, code:-1, stage:'fetch' }`
-   (`src/main.js:1082-1085`) — spawn install-скрипта не происходит.
+   (`src/main.js:1243-1246`) — spawn install-скрипта не происходит.
 3. **Манифест в staging — вшитый, а не пришедший по сети.** Источник копии —
    `path.join(bundledVendorEarly, 'checksums.json')`, где `bundledVendorEarly = vendorRoot()`
-   (`src/main.js:974, 1079`); `fs.copyFileSync` перезаписывает одноимённый файл из архива.
+   (`src/main.js:1116, 1079`); `fs.copyFileSync` перезаписывает одноимённый файл из архива.
 4. **`HM_VENDOR` для докачанного компонента указывает на sha-проверенный staging.**
    `vroot = stagingVendor || bundledVendorEarly`, `childEnv.HM_VENDOR = vroot`
-   (`src/main.js:1103, 1135`); `fr.path` — путь, возвращённый `fetchRemote` только после
-   совпадения SHA-256 архива (`src/remote-fetch.js:988-995, 1011`).
+   (`src/main.js:1267, 1135`); `fr.path` — путь, возвращённый `fetchRemote` только после
+   совпадения SHA-256 архива (`src/remote-fetch.js:999-1006, 1011`).
 5. **Ни один вшитый исполняемый артефакт не запускается без совпадения SHA-256.**
-   `Confirm-HmArtifact` (`_verify.ps1:64-104`) и `verify_artifact` (`_lib.sh:219-246`) при
+   `Confirm-HmArtifact` (`_verify.ps1:66-106`) и `verify_artifact` (`_lib.sh:254-281`) при
    любом расхождении делают `exit 1`; вызовы стоят до первого использования артефакта —
    запуска (`Start-Process`/`msiexec`/`installer`) либо распаковки (`Expand-Archive`/`unzip`
    в `course.ps1`/`course.sh`, `tar` в `uv.sh`) — в одиннадцати Windows- и одиннадцати
    macOS-скриптах (перечень выше, п. 4 раздела «Как работает»).
 6. **Отсутствие манифеста или записи в нём — это отказ, а не пропуск.** Ветки «нет
    `HM_VENDOR`», «нет `checksums.json`», «нет записи для имени» дают `exit 1`
-   (`_verify.ps1:73-87`, `_lib.sh:225-234`), а не «пропускаем проверку».
+   (`_verify.ps1:75-89`, `_lib.sh:260-269`), а не «пропускаем проверку».
 7. **`HM_REMOTE_CACHE` и `HM_VENDOR` не приходят из renderer.** `HM_REMOTE_CACHE` безусловно
-   стирается из `childEnv` (`src/main.js:1097`) и ставится только из проверенного пути
+   стирается из `childEnv` (`src/main.js:1258`) и ставится только из проверенного пути
    (`:1161`); `hm_vendor` отсутствует в `RENDERER_ENV_ALLOW` (`src/install-env.js:20-28`).
 8. **Гейт ключуется базовым именем, и это имя внутри архива уникально.** Публикатор падает
    на двух разных файлах с одним базовым именем (`tools/push-component.py:116-122`).
 9. **Запись реестра без поля `gatedFiles` не доезжает до релиза.** `build-lite.js:179-185`
-   бросает исключение до сборки; `release-check.js:221-224` даёт `fail` (сам вызов — `:222`).
+   бросает исключение до сборки; `release-check.js:243-246` даёт `fail` (сам вызов — `:222`).
 10. **Расхождение `gatedFiles` с вшитым манифестом ловится до сборки lite-издания.**
     `build-lite.js:186-199` бросает исключение при несовпадении sha; вызов стоит перед
     `electron-builder` (`:338, 344`).
@@ -209,16 +209,16 @@ dry-run. На этой ветке не выполняется только ко�
   его не читает. Оно нужно только двум сборочным проверкам.
 - **Гейт не применяется к онлайн-фолбэкам.** У загруженного из интернета `winget`-ом или
   прямой ссылкой файла версия законно другая, и хеш не совпал бы
-  (`scripts/windows/_verify.ps1:62-63`).
+  (`scripts/windows/_verify.ps1:64-65`).
 - **`nomad` проверяется иначе, чем остальные.** Там сверяется не бинарь, а дерево исходников:
   `Confirm-HmArtifact` применяется к самому манифесту `nomad-src.sha256` и к `pyproject.toml`,
-  а дерево — через `Get-HmTreeSha256` (`scripts/windows/nomad.ps1:200-214`,
+  а дерево — через `Get-HmTreeSha256` (`scripts/windows/nomad.ps1:260-274`,
   `scripts/macos/nomad.sh:49-55`).
 - **Манифесты платформо-зависимы.** `vendor/checksums.json` на диске — манифест ТОЙ ОС, где
   запускали фетчер, поэтому `release-check.js` сверяет только записи своей платформы
   (фильтр — `:219-220`), а чужие честно помечает непроверенными (`warn` — `:245`).
 - **Шрифт — сознательная уступка.** Он проверяется мягким вариантом и при несовпадении
-  просто пропускается (`extension.ps1:173`, `extension.sh:78`), а не роняет установку.
+  просто пропускается (`extension.ps1:181`, `extension.sh:78`), а не роняет установку.
 
 ## Риски и открытые вопросы
 
@@ -228,15 +228,15 @@ dry-run. На этой ветке не выполняется только ко�
   staging`, `не удалось положить`). Процитированные тесты покрывают сам механизм гейта —
   что скрипты дот-сорсят `_verify.ps1`, вызывают `Confirm-HmArtifact`/`verify_artifact` до
   запуска, и что `verify_artifact` функционально проходит на честно запечатанном
-  `$HM_VENDOR/checksums.json` (`sealNomadVendor`, `test/run-tests.js:3446-3464`; вызовы —
+  `$HM_VENDOR/checksums.json` (`sealNomadVendor`, `test/run-tests.js:3554-3572`; вызовы —
   `:3513` и `:3532`). То есть
   проверено «гейт работает, когда манифест на месте», но не проверено «манифест кладут
   в staging и не пускают компонент, если не положили». Инвентарь помечает фичу как
   покрытую тестом — это верно лишь про механизм, не про включение гейта на пути докачки.
 - **Отказ среды показывается человеку как подмена и без кнопки «Повторить».** Текст ошибки
-  из `src/main.js:1084` содержит подстроку `checksums.json`, а renderer классифицирует по
+  из `src/main.js:1245` содержит подстроку `checksums.json`, а renderer классифицирует по
   `INTEGRITY_ERR_RE = /SHA-?256|checksums\.json|не совпал|подмен/i`
-  (`src/renderer/app.js:1510-1516`). Поэтому даже при обычной ошибке ввода-вывода шаг
+  (`src/renderer/app.js:1586-1592`). Поэтому даже при обычной ошибке ввода-вывода шаг
   получает подпись «Проверка целостности не пройдена», лог «Повтор не поможет: пришли лог
   в бота» (`:1713-1714`), кнопка повтора не добавляется, и авто-ретрай не срабатывает
   (`isNetFail` исключает integrity, `:1522-1523, 1635`). Плюс `cleanupSecureCache()` в той
@@ -267,21 +267,21 @@ dry-run. На этой ветке не выполняется только ко�
 - **`release:check` не входит в сборочные скрипты.** В `package.json` он отдельная команда
   (`release:check`), её нет ни в `dist`, ни в `dist:win`, ни в `dist:win:lite`/`dist:mac:lite`.
   Значит из двух сборочных проверок в конвейере lite-издания реально стоит только
-  `assertRegistryMatchesChecksums`, вызываемая из `build-lite.js:338`.
-- **Пустой `gatedFiles: {}` проходит обе проверки.** `release-check.js:221` требует лишь
+  `assertRegistryMatchesChecksums`, вызываемая из `build-lite.js:351`.
+- **Пустой `gatedFiles: {}` проходит обе проверки.** `release-check.js:243` требует лишь
   чтобы поле было объектом, и внутренний цикл по пустому объекту не выполняется;
   `build-lite.js:176-178` собирает такие записи в `ungated` и печатает предупреждение
   (`:225-228`), но не останавливает сборку. Для `claude` и `config` это осознанно, но
   механизм не отличает «осознанно пусто» от «случайно опустело».
-- **`HM_VENDOR_BUNDLED` читается, но никем не выставляется.** `scripts/windows/nomad.ps1:142`
-  и `scripts/windows/pydeps.ps1:120` строят кандидатов из этой переменной, а поиск по
+- **`HM_VENDOR_BUNDLED` читается, но никем не выставляется.** `scripts/windows/nomad.ps1:202`
+  и `scripts/windows/pydeps.ps1:122` строят кандидатов из этой переменной, а поиск по
   репозиторию (`src/`, `tools/`, `scripts/`) не нашёл ни одного места, где она задаётся;
   в allowlist renderer-env её тоже нет (`src/install-env.js:20-28`). Эти ветки не
   выполняются никогда. Компенсирующий обход для nomad существует явно
-  (`src/main.js:1126-1136`), для `requirements.txt` в pydeps — через `HM_BUNDLED_CONFIG`
-  (`src/main.js:1138`); подтвердить чтением, что дыры в поведении нет, я не могу — это
+  (`src/main.js:1290-1300`), для `requirements.txt` в pydeps — через `HM_BUNDLED_CONFIG`
+  (`src/main.js:1302`); подтвердить чтением, что дыры в поведении нет, я не могу — это
   не проверено кодом, только тем, что альтернативные пути на месте.
 - **Совпадение реестра и манифеста на момент чтения:** все 13 win32-файлов под гейтом
   сходятся с `vendor/checksums.json` (посчитано по файлам). Darwin-записи сверить с
   лежащим на диске win32-манифестом нельзя — это и есть ограничение, о котором
-  предупреждает `release-check.js:245`.
+  предупреждает `release-check.js:267`.

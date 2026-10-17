@@ -20,6 +20,7 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # Invoke-HmDeElevated (укреплённая де-элевация, fail-closed)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # Write-HmFileSafe: запись настроек не идёт сквозь ссылку на каталоге данных
 
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -40,10 +41,12 @@ $dataDir = Join-Path $env:APPDATA 'com.pais.handy'
 # HKCU — ветка АДМИНСКОГО токена. Прямой reg add / Set-ItemProperty записал бы согласие
 # не туда (а если админ — отдельная учётка, то вообще мимо человека за машиной), и Handy
 # всё равно остался бы без микрофона, зато в реестре появилась бы лишняя запись. Поэтому
-# И ЧТЕНИЕ, И ЗАПИСЬ идут через единый укреплённый примитив Invoke-HmDeElevated
+# И ЧТЕНИЕ, И ЗАПИСЬ идут через единый укреплённый примитив Invoke-HmDeElevatedSafe
 # (_deelev.ps1): одноразовая задача планировщика от имени интерактивного пользователя с
-# LeastPrivilege-токеном. $null или гейт не 'medium' -> НЕ ПИШЕМ НИЧЕГО (fail-closed):
-# лучше остаться без согласия, чем поставить его в чужую ветку.
+# LeastPrivilege-токеном, а если доказано, что задача ничего не запустила, — то же действие с
+# токеном оболочки Explorer (тот же пользователь, medium). Ни один путь не отработал (гейт не
+# 'medium') -> НЕ ПИШЕМ НИЧЕГО (fail-closed): лучше остаться без согласия, чем поставить его в
+# чужую ветку. Итог записи подтверждается ЧТЕНИЕМ значения из реестра, а не кодом reg.exe.
 #
 # СУЩЕСТВУЮЩЕЕ РЕШЕНИЕ НЕ ПЕРЕЗАПИСЫВАЕМ: если Value уже есть — неважно, Allow или Deny —
 # человек уже высказался (сам или через «Параметры -> Конфиденциальность»), и установщик
@@ -60,6 +63,17 @@ function Grant-HmHandyMic {
     $regExe  = Join-Path (Join-Path $sysRoot 'System32') 'reg.exe'
     $consentKey = 'HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged\' +
                   ($ExePath -replace '\\', '#')
+    # Прямое ЧТЕНИЕ значения — аттестация. Де-элевированный шаг идёт от ТОЙ ЖЕ учётной записи
+    # (задача — от владельца токена, запасной путь требует совпадения пользователя), значит
+    # и ветка HKCU у нас с ним одна. Только чтение: в чужие ключи этим ничего не пишется.
+    $consentSub = $consentKey.Substring(5)
+    $readConsent = {
+        try {
+            $k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($consentSub, $false)
+            if (-not $k) { return $null }
+            try { return $k.GetValue('Value', $null) } finally { $k.Close() }
+        } catch { return $null }
+    }
 
     if ($DRY) {
         Write-Host "  [dry-run] WOULD: де-элевированно (Invoke-HmDeElevated) проверить $consentKey и записать Value=Allow — ТОЛЬКО если решения там ещё нет"
@@ -71,9 +85,9 @@ function Grant-HmHandyMic {
     }
 
     # (1) Есть ли уже решение? Код 0 = значение найдено, 1 = нет такого значения/ключа.
-    $q = Invoke-HmDeElevated $regExe @('query', $consentKey, '/v', 'Value')
+    $q = Invoke-HmDeElevatedSafe $regExe @('query', $consentKey, '/v', 'Value') -Label 'handy-mic-query'
     if ($null -eq $q -or $q.Gate -ne 'medium') {
-        Write-Host "  Микрофон: проверку от имени пользователя выполнить не удалось — ничего не меняю."
+        Write-Host "  Микрофон: проверку от имени пользователя выполнить не удалось$(if ($q -and $q.ShellReason) { " ($($q.ShellReason))" }) — ничего не меняю."
         Write-Host "  Разрешить вручную: Параметры -> Конфиденциальность и защита -> Микрофон."
         return
     }
@@ -81,18 +95,37 @@ function Grant-HmHandyMic {
         Write-Host "  Микрофон: решение для Handy в Windows уже записано — не трогаю его."
         return
     }
+    # «Не найдено» перепроверяем чтением: ложное «нет» (reg.exe упал по другой причине) иначе
+    # затёрло бы запрет, который человек поставил сам.
+    if ($null -ne (& $readConsent)) {
+        Write-Host "  Микрофон: решение для Handy в Windows уже записано — не трогаю его."
+        return
+    }
 
-    # (2) Пишем Allow — тоже де-элевированно, в ветку РЕАЛЬНОГО пользователя.
-    $a = Invoke-HmDeElevated $regExe @('add', $consentKey, '/v', 'Value', '/t', 'REG_SZ', '/d', 'Allow', '/f')
-    if ($null -ne $a -and $a.Gate -eq 'medium' -and $a.Code -eq 0) {
+    # (2) Пишем Allow — тоже де-элевированно, в ветку РЕАЛЬНОГО пользователя. Успех — только
+    # если значение Allow реально читается из реестра (код reg.exe может лишь забраковать).
+    $a = Invoke-HmDeElevatedSafe $regExe @('add', $consentKey, '/v', 'Value', '/t', 'REG_SZ', '/d', 'Allow', '/f') -Label 'handy-mic-add'
+    if ($null -ne $a -and $a.Gate -eq 'medium' -and $a.Code -eq 0 -and ([string](& $readConsent)) -eq 'Allow') {
         Write-Host "  Микрофон: доступ для Handy разрешён (настройки приватности Windows)."
-        Write-Host "HM-RECEIPT reg HKCU|$($consentKey.Substring(5))|Value"
+        Write-Host "HM-RECEIPT reg HKCU|$consentSub|Value"
         return
     }
     $why = 'причина неизвестна'
     if ($null -eq $a) { $why = 'примитив де-элевации не отработал' }
-    elseif ($a.Gate -ne 'medium') { $why = "гейт де-элевации: $($a.Gate)" }
-    else { $why = "reg.exe вернул $($a.Code)" }
+    elseif ($a.Gate -ne 'medium') {
+        # Gate — внутренние слова примитива («refused», «unavailable»): человеку они ничего не
+        # говорят. Переводим на обычный язык, технический текст причины — в скобках.
+        $gateText = switch ([string]$a.Gate) {
+            'refused'     { 'установщик работает не с обычным уровнем прав (UAC выключен или вход под встроенным администратором)' }
+            'unavailable' { 'запустить действие от имени пользователя не получилось' }
+            'not-started' { 'планировщик Windows не запустил действие' }
+            'unknown'     { 'итог запуска неизвестен' }
+            default       { 'запуск от имени пользователя не удался' }
+        }
+        $why = "запись от имени пользователя недоступна: $gateText$(if ($a.ShellReason) { ' (' + $a.ShellReason + ')' })"
+    }
+    elseif ($a.Code -ne 0) { $why = "reg.exe вернул $($a.Code)" }
+    else { $why = 'reg.exe ответил успехом, но значения Allow в реестре нет' }
     Write-Host "  Микрофон: разрешение записать не удалось ($why)."
     Write-Host "  Разрешить вручную: Параметры -> Конфиденциальность и защита -> Микрофон -> Разрешить классическим приложениям."
 }
@@ -186,9 +219,13 @@ if (Test-Path -LiteralPath $store) {
                 recording_retention_period = 'months3'
             }
         }
-        $tmp = "$store.tmp"
-        ($seed | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $tmp -Destination $store -Force -ErrorAction Stop
+        # Запись — через Write-HmFileSafe: случайный CreateNew-файл рядом и проверка ссылки впритык к
+        # замене. Прежний «$store.tmp + Move-Item -Force» не проверял ссылку вовсе, а каталог данных лежит
+        # в профиле, и процесс обычного пользователя подменил бы его ссылкой на чужую папку. Байты файла
+        # прежние (UTF-8 с BOM и перевод строки в конце, как у Set-Content -Encoding UTF8).
+        $seedJson = ($seed | ConvertTo-Json -Depth 6)
+        $seedBytes = ConvertTo-HmBomLineBytes $seedJson
+        Write-HmFileSafe -Path $store -Bytes $seedBytes
         Write-Host "  Пред-настроено: язык распознавания «русский», горячая клавиша Ctrl+Alt+Space"
         Write-Host "  (Ctrl+Space не берём — он у многих переключает раскладку.)"
     } catch {

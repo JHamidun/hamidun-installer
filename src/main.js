@@ -1,11 +1,28 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
-const { spawn, execFileSync, spawnSync } = require('child_process');
+const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
+const { spawn, execFile, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const https = require('https');
+
+// ---- корни профиля — из ТОКЕНА процесса, а не из окружения (src/profile-env.js) ----------------
+// Это ДОЛЖНО быть раньше всего, что читает os.homedir() или USERPROFILE/APPDATA/LOCALAPPDATA: uid и
+// LOG_DIR ниже, детекция, buildInstallEnv (переменные уходят в скрипты из process.env). Установщик идёт
+// под админ-токеном, а эти переменные собираются из HKCU, доступного на запись любому процессу того же
+// пользователя: подмена на каталог чужой учётки увела бы запись и удаление в чужой профиль. Источник
+// истины — os.userInfo().homedir (по токену, окружение не читает), запасной — app.getPath('home').
+// Строки об исправлениях копятся в PROFILE_LOCK.lines и пишутся в install.log, как только он объявлен.
+const profileEnv = require('./profile-env');
+const PROFILE_LOCK = profileEnv.lockProfileRoots({
+  env: process.env,
+  platform: process.platform,
+  isPackaged: app.isPackaged,
+  getTokenHome: () => os.userInfo().homedir,
+  getFallbackHome: () => app.getPath('home'),
+});
+
 const remoteFetch = require('./remote-fetch');
 const installEnv = require('./install-env');   // #4: истинный allowlist renderer-env
 const manifest = require('./install-manifest'); // Фаза 2: версии установленного (справочно)
@@ -15,7 +32,12 @@ const uninstallTargets = require('./uninstall-targets'); // зашитый per-c
 const uninstallExec = require('./uninstall-exec');       // guard (fail-closed) + исполнители удаления в JS
 const { rmStagingTree } = require('./staging-paths'); // снос staging — только по имени HmDeElev-<hex>
 const nomadKey = require('./nomad-key');             // запись ключа Nomad в config.yaml
+const deelevRoute = require('./deelev-route');       // «Last Result» задачи → можно ли запасной путь
 const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
+const pyDetect = require('./py-detect');             // pydeps: пакеты по файлам, python для детекции не запускаем
+const desktopPath = require('./desktop-path');       // рабочий стол для записи под админом — только из профиля, не из реестра
+const linkGuard = require('./link-guard');           // запись из-под админа — не через junction/symlink в цепочке пути
+const windowGuards = require('./window-guards');     // окно остаётся на своей странице: навигация и window.open под запретом
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -173,18 +195,47 @@ const INSTALL_UID = uidTelemetry.resolveUid();
 // Every line streamed to the renderer is also appended here, so a user can
 // send one file to support when something goes wrong.
 const LOG_DIR = path.join(os.homedir(), '.hamidun-setup');
+const LOG_HOME = path.dirname(LOG_DIR);   // профиль (os.homedir() после замка в начале файла) — корень проверки цепочки пути
 const LOG_PATH = path.join(LOG_DIR, 'install.log');
 let logDirReady = false;
+// Журнал дописывается из процесса с правами администратора в ~/.hamidun-setup, который доступен любой программе
+// того же пользователя. Если ~/.hamidun-setup (или сам install.log) подменён ссылкой — junction/symlink, —
+// дописывание ушло бы в чужой файл по ту сторону. Тогда журнал на диск НЕ пишем вовсе (установка из-за него не
+// падает), причину запоминаем: одна строка уходит в консоль процесса и один раз — в окно установщика
+// (run-component), потому что в сам журнал её записать как раз нельзя. Проверка — src/link-guard.js.
+let logBlocked = '';
+let logBlockedNote = '';
 // Дескриптор держим ОТКРЫТЫМ. fs.appendFileSync открывает и закрывает файл на
 // КАЖДОЙ строке, а установочные скрипты (pip, uv, npm) выдают их десятками тысяч:
 // это десятки тысяч синхронных open/write/close в главном процессе — он же качает
 // насос сообщений окна. Один открытый дескриптор убирает две трети работы и
 // сохраняет главное свойство журнала: строка на диске сразу, переживает падение.
 let logFd = null;
+function blockLog(why) {
+  if (logFd !== null) { try { fs.closeSync(logFd); } catch (e2) { /* ignore */ } logFd = null; }
+  logBlocked = why;
+  logBlockedNote = '[журнал] install.log на диск не пишется: ' + why + '. Установка идёт как обычно, но журнала не будет.';
+  try { console.error('[install.log] ' + why); } catch (e2) { /* ignore */ }
+}
 function logToFile(id, line) {
+  if (logBlocked) return;
   try {
-    if (!logDirReady) { fs.mkdirSync(LOG_DIR, { recursive: true }); logDirReady = true; }
-    if (logFd === null) logFd = fs.openSync(LOG_PATH, 'a');
+    if (!logDirReady) {
+      let g = linkGuard.checkChain(LOG_PATH, LOG_HOME);
+      if (g.ok) { fs.mkdirSync(LOG_DIR, { recursive: true }); g = linkGuard.checkChain(LOG_PATH, LOG_HOME); }   // и после создания
+      if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
+      logDirReady = true;
+    }
+    if (logFd === null) {
+      logFd = fs.openSync(LOG_PATH, 'a');
+      // Сразу после открытия: цепочка снова чистая, а дескриптор — обычный файл с одной ссылкой (жёсткую ссылку на
+      // чужой файл, подложенную под имя журнала, дописывание бы не заметило).
+      const g = linkGuard.checkChain(LOG_PATH, LOG_HOME);
+      let st = null;
+      try { st = fs.fstatSync(logFd); } catch (e2) { st = null; }   // fstat по только что открытому дескриптору не падает; не вышло — решает цепочка выше
+      if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
+      if (st && (!st.isFile() || st.nlink !== 1)) { blockLog('install.log — не обычный файл или у него есть жёсткие ссылки'); return; }
+    }
     fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
   } catch (e) {
     // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
@@ -193,6 +244,16 @@ function logToFile(id, line) {
   }
 }
 
+// Что замок профиля (в самом начале файла) исправил или не смог проверить: на тот момент журнала ещё не
+// существовало (LOG_DIR строится от уже исправленного профиля). Чаще всего строк нет вовсе — тогда и
+// install.log не создаётся раньше времени. В холостом прогоне (HM_DRY_RUN в окружении процесса) на диск
+// не пишем ничего — как и остальной журнал (P1-8).
+if (!process.env.HM_DRY_RUN) for (const line of PROFILE_LOCK.lines) logToFile('profile-env', line);
+
+// Electron 40+ на Windows: fs.rmSync падает с EPERM на read-only файлах — снос staging,
+// карантина удаления и finalDir встал бы колом. Обход и обоснование — в src/fs-compat.js.
+require('./fs-compat').install((line) => logToFile('fs-compat', line));
+
 let mainWindow = null;
 
 // Track live installer child processes so we can kill orphans if the window
@@ -200,6 +261,12 @@ let mainWindow = null;
 const CHILDREN = new Set();
 // Замок «идёт установка компонента» на уровне ПРОЦЕССА (переживает Ctrl+R окна).
 let _installBusy = false;
+// Шаг, который идёт прямо сейчас: id, дочерний процесс и состояние сторожа молчания.
+// Нужен кнопке «Пропустить шаг» (остановить ровно этот шаг) и отчёту о прерванной
+// установке (назвать шаг, на котором закрыли окно). null — между шагами.
+let CURRENT_STEP = null;
+// Последний запущенный шаг — на случай, если окно закрыли в паузе между шагами.
+let _lastStepId = '';
 
 // win32: Admins-only staging-каталоги докачки, ЖИВЫЕ в этом процессе (remoteId → dir).
 // Нужны для двух вещей: (1) ретрай компонента в той же сессии переиспользует УЖЕ
@@ -216,31 +283,37 @@ const SECURE_DIRS = new Map();
 //   Windows: taskkill /T /F walks and terminates the child tree by pid.
 //   macOS:   each child is spawned detached (its own process-group leader), so
 //            process.kill(-pid) signals the entire group at once.
-function killChildren() {
-  for (const c of CHILDREN) {
-    try {
-      if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } continue; }
-      if (IS_WIN) {
-        // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
-        // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
-        // #6: НИКАКОГО fallback в короткое имя 'taskkill.exe' (это вернуло бы
-        // PATH-резолв). System32 не валиден → fail-closed: рвём только сам child.
-        const tk = remoteFetch.sysBin('taskkill.exe');
-        if (tk) {
-          try {
-            execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
-              { windowsHide: true, stdio: 'ignore' });
-          } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
-        } else {
-          try { c.kill(); } catch (e2) { /* ignore */ }
-        }
+// Одно дерево — отдельной функцией: ей же пользуется кнопка «Пропустить шаг», которая
+// останавливает ровно ОДИН шаг, а не все процессы установщика.
+function killProcessTree(c) {
+  try {
+    // Уже вышедший процесс не трогаем: по его PID дерево не найти, а если Windows отдала PID
+    // другому процессу, taskkill убил бы чужое.
+    if (c && runOutcome.childExited(c)) return;
+    if (!c || !c.pid) { try { if (c) c.kill(); } catch (e) { /* ignore */ } return; }
+    if (IS_WIN) {
+      // taskkill по АБСОЛЮТНОМУ пути из валидированного System32 (анти-hijack:
+      // установщик elevated, подложенный taskkill.exe в PATH = эскалация).
+      // #6: НИКАКОГО fallback в короткое имя 'taskkill.exe' (это вернуло бы
+      // PATH-резолв). System32 не валиден → fail-closed: рвём только сам child.
+      const tk = remoteFetch.sysBin('taskkill.exe');
+      if (tk) {
+        try {
+          execFileSync(tk, ['/PID', String(c.pid), '/T', '/F'],
+            { windowsHide: true, stdio: 'ignore' });
+        } catch (e) { try { c.kill(); } catch (e2) { /* ignore */ } }
       } else {
-        // Negative pid => the child's whole process group (needs detached spawn).
-        try { process.kill(-c.pid, 'SIGKILL'); }
-        catch (e) { try { c.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+        try { c.kill(); } catch (e2) { /* ignore */ }
       }
-    } catch (e) { /* ignore */ }
-  }
+    } else {
+      // Negative pid => the child's whole process group (needs detached spawn).
+      try { process.kill(-c.pid, 'SIGKILL'); }
+      catch (e) { try { c.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+    }
+  } catch (e) { /* ignore */ }
+}
+function killChildren() {
+  for (const c of CHILDREN) killProcessTree(c);
   CHILDREN.clear();
 }
 
@@ -282,8 +355,19 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      // Песочница процесса страницы. Установщик работает с токеном администратора, и при sandbox:false взломанный
+      // процесс страницы (ошибка Chromium, XSS) сам получал бы этот токен. preload.js пользуется только contextBridge и
+      // ipcRenderer — песочнице это не мешает; проверено под настоящим Electron 44.5.1 (test/window-guards-probe.js):
+      // window.installer на месте, обмен с main проходит, процесс страницы в песочнице ОС.
+      sandbox: true
     }
+  });
+  // Окно не уходит со своей страницы и не открывает новых окон (will-navigate / will-redirect / window.open).
+  // Внешние ссылки открываются прежним путём — кнопками через IPC open-external с проверкой схем (ниже). Каждый отказ
+  // — строка в install.log (адрес очищен от управляющих символов и обрезан).
+  windowGuards.install(mainWindow.webContents, {
+    indexFile: path.join(__dirname, 'renderer', 'index.html'),
+    onBlock: (kind, url) => logToFile('window', 'заблокирован ' + kind + ': ' + profileEnv.cleanForLog(url))
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', bringToFront);
@@ -293,6 +377,11 @@ function createWindow() {
     _frontedForInstall = false;
     try { mainWindow.flashFrame(false); } catch (_) {}
   });
+  // Electron 35+ отвечает на WM_QUERYENDSESSION «да» по умолчанию (в 32 окно само держало
+  // перезагрузку/выход). Идущий шаг (msiexec/PowerShell) убило бы вместе с сессией на
+  // полпути, оставив полуустановленный компонент. Возвращаем старый запрет ТОЛЬКО пока
+  // держится замок _installBusy; в простое окно выключению не мешает.
+  if (IS_WIN) mainWindow.on('query-session-end', (e) => { if (_installBusy) e.preventDefault(); });
 }
 // M1: подняли ли окно на передний план в текущем «эпизоде» ухода фокуса — чтобы
 // не вырывать окно у пользователя на КАЖДОМ компоненте (8-12 рывков за прогон).
@@ -379,13 +468,28 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
+// Закрытое посреди установки окно раньше не оставляло следа: финальный отчёт шлёт
+// финиш, а до финиша такой прогон не доходил. Бот видел «начал ставить» и тишину —
+// ни шага, ни причины. Теперь перед выходом уходит отчёт «прервано на шаге X», и
+// выход ждёт его не дольше пары секунд (sendAbortReportIfNeeded / waitTelemetryThen).
 app.on('window-all-closed', () => {
+  sendAbortReportIfNeeded();   // ДО killChildren: идущий шаг ещё известен
   killChildren();
   cleanupAllSecureDirs();
-  if (!IS_MAC) app.quit();
+  if (!IS_MAC) waitTelemetryThen(() => app.quit());
 });
 
-app.on('before-quit', () => { killChildren(); cleanupAllSecureDirs(); });
+app.on('before-quit', (ev) => {
+  if (sendAbortReportIfNeeded()) {
+    // Выход по Cmd+Q / из меню посреди установки: даём отчёту уйти, потом выходим.
+    // Повторный before-quit сюда уже не попадёт — отчёт отправлен один раз.
+    ev.preventDefault();
+    killChildren(); cleanupAllSecureDirs();
+    waitTelemetryThen(() => app.quit());
+    return;
+  }
+  killChildren(); cleanupAllSecureDirs();
+});
 
 // ---- IPC -------------------------------------------------------------
 
@@ -464,7 +568,11 @@ function detectForeignUserWarning() {
     // (оболочка запущена интерактивным входом даже когда наш процесс — под другим
     // аккаунтом) и сравниваем с пользователем нашего токена. Fail-OPEN: любая
     // ошибка/таймаут/неоднозначность → '' (НИКОГДА не пугаем ложным баннером).
-    const tokenUser = String(process.env.USERNAME || '').trim().toLowerCase();
+    // Пользователь токена — из токена (os.userInfo → GetUserNameW), а не из USERNAME: переменная лежит
+    // в HKCU\Volatile Environment, и подмена спрятала бы баннер или показала ложный.
+    let tokenName = '';
+    try { tokenName = String(os.userInfo().username || '').trim(); } catch (e) { tokenName = ''; }
+    const tokenUser = tokenName.toLowerCase();
     if (!tokenUser) return '';
     const tasklist = remoteFetch.sysBin('tasklist.exe'); // абсолютный System32 (как reg/cmd)
     if (!tasklist) return '';
@@ -501,7 +609,7 @@ function detectForeignUserWarning() {
     const distinct = Array.from(new Set(owners.map(short)));
     if (distinct.length !== 1) return '';
     const interactiveFull = owners.find((o) => short(o) === distinct[0]);
-    const tokenDisplay = process.env.USERNAME || tokenUser;
+    const tokenDisplay = tokenName || tokenUser;
     return 'Установщик запущен с правами другой учётки («' + tokenDisplay + '»), а в Windows ' +
       'вы вошли как «' + interactiveFull + '». Из-за этого всё — курс, ярлык на рабочем столе, ' +
       'настройки, Claude — установится в профиль «' + tokenDisplay + '», а не в ваш, и у вас ' +
@@ -541,6 +649,9 @@ ipcMain.handle('bootstrap', () => {
     remoteSizes: remoteSizesForRenderer(),
     logPath: LOG_PATH,
     freeGB,
+    // Корень тома, на котором меряли место («C:\»), — чтобы экран говорил «свободно на C:»,
+    // а не безадресное «на диске»: у людей с двумя дисками это и был вопрос.
+    homeRoot: path.parse(os.homedir()).root,
     osRelease: os.release(),
     // Absolute path to the bundled resources dir (vendor/agent/assets live here).
     // The renderer needs it to open the offline START-HERE fallback locally.
@@ -606,15 +717,25 @@ function componentShownOnPlatform(comp, platform) {
   return !gate || gate.length === 0 || gate.indexOf(platform || process.platform) !== -1;
 }
 
+// AI-мост и подобные: без адреса сервиса в config.json (components.json →
+// hideWhileUnconfigured) компонент в выбор не отдаём и не запускаем — кроме уже
+// поставленного нами (квитанция), у которого на карточке «Удалить». См. модуль.
+const componentVisibility = require('./component-visibility');
+function componentHiddenUnconfigured(comp, cfg) {
+  return componentVisibility.hiddenWhileUnconfigured(comp, cfg || readJson('config.json', {}),
+    (cid) => receipts.hasReceipt(os.homedir(), cid));
+}
+
 // Компоненты для текущей платформы: платформо-гейтнутые (напр. uv=win32-only) на
 // чужой ОС в UI НЕ отдаём — иначе юзер выбрал бы uv на macOS и упёрся бы в отказ
 // pickEntry (в реестре докачки нет darwin-сборки). Пустые группы отбрасываем.
 function componentsForPlatform() {
   const data = readJson('components.json', { groups: [] });
   const plat = process.platform;
+  const cfg = readJson('config.json', {});
   const groups = (data.groups || [])
     .map((g) => Object.assign({}, g, {
-      components: (g.components || []).filter((c) => componentShownOnPlatform(c, plat))
+      components: (g.components || []).filter((c) => componentShownOnPlatform(c, plat) && !componentHiddenUnconfigured(c, cfg))
     }))
     .filter((g) => (g.components || []).length);
   return { groups };
@@ -781,7 +902,9 @@ function remoteCacheDir(remoteId) {
 
 // Системные env-переменные (реальные значения ОС), которые скрипты законно читают
 // ($env:USERPROFILE, LOCALAPPDATA, TEMP…). PATH/PSModulePath/ComSpec сюда НЕ входят —
-// их задаём авторитетно ниже.
+// их задаём авторитетно ниже. Профильные (USERPROFILE/HOMEDRIVE/HOMEPATH/APPDATA/LOCALAPPDATA)
+// к этому моменту уже выправлены по токену замком профиля в начале файла (PROFILE_LOCK), так что
+// копируются из process.env безопасно; TEMP/TMP остаются как есть (принятый остаток, THREAT-MODEL).
 const WIN_SYS_ENV_KEYS = [
   'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA', 'PUBLIC',
   'ALLUSERSPROFILE', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
@@ -852,13 +975,26 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'WindowsPowerShell', 'Modules')
     ].join(';');                                                    // только системные модули (анти-module-hijack)
     if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC;.PS1';
+    // npm и git читают настройки САМОГО человека (~/.npmrc, %APPDATA%\npm\etc\npmrc, ~/.gitconfig) уже под нашим
+    // админ-токеном: чужой registry/prefix/filter в них — исполнение под администратором (F14) и подмена списка
+    // каталогов, где claude.ps1 удаляет файлы (F13b). Указываем им пустые места в System32 (куда без прав
+    // администратора не писать); подробности и результаты проверки на настоящих npm/git — в src/install-env.js.
+    // Рабочая папка потомка (проектный .npmrc перебивает всё) — System32, см. spawnOpts в run-component.
+    // git-компоненту git-половину возвращает run-component: его скрипт сам ПИШЕТ глобальный конфиг git.
+    Object.assign(out, installEnv.toolConfigIsolationEnv(s32));
     Object.assign(out, NONINTERACTIVE_ENV);
     return out;
   }
-  // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем,
-  // но из renderer-env берём тот же allowlist (только HM_*, кроме HM_REMOTE_CACHE) —
-  // никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
-  const out = Object.assign({}, process.env);
+  // POSIX: uv-флоу неэлевейтед end-to-end (см. модель угроз). Реальный env сохраняем (скрипты
+  // ищут brew/node/python по PATH пользователя, прокси и локаль обязаны дойти), НО без запрещённых
+  // записей: BASH_ENV/ENV/SHELLOPTS+PS4/BASH_FUNC_*/DYLD_*/NODE_OPTIONS/PYTHON*/GIT_*/npm_config_*
+  // и чужих HM_* (installEnv.sanitizePosixEnv). Это именно окружение, а не первая строка скрипта:
+  // `unset BASH_ENV` внутри скрипта опоздал бы — bash выполняет BASH_ENV ДО неё. Опасность тут не
+  // в самих скриптах, а в том, что НЕпривилегированный bash собирает команду для admin_run и тексты
+  // HM_*_INSTALL_SH, после чего человек вводит пароль в настоящее системное окно (env -i в admin_run
+  // защищает только уже запущенный root-шелл). Из renderer-env берём тот же allowlist (только HM_*,
+  // кроме HM_REMOTE_CACHE) — никаких PATH/DYLD/LD/NODE_OPTIONS/… из renderer.
+  const out = installEnv.sanitizePosixEnv(process.env);
   Object.assign(out, installEnv.filterRendererEnv(rendererEnv));
   Object.assign(out, NONINTERACTIVE_ENV);
   return out;
@@ -868,6 +1004,9 @@ function buildInstallEnv(rendererEnv) {
 // в объяснение для ученика. Вынесен в модуль — его напрямую гоняет test/run-tests.js
 // (main.js целиком в тесте не поднять: это Electron-точка входа).
 const failureExplain = require('./failure-explain.js');
+// Исход шага по коду возврата (121 = частичный успех, причина пропуска, сторож
+// молчания) — чистые функции, тест зовёт их напрямую.
+const runOutcome = require('./run-outcome.js');
 
 // Run one component script, streaming output back to the renderer.
 //
@@ -919,6 +1058,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   const meta = COMPONENT_META.get(id);
   if (meta && !componentShownOnPlatform(meta, process.platform)) {
     return { id, ok: false, code: -1, error: `Компонент «${id}» недоступен на платформе ${process.platform}.` };
+  }
+  if (meta && componentHiddenUnconfigured(meta)) {
+    return { id, ok: false, code: -1, error: `Компонент «${id}» в этой сборке не настроен (нет адреса сервиса) — не ставлю.` };
   }
 
   const script = scriptFor(id);
@@ -1021,12 +1163,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         try { stillSafe = fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir); } catch (e) { stillSafe = false; }
         if (!stillSafe) { SECURE_DIRS.delete(declared); cacheDir = ''; }
       }
-      if (!cacheDir) cacheDir = await winMakeSecureDir();
+      if (!cacheDir) cacheDir = await winMakeSecureDir({ retry: true });
       if (!cacheDir) {
+        // Текст по ФАКТУ: сколько раз примитив реально запускался. «Две попытки не прошли» при
+        // нуле или одной попытке было бы неправдой (а совет про антивирус — гаданием).
+        const tried = lastSecureDirAttempts;
         return { id, ok: false, code: -1, stage: 'env',
         error: 'не удалось подготовить защищённый каталог для загрузки'
           + (lastSecureDirError ? ' (' + lastSecureDirError + ')' : '')
-          + '. Запусти установщик от имени администратора; если это не помогает — пришли журнал боту.' };
+          + (tried >= 2
+            ? '. Две попытки (20 и 60 секунд) остались без ответа — чаще всего так антивирус или занятый диск задерживают запуск PowerShell. Подожди пару минут и нажми «Повторить»; не поможет — перезагрузи компьютер и запусти установку снова, а журнал пришли боту.'
+            : tried === 1
+              ? '. Нажми «Повторить»; не поможет — перезагрузи компьютер, запусти установку снова и пришли журнал боту.'
+              : '. Подготовка каталога даже не запустилась. Нажми «Повторить»; не поможет — перезапусти установщик и пришли журнал боту.') };
       }
       SECURE_DIRS.set(declared, cacheDir);
       secureCacheDir = cacheDir; // чистим после успешной установки / на выходе
@@ -1070,7 +1219,19 @@ ipcMain.handle('run-component', async (_evt, payload) => {
         // повтор бессмыслен). Сеть, недоступные зеркала, отказ создать staging и прочая
         // среда — 'fetch': пользователю честно предлагаем «Повторить».
         const integrity = /sha-?256|checksums\.json|не совпал|подмен/i.test(errMsg);
-        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg };
+        // Не всё, что упало на докачке, — сеть. «EPERM при публикации распаковки» — это
+        // антивирус держит файл, «HTTP 403» — сервер отказал в доступе. Раньше и то и
+        // другое человек видел как «Сеть оборвалась» и бесконечно проверял интернет.
+        // Причину берём из того же словаря, что и для скриптов; сетевую оставляем сетью.
+        const why = integrity ? null : failureExplain.explainScriptFailure([errMsg]);
+        const notNet = !!(why && why.kind !== 'network');
+        if (notNet) {
+          const head = '[почему] ' + why.short + ':';
+          send(head); logLine(head);
+          why.lines.forEach((l) => { const m = '  ' + l; send(m); logLine(m); });
+        }
+        return { id, ok: false, code: -1, stage: integrity ? 'integrity' : 'fetch', error: errMsg,
+          hint: notNet ? why.short : '', hintKind: notNet ? why.kind : '' };
       }
     } else {
       remoteCache = fr.path; // проверенный (sha256) распакованный путь — только из main
@@ -1091,10 +1252,13 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
   // подменяемых command-resolution переменных). rendererEnv уже без HM_REMOTE_CACHE.
   const childEnv = buildInstallEnv(rendererEnv);
-  // P1-A: POSIX buildInstallEnv наследует process.env целиком → HM_REMOTE_CACHE из
-  // окружения самого установщика мог бы протечь в компонент и запустить НЕпроверенный
-  // бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из sha-проверенного
-  // remoteCache (для оставшихся/будущих remote-компонентов).
+  // git-компонент ПИШЕТ глобальную настройку git человека (git.ps1: longpaths, defaultBranch, autocrlf, имя/почта по
+  // умолчанию) — ему git-половина изоляции не нужна и вредна (запись ушла бы в NUL); npm-половина остаётся.
+  installEnv.withoutGitConfigIsolation(childEnv, id);
+  // P1-A: POSIX buildInstallEnv наследует process.env (за вычетом запрещённого, чужие HM_* в том
+  // числе), и HM_REMOTE_CACHE из окружения самого установщика мог бы протечь в компонент и
+  // запустить НЕпроверенный бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из
+  // sha-проверенного remoteCache (для оставшихся/будущих remote-компонентов).
   delete childEnv.HM_REMOTE_CACHE;
   // Paths to assets baked into the installer at build time (offline sources).
   // Для remote-компонента (докачан в staging) HM_VENDOR указывает на sha-проверенный
@@ -1212,7 +1376,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // garbage. Force the console output encoding to UTF-8 *before* running the
     // script, then invoke it via the call operator so its own `exit N` becomes
     // this process's exit code. Escape single quotes in the path ('  -> '').
-    const psScript = script.replace(/'/g, "''");
+    // psQuoteBody удваивает не только ASCII ', но и типографские кавычки U+2018/2019/201A/201B:
+    // PowerShell считает их ограничителями, и «O’Brien» в пути ломал бы запуск КАЖДОГО скрипта.
+    const psScript = deelevRoute.psQuoteBody(script);
     // Trailing exit propagates the script's real code (bare `exit $LASTEXITCODE`
     // would return 0 when the script fails to load — $LASTEXITCODE is $null then).
     const inline =
@@ -1223,8 +1389,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     cmd = ps;
     args = ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-Command', inline];
   } else {
+    // -p (привилегированный режим): bash не читает $BASH_ENV/$ENV, не принимает экспортированные
+    // функции и игнорирует SHELLOPTS — второй рубеж на случай, если в окружение просочится то,
+    // чего нет в списке sanitizePosixEnv. Эффективный uid при этом не сбрасывается (он и так равен
+    // реальному), поведение скрипта не меняется.
     cmd = '/bin/bash';
-    args = [script];
+    args = ['-p', script];
   }
 
   // send/sendChannel уже объявлены выше (используются и для докачки, и для лога).
@@ -1233,6 +1403,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   return await new Promise((resolve) => {
     let child;
     logLine('=== start ===');
+    // Журнал на диск заблокирован ссылкой на пути (см. blockLog): сказать об этом ОДИН раз там, где человек и
+    // поддержка видят вывод шага, — в сам журнал эту строку записать нельзя.
+    if (logBlockedNote) { send(logBlockedNote); logBlockedNote = ''; }
     try {
       // macOS: give the child its own process group so killChildren can reap the
       // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
@@ -1246,6 +1419,17 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // показывает ошибку, которую видно и можно починить. Никто в stdin не пишет
       // (проверено), поэтому потерь нет.
       const spawnOpts = { env: childEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] };
+      // Рабочая папка потомка по умолчанию — папка самого установщика, а у portable-exe это каталог распаковки в
+      // %TEMP%, куда пишет любая программа того же пользователя. Из неё ищут и читают первым делом: проектный
+      // .npmrc (перебивает пользовательские настройки npm, F14), `python -m`/`-c` (cwd первым в sys.path), поиск
+      // по текущей папке. Берём проверенный System32 (winSystem32: не reparse, kernel32.dll на месте), НЕ
+      // переменные окружения; не подтверждён — запуск отклоняется (try/catch ниже вернёт {ok:false}), а не
+      // уходит «куда придётся».
+      if (IS_WIN) {
+        const s32 = remoteFetch.winSystem32();
+        if (!s32) throw new Error('System32 не подтверждён — запуск без безопасной рабочей папки отклонён');
+        spawnOpts.cwd = s32;
+      }
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {
@@ -1255,6 +1439,12 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       return;
     }
     CHILDREN.add(child);
+    // Состояние сторожа молчания ЭТОГО шага. optional — из вшитого components.json
+    // (COMPONENT_META), а не из renderer: renderer недоверенный и не решает, что можно
+    // убивать. offered — кнопка «Пропустить шаг» показана в текущем эпизоде молчания.
+    const stall = { optional: !!(meta && meta.optional === true), offered: false, skipRequested: false, skipMins: 0 };
+    CURRENT_STEP = { id, child, stall, lastOut: () => lastOut };
+    _lastStepId = id;
 
     // Легаси-строки "HM-RECEIPT <type> <value>" из stdout скриптов ТОЛЬКО
     // фильтруются из UI-лога. Как источник целей удаления они НЕ используются:
@@ -1266,10 +1456,16 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // с концом. 400 строк с запасом перекрывают финальный блок ошибки.
     const TAIL_MAX = 400;
     const outTail = [];
+    // Исход запуска скрепки: mascot.ps1 печатает «HM-MASCOT launched=0|1». Строка, как квитанция, в UI-лог и в
+    // хвост вывода не идёт; значение уезжает ответом шага (res.mascotLaunched) — по нему финиш решает, писать ли
+    // «установщик запустил её». Берём только у шага mascot; null — маркера не было (macOS, прежние сборки).
+    let mascotLaunched = null;
     const emitLine = (l) => {
       if (!l.length) return;
       const ri = receipts.parseReceiptLine(l);
       if (ri) { logLine(l); return; }
+      const ml = runOutcome.parseMascotLaunch(l);
+      if (ml !== null && id === 'mascot') { mascotLaunched = ml; logLine(l); return; }
       outTail.push(l);
       if (outTail.length > TAIL_MAX) outTail.shift();
       send(l);
@@ -1285,6 +1481,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       return {
         push: (buf) => {
           lastOut = Date.now();
+          // Шаг ожил после того, как ему предложили «Пропустить» — кнопку убираем:
+          // убивать живую установку по устаревшему предложению нельзя.
+          if (stall.offered) { stall.offered = false; sendChannel('step-stall', { id, state: 'alive' }); }
           const parts = (tail + dec.write(buf)).split(/\r?\n/);
           tail = parts.pop();
           parts.forEach(emitLine);
@@ -1299,10 +1498,28 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     // Watchdog БЕЗ убийства: msiexec/pip/playwright легально идут десятками минут, а
     // kill посреди MSI-транзакции хуже висяка. Но молчащий шаг без единого признака
     // жизни — это «установщик завис, что делать?»: раз в 10 минут честно говорим.
+    // Исключение — НЕОБЯЗАТЕЛЬНЫЙ компонент: после 8 минут тишины человеку предлагается
+    // кнопка «Пропустить шаг» (убивает только этот шаг и только по его нажатию). Живые
+    // случаи: ChatGPT Desktop молчал 72 минуты, Cursor — 2,7 часа, а выхода, кроме
+    // закрыть всё окно, не было.
     let stallWarned = 0;
     const stallTimer = setInterval(() => {
-      const mins = Math.floor((Date.now() - lastOut) / 60000);
-      if (mins >= 10 && mins >= stallWarned + 10) {
+      const d = runOutcome.stallDecision({ silentMs: Date.now() - lastOut, optional: stall.optional,
+        offered: stall.offered, warnedAtMin: stallWarned });
+      const mins = d.mins;
+      if (d.offerSkip) {
+        stall.offered = true;
+        // Тишина не всегда зависание: при медленном интернете большая загрузка идёт молча
+        // (Claude Desktop качает установщик без прогресса). Убить такую — потерять почти готовое.
+        const o = '[внимание] шаг «' + id + '» молчит ' + mins + ' мин. Это необязательный компонент. ' +
+          'Молчание не всегда значит зависание: при медленном интернете большая загрузка идёт без вывода — ' +
+          'тогда лучше подождать. Если ничего не качается и не меняется — можно нажать «Пропустить шаг» ' +
+          'рядом с ним: шаг остановится, установка пойдёт дальше без него, а поставить его можно позже, ' +
+          'запустив установщик ещё раз.';
+        send(o); logLine(o);
+        sendChannel('step-stall', { id, state: 'stalled', mins });
+      }
+      if (d.warn) {
         stallWarned = mins;
         // Текст намеренно НЕ называет одну причину: раньше здесь стояло «системный
         // установщик ждёт другую установку Windows», и на шаге «vscode» это уводило
@@ -1331,14 +1548,37 @@ ipcMain.handle('run-component', async (_evt, payload) => {
     });
     child.on('close', (code) => {
       CHILDREN.delete(child);
+      if (CURRENT_STEP && CURRENT_STEP.child === child) CURRENT_STEP = null;
       invalidatePathCache();   // скрипт мог дописать в PATH — перечитаем при следующей детекции
       try { clearInterval(stallTimer); } catch (e) { /* ignore */ }
       try { outR.flush(); errR.flush(); } catch (e) { /* ignore */ }  // последняя строка без \n
       logLine(`=== exit code: ${code} ===`);
       const okRun = code === 0;
+      // Шаг остановлен кнопкой «Пропустить шаг» (только необязательный, см. skip-step).
+      // Разбираем ДО маркеров и провала: убитый процесс вернул ненулевой код, но это не
+      // поломка, а решение человека. Если процесс успел честно завершиться сам (0; 120 —
+      // свой пропуск со своей причиной; 121 — частичный успех: компонент работает)
+      // одновременно с нажатием — верим факту, а не кнопке.
+      if (stall.skipRequested && !okRun && !runOutcome.isSkipExit(code) && !runOutcome.isPartialExit(code)) {
+        cleanupSecureCache();
+        // Убитый посреди установки установщик мог оставить недоустановленную программу, а
+        // детект по файлам потом сочтёт её установленной — об этом честно говорим сразу.
+        const why = 'пропущен по кнопке «Пропустить шаг» после ' + stall.skipMins +
+          ' мин без вывода — поставить его можно позже, запустив установщик ещё раз. ' +
+          'Если после остановки программа всё же появилась и не запускается — удали её и поставь заново';
+        logLine('=== компонент «' + id + '» ' + why + ' ===');
+        resolve({ id, ok: true, code, skipped: true, userSkipped: true, skipReason: why });
+        return;
+      }
       // P0-1: осознанный skip компонента (нечего ставить) идёт distinct-кодом
       // (receipts.EXIT_SKIP) — НЕ ошибка, но и НЕ установка: маркер НЕ пишем.
       const skipped = receipts.isSkipExit(code);
+      // Код 121 (receipts.EXIT_PARTIAL) — «частичный успех»: компонент работает, но
+      // необязательной части нет (vscode: редактор стоит, панель Claude или Codex не встала).
+      // Для потока это успех: зависимые идут дальше, маркер установки пишется. Renderer
+      // получает res.partial === true и res.partialReason — текст строки «ЧАСТИЧНО: …» из
+      // вывода скрипта — и рисует шаг ЖЁЛТЫМ (не зелёным «готово», не красной ошибкой).
+      const partial = receipts.isPartialExit(code);
       // Записываем версию в справочный манифест ~/.hamidun-setup/installed.json ТОЛЬКО
       // при реальном успехе (код 0) и НЕ в dry-run. Скрытый verify не пишем. Skip-код
       // и любой ненулевой код маркер НЕ пишут (иначе фантомная кнопка «Удалить» → снос
@@ -1392,6 +1632,14 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // Объяснение печатаем в лог/UI сразу (человек читает его на месте, а не ищет
       // причину в простыне из cargo/pip) и отдаём renderer'у в res.hint — он ставит
       // короткую подпись на шаге и кладёт вид причины в отчёт боту.
+      if (partial) {
+        // Кэш докачки НЕ чистим: «Повторить» для недоставленной части переиспользует уже
+        // скачанный архив (уборка всё равно гарантирована на выходе, cleanupAllSecureDirs).
+        const partialWhy = receipts.partialReason(outTail);
+        logLine(`=== компонент «${id}» установлен частично (код ${code})${partialWhy ? ': ' + partialWhy : ''} ===`);
+        resolve({ id, ok: true, code, skipped: false, partial: true, partialReason: partialWhy });
+        return;
+      }
       if (!okRun && !skipped) {
         const why = failureExplain.explainScriptFailure(outTail);
         // ВЫЖИМКА строится ВСЕГДА, опознана причина или нет. До 20.08.2026 её не
@@ -1441,19 +1689,47 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       //
       // Причину берём из последней содержательной строки вывода: скрипты печатают её
       // прямо перед exit 120 — это их собственное объяснение, а не наша догадка.
-      let skipReason = '';
-      if (skipped) {
-        const lines = String(outTail || '').split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l && !/^\[(dry-run|debug)\]/i.test(l));
-        skipReason = lines.length ? lines[lines.length - 1].slice(0, 240) : '';
-      }
-      resolve({ id, ok: okRun || skipped, code, skipped, skipReason });
+      // (outTail — МАССИВ строк. Прежнее String(outTail).split склеивало его через
+      // запятую, и «последней строкой» оказывалось НАЧАЛО вывода — на финише стояла
+      // первая строка шага вместо причины. Разбор теперь в run-outcome.js под тестом.)
+      const skipReason = skipped ? runOutcome.skipReasonFrom(outTail) : '';
+      const res = { id, ok: okRun || skipped, code, skipped, skipReason };
+      // Исход запуска скрепки (см. mascotLaunched выше): поле есть только у шага mascot и только если маркер был.
+      if (mascotLaunched !== null) res.mascotLaunched = mascotLaunched;
+      resolve(res);
     });
   });
   } finally {
     _installBusy = false;   // замок снимается ТОЛЬКО после реального завершения шага
   }
+});
+
+// «Пропустить шаг» — остановить ОДИН зависший необязательный шаг и идти дальше.
+// Renderer лишь просит; решает main (runOutcome.canSkipNow): шаг идёт прямо сейчас,
+// он необязательный по вшитому components.json и по-прежнему молчит не меньше
+// STALL_SKIP_MIN минут. Иначе отказ с причиной. Убиваем только дерево этого шага —
+// тем же примитивом, что killChildren при закрытии окна.
+ipcMain.handle('skip-step', (_e, payload) => {
+  const st = CURRENT_STEP;
+  const silentMs = st ? Date.now() - st.lastOut() : 0;
+  const v = runOutcome.canSkipNow({
+    running: !!st, id: st && st.id, requestedId: payload && payload.id,
+    optional: !!(st && st.stall.optional), silentMs,
+    exited: !!(st && runOutcome.childExited(st.child)),
+  });
+  if (!v.ok) {
+    // Скрипт ушёл, а 'close' не приходит (его держит внук с унаследованными пайпами): рвём
+    // свои концы пайпов, чтобы шаг наконец завершился, и убивать никого не надо.
+    if (st && st.child && runOutcome.childExited(st.child)) {
+      try { if (st.child.stdout) st.child.stdout.destroy(); if (st.child.stderr) st.child.stderr.destroy(); } catch (e) { /* ignore */ }
+    }
+    return { ok: false, reason: v.reason };
+  }
+  st.stall.skipRequested = true;
+  st.stall.skipMins = Math.floor(silentMs / 60000);
+  logToFile(st.id, '[пропуск] шаг остановлен по кнопке «Пропустить шаг» после ' + st.stall.skipMins + ' мин без вывода');
+  killProcessTree(st.child);
+  return { ok: true };
 });
 
 ipcMain.handle('open-external', (_e, url) => {
@@ -1499,6 +1775,9 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       // не может: иначе он бы приписывал установки чужим людям.
       uid: INSTALL_UID || null,
       edition: isLiteEdition() ? 'lite' : 'offline',
+      // 'repair' = прогон «Проверить и починить» (только verify, ничего не ставилось). Закрытый
+      // список, как и у event: renderer не может придумать свой режим.
+      mode: p.mode === 'repair' ? 'repair' : 'install',
       ok: !!p.ok,
       failed: ids(p.failed),
       skipped: ids(p.skipped),
@@ -1516,7 +1795,28 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       // duration_sec клампим в [0, 24ч] — мусорные значения не улетают.
       duration_sec: Math.max(0, Math.min(86400, Math.round(Number(p.durationSec) || 0))),
     });
+    // Прогон начат / закончен — для отчёта о прерванной установке (sendAbortReportIfNeeded).
+    if (event === 'install_started') { _runReport.started = true; _runReport.finished = false; _runReport.startedAt = Date.now(); _runReport.mode = p.mode === 'repair' ? 'repair' : 'install'; }
+    if (event === 'installed') _runReport.finished = true;
+    postTelemetry(url, body);
+  } catch (e) { /* swallow — see above */ }
+  return { ok: true };
+});
+
+// Сколько отчётов ещё в пути. Выход из приложения ждёт их не дольше пары секунд:
+// иначе отчёт о закрытом посреди установки окне умирал бы вместе с процессом.
+let _telemetryInFlight = 0;
+// Что уже сказано о текущем прогоне: «начат» (согласие на отчёт было — иначе renderer
+// не прислал бы install_started) и «закончен» (финиш отчитался сам).
+const _runReport = { started: false, finished: false, startedAt: 0, mode: 'install' };
+let _abortReportSent = false;
+
+function postTelemetry(url, body) {
+  let settled = false;
+  const done = () => { if (!settled) { settled = true; _telemetryInFlight = Math.max(0, _telemetryInFlight - 1); } };
+  try {
     const u = new URL(url);
+    _telemetryInFlight++;
     const req = https.request({
       hostname: u.hostname,
       port: u.port || 443,
@@ -1524,13 +1824,82 @@ ipcMain.handle('send-telemetry', (_e, payload) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
       timeout: 5000,
-    }, (res) => { res.resume(); }); // ответ не важен — просто дренируем сокет
-    req.on('timeout', () => { try { req.destroy(); } catch (e) { /* ignore */ } });
-    req.on('error', () => { /* молча: телеметрия не должна ломать установку */ });
+    }, (res) => { res.on('end', done); res.on('close', done); res.resume(); }); // ответ не важен — дренируем сокет
+    req.on('timeout', () => { try { req.destroy(); } catch (e) { /* ignore */ } done(); });
+    req.on('error', () => { done(); /* молча: телеметрия не должна ломать установку */ });
+    req.on('close', done);
     req.end(body);
-  } catch (e) { /* swallow — see above */ }
-  return { ok: true };
-});
+  } catch (e) { done(); }
+}
+
+// Отчёт «установку прервали»: прогон начат, финиш не отчитался, а окно закрывают.
+// Называет шаг, который шёл (или последний запущенный), и сколько прошло минут.
+// Возвращает true, если отчёт ушёл сейчас (тогда выход стоит подождать).
+function sendAbortReportIfNeeded() {
+  try {
+    if (_abortReportSent || !_runReport.started || _runReport.finished) return false;
+    const cfg = readJson('config.json', {});
+    const url = String((cfg.telemetry && cfg.telemetry.url) || '');
+    if (!/^https:\/\//i.test(url)) return false;
+    _abortReportSent = true;
+    const stepId = String((CURRENT_STEP && CURRENT_STEP.id) || _lastStepId || 'unknown')
+      .slice(0, 64).replace(/[^A-Za-z0-9_-]/g, '-');
+    const sec = Math.max(0, Math.min(86400, Math.round((Date.now() - (_runReport.startedAt || Date.now())) / 1000)));
+    const body = JSON.stringify({
+      event: 'installed',
+      platform: IS_WIN ? 'win' : 'mac',
+      uid: INSTALL_UID || null,
+      edition: isLiteEdition() ? 'lite' : 'offline',
+      mode: _runReport.mode === 'repair' ? 'repair' : 'install',
+      ok: false,
+      failed: [stepId],
+      skipped: [],
+      selected: [],
+      errors: [{ id: stepId, stage: 'aborted',
+        error: 'установку прервали: окно закрыто' + (CURRENT_STEP ? ' во время шага' : ' между шагами') +
+          ' через ' + Math.round(sec / 60) + ' мин после начала' }],
+      duration_sec: sec,
+    });
+    postTelemetry(url, body);
+    if (!process.env.HM_DRY_RUN) {
+      logToFile('setup', '[отчёт] установка прервана закрытием окна на шаге «' + stepId + '» — отчёт отправлен');
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+function waitTelemetryThen(fn) {
+  const deadline = Date.now() + 2500;
+  const tick = () => {
+    if (_telemetryInFlight <= 0 || Date.now() > deadline) { try { fn(); } catch (e) { /* ignore */ } return; }
+    setTimeout(tick, 100);
+  };
+  tick();
+}
+
+// Рабочий стол, в который можно писать и с которого можно убирать файлы из-под администратора.
+// Ответ оболочки (app.getPath('desktop')) берётся из HKCU\...\User Shell Folders, а эту ветку без
+// UAC правит любая программа пользователя: перенаправив «Desktop» в папку, куда она писать не
+// может, а администратор может (автозагрузка всех пользователей, чужой профиль), она получила бы
+// файл, созданный администратором. Поэтому ответ принимается только внутри профиля ИЗ ТОКЕНА
+// (os.userInfo().homedir — не os.homedir(): тот читает переменную USERPROFILE, её тоже подменяют)
+// и без ссылок на пути — см. src/desktop-path.js. '' = стол не годится: файл не пишем, строка в журнале.
+function safeDesktopDir() {
+  let shellDesktop = '';
+  try { shellDesktop = app.getPath('desktop'); } catch (e) { shellDesktop = ''; }
+  let profile = '';
+  try { profile = os.userInfo().homedir; } catch (e) { profile = ''; }
+  let v;
+  try { v = desktopPath.resolveSafeDesktop({ profile, shellDesktop, platform: process.platform }); }
+  catch (e) { v = { ok: false, reason: 'проверка не выполнилась (' + ((e && e.code) || (e && e.message) || e) + ')' }; }
+  if (v.ok) return v.dir;
+  // Ответ оболочки — чужой текст из реестра: в журнал он идёт одной строкой, без переводов строк и управляющих знаков
+  // (иначе значение с \n подделало бы соседние строки журнала).
+  const oneLine = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '?').slice(0, 300);
+  logToFile('setup', 'Рабочий стол (' + oneLine(shellDesktop || 'оболочка не назвала') + ') не прошёл проверку: ' + oneLine(v.reason) +
+    ' — под администратором на него не пишу и с него ничего не убираю; памятка открывается из ресурсов установщика.');
+  return '';
+}
 
 // shell.openPath резолвится СТРОКОЙ: пустая = успех, непустая = текст ошибки.
 // Пробрасываем это в renderer, чтобы он мог показать фолбэк вместо тихого no-op.
@@ -1543,8 +1912,13 @@ ipcMain.handle('open-path', async (_e, p) => {
   try {
     const rp = path.resolve(String(p));
     const root = path.resolve(resourceRoot());
-    const desktopMemo = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
-    const allowed = rp === path.resolve(LOG_PATH) || rp === desktopMemo || rp.startsWith(root + path.sep);
+    // Стол проверяем, только если просят именно памятку: на каждый другой путь (журнал, ресурсы)
+    // лишняя проверка и строка об отказе в журнале не нужны. '' — стол не прошёл проверку профиля:
+    // памятка на нём открытию не подлежит.
+    const MEMO_FILE = 'Что дальше — Hamidun.html';
+    const deskDir = path.basename(rp) === MEMO_FILE ? safeDesktopDir() : '';
+    const desktopMemo = deskDir ? path.join(deskDir, MEMO_FILE) : '';
+    const allowed = rp === path.resolve(LOG_PATH) || (desktopMemo !== '' && rp === desktopMemo) || rp.startsWith(root + path.sep);
     if (!allowed) return { ok: false, error: 'bad-path' };
     const err = await shell.openPath(rp);
     return { ok: !err, error: err || '' };
@@ -1552,6 +1926,13 @@ ipcMain.handle('open-path', async (_e, p) => {
     return { ok: false, error: e.message };
   }
 });
+
+// Памятка START-HERE.html с числами из сводки конфига (src/pack-summary.js → fillStartHere).
+// Читает вшитый файл по уже проверенному пути и подставляет числа между маркерами PACK-COUNTS.
+function startHereHtml(src) {
+  const raw = fs.readFileSync(src, 'utf8');
+  return packSummary.fillStartHere(raw, packSummary.readSummaryJson({ home: os.homedir() }));
+}
 
 // Копируем памятку START-HERE.html на рабочий стол — чтобы к ней можно было
 // вернуться в любой момент (не зависит от того, где лежит установщик/ресурсы).
@@ -1569,7 +1950,18 @@ ipcMain.handle('save-start-here', () => {
     src = path.resolve(root, rel);
     if (!src.startsWith(root + path.sep)) return { ok: false, dest: '', src: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, dest: '', src, error: 'source-missing' };
-    const dest = path.join(app.getPath('desktop'), 'Что дальше — Hamidun.html');
+    // Содержимое считаем ДО проверки стола: чтение 600 КБ памятки и сводки конфига — десятки
+    // миллисекунд, а между проверкой папки и записью программа пользователя успела бы подменить
+    // папку. Теперь между ними только lstat имени: окно остаётся, но в доли миллисекунды.
+    let html = null;
+    try { html = startHereHtml(src); } catch (e1) { html = null; }
+    // Папка — из профиля, а не «как сказала оболочка» (safeDesktopDir): ответ оболочки лежит в ветке
+    // реестра, которую без UAC правит любая программа пользователя, и перенаправленный в чужую
+    // папку стол получил бы файл, созданный администратором. Отказ — как любой другой сбой
+    // копирования: renderer откроет вшитую копию (src).
+    const desk = safeDesktopDir();
+    if (!desk) return { ok: false, dest: '', src, error: 'desktop-outside-profile' };
+    const dest = path.join(desk, 'Что дальше — Hamidun.html');
     // Проверяем НАЗНАЧЕНИЕ, а не только источник. Раньше здесь был голый
     // copyFileSync: имя на рабочем столе фиксированное и известное заранее, и
     // если по нему заранее подложить symlink или hardlink на чужой файл, копия
@@ -1597,7 +1989,11 @@ ipcMain.handle('save-start-here', () => {
     if (dst && dst.nlink > 1) {
       return { ok: false, dest: '', src, error: 'dest-hardlinked' };
     }
-    fs.copyFileSync(src, dest);
+    // Числа в памятке («N навыков, M команд, K помощников») — из сводки конфига ЭТОГО человека, а не
+    // зашитые в файл. Не получилось подставить — кладём файл как есть: памятка важнее цифр.
+    let wrote = false;
+    if (html !== null) { try { fs.writeFileSync(dest, html, 'utf8'); wrote = true; } catch (e2) { wrote = false; } }
+    if (!wrote) fs.copyFileSync(src, dest);
     return { ok: true, dest, src };
   } catch (e) {
     // src отдаём и при ошибке — renderer откроет вшитую копию как фолбэк.
@@ -1619,7 +2015,9 @@ ipcMain.handle('read-start-here', () => {
     const src = path.resolve(root, rel);
     if (!src.startsWith(root + path.sep)) return { ok: false, html: '', error: 'bad-path' };
     if (!fs.existsSync(src)) return { ok: false, html: '', error: 'source-missing' };
-    return { ok: true, html: fs.readFileSync(src, 'utf8'), error: '' };
+    let html = fs.readFileSync(src, 'utf8');
+    try { html = startHereHtml(src); } catch (e2) { /* без чисел — памятка всё равно читается */ }
+    return { ok: true, html, error: '' };
   } catch (e) {
     return { ok: false, html: '', error: e.message };
   }
@@ -1654,7 +2052,7 @@ ipcMain.handle('launch-cursor', () => {
       try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — проверим ниже */ }
       try { if (!fs.statSync(startDir).isDirectory()) return false; } catch (e) { return false; }
       const cexe = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe');
-      if (fs.existsSync(cexe)) { return winLaunchDeElevated(cexe, startDir); }
+      if (fs.existsSync(cexe)) { return winLaunchDeElevated(cexe, startDir, deelevRoute.editorOpenFiles(startDir, 'PROMPTS.md')); }
     } else if (IS_MAC) {
       spawn('/usr/bin/open', ['-a', 'Cursor'], { detached: true, stdio: 'ignore' }).unref();
       return true;
@@ -1690,31 +2088,41 @@ function winDeElevScript() {
 // Последняя причина отказа защищённого staging — чтобы в журнале и в тексте ошибки
 // стояла ПРАВДА, а не «сеть оборвалась». Пишется только из winMakeSecureDir.
 let lastSecureDirError = '';
+// Сколько раз примитив РЕАЛЬНО запускался в последнем вызове (0 — до запуска не дошли). Нужен вызывающему,
+// чтобы текст отказа не говорил «две попытки не прошли», когда не было ни одной.
+let lastSecureDirAttempts = 0;
 
 // Вычисление пути для сноса staging и сам снос живут в src/staging-paths.js:
 // это код с ценой ошибки «стёрли чужой каталог под админом», и он обязан
 // проверяться тестом напрямую, а не через выковыривание функции из этого файла.
 // Гейт по имени HmDeElev-<32 hex> — там же (зеркало Remove-HmSecureStagingDir).
 
-async function winMakeSecureDir() {
+// opts.retry — после ТАЙМАУТА или сбоя запуска примитива (он не ответил) один раз повторить с запасом
+// времени. Нужен только пути докачки (run-component): там шаг иначе падал. Запуск редактора
+// (winLaunchDeElevated) зовёт без него — человек ждёт окно, и 20 секунд ему уже долго.
+async function winMakeSecureDir(opts) {
   // Сбрасываем на КАЖДОМ входе. Иначе причина от прошлого отказа доживает до следующего
   // и приклеивается к другому компоненту: половина веток возвращает null молча, и в
   // тексте шага оказалась бы чужая, уже неверная причина — ровно то, ради чего эта
   // диагностика и заводилась.
   lastSecureDirError = '';
+  lastSecureDirAttempts = 0;
   try {
     const pd = remoteFetch.winProgramData();
-    if (!pd || !fs.existsSync(pd)) return null;
+    if (!pd || !fs.existsSync(pd)) { lastSecureDirError = 'папка %ProgramData% не найдена'; return null; }
     const ps = remoteFetch.winPowershellPath();       // абс. powershell из валидир. System32
     const icacls = remoteFetch.sysBin('icacls.exe');   // абс. icacls (примитив ставит владельца)
     const deelev = winDeElevScript();                  // абс. путь к вшитому _deelev.ps1
-    if (!ps || !icacls || !deelev || !fs.existsSync(deelev)) return null;
+    if (!ps || !icacls || !deelev || !fs.existsSync(deelev)) {
+      lastSecureDirError = 'не нашлись powershell.exe, icacls.exe или _deelev.ps1 установщика';
+      return null;
+    }
     // Инлайн: дот-сорсим bundled-примитив и зовём АТОМАРНЫЙ конструктор secure-dir.
     // Пути — ЛИТЕРАЛАМИ (single-quoted, ''-экранирование); ни одного аргумента из
     // renderer/сети. Установщик elevated -> каталог {SYSTEM,Admins}, без user-ACE.
-    const deLit = String(deelev).replace(/'/g, "''");
-    const pdLit = String(pd).replace(/'/g, "''");
-    const icLit = String(icacls).replace(/'/g, "''");
+    const deLit = deelevRoute.psQuoteBody(deelev);
+    const pdLit = deelevRoute.psQuoteBody(pd);
+    const icLit = deelevRoute.psQuoteBody(icacls);
     // PSModulePath ПРИБИВАЕМ литералом к System32\WindowsPowerShell\v1.0\Modules.
     // Две причины, обе кусаются:
     //  1) если установщик запущен из окружения PowerShell 7 (терминал pwsh, CI-раннер),
@@ -1726,7 +2134,7 @@ async function winMakeSecureDir() {
     //  2) PSModulePath пишется medium-малварью того же юзера (HKCU\Environment) и является
     //     штатным вектором module-hijack в elevated-процессе.
     const s32 = path.dirname(path.dirname(path.dirname(ps)));   // ...\System32 из валидированного powershell.exe
-    const psmLit = path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules').replace(/'/g, "''");
+    const psmLit = deelevRoute.psQuoteBody(path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'));
     const inline =
       // Кодировку консоли задаём ПЕРВОЙ командой. powershell 5.1 пишет stdout и stderr
       // в кодовой странице консоли (CP866 на русской Windows), а Node читает трубу как
@@ -1746,7 +2154,12 @@ async function winMakeSecureDir() {
     // Читаем stderr, а не только stdout: примитив на отказе НЕ бросает, он возвращает $null
     // и пишет причину (HMSECFAIL) в stderr. Раньше причина молча терялась, и пользователь
     // получал бесполезное «примитив не вернул путь».
-    const r = await new Promise((resolve) => {
+    // Попытки — 20 с, а с opts.retry при молчании примитива ещё 60 с. Холодный старт
+    // powershell.exe под антивирусом на слабой машине бывает дольше 20 с: у людей шаг падал с
+    // «таймаут примитива (20 с)», а повтор через пару минут проходил. Повторяем ТОЛЬКО когда
+    // примитив не ответил (таймаут, сбой запуска): ответ HMSECFAIL — окончательный, повтор
+    // дал бы то же самое.
+    const runOnce = (budgetMs) => new Promise((resolve) => {
       let so = '', se = '', settled = false;
       const done = (res) => { if (!settled) { settled = true; resolve(res); } };
       let child;
@@ -1759,12 +2172,17 @@ async function winMakeSecureDir() {
         child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
           { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
       } catch (e) { return done({ error: e }); }
-      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || 'таймаут примитива (20 с)' }); }, 20000);
+      const kill = setTimeout(() => { try { child.kill(); } catch (e) { /* */ } done({ stdout: so, stderr: se || ('таймаут примитива (' + (budgetMs / 1000) + ' с)') }); }, budgetMs);
       child.stdout.on('data', (d) => { so += String(d); });
       child.stderr.on('data', (d) => { se += String(d); });
       child.on('error', (e) => { clearTimeout(kill); done({ error: e }); });
       child.on('close', () => { clearTimeout(kill); done({ stdout: so, stderr: se }); });
     });
+    const answered = (x) => !!(x && !x.error && (/HMSECDIR::[\s\S]+?::END/.test(String(x.stdout || ''))
+      || /HMSECFAIL/.test(String(x.stderr || ''))));
+    let r = await runOnce(20000);
+    lastSecureDirAttempts = 1;
+    if (opts && opts.retry && !answered(r)) { r = await runOnce(60000); lastSecureDirAttempts = 2; }
     const out = String((r && r.stdout) || '');
     // Берём ПОСЛЕДНЮЮ строку HMSECFAIL: их может быть несколько (посторонние ACE
     // перечисляются по одному), и последняя — та, что решила исход.
@@ -1781,7 +2199,7 @@ async function winMakeSecureDir() {
       return null;
     }
     const dir = m[1].trim();
-    if (!dir) return null;
+    if (!dir) { lastSecureDirError = 'примитив вернул пустой путь'; return null; }
     const rm = () => rmStagingTree(dir);
     // Defense-in-depth: путь строго под ProgramData, каталог существует, owner=Admins и
     // никаких посторонних ACE (SID-based). Примитив уже верифицировал — перепроверяем.
@@ -1797,10 +2215,76 @@ async function winMakeSecureDir() {
       lastSecureDirError = 'примитив вернул путь вне %ProgramData% — каталог не тронут';
       return null;
     }
-    if (!fs.existsSync(dir)) return null;
-    if (!remoteFetch.verifyDirSecureWin(dir)) { rm(); return null; }   // owner=Admins, посторонних ACE нет
+    if (!fs.existsSync(dir)) { lastSecureDirError = 'каталог пропал сразу после создания: ' + dir; return null; }
+    // Причину отказа проверки берём из её журнала. Раньше тут молча возвращался null: на чистой машине проверка
+    // упиралась в таймаут PowerShell, а человек читал «часто мешает антивирус» вместо настоящей причины
+    // («PowerShell не ответил за N с», «посторонний ACE», «владелец …»).
+    const verifyLog = [];
+    if (!remoteFetch.verifyDirSecureWin(dir, (l) => verifyLog.push(String(l).replace(/^\s*\[sec\]\s*/, '').trim()))) {
+      lastSecureDirError = (verifyLog[verifyLog.length - 1] || 'проверка прав на каталог не пройдена').slice(0, 300);
+      rm(); return null;                                              // owner=Admins, посторонних ACE нет
+    }
     return dir;
-  } catch (e) { return null; }
+  } catch (e) {
+    lastSecureDirError = String((e && e.message) || e).slice(0, 300);
+    return null;
+  }
+}
+
+// Запуск ТОКЕНОМ ОБОЛОЧКИ Explorer (medium, тот же пользователь — проверяется по самому токену
+// ДО запуска) через вшитый _deelev.ps1 (Invoke-HmAsShellUser, CreateProcessWithTokenW). Им идут
+// все запуски пользовательских файлов из повышенного процесса, которые нельзя отдать задаче
+// планировщика: запасной путь кнопок редактора и окно «Войти в Claude». НЕ «explorer.exe <файл>»:
+// если оболочки в этот момент нет (её может прибить малварь того же юзера), наш elevated
+// explorer исполнил бы запуск сам, под админом, по ассоциациям из HKCU.
+// spec: { exe, args } — программа с аргументами | { script } — готовый текст команды для cmd.exe
+// (deelevRoute.CLAUDE_TERMINAL_SCRIPT); cwd — рабочая папка (примитив проверит: внутри профиля,
+// без ссылок); label — метка журнала.
+// Promise<{ gate, code, reason }>: gate 'medium' и code 0 — процесс запущен и не упал за 3 с.
+function winShellTokenRun(spec) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    let ps = null; let deelev = null;
+    try { ps = remoteFetch.winPowershellPath(); deelev = winDeElevScript(); } catch (e) { /* ниже */ }
+    if (!ps || !deelev || !fs.existsSync(ps) || !fs.existsSync(deelev)) {
+      return done({ gate: 'unavailable', code: -1, reason: 'нет powershell или _deelev.ps1' });
+    }
+    // Литералы — single-quoted с удвоением ВСЕХ пяти знаков-ограничителей (ASCII ' и U+2018/2019/
+    // 201A/201B, deelevRoute.psLit внутри shellTokenInline), ни одного значения из renderer.
+    // PSModulePath прибит литералом (тот же довод, что в winMakeSecureDir).
+    const s32 = path.dirname(path.dirname(path.dirname(ps)));
+    const inline = deelevRoute.shellTokenInline({
+      psModulePath: path.join(s32, 'WindowsPowerShell', 'v1.0', 'Modules'),
+      deelev, exe: spec.exe, args: spec.args, script: spec.script, cwd: spec.cwd, label: spec.label
+    });
+    let so = '';
+    let child;
+    try {
+      // env доверенный (detectSpawnEnv): COR_*/PSModulePath из HKCU\Environment в elevated
+      // powershell.exe не пускаем — тот же класс подсадки, что закрыт в winMakeSecureDir.
+      child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', inline],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: detectSpawnEnv() });
+    } catch (e) { return done({ gate: 'unavailable', code: -1, reason: String((e && e.message) || e) }); }
+    const kill = setTimeout(() => {
+      try { child.kill(); } catch (e) { /* */ }
+      done({ gate: 'unknown', code: -1, reason: 'запуск токеном оболочки не ответил за 30 с' });
+    }, 30000);
+    child.stdout.on('data', (d) => { so += String(d); });
+    child.stderr.on('data', () => { /* причина приезжает в маркере stdout */ });
+    child.on('error', (e) => { clearTimeout(kill); done({ gate: 'unavailable', code: -1, reason: String((e && e.message) || e) }); });
+    child.on('close', () => {
+      clearTimeout(kill);
+      const m = /HMSHELL::([a-z-]+)::(-?\d+)::([\s\S]*?)::END/.exec(so);
+      if (!m) return done({ gate: 'unavailable', code: -1, reason: 'нет ответа от _deelev.ps1' });
+      done({ gate: m[1], code: Number(m[2]), reason: m[3] });
+    });
+  });
+}
+
+// Запасной путь запуска редактора: тот же exe с токеном оболочки, папка и файлы-вкладки — аргументами.
+function winShellTokenLaunch(exe, folderArg, extraArgs) {
+  return winShellTokenRun({ exe, args: [folderArg].concat(extraArgs || []), label: 'launch-editor' });
 }
 
 // P0-D (privesc): установщик запущен ELEVATED (requestedExecutionLevel=requireAdministrator).
@@ -1816,13 +2300,18 @@ async function winMakeSecureDir() {
 //              pre-creation/tamper XML невозможны. Обёртка ПЕРВЫМИ строками ставит чистые
 //              env-ЛИТЕРАЛЫ (ни одного cmdlet до gate), сверяет integrity абсолютным
 //              System32\whoami и стартует редактор ЛИШЬ при medium (иначе exit 210).
-//   fallback — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
-//              shell). Editor-exe в fallback НЕ исполняем (P0-D#4).
+//   запасной — если ДОКАЗАНО, что задача ничего не запустила (сбой до /Run, 210, HRESULT
+//              планировщика — deelevRoute.shellFallbackAllowed), тот же exe с проверенным
+//              medium-токеном оболочки Explorer (winShellTokenLaunch).
+//   последний — открыть ТОЛЬКО ПАПКУ через АБСОЛЮТНЫЙ %WINDIR%\explorer.exe (medium, токен
+//              shell). Editor-exe через explorer НЕ исполняем (P0-D#4).
 // P0-D#5/P1-1: true возвращаем ТОЛЬКО когда задача подтвердила gate И старт — по «Last Result»
-// (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил.
-// Иначе (210 refused / 211 start-fail / нет подтверждения / любой сбой) -> folder-only fallback.
-// Возвращает Promise<boolean> (опрос неблокирующий — UI не морозим).
-async function winLaunchDeElevated(exe, folderArg) {
+// (БД планировщика, SYSTEM-owned, НЕ user-writable): 0 = medium прошёл И Start-Process не бросил,
+// либо запасной путь создал процесс с проверенным medium-токеном. Иначе (211 start-fail / нет
+// подтверждения / любой сбой) -> folder-only fallback. Каждый исход — строка в install.log.
+// Возвращает Promise<boolean|'explorer'> (опрос неблокирующий — UI не морозим).
+// extraArgs — файлы, которые редактор откроет вкладками в той же папке (code <папка> <файл>).
+async function winLaunchDeElevated(exe, folderArg, extraArgs) {
   const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
   // Fallback: открыть ПАПКУ (не exe) в explorer — medium integrity, наследует токен shell.
   // Возвращаем 'explorer', а НЕ true: открылась папка, редактор не запускался.
@@ -1845,7 +2334,25 @@ async function winLaunchDeElevated(exe, folderArg) {
     } catch (e) { /* ignore */ }
     return false;
   };
-  const done = (v) => Promise.resolve(v);
+  // Итог запуска — одной строкой в install.log: путь, Gate и «Last Result» (hex), причина.
+  // Раньше отказ кнопки не оставлял следа нигде, и «открылась только папка» не объяснить.
+  const note = (msg) => { try { logToFile('launch', 'Открыть редактор: ' + msg); } catch (e) { /* журнал не роняет запуск */ } };
+  // Задача доказанно НИЧЕГО не запустила -> токен оболочки; не вышло или не доказано -> папка.
+  const viaShellOrFolder = async (stage, lr) => {
+    const v = deelevRoute.taskVerdict(lr);
+    const taskText = stage === 'done'
+      ? 'задача — Gate=' + v.gate + (v.hex ? ', Last Result=' + v.hex : '')
+      : 'задача не отработала (этап ' + stage + ')';
+    if (!deelevRoute.shellFallbackAllowed(stage, lr)) {
+      note(taskText + '; запасной путь не запускаю (первый запуск отработал или мог ещё идти) — открываю папку');
+      return folderFallback();
+    }
+    const sh = await winShellTokenLaunch(exe, folderArg, extraArgs);
+    note(taskText + '; запасной путь (токен оболочки Explorer) — Gate=' + sh.gate + ', код ' + sh.code +
+      (sh.reason ? ': ' + sh.reason : ''));
+    if (sh.gate === 'medium' && sh.code === 0) return true;
+    return folderFallback();
+  };
 
   let ps = null, schtasks = null, whoami = null;
   try {
@@ -1853,12 +2360,26 @@ async function winLaunchDeElevated(exe, folderArg) {
     schtasks = remoteFetch.sysBin('schtasks.exe');
     whoami = remoteFetch.sysBin('whoami.exe');
   } catch (e) { /* fail-closed ниже */ }
-  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return done(folderFallback()); }
+  if (!ps || !schtasks || !whoami || !fs.existsSync(ps) || !fs.existsSync(schtasks)) { return viaShellOrFolder('prereq', null); }
+
+  // Принципал задачи — пользователь ЭТОГО токена, и берём его из токена (whoami /user → SID), а не из
+  // USERDOMAIN/USERNAME: обе переменные лежат в HKCU\Volatile Environment и пишутся процессом того же
+  // пользователя; подмена на учётку другого человека с интерактивным сеансом запустила бы обёртку в ЕГО
+  // сеансе. Не прочитали — задачу не создаём: запасной путь сверяет токен оболочки по тому же SID.
+  let userSid = '';
+  try {
+    userSid = deelevRoute.parseWhoamiUserSid(execFileSync(whoami, ['/user', '/fo', 'csv', '/nh'],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], env: detectSpawnEnv() }));
+  } catch (e) { userSid = ''; }
+  if (!userSid) {
+    note('не удалось прочитать SID пользователя из токена (whoami /user) — задачу планировщика не создаю');
+    return viaShellOrFolder('prereq', null);
+  }
 
   const s32 = path.join(sysRoot, 'System32');
   const tag = 'HmLaunch_' + crypto.randomBytes(6).toString('hex');
   const dir = await winMakeSecureDir();
-  if (!dir) { return done(folderFallback()); }        // не заперли staging -> fail-closed на папку
+  if (!dir) { return viaShellOrFolder('staging', null); }   // не заперли staging -> задача не создана
   const xmlFile = path.join(dir, 'task.xml');
   function runSchtasks(args) {
     // env доверенный: schtasks — тот же класс привилегированного вызова, что и
@@ -1874,33 +2395,35 @@ async function winLaunchDeElevated(exe, folderArg) {
   // Обёртка исполняется de-elevated планировщиком. ПЕРВЫЕ строки — чистые env-ЛИТЕРАЛЫ (без
   // единого cmdlet/Join-Path до них). Integrity-self-check абсолютным System32\whoami.
   // Start-Process редактора ТОЛЬКО при medium: exit 0 старт / 211 бросок / 210 не-medium.
-  // Путь папки — в ОДНОМ аргументе с вложенными кавычками (P1-2: %USERPROFILE% с пробелом не рвётся).
-  const s32Lit = s32.replace(/'/g, "''");
-  const srLit = sysRoot.replace(/'/g, "''");
-  const whoLit = whoami.replace(/'/g, "''");
-  const exeLit = String(exe).replace(/'/g, "''");
-  const folderLit = String(folderArg).replace(/'/g, "''");
+  // Каждый путь — ОДНИМ аргументом с вложенными кавычками (P1-2: %USERPROFILE% с пробелом не рвётся).
+  const s32Lit = deelevRoute.psQuoteBody(s32);
+  const srLit = deelevRoute.psQuoteBody(sysRoot);
+  const whoLit = deelevRoute.psQuoteBody(whoami);
+  const exeLit = deelevRoute.psQuoteBody(exe);
+  // Папка и файлы — ОТДЕЛЬНЫМИ аргументами, каждый в своих кавычках (P1-2: пробел в
+  // %USERPROFILE% не рвёт путь); невыразимый путь к файлу не ломает запуск — откроется папка.
+  const argList = deelevRoute.psArgList([folderArg].concat(extraArgs || [])) || deelevRoute.psArgList([folderArg]);
+  // Папку не выразить аргументом (кавычка, перевод строки) — редактор не запускаем, только папка.
+  if (!argList) { rmStagingTree(dir); note('путь папки не выразить аргументом — открываю папку'); return folderFallback(); }
   const wrapperBody =
     "$env:PSModulePath='" + s32Lit + "\\WindowsPowerShell\\v1.0\\Modules'\n" +
     "$env:Path='" + s32Lit + ";" + srLit + ";" + s32Lit + "\\WindowsPowerShell\\v1.0'\n" +
     "if(@(& '" + whoLit + "' /groups 2>$null) -match 'S-1-16-8192'){\n" +
-    "try{ Start-Process -FilePath '" + exeLit + "' -ArgumentList '\"" + folderLit + "\"'; exit 0 }catch{ exit 211 }\n" +
+    "try{ Start-Process -FilePath '" + exeLit + "' -ArgumentList " + argList + "; exit 0 }catch{ exit 211 }\n" +
     "} else { exit 210 }\n";
   const b64 = Buffer.from(wrapperBody, 'utf16le').toString('base64');
   const wrapArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + b64;
 
-  // XML: принципал = текущий интерактивный пользователь, InteractiveToken, LeastPrivilege.
+  // XML: принципал = пользователь токена (SID из whoami выше), InteractiveToken, LeastPrivilege.
   // Тело обёртки — ЦЕЛИКОМ в <Arguments> (нет лимита 261 как у /TR command-line).
   const xmlEsc = (s) => String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
-  const userId = (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') +
-    (process.env.USERNAME || (function () { try { return os.userInfo().username; } catch (e) { return ''; } })());
   const taskXml =
     '<?xml version="1.0" encoding="UTF-16"?>\r\n' +
     '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n' +
     '  <RegistrationInfo><Description>Hamidun launch one-shot (de-elevated)</Description></RegistrationInfo>\r\n' +
-    '  <Principals><Principal id="Author"><UserId>' + xmlEsc(userId) + '</UserId>' +
+    '  <Principals><Principal id="Author"><UserId>' + xmlEsc(userSid) + '</UserId>' +
     '<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n' +
     '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><AllowHardTerminate>true</AllowHardTerminate>' +
     '<StartWhenAvailable>false</StartWhenAvailable><Enabled>true</Enabled><Hidden>true</Hidden>' +
@@ -1925,11 +2448,11 @@ async function winLaunchDeElevated(exe, folderArg) {
 
   try {
     fs.writeFileSync(xmlFile, '\uFEFF' + taskXml, 'ucs2');   // UTF-16LE + BOM (schtasks /XML)
-  } catch (e) { cleanup(); return done(folderFallback()); }
+  } catch (e) { cleanup(); return viaShellOrFolder('create', null); }
 
-  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return done(folderFallback()); }
+  if (!runSchtasks(['/Create', '/TN', tag, '/XML', xmlFile, '/F'])) { cleanup(); return viaShellOrFolder('create', null); }
   try { fs.unlinkSync(xmlFile); } catch (e) { /* определение задачи уже в БД планировщика */ }
-  if (!runSchtasks(['/Run', '/TN', tag])) { cleanup(); return done(folderFallback()); }
+  if (!runSchtasks(['/Run', '/TN', tag])) { cleanup(); return viaShellOrFolder('run', null); }
 
   // Неблокирующий опрос «Last Result» (Start-Process быстр -> обычно ~1-2с; крайний срок 30с).
   return new Promise((resolve) => {
@@ -1938,9 +2461,16 @@ async function winLaunchDeElevated(exe, folderArg) {
       const lr = readLastResult();
       if (lr !== null && lr !== '267009' && lr !== '267011') {
         cleanup();
-        return resolve(lr === '0' ? true : folderFallback());   // 0 = gate прошёл И старт; иначе папка
+        // 0 = gate прошёл И старт. Иначе — запасной путь, ЕСЛИ задача доказанно ничего не
+        // запустила (210 / HRESULT планировщика); 211 и прочее — папка.
+        if (lr === '0') { note('задача — Gate=medium, Last Result=0x00000000: редактор запущен'); return resolve(true); }
+        return viaShellOrFolder('done', lr).then(resolve, () => resolve(folderFallback()));
       }
-      if (Date.now() > deadline) { cleanup(); return resolve(folderFallback()); }
+      if (Date.now() > deadline) {
+        cleanup();
+        note('задача не отчиталась за 30 с — второй запуск не делаю, открываю папку');
+        return resolve(folderFallback());
+      }
       setTimeout(poll, 400);
     };
     setTimeout(poll, 400);
@@ -1954,7 +2484,7 @@ async function winLaunchDeElevated(exe, folderArg) {
 // Open a folder in VS Code (de-elevated on Windows; `open -a` on macOS). Shared
 // by the default finish button (HamidunStart sandbox) and the explicit course
 // launcher below.
-function launchVsCodeOn(dir, { create = true } = {}) {
+function launchVsCodeOn(dir, { create = true, openFile = '' } = {}) {
   try {
     if (create) {
       // P2: не глушим mkdir вслепую. Если путь занят обычным ФАЙЛОМ (или каталог не создать),
@@ -1963,12 +2493,10 @@ function launchVsCodeOn(dir, { create = true } = {}) {
     }
     try { if (!fs.statSync(dir).isDirectory()) return false; } catch (e) { return false; }
     if (IS_WIN) {
-      const codeExe = firstExisting([
-        path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Microsoft VS Code', 'Code.exe'),
-        path.join(winPF(), 'Microsoft VS Code', 'Code.exe')
-      ]);
+      // Те же поиски, что у детектора и у vscode.ps1: стандартные места + установка в свою папку.
+      const codeExe = winVsCodeExe();
       // P0: НЕ spawn напрямую (elevated) — де-элевируем запуск (см. winLaunchDeElevated).
-      if (codeExe) { return winLaunchDeElevated(codeExe, dir); }
+      if (codeExe) { return winLaunchDeElevated(codeExe, dir, deelevRoute.editorOpenFiles(dir, openFile)); }
       // ЗАПАСНОЙ РЕДАКТОР — CURSOR. Установщик предлагает оба редактора на выбор, и
       // человек вправе снять VS Code, оставив Cursor. Раньше здесь искался ТОЛЬКО
       // Code.exe, и у такого человека кнопка «Открыть курс-симулятор» молча ничего не
@@ -1979,7 +2507,7 @@ function launchVsCodeOn(dir, { create = true } = {}) {
         path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'cursor', 'Cursor.exe'),
         path.join(winPF(), 'cursor', 'Cursor.exe')
       ]);
-      if (cursorExe) { return winLaunchDeElevated(cursorExe, dir); }
+      if (cursorExe) { return winLaunchDeElevated(cursorExe, dir, deelevRoute.editorOpenFiles(dir, openFile)); }
       // Редактора нет вовсе — открываем папку в проводнике. Это не «как задумано», но
       // человек хотя бы видит файлы курса и понимает, куда идти, вместо пустого клика.
       try {
@@ -1997,13 +2525,16 @@ function launchVsCodeOn(dir, { create = true } = {}) {
       // (VS Code в нестандартном месте вроде ~/Downloads — pre-check по путям его бы
       // пропустил). Раньше fire-and-forget spawn всегда возвращал true. open отдаёт
       // управление быстро (хендофф в LaunchServices), main-поток блокируется кратко.
-      const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir],
+      // Папка И PROMPTS.md (если он есть) одним вызовом: кнопка ✳ панели Claude в заголовке
+      // редактора видна только при открытом файле.
+      const files = deelevRoute.editorOpenFiles(dir, openFile);
+      const r = spawnSync('/usr/bin/open', ['-a', 'Visual Studio Code', dir].concat(files),
         { stdio: 'ignore', timeout: 15000 });
       if (r.status === 0) return true;
       // Тот же запасной путь, что и на Windows: человек мог выбрать Cursor вместо
       // VS Code — тогда открываем в нём, а если редактора нет вовсе, показываем папку
       // в Finder. Пустой клик — худший из возможных исходов.
-      const rc = spawnSync('/usr/bin/open', ['-a', 'Cursor', dir],
+      const rc = spawnSync('/usr/bin/open', ['-a', 'Cursor', dir].concat(files),
         { stdio: 'ignore', timeout: 15000 });
       if (rc.status === 0) return true;
       const rf = spawnSync('/usr/bin/open', [dir], { stdio: 'ignore', timeout: 10000 });
@@ -2013,7 +2544,9 @@ function launchVsCodeOn(dir, { create = true } = {}) {
   return false;
 }
 
-ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart')));
+// Вместе с папкой открываем PROMPTS.md (если он есть): кнопка ✳ панели Claude в заголовке
+// редактора появляется только при открытом файле, а без неё новичок панель не находит.
+ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'HamidunStart'), { openFile: 'PROMPTS.md' }));
 
 // Приём ключа Nomad ПОСЛЕ установки.
 //
@@ -2028,8 +2561,15 @@ ipcMain.handle('launch-vscode', () => launchVsCodeOn(path.join(os.homedir(), 'Ha
 // последний. Сама запись живёт в `src/nomad-key.js`: отсюда её было не позвать тестом
 // (main.js требует electron), и фича годами оставалась без единой проверки — это
 // отдельная строка в реестре рисков (4.2).
-ipcMain.handle('nomad-set-key', (_e, key) =>
-  nomadKey.writeNomadKey(key, { config: readJson('config.json', {}) }));
+//
+// Каталог агента: HERMES_HOME принимается, только если лежит внутри профиля (иначе запись под администратором
+// пошла бы туда, куда укажет переменная из HKCU\Environment). Отказ называет причину человеку (message) и
+// одной строкой уходит в install.log (log).
+ipcMain.handle('nomad-set-key', (_e, key) => {
+  const res = nomadKey.writeNomadKey(key, { config: readJson('config.json', {}) });
+  if (res && res.log) logToFile('nomad-key', res.log);
+  return res;
+});
 
 // Explicit «open the course-simulator» — NOT auto-opened; the finish screen
 // offers it as a labelled choice. Opens the course folder in VS Code so Claude
@@ -2204,8 +2744,9 @@ function freshWindowsPathCached() {
 // юзера, а интерпретаторы/хосты исполняют код из env (PYTHONPATH/PYTHONSTARTUP →
 // import чужого .py; PSModulePath/COR_PROFILER → загрузка в powershell.exe). Здесь —
 // авторитетные системные значения (валидированный SystemRoot, не из env) + профильные
-// пути, которые НУЖНЫ для корректной детекции (python user site-packages ставится
-// `pip install --user` в %APPDATA%). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
+// пути, которые НУЖНЫ инструментам, чью версию мы спрашиваем (git/node/uv читают конфиги
+// из профиля); они уже выправлены по токену замком профиля в начале файла. python для
+// детекции не запускается вовсе (src/py-detect.js). Никаких PYTHON*/NODE_OPTIONS/GIT_*/COR_* внутрь.
 function detectSpawnEnv() {
   const root = remoteFetch.winSystemRoot() || process.env.SystemRoot || 'C:\\Windows';
   const s32 = path.join(root, 'System32');
@@ -2223,48 +2764,40 @@ function detectSpawnEnv() {
   return out;
 }
 
+// «Войти в Claude» на Windows. #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся
+// ПЕРВАЯ сессия Claude у новичка идёт с ПРАВАМИ АДМИНА (high integrity — тот же integrity-
+// escalation, что закрыт для Code.exe через winLaunchDeElevated), (2) cwd наследуется от
+// установщика = %TEMP%-распаковка portable-exe → «куда делись мои файлы» + claude просит доверие
+// к странной папке, (3) drag&drop файлов в elevated-окно не работает (UIPI).
+// Окно открывает ТОКЕН ОБОЛОЧКИ (winShellTokenRun → Invoke-HmAsShellUser: ровно medium и тот же
+// пользователь, проверяется до запуска) с фиксированной командой deelevRoute.CLAUDE_TERMINAL_SCRIPT
+// и рабочей папкой ~/HamidunStart. Раньше команда писалась файлом claude-start.cmd (запись по пути
+// из-под админа в пользовательскую папку: ссылка, подложенная заранее, уводила её) и отдавалась
+// explorer.exe, а тот без живой оболочки исполнял файл САМ, под админом, по ассоциациям из HKCU.
+// Теперь файла нет, explorer нет, и на любом отказе токена (нет оболочки, она не обычного уровня,
+// чужая учётка, отключена служба «Вторичный вход», рабочая папка — ссылка) окно НЕ открывается ни
+// другим способом, ни под админом: false → renderer покажет ручную инструкцию «открой обычный
+// терминал и набери claude». Причина — строкой в install.log.
+// Ответ приходит не сразу (токен оболочки ждёт до 3 с, не упало ли окно), и повторное нажатие за это время
+// открывало второе окно. Пока запуск идёт, новые нажатия получают ТОТ ЖЕ ответ — второго запуска нет.
+let _winTerminalBusy = null;
+async function winOpenClaudeTerminal() {
+  if (_winTerminalBusy) return _winTerminalBusy;
+  _winTerminalBusy = (async () => {
+    const startDir = path.join(os.homedir(), 'HamidunStart');
+    try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
+    const sh = await winShellTokenRun({ script: deelevRoute.CLAUDE_TERMINAL_SCRIPT, cwd: startDir, label: 'claude-terminal' });
+    try {
+      logToFile('launch', 'Войти в Claude: токен оболочки — Gate=' + sh.gate + ', код ' + sh.code + (sh.reason ? ': ' + sh.reason : ''));
+    } catch (e) { /* журнал не роняет запуск */ }
+    return sh.gate === 'medium' && sh.code === 0;
+  })();
+  try { return await _winTerminalBusy; } finally { _winTerminalBusy = null; }
+}
+
 ipcMain.handle('open-claude-terminal', async () => {
   try {
-    if (IS_WIN) {
-      const startDir = path.join(os.homedir(), 'HamidunStart');
-      try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
-      // #6: НЕ spawn cmd напрямую из elevated-процесса. Иначе (1) вся ПЕРВАЯ сессия
-      // Claude у новичка идёт с ПРАВАМИ АДМИНА (high integrity — тот же integrity-
-      // escalation, что закрыт для Code.exe через winLaunchDeElevated), (2) cwd
-      // наследуется от установщика = %TEMP%-распаковка portable-exe → «куда делись
-      // мои файлы» + claude просит доверие к странной папке, (3) drag&drop файлов в
-      // elevated-окно не работает (UIPI). Решение: .cmd-лаунчер с фиксированным cwd,
-      // запущенный через explorer.exe — тот стартует цель medium-токеном shell
-      // (де-элевация), как folderFallback в winLaunchDeElevated.
-      const sysRoot = remoteFetch.winSystemRoot() || process.env.SystemRoot || process.env.windir || 'C:\\Windows';
-      const exp = path.join(sysRoot, 'explorer.exe');
-      const launcher = path.join(startDir, 'claude-start.cmd');
-      // cwd фиксируем в HamidunStart; canonical-локации claude (~/.local/bin,
-      // %APPDATA%\npm) префиксуем к PATH — %USERPROFILE% cmd раскроет в рантайме
-      // под ДЕ-элевированным (интерактивным) пользователем.
-      // %USERPROFILE%/%ProgramFiles% раскрываются в РАНТАЙМЕ под ДЕ-элевированным
-      // (интерактивным) юзером — не бейкаем абсолютные пути os.homedir() (в over-the-
-      // shoulder это был бы профиль АДМИНА). where claude — авторитетная проверка в
-      // контексте запуска: нет claude → сообщение + pause (окно НЕ схлопывается за долю
-      // секунды, как было бы с голым `claude`). nodejs в PATH — claude.cmd требует node.
-      const cmdBody = '@echo off\r\n' +
-        'cd /d "%USERPROFILE%\\HamidunStart"\r\n' +
-        'set "PATH=%USERPROFILE%\\.local\\bin;%USERPROFILE%\\AppData\\Roaming\\npm;%ProgramFiles%\\nodejs;%PATH%"\r\n' +
-        'title Claude Code\r\n' +
-        'where claude >nul 2>nul || (echo Claude Code не найден. Запусти установщик заново и отметь компонент "Claude Code". & echo. & pause & exit /b 1)\r\n' +
-        'claude\r\n' +
-        'if errorlevel 1 pause\r\n';
-      try { fs.writeFileSync(launcher, cmdBody, 'utf8'); } catch (e) { return false; }
-      if (fs.existsSync(exp)) {
-        spawn(exp, [launcher], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-        return true;
-      }
-      // Фолбэк (explorer недоступен, крайне редко): НЕ запускаем claude под elevated-
-      // токеном с user-writable PATH (freshPath несёт ~/.local/bin, %APPDATA%\npm →
-      // claude.cmd юзера выполнился бы под АДМИНОМ). Возвращаем false → renderer покажет
-      // ручную инструкцию «открой обычный терминал и набери claude».
-      return false;
-    }
+    if (IS_WIN) return await winOpenClaudeTerminal();
     if (IS_MAC) {
       // #3: НЕ fire-and-forget с вечным true. На hardened-runtime без Apple-Events-
       // entitlement (добавлен в build/entitlements.mac.plist) событие отклонилось бы
@@ -2279,10 +2812,14 @@ ipcMain.handle('open-claude-terminal', async () => {
         const done = (v) => { if (!settled) { settled = true; resolve(v); } };
         let child;
         try {
-          child = spawn('/usr/bin/osascript', [
-            '-e', 'tell application "Terminal" to activate',
-            '-e', 'tell application "Terminal" to do script "claude"'
-          ], { stdio: 'ignore' });
+          // Terminal — в ~/HamidunStart (как на Windows), а не в $HOME: Claude просит доверия к
+          // папке, и домашняя — худший выбор. Путь едет отдельным аргументом osascript (см.
+          // deelevRoute.claudeTerminalOsaArgs), так что пробелы и кавычки в нём безопасны.
+          const startDir = path.join(os.homedir(), 'HamidunStart');
+          try { fs.mkdirSync(startDir, { recursive: true }); } catch (e) { /* EEXIST — не критично */ }
+          let inStart = false;
+          try { inStart = fs.statSync(startDir).isDirectory(); } catch (e) { inStart = false; }
+          child = spawn('/usr/bin/osascript', deelevRoute.claudeTerminalOsaArgs(inStart ? startDir : ''), { stdio: 'ignore' });
         } catch (e) { return done(false); }
         child.on('error', () => done(false));
         child.on('close', (code) => done(code === 0));
@@ -2478,6 +3015,19 @@ function firstExisting(paths) {
   return '';
 }
 
+// Code.exe редактора VS Code на Windows: два стандартных места, затем каталог рядом с `code.cmd` из
+// свежего PATH (установщик VS Code кладёт <каталог>in в PATH) — так находится установка в
+// НЕстандартную папку, как её находит vscode.ps1 по ключу Uninstall. Только существование файла:
+// под elevated-токеном здесь ничего не запускается. Code.exe именно рядом с CLI — одиночный
+// code.cmd (хвост неполного удаления; курсоровский шим) редактором не считается.
+function winVsCodeExe() {
+  const std = firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
+                             path.join(winPF(), 'Microsoft VS Code', 'Code.exe')]);
+  if (std) return std;
+  const cli = resolveExecutable(['code.cmd'], []);
+  return cli ? firstExisting([path.join(path.dirname(path.dirname(cli)), 'Code.exe')]) : '';
+}
+
 // Каталог расширения установлен в dir: есть ПОДКАТАЛОГ вида "<extId>-<версия>".
 // Точный префикс `${extId}-` + ЦИФРА версии (ordinal case-insensitive) + ОБЯЗАТЕЛЬНО
 // Dirent.isDirectory(): иначе `anthropic.claude-code-helper-1.0` даёт ложный PASS (он тоже
@@ -2569,19 +3119,19 @@ function detectComponents() {
       : firstExisting(['/Applications/Cursor.app', path.join(home, 'Applications', 'Cursor.app')]);
     out.cursor = { installed: !!p, detectedVersion: '' };
   }
-  // vscode (полный бандл: приложение + ОБА расширения) — рекомендуемый редактор.
-  // P1: «установлен» (и авто-снятие галки) ТОЛЬКО когда есть И приложение, И оба
-  // расширения (Claude + Codex) ИМЕННО в VS Code. Иначе НЕ снимаем — vscode.ps1/sh
-  // единственный доставщик Codex, и он до-ставит недостающее даже при уже
-  // предустановленном VS Code (сценарий «VS Code есть, Codex нет» больше не молчит).
+  // vscode (рекомендуемый редактор): приложение + панель Claude Code.
+  // «Установлен» (и авто-снятие галки) ТОЛЬКО когда есть И приложение, И панель Claude ИМЕННО в
+  // VS Code (~/.vscode/extensions; чтение, ничего не пишется). Редактор БЕЗ панели — это и есть
+  // поломка, из-за которой шаг и затевался: такого человека шаг обязан предложить снова,
+  // vscode.ps1 при готовом редакторе ставит только недостающее расширение. Codex в условие
+  // НЕ входит: он необязателен (скрипт без него заканчивается кодом 121 «частично»), и требуй
+  // детектор его, шаг предлагался бы заново при каждом запуске тем, у кого Codex не встал.
   {
     const appPresent = IS_WIN
-      ? firstExisting([path.join(winLocalAppData(), 'Programs', 'Microsoft VS Code', 'Code.exe'),
-                       path.join(winPF(), 'Microsoft VS Code', 'Code.exe')])
+      ? winVsCodeExe()
       : firstExisting(['/Applications/Visual Studio Code.app', path.join(home, 'Applications', 'Visual Studio Code.app')]);
     const claudeExtId = (readJson('config.json', {}).claudeCodeExtensionId) || 'anthropic.claude-code';
-    const bothExts = vsCodeHasExt(home, claudeExtId) && vsCodeHasExt(home, 'openai.chatgpt');
-    out.vscode = { installed: !!appPresent && bothExts, detectedVersion: '' };
+    out.vscode = { installed: !!appPresent && vsCodeHasExt(home, claudeExtId), detectedVersion: '' };
   }
   // claude CLI
   {
@@ -2625,26 +3175,27 @@ function detectComponents() {
     // установленным (ложно-негатив безвреден: pydeps.sh идемпотентен и ставит
     // пакеты через framework/uv-python без окон Apple).
     const pyShim = IS_MAC && (py === '/usr/bin/python3' || py === '/usr/bin/python') && !xcodeCltPresent();
-    // Windows: НЕ запускаем python под elevated-токеном, если он мог быть подменён medium-
-    // юзером (тот же RCE-вектор, что probeVersion; admin-owned — можно). Ложно-негатив
-    // безвреден (pydeps.ps1 идемпотентен).
-    const pyExecSafe = py && !pyShim && winSafeToExec(py);
-    if (pyExecSafe) {
+    if (IS_WIN) {
+      // Windows: интерпретатор для детекции НЕ запускаем вовсе. Детекция идёт под elevated-токеном
+      // при открытии окна, а запуск python — это исполнение кода из мест, куда пишет любой процесс
+      // того же пользователя: usercustomize.py и import-строки *.pth из
+      // %APPDATA%\Python\Python3xx\site-packages выполняются при старте интерпретатора даже под `-E`
+      // (воспроизведено на настоящем Python; гаснут только от -s/-I, а они «не видят» пакеты,
+      // которые pydeps ставит `pip install --user`, и детекция стала бы вечно ложно-отрицательной).
+      // Поэтому смотрим ФАЙЛЫ (src/py-detect.js): каталог пакета с __init__.py или .dist-info в user
+      // site и в Lib\site-packages самого интерпретатора; пакеты те же, что в итоговом verify.ps1
+      // (PIL, requests, playwright). Гейт winSafeToExec здесь не нужен — ничего не исполняется, зато
+      // штатный per-user Python (%LOCALAPPDATA%\Programs\Python) теперь виден.
+      // APPDATA — из исправленного по токену окружения (замок профиля в начале файла).
+      if (py) {
+        found = pyDetect.detectPythonPackages({
+          pyExe: py,
+          appData: process.env.APPDATA || path.join(home, 'AppData', 'Roaming')
+        }).installed;
+      }
+    } else if (py && !pyShim) {
       try {
-        // `-E` + доверенный env: без них PYTHONPATH/PYTHONSTARTUP из HKCU\Environment
-        // (пишет medium-малварь того же юзера) заставили бы интерпретатор ИМПОРТИРОВАТЬ
-        // чужой PIL.py ПОД АДМИНОМ — авто-детекция на старте, до единого клика.
-        // `-I` НЕ используем: он выключает и user site-packages, а pydeps ставит пакеты
-        // через `pip install --user` → детекция стала бы вечно ложно-отрицательной.
-        // cwd в System32: для `-c` sys.path[0]='' = ТЕКУЩИЙ каталог, а portable-exe
-        // запускается из user-writable Downloads (подмена модуля по cwd).
-        const opts = { windowsHide: true, timeout: 6000, stdio: 'ignore' };
-        const pyArgs = IS_WIN ? ['-E', '-c', 'import PIL, requests'] : ['-c', 'import PIL, requests'];
-        if (IS_WIN) {
-          opts.env = detectSpawnEnv();
-          opts.cwd = path.join(remoteFetch.winSystemRoot() || 'C:\\Windows', 'System32');
-        }
-        execFileSync(py, pyArgs, opts);
+        execFileSync(py, ['-c', 'import PIL, requests'], { windowsHide: true, timeout: 6000, stdio: 'ignore' });
         found = true;
       } catch (e) { found = false; }
     }
@@ -3020,6 +3571,12 @@ function winRegDeleteValue(t) {
   const q0 = regQueryValueTyped(keyPath, t.value);
   if (!q0.ok) return { status: 'failed', message: 'чтение реестра: ' + q0.error };
   if (!q0.found) return { status: 'absent', message: 'значения нет' };
+  // onlyIfValueIs: имя совпало, но под ним может лежать ЧУЖОЕ значение (своя запись человека).
+  // Снимаем только запись, которая ведёт на наш exe, — так же рассуждает и установка
+  // при повторном запуске (scripts/windows/_mascot.ps1).
+  if (t.onlyIfValueIs && !uninstallExec.runValueIsOurs(q0.data, t.onlyIfValueIs)) {
+    return { status: 'kept', message: 'значение ведёт не на нашу программу (' + q0.data + ') — оставлено' };
+  }
   const del = regDeleteValueTyped(keyPath, t.value);
   if (!del.ok) return { status: 'failed', message: 'удаление значения: ' + del.error };
   const q1 = regQueryValueTyped(keyPath, t.value);
@@ -3146,8 +3703,8 @@ function resolveMascotVendorApp() {
 // config.json, vendor. Никаких значений из renderer-env.
 function buildUninstallCtx() {
   const cfg = readJson('config.json', {});
-  let desktop = '';
-  try { desktop = app.getPath('desktop'); } catch (e) { desktop = path.join(os.homedir(), 'Desktop'); }
+  // Стол — только из проверенного (safeDesktopDir); '' → uninstall-targets берёт <профиль>\Desktop.
+  const desktop = safeDesktopDir();
   return {
     platform: process.platform,
     home: os.homedir(),
@@ -3176,7 +3733,7 @@ function describeTarget(t) {
     case 'reg': return 'реестр HKCU\\' + t.key + ' → ' + t.value;
     case 'pathentry': return 'запись PATH ' + t.dir + ' (только если каталог исчез)';
     case 'profileline': return 'точная строка «' + t.line + '» из ' + t.file;
-    case 'hookurl': return 'hook-url «' + t.from + '» → «' + t.to + '» в ' + t.file +
+    case 'hookentries': return 'записи хуков скрепки (http://127.0.0.1:' + t.port + '/hook) из ' + t.file +
       (t.why ? ' (' + t.why + ')' : '');
     case 'launchagent': return 'LaunchAgent ' + t.label + ' (' + t.plist + ')';
     case 'appbundle': return '.app ' + t.path + ' (при совпадении идентичности)';
@@ -3192,6 +3749,9 @@ function executeUninstallTarget(t, guardOpts) {
       // P0-1: gated shim — удаляем ТОЛЬКО при подтверждённом нашем ownership-маркере
       // (наш venv), иначе файл не наш (собственный uv-tool пользователя) → kept.
       if (t.onlyIfOwnerMarker) return uninstallExec.removeFileGated(t.path, guardOpts, t.onlyIfOwnerMarker);
+      // bestEffort (ярлык скрепки в меню «Пуск»): отказ защиты или сбой — «оставлен», а не провал
+      // всего удаления компонента.
+      if (t.bestEffort) return uninstallExec.removeFileBestEffort(t.path, guardOpts);
       return uninstallExec.removeFile(t.path, guardOpts);
     case 'emptydir': return uninstallExec.removeEmptyDir(t.path, guardOpts);
     case 'dirtree': {
@@ -3203,11 +3763,11 @@ function executeUninstallTarget(t, guardOpts) {
       return uninstallExec.removeDirTree(t.path, guardOpts);
     }
     case 'profileline': return uninstallExec.removeProfileLine(t.file, t.line, guardOpts);
-    // Не удаление, а обратная правка: hook-url скрепки возвращается к плейсхолдеру
-    // пака. Свой узкий допуск внутри restoreHookUrl (ровно ~/.claude/settings.json),
-    // потому что checkTarget закрывает весь ~/.claude — и правильно делает: там
-    // нельзя УДАЛЯТЬ. Здесь ничего и не удаляется.
-    case 'hookurl': return uninstallExec.restoreHookUrl(t.file, t.from, t.to, guardOpts);
+    // Правка одного файла, а не удаление файла: из settings.json убираются записи хуков
+    // скрепки (по адресу), всё остальное остаётся. Свой узкий допуск внутри
+    // removeMascotHooks (ровно ~/.claude/settings.json), потому что checkTarget закрывает
+    // весь ~/.claude — и правильно делает: там нельзя УДАЛЯТЬ файлы.
+    case 'hookentries': return uninstallExec.removeMascotHooks(t.file, t.port, guardOpts);
     case 'launchagent': {
       if (!IS_MAC) return { status: 'failed', message: 'launchagent вне macOS' };
       // P1-3: guard plist ПЕРВЫМ — для подозрительной цели launchctl не дёргаем.
@@ -3425,33 +3985,35 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
 //
 // Установщик знает про себя больше, чем человек: где смонтирован образ, из какого файла
 // он смонтирован (hdiutil info) и что сам он запущен из карантинной копии. Значит может
-// починить сам: снять карантин с ОБРАЗА, отцепить ВСЕ его тома, открыть заново и
+// починить сам: снять карантин с ОБРАЗА, отцепить его тома, открыть заново и
 // запуститься из свежего — уже без карантина, а значит без транслокации.
+//
+// ИМЯ ФАЙЛА НИЧЕГО НЕ ДОКАЗЫВАЕТ. Файл «Hamidun-Setup-Mac*.dmg» мог прийти из сети или
+// быть подложен кем угодно под тем же пользователем; снять с него карантин и запустить
+// приложение — значит обойти Gatekeeper для чужого кода. Поэтому имя лишь номинирует
+// кандидата, а решает проверка подписи приложения внутри образа против подписи ЗАПУЩЕННОГО
+// установщика (src/mac-selfheal.js: preflight) — до снятия карантина и до отцепления
+// чего-либо — и вторая такая же проверка в помощнике перед `open`.
 //
 // Привилегии не нужны: на macOS установщик работает НЕ от администратора, а образ —
 // файл самого пользователя. Все вызовы идут execFile с массивом аргументов (без shell),
-// пути проверяются: только абсолютные, только под /Volumes или домашним каталогом,
-// только имя вида Hamidun-Setup-Mac*.dmg.
-function macFindOurDmg() {
+// пути проверяются: только абсолютные, только имя вида Hamidun-Setup-Mac*.dmg.
+const macSelfheal = require('./mac-selfheal');   // plist, личность подписи, проверка образа, текст помощника
+
+// Образы на диске в обычных местах, от свежего к старому (список, а не «самый свежий»: проверка
+// подписи решает, какой из них наш, и проверять приходится по очереди).
+function macFindOurDmgFiles() {
   const okDmg = (p) => {
     try {
       if (!p || typeof p !== 'string' || !path.isAbsolute(p)) return false;
-      if (!/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(path.basename(p))) return false;
+      if (!macSelfheal.DMG_NAME_RE.test(path.basename(p))) return false;
       return fs.statSync(p).isFile();
     } catch (e) { return false; }
   };
-  // 1) Самый точный источник: смонтированный образ знает свой файл.
-  try {
-    const out = execFileSync('/usr/bin/hdiutil', ['info'], { encoding: 'utf8', timeout: 15000 });
-    for (const line of String(out).split(/\r?\n/)) {
-      const m = /^image-path\s*:\s*(.+)$/.exec(line.trim());
-      if (m && okDmg(m[1].trim())) return m[1].trim();
-    }
-  } catch (e) { /* образ мог быть уже отцеплен — идём дальше */ }
-  // 2) Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
-  //    Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
-  //    и плоский обход находил образ только если тот лежал ровно в корне. Глубину
-  //    ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
+  // Обычные места, куда браузеры кладут скачанное — С ПОДПАПКАМИ.
+  // Люди раскладывают загрузки по папкам (Downloads/installers, Desktop/Хамидун…),
+  // и плоский обход находил образ только если тот лежал ровно в корне. Глубину
+  // ограничиваем и каталог-жертву пропускаем, чтобы обход не гулял по всему диску.
   const home = os.homedir();
   const SKIP = /^(Library|Applications|\.Trash|node_modules|\.git|Pictures|Music|Movies)$/i;
   const found = [];
@@ -3464,27 +4026,73 @@ function macFindOurDmg() {
       if (e.isDirectory()) {
         if (e.name.startsWith('.') || SKIP.test(e.name)) continue;
         walk(p, depth - 1);
-      } else if (/^Hamidun-Setup-Mac[A-Za-z0-9._ ()-]*\.dmg$/i.test(e.name) && okDmg(p)) {
+      } else if (macSelfheal.DMG_NAME_RE.test(e.name) && okDmg(p)) {
         found.push(p);
       }
     }
   };
   for (const dir of ['Downloads', 'Desktop', 'Documents']) walk(path.join(home, dir), 2);
   if (!found.length) walk(home, 1);          // корень профиля — без углубления
-  if (!found.length) return '';
-  // Самый свежий: человек мог скачать заново, и чинить надо именно новый образ.
+  // Самые свежие первыми: человек мог скачать заново, и чинить надо именно новый образ.
   found.sort((a, b) => {
     try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch (e) { return 0; }
   });
-  return found[0];
+  return found;
 }
+
+// Асинхронный запуск системной утилиты для проверки образа: код 0 — успех, остальное — отказ; не бросает.
+// stdin закрыт сразу: утилита, задавшая вопрос (лицензия образа), получает EOF, а не висит вечно.
+function macSelfhealExec(file, args, timeoutMs) {
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(file, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+        (err, stdout, stderr) => {
+          resolve({
+            code: err ? (typeof err.code === 'number' ? err.code : -1) : 0,
+            stdout: String(stdout || ''), stderr: String(stderr || '')
+          });
+        });
+      if (child && child.stdin) { child.stdin.on('error', () => {}); child.stdin.end(); }
+    } catch (e) { resolve({ code: -1, stdout: '', stderr: String((e && e.message) || e) }); }
+  });
+}
+
+// Проверка образа теперь не мгновенная (монтирование и codesign по всему бандлу — секунды), поэтому
+// параллельный второй вызов (перезагрузка окна сбрасывает защёлку в renderer, а проверка в main
+// продолжается) получает отказ, а не вторую проверку со своими монтированиями.
+let _macSelfhealBusy = false;
 
 ipcMain.handle('mac-selfheal', async () => {
   if (process.platform !== 'darwin') return { ok: false, error: 'not-darwin' };
-  const dmg = macFindOurDmg();
-  if (!dmg) return { ok: false, error: 'dmg-not-found' };
-  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» —
-  //    и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
+  if (_macSelfhealBusy) return { ok: false, error: 'busy' };
+  // 0) ПРОВЕРКА ДО ЛЮБЫХ ИЗМЕНЕНИЙ. Образ-кандидат принимается, только если приложение внутри него
+  //    подписано тем же издателем и с тем же bundle id, что и запущенный установщик (у ad-hoc
+  //    тестовой сборки — тот же bundle id + проходящая проверка подписи). До этой точки не снят
+  //    ни один карантин и не отцеплен ни один том; отказ — fail-closed, причина идёт в install.log
+  //    (из pre-проверки) и в окно (код ошибки).
+  let pre;
+  _macSelfhealBusy = true;
+  try {
+    pre = await macSelfheal.preflight({
+      exec: macSelfhealExec,
+      runningBundle: macSelfheal.bundlePathFromExecPath(process.execPath),
+      fileCandidates: macFindOurDmgFiles,
+      isFile: (p) => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } },
+      isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } },
+      mkPrivateDir: () => fs.mkdtempSync(path.join(os.tmpdir(), 'hm-selfheal-')),
+      rmPrivateDir: (d) => { try { fs.rmdirSync(d); } catch (e) { /* ещё занят или уже убран */ } },
+      log: (l) => logToFile('selfheal', l)
+    });
+  } catch (e) {
+    logToFile('selfheal', 'Самолечение: проверка образа упала (' + String((e && e.message) || e) + ') — ничего не меняю (fail-closed).');
+    return { ok: false, error: 'preflight-failed' };
+  } finally {
+    _macSelfhealBusy = false;
+  }
+  if (!pre.ok) return pre.dmg ? { ok: false, error: pre.error, dmg: pre.dmg } : { ok: false, error: pre.error };
+  const dmg = pre.dmg;
+  // 1) Карантин снимаем с ФАЙЛА образа — именно он делает копию «карантинной» — но только с
+  //    ПРОВЕРЕННОГО (pre.ok), и ПРОВЕРЯЕМ факт. Раньше результат не проверялся вовсе: человеку писали
   //    «Готово», закрывали окно, и он получал ровно тот же заблокированный
   //    установщик. Отсутствие исключения — не доказательство.
   try {
@@ -3506,40 +4114,12 @@ ipcMain.handle('mac-selfheal', async () => {
   //    `hdiutil detach -force` выдёргивает backing store у собственного
   //    исполняемого файла, и установщик умирает посреди «починки» — окно просто
   //    исчезает, без свежего образа и без объяснений.
-  //    Помощник: ждёт нашего выхода → отцепляет ВСЕ тома Hamidun → открывает
-  //    образ → дожидается ПОЯВЛЕНИЯ тома → запускает приложение оттуда.
-  //    `open -n` обязателен: без него macOS просто активировала бы уже
-  //    запущенный экземпляр того же bundle id вместо запуска с нового тома.
-  const helper = [
-    'DMG="$1"; PID="$2"; ST="$3";',
-    // Ждём выхода установщика. Дождаться ОБЯЗАТЕЛЬНО: пока мы живы, наш замок
-    // единственного экземпляра не отпущен, и запущенный помощником свежий
-    // установщик просто закроется сам. Потолок щедрый — 120 с.
-    'i=0; while kill -0 "$PID" 2>/dev/null && [ $i -lt 240 ]; do sleep 0.5; i=$((i+1)); done;',
-    'for v in /Volumes/Hamidun*; do [ -d "$v" ] && /usr/bin/hdiutil detach "$v" -force >/dev/null 2>&1; done;',
-    // Монтируем САМИ и берём точку монтирования ИЗ ВЫВОДА. Раньше том искали
-    // перебором /Volumes/Hamidun*, полагаясь на то, что старые уже отцеплены.
-    // Но том держит Finder (человек как раз из окна образа и запускался), detach
-    // не проходит, macOS монтирует «Hamidun Setup 1» рядом — а перебор брал
-    // первый по алфавиту, то есть СТАРЫЙ, всё ещё карантинный том. Человек
-    // получал тот же экран блокировки и надпись «Готово». Свой mount-point
-    // такой ошибки не допускает: он заведомо от ЭТОГО монтирования.
-    'MP=$(/usr/bin/hdiutil attach -nobrowse "$DMG" 2>/dev/null | /usr/bin/sed -n "s|.*\\(/Volumes/.*\\)$|\\1|p" | /usr/bin/tail -1);',
-    'if [ -z "$MP" ] || [ ! -d "$MP/Hamidun Setup.app" ]; then printf mount-failed > "$ST"; exit 1; fi;',
-    // open -n обязателен: без него macOS активировала бы уже запущенный
-    // экземпляр того же bundle id вместо запуска с нового тома.
-    'if ! /usr/bin/open -n -a "$MP/Hamidun Setup.app"; then printf relaunch-failed > "$ST"; exit 1; fi;',
-    // `open` вернул 0 — это лишь «команда принята». Ждём, пока процесс РЕАЛЬНО
-    // появится: раньше в крошку писали «ok» по коду open, и самый вероятный тихий
-    // провал (свежий экземпляр закрылся сам из-за занятого замка) выглядел успехом.
-    'i=0; while [ $i -lt 20 ]; do',
-    '  if /usr/bin/pgrep -f "Hamidun Setup.app/Contents/MacOS" >/dev/null 2>&1; then',
-    '    printf ok > "$ST"; exit 0;',
-    '  fi;',
-    '  sleep 1; i=$((i+1));',
-    'done;',
-    'printf relaunch-not-seen > "$ST"; exit 1',
-  ].join(' ');
+  //    Помощник: ждёт нашего выхода → отцепляет ТОЛЬКО тома этого образа (точки монтирования
+  //    из `hdiutil info -plist`, их считает preflight; не маска /Volumes/Hamidun*) → монтирует
+  //    образ → ПРОВЕРЯЕТ приложение (подпись + издатель, тот же рубеж, что в preflight) →
+  //    запускает его оттуда. Текст помощника собирает src/mac-selfheal.js (buildHelperScript):
+  //    там же объяснено, почему `open -n` и точка монтирования берётся из вывода attach.
+  const helper = macSelfheal.buildHelperScript();
   // Хлебная крошка: помощник работает уже после нашего выхода, и без неё любой
   // его отказ был бы невидим — окно просто исчезало бы навсегда. Свежий
   // экземпляр читает этот файл при старте и показывает, что пошло не так.
@@ -3553,10 +4133,16 @@ ipcMain.handle('mac-selfheal', async () => {
     fs.writeFileSync(statusFile, JSON.stringify({ result: 'started', at: Date.now(), dmg }));
   } catch (e) { /* без крошки починка всё равно поедет */ }
   try {
-    // Путь к образу уходит аргументом, а не подстановкой в текст скрипта:
-    // в имени файла бывают пробелы и скобки («… (1).dmg»).
-    const child = spawn('/bin/sh', ['-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile],
-      { detached: true, stdio: 'ignore' });
+    // Всё внешнее уходит аргументами, а не подстановкой в текст скрипта: в имени файла бывают
+    // пробелы и скобки («… (1).dmg»), а требование подписи и точки монтирования — данные.
+    // $5… — точки монтирования ЭТОГО образа, которые помощник отцепит после нашего выхода.
+    // Окружение чистим так же, как у скриптов компонентов (M-1): /bin/sh на macOS — bash в POSIX-режиме, он
+    // исполняет PS4 при SHELLOPTS=xtrace и принимает экспортированные функции BASH_FUNC_* из окружения
+    // (BASH_ENV/ENV неинтерактивный sh не читает), а помощник — последний рубеж проверки подписи перед `open`.
+    // `-p` — второй рубеж, независимый от списка запретов: в привилегированном режиме SHELLOPTS и функции игнорируются.
+    const child = spawn('/bin/sh',
+      ['-p', '-c', helper, 'hm-selfheal', dmg, String(process.pid), statusFile, pre.requirement].concat(pre.mountPoints),
+      { detached: true, stdio: 'ignore', env: installEnv.sanitizePosixEnv(process.env) });
     child.unref();
   } catch (e) {
     return { ok: false, error: 'helper-failed', dmg };
@@ -3595,8 +4181,154 @@ ipcMain.handle('mac-selfheal-status', () => {
     if (raw.charAt(0) === '{') {
       try { status = String((JSON.parse(raw) || {}).result || '').slice(0, 40); } catch (e) { /* оставим сырое */ }
     }
+    // Помощник работает после нашего выхода и в журнал не пишет — его исход заносим сюда, на следующем
+    // запуске, чтобы причина (в том числе «приложение в образе не прошло проверку») осталась в install.log.
+    const note = macSelfheal.statusMessageRu(status);
+    if (note) logToFile('selfheal', note);
     return { status };
   } catch (e) { return { status: '' }; }
 });
 
 ipcMain.handle('quit', () => app.quit());
+
+// ---- после установки: отчёт для поддержки, связь с Anthropic, сводка пака ----
+// Секция стоит в конце файла намеренно: обработчики новые, и вставка в середину
+// сдвинула бы все ссылки «файл:строка» из docs/specs на нижележащий код.
+
+const supportReport = require('./support-report.js'); // текст отчёта + вырезание секретов
+const netCheck = require('./net-check.js');           // проба api.anthropic.com + прокси
+
+// Итог последней проверки связи — одной строкой в отчёт для поддержки.
+let _lastNetSummary = '';
+
+// «Скопировать отчёт для поддержки»: шаг, ошибка, хвост журнала, ОС, издание, версия,
+// uid — одним куском текста в буфер обмена. Хвост журнала читает MAIN (renderer путь
+// не передаёт), всё чистится от ПД и секретов в src/support-report.js.
+ipcMain.handle('support-report', (_e, payload) => {
+  try {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    const tail = supportReport.readLogTail(LOG_PATH, supportReport.LOG_TAIL_LINES);
+    const text = supportReport.buildSupportReport({
+      meta: {
+        version: app.getVersion(),
+        edition: isLiteEdition() ? 'lite' : 'offline',
+        platform: process.platform,
+        // На macOS os.release() — версия ядра Darwin («24.1.0» для macOS 15): поддержка читала её
+        // как версию системы. process.getSystemVersion() отдаёт настоящую.
+        osRelease: (process.platform === 'darwin' && typeof process.getSystemVersion === 'function')
+          ? process.getSystemVersion() : os.release(),
+        arch: process.arch,
+        uid: INSTALL_UID,
+        outcome: String(p.outcome || '').slice(0, 120),
+        running: p.running === true,   // отчёт посреди установки: «ничего не встало» — не итог
+      },
+      steps: Array.isArray(p.steps) ? p.steps.slice(0, 10) : [],
+      logTail: tail.lines,
+      net: _lastNetSummary,
+      scrub: (s) => scrubText(s),
+    });
+    clipboard.writeText(text);
+    return { ok: true, text, logRead: tail.ok };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+
+// Системный прокси Windows — тот, через который ходит браузер. Читаем HKCU пакетом
+// (один запуск интерпретатора). Не прочитали — честное «не знаем», не догадка.
+const WIN_INET_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+function readWinSystemProxy() {
+  if (!IS_WIN) return { enabled: false, reason: 'platform' };
+  const r = regQueryManyDotNet([
+    { key: WIN_INET_KEY, name: 'ProxyEnable' },
+    { key: WIN_INET_KEY, name: 'ProxyServer' },
+  ]);
+  if (!r[0] || !r[0].ok) return { enabled: false, reason: 'read-failed' };
+  const val = (x) => ((x && x.ok && x.found) ? x.data : '');
+  return netCheck.parseWinProxy(val(r[0]), val(r[1]));
+}
+
+// Проверка связи из консольного стека (так пойдёт сам Claude Code). Ничего не
+// блокирует и ничего не меняет — только смотрит и рассказывает.
+ipcMain.handle('net-check', async () => {
+  try {
+    if (process.env.HM_DRY_RUN) return { kind: 'skipped' };
+    const res = { kind: 'unknown', proxy: null, configured: '' };
+    // Прокси, уже прописанный в настройках Claude Code (прошлым запуском или руками),
+    // меняет картину: напрямую может не пускать, а Claude Code ходит через него.
+    const configured = netCheck.readProxyEnv(os.homedir()).httpsProxy;
+    const cfgProxy = netCheck.classifyConfiguredProxy(configured);
+    // Прописан, но не разобрали (логин:пароль@хост, socks, мусор): на экран значение НЕ отдаём —
+    // в нём может быть пароль, — и системный прокси предлагать вместо него нельзя.
+    res.configured = cfgProxy.unreadable ? '' : (configured || '');
+    res.configuredUnreadable = cfgProxy.unreadable;
+    const direct = await netCheck.probeDirect();
+    res.kind = netCheck.classifyProbe(direct);
+    res.detail = netCheck.describeKind(res.kind);   // фраза для экрана — одна на экран и отчёт
+    if (res.kind !== 'reachable' && cfgProxy.parsed) {
+      const via = await netCheck.probeViaProxy({ host: cfgProxy.parsed.host, port: cfgProxy.parsed.port });
+      res.configuredKind = netCheck.classifyProbe(via);
+    }
+    if (res.kind !== 'reachable' && !res.configuredKind && !res.configuredUnreadable && IS_WIN) {
+      const px = readWinSystemProxy();
+      res.proxy = { enabled: !!px.enabled, local: !!px.local, socksOnly: !!px.socksOnly, url: px.local ? px.url : '' };
+      if (px.local && px.host && px.port) {
+        const via = await netCheck.probeViaProxy({ host: px.host, port: px.port });
+        res.proxy.kind = netCheck.classifyProbe(via);
+        res.proxy.works = res.proxy.kind === 'reachable';
+      }
+    }
+    _lastNetSummary = netCheck.describeKind(res.kind) +
+      (res.configuredKind ? '; через прокси из настроек Claude Code: ' + netCheck.describeKind(res.configuredKind) : '') +
+      (res.proxy && res.proxy.url ? '; системный прокси ' + res.proxy.url + ': ' + netCheck.describeKind(res.proxy.kind) : '');
+    logToFile('net', '[связь с Anthropic] ' + _lastNetSummary);
+    return res;
+  } catch (e) {
+    return { kind: 'unknown', error: String((e && e.message) || e) };
+  }
+});
+
+// Прописать прокси VPN-клиента в ~/.claude/settings.json → env. Только по нажатию и
+// согласию в окне. Адрес НЕ принимается от renderer: main сам заново читает системный
+// прокси, требует локальный (127.0.0.1) и проверяет, что через него Anthropic отвечает.
+ipcMain.handle('apply-proxy', async () => {
+  try {
+    if (!IS_WIN) return { ok: false, reason: 'platform' };
+    const px = readWinSystemProxy();
+    if (!px.local || !px.url || !px.host || !px.port) return { ok: false, reason: 'no-local-proxy' };
+    const via = await netCheck.probeViaProxy({ host: px.host, port: px.port });
+    const kind = netCheck.classifyProbe(via);
+    if (kind !== 'reachable') return { ok: false, reason: 'proxy-not-working', kind };
+    // Уже прописанный ДРУГОЙ прокси (рабочий, с паролем, socks) молча не заменяем: экран такого
+    // предложения не показывает, а эта проверка не даёт обойти его устаревшей кнопкой.
+    const existing = netCheck.readProxyEnv(os.homedir()).httpsProxy;
+    if (existing && existing !== px.url) return { ok: false, reason: 'existing-proxy' };
+    const w = netCheck.writeProxyEnv(px.url, { home: os.homedir() });
+    logToFile('net', w.ok
+      ? '[прокси] записан в ' + w.path + ': HTTPS_PROXY/HTTP_PROXY=' + px.url + (w.backup ? ' (копия: ' + w.backup + ')' : '')
+      : '[прокси] НЕ записан: ' + w.reason + (w.error ? ' (' + w.error + ')' : ''));
+    if (w.ok) _lastNetSummary += '; прокси прописан в настройки Claude Code';
+    return w.ok ? { ok: true, url: px.url, path: w.path, backup: w.backup } : w;
+  } catch (e) {
+    return { ok: false, reason: 'error', error: String((e && e.message) || e) };
+  }
+});
+
+// Сводка установленного пака (её пишет config-скрипт в ~/.hamidun-setup/config-summary.json):
+// «Установлено N скиллов, M агентов» + где лежит каталог. Нет файла — молчим. Разбор —
+// в src/pack-summary.js (файл лежит в профиле, форме его не доверяем).
+const packSummary = require('./pack-summary.js');
+ipcMain.handle('pack-summary', () => packSummary.readPackSummary({ home: os.homedir() }));
+
+// Показать каталог скиллов в Проводнике/Finder. Путь фиксированный, от renderer не
+// принимается; открываем папку с выделенным файлом, а не сам .md: из процесса с правами
+// администратора shell.openPath запустил бы редактор .md (часто — VS Code из профиля
+// пользователя) тоже с правами администратора.
+ipcMain.handle('reveal-catalog', () => {
+  try {
+    const target = path.join(os.homedir(), '.claude', 'CATALOG.md');
+    if (!fs.existsSync(target)) return false;
+    shell.showItemInFolder(target);
+    return true;
+  } catch (e) { return false; }
+});

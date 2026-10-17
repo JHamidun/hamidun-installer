@@ -34,6 +34,13 @@ npm run dist:mac          # -> release/Hamidun-Setup-Mac.dmg
 Без секретов Apple в окружении сборка выйдет с ad-hoc подписью (`tools/mac-adhoc-sign.js`) —
 раздавать такой артефакт нельзя, он только для локальной проверки.
 
+Хук `afterPack` — `tools/after-pack.js`: сначала он гасит fuse `RunAsNode`,
+`EnableNodeOptionsEnvironmentVariable` и `EnableNodeCliInspectArguments` в `Electron Framework`
+внутри `.app` (до любой подписи, на каждом слайсе и на склеенном universal-пакете), потом передаёт
+управление `tools/mac-adhoc-sign.js`. Результат сверяет `node tools/verify-fuses.js
+release/mac-universal` — он стоит в `dist:mac`, в `tools/build-lite.js` и отдельным шагом в
+`.github/workflows/build-mac.yml`.
+
 ## Полное офлайн-издание: четыре шага, последний пропускать нельзя
 
 Порядок ровно такой, как в `build-mac.yml`. Ошибка ровно одна и всегда одна и та же:
@@ -75,6 +82,15 @@ Mach-O внутри вложенных архивов (`.so` в `.whl`), поэ�
 Скрипты `scripts/macos/*.sh` ставят компонент из `vendor/`, если он там есть, иначе идут в
 прямую загрузку (Homebrew используется только как фолбэк для Claude CLI). Финальный экран
 «Что дальше» и выбор паков — те же, что на Windows.
+
+## Требования к системе
+
+**Нужна macOS 13 Ventura или новее (лучше 13.5+).** Пол задаёт Electron 44: `LSMinimumSystemVersion`
+в `Info.plist` приложения = 13.0 (в `package.json` он записан явно —
+`build.mac.minimumSystemVersion`; ниже 13.0 не опускать, приложение запустится и упадёт).
+13.5 — нижняя граница Node.js 24, который едет в комплекте. На macOS 10.15–12 система
+отказывает ещё до первого экрана установщика, поэтому наши стоп-экраны там не покажутся:
+объясняют это текстом — файл `ПРОЧТИ…txt` в образе, README и бот (`docs/bridge-bot-spec.md`).
 
 ## Как запускать готовый dmg (единственная верная инструкция)
 

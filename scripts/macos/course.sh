@@ -204,5 +204,5 @@ LAUNCHER="$HOME/Desktop/$SHORTCUT.command"
   echo 'echo "Ни Claude Code, ни Codex не найдены. Запусти установщик ещё раз и включи Claude Code — либо открой эту папку в своём агенте и напиши: начать"; open .'
 } > "$LAUNCHER" 2>/dev/null && chmod +x "$LAUNCHER" 2>/dev/null && { echo "Ярлык создан: $LAUNCHER"; echo "HM-RECEIPT path $LAUNCHER"; } || echo "Ярлык не создался (не критично)."
 
-echo "OK: курс-симулятор установлен. Открой ярлык «$SHORTCUT» (или папку $COURSE_DIR) и напиши агенту «начать»."
+echo "OK: курс-симулятор установлен. Открой ярлык «${SHORTCUT}» (или папку $COURSE_DIR) и напиши агенту «начать»."
 exit 0

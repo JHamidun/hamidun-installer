@@ -7,6 +7,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 # Invoke-HmDeElevated: проверочный ЗАПУСК claude (user-writable бинарь) — только де-элевированно.
 . (Join-Path $PSScriptRoot '_deelev.ps1')
+. (Join-Path $PSScriptRoot '_userpath.ps1')   # Add-HmUserPath: PATH пользователя + WM_SETTINGCHANGE
+. (Join-Path $PSScriptRoot '_claudeenv.ps1')  # Write-HmCheck, политика PowerShell, Repair-HmClaudeUserEnv (общие с verify.ps1)
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -57,29 +59,6 @@ function Find-ClaudeBinary {
     return $null
 }
 
-# Прописать каталог в ПОЛЬЗОВАТЕЛЬСКИЙ PATH, чтобы `claude` работал в новом
-# терминале (npm-global-prefix / ~/.local\bin часто не в PATH пользователя).
-function Add-ToUserPath($dir) {
-    if (-not $dir -or -not (Test-Path $dir)) { return }
-    # Читаем СЫРОЕ значение (DoNotExpand) и пишем как ExpandString — сохраняем тип
-    # REG_EXPAND_SZ и записи пользователя с %USERPROFILE%/%VAR%. [Environment]::Get/Set
-    # разворачивали %VAR% в литералы и меняли тип на REG_SZ — тихая порча User PATH.
-    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
-    if (-not $key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment') }
-    try {
-        $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-        # сверяем по РАЗВЁРНУТОЙ копии, чтобы не задвоить уже присутствующий каталог
-        $expanded = [Environment]::ExpandEnvironmentVariables($raw)
-        if (($expanded.Split(';') | Where-Object { $_ -ne '' }) -notcontains $dir) {
-            $new = ($raw.TrimEnd(';') + ';' + $dir).TrimStart(';')
-            $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-            Write-Host "Добавил $dir в PATH пользователя."
-        }
-    } finally { $key.Close() }
-    # PATH текущего процесса — чтобы дальнейшие шаги увидели каталог сразу.
-    if ($env:Path.Split(';') -notcontains $dir) { $env:Path = $env:Path.TrimEnd(';') + ';' + $dir }
-}
-
 # Проверка ЗАПУСКОМ (урок macOS, зеркало scripts/macos/claude.sh — на маке это уже
 # случилось у живого человека): НУЛЕВОЙ КОД npm НИЧЕГО НЕ ДОКАЗЫВАЕТ. Настоящий бинарь
 # Claude ставится ПЛАТФОРМЕННЫМ optional-пакетом (@anthropic-ai/claude-code-win32-*).
@@ -89,7 +68,8 @@ function Add-ToUserPath($dir) {
 # Поэтому проверяем не код установки, а РАБОТУ: команда обязана ответить на --version.
 # P0-инвариант (тот же, что у editor-CLI в vscode.ps1): claude лежит в user-writable
 # каталоге, а этот скрипт исполняется ELEVATED — запускаем ТОЛЬКО де-элевированно
-# (Invoke-HmDeElevated), НЕ под админом. Возвращает:
+# (Invoke-HmDeElevatedSafe: задача планировщика, а если она доказанно ничего не запустила —
+# токен оболочки Explorer), НЕ под админом. Возвращает:
 #   'works'      — ответил, код 0: бинарь рабочий;
 #   'broken'     — запуск ДОКАЗАННО состоялся (Gate=medium) и вернул НЕ 0: нерабочая обёртка;
 #   'unverified' — де-элевация недоступна/не отчиталась ИЛИ «Last Result» — служебный
@@ -97,7 +77,7 @@ function Add-ToUserPath($dir) {
 #                  (fail-open к прежней проверке «бинарь на диске»).
 function Test-HmClaudeRuns($bin) {
     if (-not $bin) { return 'broken' }
-    $r = Invoke-HmDeElevated $bin @('--version')
+    $r = Invoke-HmDeElevatedSafe $bin @('--version') -Label 'claude-version' -TimeoutSec 120
     if ($null -eq $r -or $r.Gate -ne 'medium') { return 'unverified' }
     if ($r.Code -eq 0) { return 'works' }
     # «Last Result» задачи планировщика бывает СЛУЖЕБНЫМ СТАТУСОМ ЗАДАЧИ (SCHED_S_*,
@@ -181,6 +161,10 @@ function Remove-HmBrokenClaude($bin) {
 
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
+# Вердикт «claude из PowerShell» прошлого прогона не должен пережить этот: ранние выходы ниже
+# (claude не установился, обёртка нерабочая) до его записи не доходят, и verify.ps1 показал бы
+# красную строку «Запуск claude в PowerShell» по давно устаревшему факту. Сбрасываем СРАЗУ.
+if (-not $DRY) { Write-HmCheck 'claude-ps' 'n/a' }
 $cache = if ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'npm-cache' } else { '' }
 $offlineOk = $false      # офлайн-путь дал claude, который НЕ доказан сломанным
 $probedBin = ''          # кэш проверки, чтобы не гонять де-элевированный запуск дважды
@@ -263,28 +247,6 @@ if (-not $claudeBin) {
 # а не зелёная галочка при неработающем claude.
 $probe = if ($claudeBin -eq $probedBin -and $probedResult) { $probedResult } else { Test-HmClaudeRuns $claudeBin }
 
-# Вердикт запуском пишем в ~/.hamidun-setup/checks.json — финальный чек-лист
-# (verify.ps1) обязан ПЕРЕНЕСТИ его, а не выводить заново по наличию файла.
-# Один факт «claude работает» — один стандарт доказательства.
-function Write-HmCheck($name, $verdict) {
-    try {
-        $dir = Join-Path $env:USERPROFILE '.hamidun-setup'
-        New-Item -ItemType Directory -Force -Path $dir -ErrorAction SilentlyContinue | Out-Null
-        $file = Join-Path $dir 'checks.json'
-        $data = @{}
-        if (Test-Path -LiteralPath $file) {
-            try { $data = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json) } catch { $data = New-Object psobject }
-        }
-        $entry = @{ verdict = $verdict; at = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds }
-        # atomic: temp + move (как маркеры/квитанции)
-        $obj = @{}
-        if ($data) { foreach ($p in $data.PSObject.Properties) { $obj[$p.Name] = $p.Value } }
-        $obj[$name] = $entry
-        $tmp = "$file.tmp"
-        ($obj | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $tmp -Encoding UTF8
-        Move-Item -LiteralPath $tmp -Destination $file -Force
-    } catch { }   # диагностика не должна ломать установку
-}
 # Красный вердикт «сломан» имеем право выносить только за НАШ артефакт: сломанный claude
 # ВНЕ наших каталогов (свой npm prefix/volta) не трогаем и не хороним им установку —
 # честно уходим путём «не смогли подтвердить» (тот же аллоулист, что у уборки).
@@ -312,8 +274,18 @@ if ($probe -eq 'broken') {
     Write-HmCheck 'claude' 'broken'
     exit 1
 }
-Add-ToUserPath (Split-Path $claudeBin)
-Add-ToUserPath (Join-Path $env:USERPROFILE '.local\bin')
+# Пользовательские починки — общие с verify.ps1 (там они идут на КАЖДОМ прогоне, даже когда у
+# claude снята галочка): PATH пользователя (каталог бинаря и ~/.local\bin, даже если его ещё нет)
+# и политика выполнения PowerShell — терминал VS Code по умолчанию именно он, а не cmd
+# (Get-HmExecPolicyPlan, Set-HmUserExecPolicy). Проба из PowerShell — только если cmd-проба
+# уже доказала, что claude отвечает. Вердикт — отдельный факт 'claude-ps' для чек-листа.
+$psVerdict = Repair-HmClaudeUserEnv -Bin $claudeBin -Probe:($probe -eq 'works')
+Write-HmCheck 'claude-ps' $psVerdict
+if ($psVerdict -eq 'blocked') {
+    Write-Host "ВНИМАНИЕ: в PowerShell (терминал VS Code) команда claude не запустится — политика выполнения скриптов не пускает claude.ps1. Набирай claude.cmd."
+} elseif ($psVerdict -eq 'broken') {
+    Write-Host "ВНИМАНИЕ: в PowerShell команда claude не ответила на --version, хотя в cmd отвечает. Набирай claude.cmd или открой терминал «Command Prompt»."
+}
 if ($probe -eq 'works') {
     Write-HmCheck 'claude' 'works'
     Write-Host "OK: Claude Code CLI установлен и отвечает на --version ($claudeBin). Открой НОВЫЙ терминал, чтобы работала команда claude."

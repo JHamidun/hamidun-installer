@@ -3,6 +3,8 @@
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # New-HmSecureStagingDir (Admins-only кэш для онлайн-фолбэка Python)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # python в PATH пользователя, если команда ведёт в Магазин
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Open-HmPinnedDir: папка ms-playwright проверена по цепочке и закреплена на время копирования
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -172,8 +174,21 @@ $pwWarn = $false
 if ($pwb -and (Test-Path $pwb)) {
     Write-Host "Ставлю встроенные браузеры Playwright (офлайн)..."
     $dst = Join-Path $env:LOCALAPPDATA 'ms-playwright'
-    New-Item -ItemType Directory -Force $dst | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue
+    # Копия идёт под администратором в профиль: junction на %LOCALAPPDATA%\ms-playwright (или выше по пути) уводил New-Item и
+    # Copy-Item -Recurse в чужую папку, а переименование папки в разгар многосекундной копии — тем более. Поэтому цепочка от
+    # профиля проверяется до копии, папка создаётся под закрепкой и остаётся закреплённой, пока идёт копирование (открытый файл
+    # внутри не даёт переименовать её и родителей). НЕ закрыто: ссылка ВНУТРИ уже существующего ms-playwright (скажем, заранее
+    # подложенная chromium-NNNN) — это дерево в сотни мегабайт, link-safe копия по файлам для него отдельная задача.
+    $pwPin = $null
+    try { $pwPin = Open-HmPinnedDir -Dir $dst -Anchor (Get-HmTrustAnchor -Path $dst) }
+    catch {
+        # Итог шага решает `playwright install` ниже (его код возврата), а не эта строка: браузеры он докачает сам.
+        Write-Host "  ВНИМАНИЕ: встроенные браузеры Playwright не скопированы: папка $dst не прошла проверку на ссылки ($($_.Exception.Message)). Установщик работает с правами администратора и сквозь ссылки не пишет."
+    }
+    if ($pwPin) {
+        try { Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue }
+        finally { $pwPin.Stream.Dispose() }
+    }
     # Вшитый набор может не совпасть с колесом playwright: ревизия Chromium прибита
     # к версии пакета (1.62 требует chromium-1234), и fetch-vendor вдобавок срезает
     # chromium_headless_shell — а headless-запуск (весь рендер-конвейер) идёт именно
@@ -219,6 +234,12 @@ if (Test-Path $runtimeScript) {
 } else {
     Write-Host "  (пропускаю доводку рантайма: $runtimeScript не найден — конфиг ещё не разложен)"
 }
+
+# Команда python в НОВОМ терминале человека (A09): если она ведёт в заглушку Магазина, а не в
+# установленный Python, каталог Python встаёт в начало PATH пользователя — как сделала бы
+# галочка «Add python.exe to PATH». Логика общая с verify.ps1 (там она идёт на КАЖДОМ прогоне,
+# даже когда у pydeps снята галочка): Repair-HmPythonPath в _userpath.ps1.
+[void](Repair-HmPythonPath $py)
 
 if ($pwWarn) { Write-Host "Python-зависимости установлены, но браузеры Playwright — нет (повтори установку этого компонента)." }
 else { Write-Host "OK: Python-зависимости установлены." }

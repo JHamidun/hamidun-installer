@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Continue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 # #2: интегрити-гейт nomad-src (Confirm-HmArtifact + Get-HmTreeSha256 из _verify.ps1).
 . (Join-Path $PSScriptRoot '_verify.ps1')
+. (Join-Path $PSScriptRoot '_userpath.ps1')   # Add-HmUserPath: ~/.local\bin в PATH пользователя
+. (Join-Path $PSScriptRoot '_linksafe.ps1')   # New-HmUserDir / Write-HmUserFile: брендинг и config.yaml пишутся без хода по ссылке
 
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
@@ -72,6 +74,59 @@ function Test-NomadNetwork {
     }
     return $false
 }
+
+# Копия исходников Nomad для сборки: в ЗАЩИЩЁННОЙ папке (создаётся атомарно, доступ только у
+# Администраторов и SYSTEM — тот же примитив New-HmSecureStagingDir, что у git/node/pydeps) и сверенная
+# с манифестом УЖЕ ПОСЛЕ копирования.
+# Почему так. uv не просто ставит пакет: несколько минут он резолвит и качает зависимости, а потом
+# ИСПОЛНЯЕТ сборочный код проекта (pyproject.toml, setup.py, модули) — под администратором. Раньше копия
+# лежала в %TEMP% (права пользователя): процесс обычного пользователя подменял в ней файл за эти минуты, и
+# его код выполнялся у нас с правами администратора. Проверка суммы исходного дерева этого не закрывала:
+# проверялся оригинал, а исполнялась копия. Теперь копия недоступна обычному процессу, и проверяется
+# именно она — исполняется ровно то, что проверено.
+# Возвращает { Stage; Path } или $null (причина напечатана, защищённая папка уже убрана). Папку Stage
+# после сборки убирает вызывающий: Remove-HmSecureStagingDir. Нужен подключённый _deelev.ps1.
+function New-HmNomadBuildCopy {
+    param([Parameter(Mandatory = $true)][string]$Src, [Parameter(Mandatory = $true)][string]$TreeWant)
+    $sysRoot  = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    $icacls   = Join-Path (Join-Path $sysRoot 'System32') 'icacls.exe'
+    $progData = Join-Path ([System.IO.Path]::GetPathRoot($sysRoot)) 'ProgramData'
+    $stage = $null
+    if ((Test-Path -LiteralPath $icacls) -and (Test-Path -LiteralPath $progData)) {
+        $stage = New-HmSecureStagingDir -ProgramData $progData -Icacls $icacls -Elevated $true
+    }
+    if (-not ($stage -and (Test-Path -LiteralPath $stage))) {
+        Write-Host "Nomad: не удалось создать защищённую папку для сборки в ProgramData — из общей временной папки собирать не буду: подменить в ней файлы мог бы любой процесс обычного пользователя. Установка Nomad остановлена."
+        Write-Host "  Что делать: нажми «Повторить»; если не помогло — пришли журнал установки в бота поддержки."
+        return $null
+    }
+    $dst = Join-Path $stage 'nomad-src'
+    Write-Host "  Копирую исходники в защищённую папку и сверяю копию с манифестом (на медленном диске это до минуты)..."
+    try {
+        # Каталог копируем целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок: Copy-Item -LiteralPath "...\*"
+        # в Windows PowerShell 5.1 (боевой интерпретатор) НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов.
+        Copy-Item -LiteralPath $Src -Destination $dst -Recurse -Force -ErrorAction Stop
+        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
+        if (-not (Test-Path -LiteralPath (Join-Path $dst 'pyproject.toml'))) {
+            throw 'копия исходников пуста (нет pyproject.toml)'
+        }
+        $got = Get-HmTreeSha256 $dst
+        if (-not $TreeWant -or $got -ne $TreeWant) {
+            Write-Host "БЕЗОПАСНОСТЬ: НЕ СОВПАЛ SHA-256 КОПИИ nomad-src в защищённой папке — исходники менялись во время копирования. Установка Nomad остановлена."
+            Write-Host "  ожидалось: $TreeWant"
+            Write-Host "  получено:  $got"
+            Remove-HmSecureStagingDir -Path $stage
+            return $null
+        }
+    } catch {
+        Write-Host "Nomad: не удалось подготовить копию исходников в защищённой папке ($($_.Exception.Message)) — установка остановлена."
+        Remove-HmSecureStagingDir -Path $stage
+        return $null
+    }
+    Write-Host "  Копия для сборки лежит в защищённой папке и сверена с манифестом."
+    return [pscustomobject]@{ Stage = $stage; Path = $dst }
+}
+
 Update-Path
 $DRY = [bool]$env:HM_DRY_RUN
 
@@ -100,6 +155,11 @@ if (-not $DRY) {
     ) | Where-Object { Test-Path -LiteralPath $_ }
     if ($existingNomad) {
         Write-Host "uv-tool nomad-agent или команды nmd/nomad-agent/nomad-acp уже установлены — не перезаписываю чужое (без принудительной перезаписи). Пропускаю."
+        # Установлен — значит, до записи PATH внизу скрипта дело уже не дойдёт, а у людей с давно
+        # поставленным Nomad ~/.local\bin в PATH пользователя как раз и нет («nmd не распознано»).
+        # Чиним тут же, до выхода: запись идёт только в HKCU, шим не запускается.
+        $shimDir = Join-Path $env:USERPROFILE '.local\bin'
+        if (Test-Path -LiteralPath (Join-Path $shimDir 'nmd.exe') -PathType Leaf) { [void](Add-HmUserPath $shimDir) }
         exit 120
     }
 }
@@ -229,7 +289,7 @@ if (-not $uv -and -not $uvPlannedOffline) {
 # БЕЗ принудительной перезаписи: uv-тул/шимы этого имени уже отсеяны guard-ом выше, а
 # принудительная замена могла бы затронуть и не-uv бинарь того же имени — недопустимо.
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: uv python install 3.12; uv tool install --python 3.12 `"$src`" (без принудительной перезаписи)"
+    Write-Host "  [dry-run] WOULD: uv python install 3.12; скопировать исходники в защищённую папку (ProgramData, только администраторы), сверить КОПИЮ с манифестом и поставить из неё: uv tool install --python 3.12 <копия> (без принудительной перезаписи)"
 } else {
     if (-not $uv) { Write-Host "uv не найден после установки — прерываю."; exit 1 }
     # P1-5: коды нативных команд НЕ проглатываем ($ErrorActionPreference=Continue их
@@ -263,27 +323,21 @@ if ($DRY) {
     # честно говорит «vendor подменён» — компонент больше не ставится никогда.
     # Проверено запуском: 4929 файлов в дереве превращались в 7374, SHA переставал
     # совпадать. На macOS это уже было сделано (nomad.sh, BUILD_SRC) — переносим сюда.
-    # ВАЖНО: копируем каталог целиком в ЕЩЁ НЕ СУЩЕСТВУЮЩИЙ путь, без подстановок.
-    # Copy-Item -LiteralPath "...\*" в Windows PowerShell 5.1 (а это боевой интерпретатор)
-    # НЕ раскрывает звёздочку и молча копирует НОЛЬ файлов: исключения нет, catch не
-    # срабатывает, и uv получает пустой каталог. Проверено запуском: 2 файла -> 0.
-    $buildSrc = Join-Path ([System.IO.Path]::GetTempPath()) ('hm-nomad-build-' + [guid]::NewGuid().ToString('N'))
-    $srcForInstall = $src
+    # Копия лежит в ЗАЩИЩЁННОЙ папке (не в %TEMP%) и сверяется с манифестом после копирования —
+    # подробности и причина в New-HmNomadBuildCopy. Не вышло — fail-closed, запасного пути
+    # «из vendor напрямую» нет: он вернул бы исполнение непроверенного дерева.
+    # _deelev.ps1 при подключении подметает осиротевшие задачи планировщика, поэтому подключаем его
+    # только здесь, перед сборкой: ранние выходы выше (уже стоит, нет vendor, нет сети) обходятся без этого.
+    . (Join-Path $PSScriptRoot '_deelev.ps1')   # New-HmSecureStagingDir, Remove-HmSecureStagingDir
+    $build = New-HmNomadBuildCopy -Src $src -TreeWant $treeWant
+    if (-not $build) { exit 1 }
     try {
-        Copy-Item -LiteralPath $src -Destination $buildSrc -Recurse -Force -ErrorAction Stop
-        # Молчаливый no-op копирования уже стоил компоненту установки — проверяем факт.
-        if (-not (Test-Path -LiteralPath (Join-Path $buildSrc 'pyproject.toml'))) {
-            throw 'копия исходников пуста (нет pyproject.toml)'
-        }
-        $srcForInstall = $buildSrc
-    } catch {
-        Write-Host "  Не удалось подготовить временную копию исходников ($($_.Exception.Message)) — ставлю из vendor напрямую."
-        if (Test-Path -LiteralPath $buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
-        $buildSrc = ''
+        & $uv tool install --python 3.12 "$($build.Path)"
+        $toolRc = $LASTEXITCODE
+    } finally {
+        Remove-HmSecureStagingDir -Path $build.Stage
     }
-    & $uv tool install --python 3.12 "$srcForInstall"
-    if ($buildSrc) { Remove-Item -LiteralPath $buildSrc -Recurse -Force -ErrorAction SilentlyContinue }
-    if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $LASTEXITCODE — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
+    if ($toolRc -ne 0) { Write-Host "ОШИБКА: uv tool install завершился с кодом $toolRc — прерываю (брендинг/квитанцию не пишу)."; exit 1 }
     Update-Path
     # v1: ownership-маркеры в venv БОЛЬШЕ НЕ пишем (маркерная логика удалена вместе с
     # авто-удалением Nomad — см. src/uninstall-targets.js). Запись маркера-владения в
@@ -294,24 +348,44 @@ if ($DRY) {
 # ТОЛЬКО если целевого НЕТ — существующий пользовательский файл НЕ перезаписываем.
 $hh = if ($env:HERMES_HOME) { $env:HERMES_HOME } else { Join-Path $env:LOCALAPPDATA 'hermes' }
 $wroteSoul = $false; $wroteSkin = $false
+# Каталог агента лежит в профиле, и записи в него идут под администратором: junction на HERMES_HOME (или на %LOCALAPPDATA%)
+# уводил Copy-Item и WriteAllText в чужую папку, а file-symlink на SOUL.md/config.yaml — запись в её цель. Поэтому
+# каталог создаётся и проверяется по цепочке от профиля (New-HmUserDir: ссылка — отказ), а файлы пишутся переносом по имени
+# (Write-HmUserFile). Каталог небезопасен — брендинг и облачный блок пропускаются со строкой в журнал, сам Nomad уже стоит.
+$hhSafe = $false
 if (-not $DRY) {
-    New-Item -ItemType Directory -Force -Path $hh, (Join-Path $hh 'skins') | Out-Null
+    try {
+        [void](New-HmUserDir -Path $hh)
+        [void](New-HmUserDir -Path (Join-Path $hh 'skins'))
+        $hhSafe = $true
+    } catch { Write-Host "Nomad: брендинг и настройки НЕ записаны: каталог агента ($hh) не прошёл проверку на ссылки ($($_.Exception.Message)). Сам Nomad установлен." }
+}
+if (-not $DRY -and $hhSafe) {
     $soulDst = Join-Path $hh 'SOUL.md'
     if (-not (Test-Path -LiteralPath $soulDst)) {
         $soulSrc = Join-Path $src 'branding\SOUL.md'
-        if (Test-Path $soulSrc) { Copy-Item $soulSrc $soulDst; $wroteSoul = $true }
+        if (Test-Path $soulSrc) {
+            try { Write-HmUserFile -Path $soulDst -Bytes ([System.IO.File]::ReadAllBytes($soulSrc)); $wroteSoul = $true }
+            catch { Write-Host "  [warn] SOUL.md не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\SOUL.md не найден — пропускаю" }
     } else { Write-Host "  SOUL.md уже существует — не перезаписываю." }
     $skinDst = Join-Path $hh 'skins\nomad.yaml'
     if (-not (Test-Path -LiteralPath $skinDst)) {
         $nomadYamlSrc = Join-Path $src 'branding\skins\nomad.yaml'
-        if (Test-Path $nomadYamlSrc) { Copy-Item $nomadYamlSrc $skinDst; $wroteSkin = $true }
+        if (Test-Path $nomadYamlSrc) {
+            try { Write-HmUserFile -Path $skinDst -Bytes ([System.IO.File]::ReadAllBytes($nomadYamlSrc)); $wroteSkin = $true }
+            catch { Write-Host "  [warn] skins\nomad.yaml не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\skins\nomad.yaml не найден — пропускаю" }
     } else { Write-Host "  skins\nomad.yaml уже существует — не перезаписываю." }
     $cfgY = Join-Path $hh 'config.yaml'
     if (-not (Test-Path $cfgY)) {
         $cfgTmpl = Join-Path $src 'branding\config.yaml.template'
-        if (Test-Path $cfgTmpl) { Copy-Item $cfgTmpl $cfgY }
+        if (Test-Path $cfgTmpl) {
+            try { Write-HmUserFile -Path $cfgY -Bytes ([System.IO.File]::ReadAllBytes($cfgTmpl)) }
+            catch { Write-Host "  [warn] config.yaml не записан: $($_.Exception.Message)" }
+        }
         else { Write-Host "  [warn] branding\config.yaml.template не найден — пропускаю" }
     }
 }
@@ -335,6 +409,12 @@ if (-not $cloudKey) {
     $modelSan = ($cloudModel -replace '["\r\n]', '')
     if ($DRY) {
         Write-Host "  [dry-run] WOULD: в $cfgY вписать model.provider=custom base_url=$urlSan default=$modelSan api_key=<скрыт>"
+    } elseif (-not $hhSafe) {
+        Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан — каталог агента ($hh) не прошёл проверку на ссылки (см. выше). Подключишь позже: nmd model."
+    } elseif (Test-HmIsReparse $cfgY) {
+        # Читать ссылку незачем: содержимое её цели (в том числе закрытого файла, который администратор прочитать может) легло
+        # бы в обычный config.yaml пользователя вместе с ключом.
+        Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан — сам config.yaml это ссылка (symlink), а установщик работает с правами администратора и сквозь ссылки не пишет. Удали ссылку и повтори установку Nomad (или подключи облако позже: nmd model)."
     } else {
         $text = ''
         if (Test-Path $cfgY) { $text = [IO.File]::ReadAllText($cfgY, [Text.Encoding]::UTF8) }
@@ -352,14 +432,24 @@ if (-not $cloudKey) {
                  '  default: "' + $modelSan + '"' + $nl +
                  '# <<< nomad-cloud <<<' + $nl
         $text = $block + $text
-        # config.yaml — данные: пишем БЕЗ BOM (BOM ломает YAML-парсер).
-        [IO.File]::WriteAllText($cfgY, $text, (New-Object Text.UTF8Encoding $false))
-        Write-Host "OK: Nomad подключён к облаку $urlSan (модель $modelSan). Ключ записан в config.yaml."
+        # config.yaml — данные: пишем БЕЗ BOM (BOM ломает YAML-парсер). Запись — переносом по имени, не открытием имени на запись.
+        try {
+            Write-HmUserFile -Path $cfgY -Bytes ((New-Object Text.UTF8Encoding $false).GetBytes($text))
+            Write-Host "OK: Nomad подключён к облаку $urlSan (модель $modelSan). Ключ записан в config.yaml."
+        } catch { Write-Host "Nomad Cloud: ключ в config.yaml НЕ записан: $($_.Exception.Message)" }
     }
 }
 
 if ($DRY) { Write-Host "[dry-run] Nomad preview завершён."; exit 0 }
 Update-Path
+
+# Шимы nmd/nomad-agent/nomad-acp лежат в ~/.local\bin, а его в PATH пользователя часто нет
+# (uv лишь предупреждает «is not on your PATH»). Финал раньше обещал «nmd появится в PATH»
+# и PATH не трогал — в новом окне человек получал «Имя "nmd" не распознано». Пишем в реестр
+# (HKCU) с рассылкой WM_SETTINGCHANGE; PATH ЭТОГО процесса не трогаем — Get-Command nmd
+# ниже не должен находить user-writable шим под администратором.
+$localBin = Join-Path $env:USERPROFILE '.local\bin'
+if (Test-Path -LiteralPath (Join-Path $localBin 'nmd.exe')) { [void](Add-HmUserPath $localBin) }
 
 # P0-4: квитанция владения — ТОЧНЫЕ пути СОЗДАННЫХ артефактов (main соберёт в receipt).
 # ВАЖНО: HERMES_HOME\config.yaml НЕ записываем в квитанцию — после установки это
@@ -393,7 +483,7 @@ if (Get-Command nmd -ErrorAction SilentlyContinue) {
 }
 if (Test-Path (Join-Path $env:USERPROFILE '.local\bin\nmd.exe')) {
     Write-NomadReceipt
-    Write-Host "OK: Nomad в ~/.local/bin — команда nmd появится в PATH после перезапуска терминала."; exit 0
+    Write-Host "OK: Nomad в ~/.local/bin — открой НОВОЕ окно терминала, и команда nmd заработает."; exit 0
 }
 Write-Host "ОШИБКА: Nomad не установился — смотри лог выше."
 exit 1

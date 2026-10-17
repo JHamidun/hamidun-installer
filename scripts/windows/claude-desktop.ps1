@@ -16,13 +16,15 @@
 #      Это НЕ user-writable %TEMP%.
 #
 #   2. ГЛАВНЫЙ ГЕЙТ ЦЕЛОСТНОСТИ — Authenticode-подпись ДО запуска (вместо SHA-пиннинга:
-#      версии десктопа меняются, зашитый sha устарел бы). НАДЁЖНАЯ проверка
-#      (Test-HmSignerTrusted, см. ниже):
+#      версии десктопа меняются, зашитый sha устарел бы). НАДЁЖНАЯ проверка — общая функция
+#      примитива Test-HmTrustedSigner (_deelev.ps1; у этого скрипта своей копии больше нет):
 #      (a) Get-AuthenticodeSignature Status=Valid — хеш файла не подменён (файл целостен);
 #      (b) цепочка leaf-серта строится, и её КОРЕНЬ обязан лежать в МАШИННОМ доверенном
 #          сторе (LocalMachine\Root). CurrentUser\Root НЕ доверяем: medium-integrity малварь
 #          ТОГО ЖЕ юзера может отравить его своим самоподписанным корнем БЕЗ прав админа
 #          (в machine-стор без админа не записать) → закрываем spoofing через user-cert-store;
+#          звено цепочки вне срока принимается только по метке времени от TSA, чей корень тоже
+#          в LocalMachine\Root (короткоживущий лист уже истёк, а подпись цела);
 #      (c) поле Organization (O=) leaf-серта ТОЧНО равно 'Anthropic, PBC' (парсим RDN, а НЕ
 #          подстрока по всему Subject: 'CN=Evil,OU=Anthropic' НЕ пройдёт);
 #      (d) EKU включает Code Signing. Публичный CA не выпишет злоумышленнику серт с
@@ -52,10 +54,10 @@
 #   downloads.claude.ai/.../ClaudeSetup-*.exe.
 # TODO-verify (опц. усиление, НЕ обязательно): $LEAF_THUMBPRINT — SHA1-отпечаток leaf-серта
 #   Anthropic. По умолчанию ПУСТО (пин выключен): основной контроль — цепочка-к-машинному-
-#   корню + точное O= + Code Signing EKU, он fail-closed и без thumbprint'а. Владелец МОЖЕТ
-#   снять отпечаток с реального ClaudeSetup.exe:
-#     (Get-AuthenticodeSignature .\ClaudeSetup.exe).SignerCertificate.Thumbprint
-#   и вписать сюда для доп. пиннинга. Пустое значение НЕ ослабляет fail-closed.
+#   корню + точное O= + Code Signing EKU, он fail-closed и без thumbprint'а. ВНИМАНИЕ: отпечаток
+#   ЛИСТА перевыпуск сертификата не переживает — вписанная константа протухнет, и установка молча
+#   станет пропуском (exit 120); вписывать, только если готов менять её вместе с релизом издателя.
+#   Снять: (Get-AuthenticodeSignature .\ClaudeSetup.exe).SignerCertificate.Thumbprint. Пусто — безопасно.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # New-HmSecureStagingDir (атомарный Admins-only каталог)
 
@@ -69,69 +71,15 @@ $PUBLISHER_O = 'Anthropic, PBC'
 # Опциональный пин SHA1-отпечатка leaf-серта (по умолчанию выкл; см. TODO-verify выше).
 $LEAF_THUMBPRINT = ''
 
-# --- НАДЁЖНАЯ проверка Authenticode: цепочка-к-машинному-корню + точное O= + Code Signing EKU ---
-# Возвращает '' если бинарь ДОВЕРЕН, иначе строку-причину отказа (у вызывающего → fail-closed).
-# Ключевая идея: НЕ полагаемся на подстроку по Subject и НЕ доверяем CurrentUser-корням —
-# требуем проверяемую криптоцепочку до корня в МАШИННОМ сторе + точное поле Organization.
-function Test-HmSignerTrusted {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ExpectedOrg,
-        [string]$PinnedThumbprint = ''
-    )
-    # (a) Authenticode: подпись присутствует И хеш файла не подменён (иначе Status != Valid).
-    $sig = Get-AuthenticodeSignature -LiteralPath $Path
-    if (-not $sig) { return 'подпись не читается' }
-    if ($sig.Status -ne 'Valid') { return "Authenticode Status=$($sig.Status) (хеш подменён или цепочка недоверенна)" }
-    $cert = $sig.SignerCertificate
-    if (-not $cert) { return 'нет сертификата подписанта' }
-    # (b) Строим цепочку и ТРЕБУЕМ корень в LocalMachine\Root (машинный стор). CurrentUser\Root
-    #     НЕ доверяем: medium-малварь ТОГО ЖЕ юзера отравляет его без прав администратора.
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck  # отзыв уже проверен WinVerifyTrust при Status=Valid
-    $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-    [void]$chain.ChainPolicy.ApplicationPolicy.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))  # требуем EKU Code Signing
-    $built = $false
-    try { $built = $chain.Build($cert) } catch { return "не удалось построить цепочку: $($_.Exception.Message)" }
-    if (-not $built) {
-        $st = ($chain.ChainStatus | ForEach-Object { $_.Status }) -join ','
-        return "цепочка сертификатов не выстроилась ($st)"
-    }
-    $elems = $chain.ChainElements
-    if (-not $elems -or $elems.Count -lt 1) { return 'пустая цепочка сертификатов' }
-    $root = $elems[$elems.Count - 1].Certificate
-    if (-not $root -or -not $root.Thumbprint) { return 'не удалось определить корень цепочки' }
-    $inMachine = $false
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store([System.Security.Cryptography.X509Certificates.StoreName]::Root, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-    try {
-        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-        foreach ($c in $store.Certificates) { if ($c.Thumbprint -eq $root.Thumbprint) { $inMachine = $true; break } }
-    } catch { return "не удалось открыть машинный стор корней: $($_.Exception.Message)" }
-    finally { try { $store.Close() } catch { } }
-    if (-not $inMachine) { return "корень цепочки НЕ в LocalMachine\Root (возможно отравление CurrentUser\Root): $($root.Subject)" }
-    # (c) Organization (O=) leaf-серта ТОЧНО равно ожидаемому (парсим RDN, не подстрока Subject).
-    $org = ''
-    try {
-        foreach ($ln in ($cert.SubjectName.Format($true) -split '\r?\n')) {
-            if ($ln -match '^\s*O=') { $org = ($ln -replace '^\s*O=', '').Trim(); break }
-        }
-    } catch { }
-    if ($org -ne $ExpectedOrg) { return "Organization подписи ('$org') != ожидаемого ('$ExpectedOrg')" }
-    # (d) EKU включает Code Signing (1.3.6.1.5.5.7.3.3).
-    $hasCodeSigning = $false
-    foreach ($ext in $cert.Extensions) {
-        if ($ext -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]) {
-            foreach ($oid in $ext.EnhancedKeyUsages) { if ($oid.Value -eq '1.3.6.1.5.5.7.3.3') { $hasCodeSigning = $true; break } }
-        }
-    }
-    if (-not $hasCodeSigning) { return 'у сертификата нет EKU Code Signing' }
-    # (e) Опциональный пин отпечатка leaf-серта (усиление; по умолчанию выключено).
-    if ($PinnedThumbprint -and $PinnedThumbprint.Trim()) {
-        $want = ($PinnedThumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
-        if ($cert.Thumbprint.ToUpperInvariant() -ne $want) { return 'отпечаток leaf-серта не совпал с пиннингом' }
-    }
-    return ''
-}
+# --- Проверка Authenticode — ЕДИНАЯ функция примитива: Test-HmTrustedSigner (_deelev.ps1) ---
+# Раньше тут жила своя копия (цепочка «на сегодня» без флагов + O= по тексту RDN) и расходилась с общей:
+#   • срок: подписанту с уже истёкшим коротким листом (метка времени у подписи есть, Status='Valid') цепочка
+#     «на сегодня» отказывала с NotTimeValid — теперь срок звеньев решает метка времени от машинного TSA;
+#   • пин O='Anthropic, PBC' не совпадал НИКОГДА: .NET берёт значение с запятой в кавычки, и сравнивалось
+#     '"Anthropic, PBC"' — установка Claude Desktop всегда уходила в exit 120.
+# Контракт прежний: '' — бинарь ДОВЕРЕН, иначе строка-причина (у вызывающего → fail-closed). Проверяется
+# Status=Valid + цепочка к корню в LocalMachine\Root (CurrentUser\Root не доверяем) + EKU Code Signing + точное
+# O= (-ExpectedOrg) + необязательный отпечаток листа (-ExpectedThumbprint).
 
 # --- Идемпотентность: уже установлен? (Win32 Squirrel ИЛИ MSIX/Store) ---
 function Test-ClaudeDesktopInstalled {
@@ -193,7 +141,7 @@ $arch = "$env:PROCESSOR_ARCHITECTURE"
 $url = if ($arch -match 'ARM64') { $URL_ARM64 } else { $URL_X64 }
 
 if ($DRY) {
-    Write-Host "  [dry-run] WOULD: New-HmSecureStagingDir (Admins-only %ProgramData%\HmDeElev-*), скачать $url в него по HTTPS, Test-HmSignerTrusted → Status Valid + цепочка к LocalMachine\Root + O='$PUBLISHER_O' + Code Signing EKU (ДО запуска, fail-closed), запустить проверенный установщик ИЗ защищённого кэша, дождаться claude.exe, почистить кэш."
+    Write-Host "  [dry-run] WOULD: New-HmSecureStagingDir (Admins-only %ProgramData%\HmDeElev-*), скачать $url в него по HTTPS, Test-HmTrustedSigner → Status Valid + цепочка к LocalMachine\Root + O='$PUBLISHER_O' + Code Signing EKU (ДО запуска, fail-closed), запустить проверенный установщик ИЗ защищённого кэша, дождаться claude.exe, почистить кэш."
     exit 0
 }
 
@@ -227,7 +175,19 @@ try {
     try {
         Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 600
     } catch {
-        Write-Host "Не удалось скачать установщик Claude Desktop (нет сети?) — пропускаю. Всё остальное работает; поставь позже с claude.com/download. ($($_.Exception.Message))"
+        # Причину называем по факту, а не «нет сети?» на всё подряд. Живой журнал:
+        # «(403) Запрещено» с сайта Anthropic — интернет работал, а сервер отказал по
+        # адресу (страна/сеть). Совет в этом случае обратный: не чинить Wi-Fi, а
+        # включить VPN на весь компьютер. Последняя строка — она же причина на финише.
+        $httpCode = 0
+        try { if ($_.Exception.Response) { $httpCode = [int]$_.Exception.Response.StatusCode } } catch { }
+        if ($httpCode -eq 403 -or $httpCode -eq 451) {
+            Write-Host "Сервер Anthropic отказал в скачивании (HTTP $httpCode): загрузка с твоего адреса закрыта — это не обрыв сети. Claude Desktop необязателен, всё остальное работает; поставить его можно позже с claude.com/download при VPN на весь компьютер. Пропускаю."
+        } elseif ($httpCode -gt 0) {
+            Write-Host "Сервер ответил ошибкой HTTP $httpCode — установщик Claude Desktop не скачался. Пропускаю; всё остальное работает, поставь его позже с claude.com/download."
+        } else {
+            Write-Host "Не удалось скачать установщик Claude Desktop: нет соединения с сервером ($($_.Exception.Message)). Пропускаю — всё остальное работает; поставь позже с claude.com/download."
+        }
         exit 120
     }
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
@@ -243,7 +203,7 @@ try {
 
     # --- 3. НАДЁЖНЫЙ ГЕЙТ ПОДПИСИ ДО ЗАПУСКА (fail-closed) ---
     #     Проверяем ТОТ ЖЕ $installer, который сейчас запустим (без ре-резолва пути).
-    $why = Test-HmSignerTrusted -Path $installer -ExpectedOrg $PUBLISHER_O -PinnedThumbprint $LEAF_THUMBPRINT
+    $why = Test-HmTrustedSigner -Path $installer -ExpectedOrg $PUBLISHER_O -ExpectedThumbprint $LEAF_THUMBPRINT
     if ($why) {
         Write-Host "БЕЗОПАСНОСТЬ: установщик не прошёл надёжную проверку подписи ($why) — НЕ запускаю. Пропускаю Claude Desktop (fail-closed)."
         exit 120

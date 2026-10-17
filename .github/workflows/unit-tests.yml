@@ -23,6 +23,12 @@ on:
   pull_request:
     branches: ['main']
 
+# Права токена по умолчанию — только чтение. Здесь нечего писать в репозиторий: ни релизов, ни
+# коммитов, ни комментариев; артефакты и кэш идут через токен рантайма, а не через GITHUB_TOKEN.
+# Без этой строки токен получал бы права по умолчанию для репозитория (у многих — на запись).
+permissions:
+  contents: read
+
 # Отмена устаревших прогонов. Новый push в ту же ветку делает предыдущий прогон
 # бессмысленным — но он продолжает жечь раннер. На macOS это десятикратный тариф.
 concurrency:
@@ -44,7 +50,7 @@ jobs:
     outputs:
       code: ${{ steps.detect.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -84,17 +90,24 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     name: npm test (Windows — .ps1 + bash-скрипты)
     runs-on: windows-latest
-    timeout-minutes: 15
+    # 40, а не 15: набор вырос до 30+ тысяч строк (PowerShell-стенды, настоящий Electron 44, мутационные контроли).
+    # Лимит в 15 минут резал бы зелёный прогон по таймауту и выглядел бы как падение теста.
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
         run: npm ci --no-audit --no-fund
+
+      # Electron >= 42 не скачивает бинарь в postinstall. Без него тесты, которым нужен НАСТОЯЩИЙ рантайм
+      # (junction под Electron 44, fuse упакованного приложения), молча пропускаются (SKIP) — зелёный гейт без них.
+      - name: Electron binary (нужен тестам с настоящим рантаймом)
+        run: npx install-electron --no
 
       # Вывод пишется в файл и уезжает артефактом (шаг ниже). Причина: падение
       # 33200117231 не оставило улик — логи упавших джоб пришли ПУСТЫМИ, шаги через
@@ -115,7 +128,7 @@ jobs:
 
       - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-output-windows
           path: test-output.log
@@ -136,13 +149,14 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     name: npm test (macOS — .sh скрипты нативно)
     runs-on: macos-latest
-    timeout-minutes: 15
+    # См. комментарий у windows-джобы: набор вырос, 15 минут мало.
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Установка зависимостей
@@ -160,7 +174,7 @@ jobs:
 
       - name: Полный вывод тестов артефактом (улика на случай плавающего падения)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-output-macos
           path: test-output.log
@@ -192,10 +206,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '22'
       - run: npm run specs:check
 
   # ЕДИНСТВЕННАЯ обязательная проверка для защиты ветки.

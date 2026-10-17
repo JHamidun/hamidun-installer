@@ -1,0 +1,11 @@
+
+/** Путь к config.yaml агента: HERMES_HOME, иначе платформенный дефолт. */
+function nomadConfigPath(env, platform) {
+  const e = env || process.env;
+  const p = platform || process.platform;
+  const hh = e.HERMES_HOME ||
+    (p === 'win32'
+      ? path.join(e.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'hermes')
+      : path.join(os.homedir(), '.hermes'));
+  return path.join(hh, 'config.yaml');
+}

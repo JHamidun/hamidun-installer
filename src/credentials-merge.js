@@ -18,11 +18,19 @@
  * 2. **Замена значения не толкует `$`.** `String.replace` со строкой-заменой
  *    трактует `$&`, `$1`, `$'` как ссылки. В API-ключах доллар встречается.
  *    Поэтому замена — ФУНКЦИЕЙ: она отдаёт строку буквально.
+ *
+ * 3. **Не через ссылку (u10a, F16).** Файл ключей лежит в ~/.claude, а запись идёт из процесса с правами
+ *    администратора. Если ~/.claude (или сам файл) подменён junction-ом/symlink-ом, путь «работает», но чтение,
+ *    mkdir и rename приходятся на другую сторону: ключи легли бы в чужой каталог, а содержимое чужого файла
+ *    через ссылку-файл попало бы в наш. Цепочка от профиля до файла проверяется (src/link-guard.js) до любых
+ *    действий, после создания каталога и сразу после создания временного файла; ссылка — отказ, ключи не
+ *    сохранены, человек видит причину (секреты — fail-closed, мягкой деградации здесь нет).
  */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const linkGuard = require('./link-guard');
 
 /** Имя переменной окружения: заглавные, цифры и подчёркивание, начиная с буквы. */
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
@@ -44,9 +52,15 @@ function credentialsPath(home) {
  */
 function saveCredentials(obj, opts) {
   const o = opts || {};
-  const file = o.file || credentialsPath(o.home);
+  const home = o.home || os.homedir();
+  const file = o.file || credentialsPath(home);
+  // Корень проверки — профиль. Явный `file` без `home` (тестовый шов; main.js его не передаёт) — свой каталог файла.
+  const anchor = o.anchor || (o.file && !o.home ? path.dirname(file) : home);
+  const guard = () => linkGuard.assertNoLinkInChain(file, anchor, { platform: o.platform }, 'файлу ключей');
   try {
+    guard();                                    // до mkdir: он тоже идёт по ссылке
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    guard();                                    // каталог мог стать ссылкой между проверкой и созданием
     let text = '';
     try {
       text = fs.readFileSync(file, 'utf8');
@@ -97,6 +111,14 @@ function saveCredentials(obj, opts) {
         catch (e) { if (e && e.code === 'EEXIST') continue; throw e; }
       }
       if (fd === null) throw new Error('ЗАЩИТА: временный файл ключей уже существует (EEXIST) — возможная подмена, отказ');
+      // Сразу после создания временного файла: подмена ПОСЛЕ этого уже не уведёт rename (временный файл остался по
+      // эту сторону ссылки), подмена ДО — видна здесь; тогда убираем свой временный файл и отказываем.
+      try { guard(); }
+      catch (e) {
+        try { fs.closeSync(fd); } catch (e2) { /* ignore */ }
+        try { fs.rmSync(tmp, { force: true }); } catch (e2) { /* ignore */ }
+        throw e;
+      }
       try {
         const st = fs.fstatSync(fd);
         if (!st.isFile() || (typeof st.nlink === 'number' && st.nlink !== 1)) {
@@ -112,6 +134,8 @@ function saveCredentials(obj, opts) {
     }
     return { ok: true, saved, path: file };
   } catch (e) {
+    // Отказ из-за ссылки — без «Error:» и со словами, что ключи не сохранены (человек видит эту строку как есть).
+    if (e && e.code === 'EHMLINK') return { ok: false, error: e.message + '. Ключи НЕ сохранены.' };
     return { ok: false, error: String(e) };   // форма ответа как была в ipcMain.handle
   }
 }

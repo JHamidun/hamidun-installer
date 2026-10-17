@@ -15,6 +15,9 @@
  *
  * Запуск:  node tools/audit-pack.js [путь к паку]
  *   По умолчанию проверяется vendor/config-pack — то, что реально едет пользователю.
+ *
+ * Коды выхода: 0 — связность в порядке (что-то проверено, СТОПов нет); 1 — есть СТОПы;
+ *   2 — проверять нечего (пак пуст или не найден; см. nothingToAudit) — это НЕ «в порядке».
  */
 'use strict';
 const fs = require('fs');
@@ -29,6 +32,48 @@ const ok = [];
 
 function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; }
+}
+
+/* ---------- 0. Есть ли вообще что проверять ---------- */
+
+// ПУСТОЙ ЗЕЛЁНЫЙ (S-7). На пустом или отсутствующем каталоге каждая проверка ниже молча
+// «ничего не нашла», и аудит печатал «связность в порядке» с кодом 0 — хотя не проверил ни одного
+// файла. Вердикт «в порядке» вправе говорить только тот, кто что-то проверил, поэтому «проверять
+// нечего» — отдельный исход с кодом 2 (код 1 остаётся за найденными проблемами). preflight-build.js
+// читает любое отсутствие вердикта как отказ сборки.
+//
+// Нечего проверять, если: каталога пака нет; в нём нет каталога .claude или в .claude ни одного
+// файла; нет settings.json, он не разбирается как JSON-объект или в нём ни одного ключа — хуки, MCP
+// и плагины, ради которых аудит и написан, живут именно там.
+function nothingToAudit() {
+  try {
+    if (!fs.statSync(PACK).isDirectory()) return 'это не каталог: ' + PACK;
+  } catch (e) { return 'каталога пака нет: ' + PACK; }
+  try {
+    if (!fs.statSync(C).isDirectory()) return 'в паке нет каталога .claude';
+  } catch (e) { return 'в паке нет каталога .claude'; }
+  let files = 0;
+  const count = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) count(path.join(dir, e.name));
+      else if (e.isFile()) files++;
+    }
+  };
+  count(C);
+  if (!files) return 'каталог .claude пуст';
+  const s = readJson(path.join(C, 'settings.json'));
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return '.claude/settings.json нет или он не JSON-объект';
+  if (!Object.keys(s).length) return '.claude/settings.json пуст — хуков, MCP и плагинов для проверки нет';
+  return '';
+}
+
+const hollow = nothingToAudit();
+if (hollow) {
+  console.log('ПАК: ' + PACK + '\n');
+  console.log('  ~    ' + hollow);
+  console.log('\n' + '='.repeat(70));
+  console.log('ВЕРДИКТ: НЕ ПРОВЕРЕНО — ' + hollow + '. «Связность в порядке» здесь значило бы «проверок не было».');
+  process.exit(2);
 }
 
 /* ---------- 1. MCP: чем запускаются и есть ли личные пути ---------- */

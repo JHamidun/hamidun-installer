@@ -48,7 +48,23 @@ REGISTRY = REPO / "remote-components.json"
 COMPONENTS = {
     "git":    {"kind": "single", "src": "apps/git-setup.exe",    "prefix": "apps",              "name": "Git for Windows"},
     "node":   {"kind": "single", "src": "apps/node-lts.msi",     "prefix": "apps",              "name": "Node.js LTS"},
-    "vscode": {"kind": "single", "src": "apps/vscode-setup.exe", "prefix": "apps",              "name": "Visual Studio Code"},
+    # vscode — СОСТАВНОЙ: установщик редактора + claude-code.vsix. Раньше архив вёз один
+    # vscode-setup.exe, а vsix панели Claude ехал только в архиве «extension», который ставит
+    # панель ТОЛЬКО в Cursor (extension.ps1) и качается лишь при выбранном Cursor. В lite
+    # vscode.ps1 вшитого vsix не находил никогда, и панель Claude в VS Code шла только из
+    # Marketplace через планировщик — две точки отказа; отсюда главный красный пункт
+    # телеметрии. vscode.ps1 читает $HM_VENDOR/apps/claude-code.vsix — путь внутри архива тот
+    # же. Обе части обязательны: архив без vsix вернул бы lite к Marketplace молча.
+    # chatgpt.vsix (Codex, ~340 МБ) сюда НЕ кладём: Codex необязателен, его отсутствие —
+    # частичный успех (vscode.ps1, код 121), а не повод раздувать архив каждому.
+    # Русский языковой пакет (несколько МБ) едет здесь же: vscode.ps1 ставит его тем же
+    # де-элевированным путём, а vscode-settings.ps1 включает locale=ru, только когда пакет
+    # на диске. Пакет подобран под минор вшитого vscode-setup.exe (tools/fetch-vendor.ps1),
+    # поэтому публикуются они только вместе.
+    "vscode": {"kind": "staged", "parts": [("apps/vscode-setup.exe", "apps/vscode-setup.exe"),
+                                           ("apps/claude-code.vsix", "apps/claude-code.vsix"),
+                                           ("apps/vscode-language-pack-ru.vsix", "apps/vscode-language-pack-ru.vsix")],
+               "name": "Visual Studio Code + панель Claude Code + русский интерфейс (vsix)"},
     "cursor": {"kind": "single", "src": "apps/cursor-setup.exe", "prefix": "apps",              "name": "Cursor"},
     "claude": {"kind": "single", "src": "npm-cache",             "prefix": "npm-cache",         "name": "Claude Code CLI (npm-cache)"},
     "uv":     {"kind": "single", "src": "apps/uv",               "prefix": "apps/uv",           "name": "uv (Astral)"},

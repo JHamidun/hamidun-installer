@@ -15,11 +15,19 @@ APP_USER="$HOME/Applications/Visual Studio Code.app"
 if   [ -d "$APP_SYS" ];  then APP="$APP_SYS"
 elif [ -d "$APP_USER" ]; then APP="$APP_USER"
 else APP="$APP_SYS"; fi   # ни одного нет -> цель установки по умолчанию /Applications
-CODE_CLI="$APP/Contents/Resources/app/bin/code"
+CODE_CLI="$APP/Contents/Resources/app/bin/code"; source "$DIR/vscode-firstrun.sh"   # настройки VS Code для новичка: ловушка EXIT
 
 echo "Проверяю VS Code..."
 if [ -d "$APP" ]; then
   echo "VS Code уже установлен — доставлю только расширения."
+  # VS Code, поставленный прежней версией установщика, принадлежит root, и его
+  # самообновление каждый раз просит пароль (A42). Без спроса не чиним — это ещё одно
+  # окно с паролем посреди установки, — но говорим прямо и даём команду. Тот же текст
+  # печатает always-run touchup-vscode-owner.sh: он доходит и до тех, у кого VS Code уже
+  # установлен и при повторном запуске снят с выбора (сюда они не попадают).
+  if hm_app_is_root_owned "$APP"; then
+    echo "  $(hm_vscode_owner_hint "$APP")"
+  fi
 else
   ZIP="${HM_VENDOR:-}/apps/vscode.zip"
   if [ -z "${HM_VENDOR:-}" ] || [ ! -f "$ZIP" ]; then
@@ -29,7 +37,7 @@ else
     exit 120
   fi
   if [ -n "$DRY" ]; then
-    echo "  [dry-run] WOULD: под ОДНИМ admin_run (root): staging /var/root, cp вшитого vscode.zip в staging, ditto -x -k, codesign -R Team ID(UBF8T346G9)+spctl распакованного .app в staging, cp .app в /Applications, xattr -dr com.apple.quarantine; поставить расширения anthropic.claude-code + openai.chatgpt"
+    echo "  [dry-run] WOULD: под ОДНИМ admin_run (root): staging /var/root, cp вшитого vscode.zip в staging, ditto -x -k, codesign -R Team ID(UBF8T346G9)+spctl распакованного .app в staging, снять карантин и передать владельцу на staged-копии, переименовать (mv -n) проверенный .app в /Applications (место должно быть пустым); поставить расширения anthropic.claude-code + openai.chatgpt"
   else
     verify_artifact "$ZIP"    # вшитый артефакт — предварительный fail-closed SHA-256 (быстрый отсев повреждённого zip без пароля)
     # verify + install АТОМАРНО под root на root-owned staging (Codex — тот же TOCTOU, что
@@ -39,9 +47,11 @@ else
     # checksums.json тоже same-UID (атакующий подменит и zip, и хэш). Теперь под root в
     # ОДНОМ admin_run (HM_VSCODE_INSTALL_SH): cp вшитого zip -> root-owned staging (0700) ->
     # ditto распаковка в staging -> codesign -R (ТОЧНЫЙ Team ID Microsoft; крипто-оценка
-    # подписи, не парсинг -dv) + spctl (нотаризация) распакованного .app -> cp .app в
-    # /Applications -> снять карантин. Между verify и install окна нет (всё над root-owned
-    # staging). Team ID и dest — ПОЗИЦИОННЫЕ параметры (не интерполяция в текст).
+    # подписи, не парсинг -dv) + spctl (нотаризация) распакованного .app -> снять карантин и
+    # передать владельцу НА staged-копии -> переименовать (mv -n) её в /Applications; место
+    # назначения обязано быть пустым (находка M-3, подробности в _lib.sh). Между verify и
+    # install окна нет (всё над root-owned staging). Team ID и dest — ПОЗИЦИОННЫЕ параметры
+    # (не интерполяция в текст).
     # Team ID VS Code. Подтверждено сетью (2026-07): официальные сборки VS Code подписаны
     # "Developer ID Application: Microsoft Corporation (UBF8T346G9)", TeamIdentifier=UBF8T346G9
     # (community.jamf.com — codesign output; fullmetalmac.com/team-ids — Microsoft = UBF8T346G9).
@@ -61,7 +71,11 @@ else
       exit 1
     fi
     echo "Проверяю подпись и устанавливаю VS Code в /Applications (может потребоваться пароль администратора)..."
-    if ! admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH" hm_vscode_install "$ZIP" "$VSCODE_TEAM_ID" "$APP"; then
+    # Копирует root, поэтому без передачи владения бандл остался бы root-овым — и каждое
+    # самообновление VS Code просило бы пароль или Touch ID (A42). Отдаём его человеку
+    # за экраном прямо в том же root-скрипте, уже после проверки подписи.
+    VSCODE_OWNER="$(hm_console_user || true)"
+    if ! admin_run /bin/sh -c "$HM_VSCODE_INSTALL_SH" hm_vscode_install "$ZIP" "$VSCODE_TEAM_ID" "$APP" "$VSCODE_OWNER"; then
       # Один код возврата — три разные причины, и советы у них РАЗНЫЕ. Раньше все
       # три сливались в «подпись/нотаризация не подтверждены (fail-closed)», после
       # которого человек не знал, что делать. Разводим текстом.
@@ -79,6 +93,13 @@ else
     if [ -d "$APP" ]; then
       echo "VS Code установлен."
       echo "HM-RECEIPT path $APP"
+      # Факт проверяем по диску, а не по коду root-скрипта: chown там не валит установку.
+      APP_OWNER_NOW="$(stat -f %Su "$APP" 2>/dev/null || true)"
+      if [ -n "$VSCODE_OWNER" ] && [ "$APP_OWNER_NOW" = "$VSCODE_OWNER" ]; then
+        echo "  VS Code принадлежит пользователю $VSCODE_OWNER — обновляться будет сам, без пароля администратора."
+      else
+        echo "  ВНИМАНИЕ: VS Code принадлежит «${APP_OWNER_NOW:-?}», а не тебе — при обновлении macOS может спросить пароль администратора."
+      fi
     else
       echo "ВНИМАНИЕ: VS Code не подтвердил установку — расширения всё равно попробую доставить."
     fi

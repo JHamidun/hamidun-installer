@@ -727,3 +727,63 @@ h1 {
   transition: width .35s ease;
 }
 .run-progress__label { margin-top: 6px; font-size: 13px; color: var(--text-muted); }
+
+/* ---- исход шага: жёлтое «есть оговорка, но работать можно» ---- */
+/* partial — код 121 (компонент работает, необязательная часть не встала);
+   warn — не встал НЕОБЯЗАТЕЛЬНЫЙ компонент. Ни то ни другое не красное: красным
+   здесь отмечено только то, без чего Claude Code не заработает. */
+.step.partial .dot, .step.warn .dot { background: var(--h-yellow); border-color: var(--h-yellow); }
+.step.partial, .step.warn { border-color: rgba(245,213,71,.55); }
+/* «Пропустить шаг» — у необязательного шага, который долго молчит. */
+.step .step-skip { margin-left: auto; flex: 0 0 auto; padding: 3px 10px; font-size: 11.5px; }
+.step .step-skip + .step-retry, .step .step-retry + .step-skip { margin-left: 6px; }
+.step .step-skip:disabled { opacity: .5; cursor: default; }
+
+/* Карточка компонента: одна строка «зачем · платно ли · можно ли снять». */
+.card-brief { color: var(--text); opacity: .82; font-size: 12px; margin-top: 4px; line-height: 1.4; }
+
+/* Экран выбора: «нужно ≈X ГБ, свободно Y ГБ на C:» (когда места хватает). */
+.disk-line { flex: 0 0 auto; color: var(--text-muted); font-size: 12.5px; margin: 0 0 10px; }
+
+/* Приветствие: «Что понадобится» — до установки, а не на финише. */
+.wc-need {
+  background: rgba(245,213,71,.08);
+  border: 1px solid rgba(245,213,71,.35);
+  border-radius: var(--h-r-md);
+  padding: 12px 15px;
+  margin: 0 0 14px;
+  font-size: 14px; line-height: 1.55; color: var(--text);
+}
+.wc-need-title { font-family: var(--h-font-head); font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+.wc-need-list { margin: 0; padding: 0; list-style: none; }
+.wc-need-list li { margin: 4px 0; color: var(--text-muted); }
+.wc-need-list li b { color: var(--text); font-weight: 600; }
+
+/* Финиш: необязательное/частичное — жёлтым, без тревоги. */
+.ns-warn { background: rgba(245,213,71,.10); border: 1px solid rgba(245,213,71,.38); border-radius: var(--h-r-md); padding: 9px 12px; margin-bottom: 10px; font-size: 13px; color: var(--text); line-height: 1.45; }
+/* Финиш: связь с Anthropic из консоли. */
+.ns-net { border: 1px solid var(--border-strong); background: var(--surface-2); border-radius: var(--h-r-md); padding: 9px 12px; margin-bottom: 10px; font-size: 13px; color: var(--text-muted); line-height: 1.5; }
+.ns-net.ok { border-color: rgba(98,197,132,.45); background: rgba(98,197,132,.08); color: var(--text); }
+.ns-net.warn { border-color: rgba(245,213,71,.45); background: rgba(245,213,71,.08); color: var(--text); }
+.ns-net .btn-sm { margin-top: 8px; }
+.ns-net-steps { margin: 6px 0 0 18px; padding: 0; }
+.ns-net-steps li { margin: 2px 0; }
+.ns-net-note { margin-top: 6px; font-size: 12.5px; color: var(--text-muted); }
+.ns-net code, .ns-pack code { font-size: 12px; }
+.ns-pack .btn-sm { margin-left: 6px; }
+/* «Отчёт скопирован» и текст отчёта в окне предпросмотра. */
+.ns-report-status { font-size: 12.5px; color: var(--text-muted); margin: -4px 0 10px; }
+.ns-report-status:empty { display: none; }
+.report-pre { max-height: 46vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.45; background: rgba(0,0,0,.25); border: 1px solid var(--border); border-radius: var(--h-r-md); padding: 10px; text-align: left; }
+/* Красная строка чеклиста финиша с пояснением (ярлыки, которые сами не говорят, что делать):
+   строка на всю ширину сетки, под ярлыком — мелкий серый абзац. */
+.ns-check-list li.has-why { grid-column: 1 / -1; align-items: flex-start; }
+.ns-check-why { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; line-height: 1.45; color: var(--text-muted); overflow-wrap: anywhere; }
+/* Футер экрана выбора: «Проверить и починить» рядом с «Установить». */
+.actions-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.actions-right .btn-sm { padding: 10px 18px; }
+.actions-right .btn-sm:disabled { opacity: .5; cursor: not-allowed; }
+.ns-repair-list { margin: 6px 0 0 18px; padding: 0; }
+.ns-repair-list li { margin: 3px 0; overflow-wrap: anywhere; }
+.ns-repair-more { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
+.progress-bot-status { font-weight: 400; color: var(--text-muted); }

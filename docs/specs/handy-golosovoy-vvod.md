@@ -3,8 +3,8 @@
 <!-- spec-id: handy-golosovoy-vvod -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:300-330`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,95-97,342-347,447-459,481-504,1264-1308`, `src/install-env.js:19-46`, `src/main.js:457-460,603-606,703-725,744,970-995,1258-1276,1748`, `package.json:115`, `scripts/windows/_verify.ps1:64-104`, `scripts/windows/_deelev.ps1:524-685`, `scripts/macos/_lib.sh:97-109,219-246,314-328`, `src/install-receipts.js:33-43`, `src/uninstall-targets.js:255-256`, `vendor/checksums.json:10`, `remote-components.json:455-499`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:42-57`, `tools/fetch-vendor-mac.sh:39-61,559-564`, `tools/release-check.js:154-172`
-- **Тесты:** «handy: компонент объявлен, опционален и не требует администратора», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского», «handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой», «handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом», «app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит», «app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент», «handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json»
+- **Код:** `components.json:324-356`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,96-98,348-353,452-464,487-510,1333-1384`, `src/install-env.js:19-46`, `src/main.js:561-564,714-717,824-846,865,1112-1137,1448-1472,2156`, `package.json:116`, `scripts/windows/_verify.ps1:66-106`, `scripts/windows/_deelev.ps1:736-896`, `scripts/macos/_lib.sh:109-121,254-281,366-414`, `src/install-receipts.js:34-64`, `src/uninstall-targets.js:283-284`, `vendor/checksums.json:10`, `remote-components.json:461-505`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:334-349`, `tools/fetch-vendor-mac.sh:55-77,736-741`, `tools/release-check.js:176-194`
+- **Тесты:** «handy: компонент объявлен, опционален и не требует администратора», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского», «handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой», «handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом», «app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит», «app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент», «handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json», «A1c (прогон PS 5.1): Handy — причина отказа записи микрофона обычным языком (refused/unavailable не печатаются), ручной способ назван», «u3-B: handy.ps1 — settings_store.json пишется безопасно: ссылка на каталоге данных и подмена во время сериализации не дают записи сквозь, байты прежние»
 
 ## Что обещает человеку
 
@@ -13,38 +13,38 @@
 активное поле, включая окно терминала. Распознавание идёт на его компьютере, записи
 никуда не уходят. На Windows программа ставится не в `Program Files`, а в
 `%LOCALAPPDATA%\Handy` — но **прав администратора это не отменяет**. Весь установщик
-объявлен `"requestedExecutionLevel": "requireAdministrator"` (`package.json:115`; то же
-дословно в комментарии `src/main.js:1748`), то есть без UAC до компонента не дойти, а
+объявлен `"requestedExecutionLevel": "requireAdministrator"` (`package.json:116`; то же
+дословно в комментарии `src/main.js:2156`), то есть без UAC до компонента не дойти, а
 per-user у NSIS означает лишь «не в `Program Files`». Запуск установщика де-элевацию не
 проходит — `Start-Process -FilePath $local -ArgumentList '/S' -Wait -PassThru`
-(`scripts/windows/handy.ps1:144`), в отличие от реестровых операций того же файла
+(`scripts/windows/handy.ps1:177`), в отличие от реестровых операций того же файла
 (`:74`, `:86`), которые де-элевируются именно потому, что, по словам самой шапки
-(`handy.ps1:39-41`), «установщик работает ПОД АДМИНОМ, поэтому его HKCU — ветка
+(`handy.ps1:40-42`), «установщик работает ПОД АДМИНОМ, поэтому его HKCU — ветка
 АДМИНСКОГО токена; а если админ — отдельная учётка, то вообще мимо человека за машиной».
 Отсюда расхождение половин в сценарии, который кодовая база сама считает рабочим
-(«over-the-shoulder UAC», `src/main.js:457-460`): `$appDir`/`$appExe` строятся из
-`$env:LOCALAPPDATA` элевейтед-процесса (`handy.ps1:26-27`) и Handy встаёт в профиль
+(«over-the-shoulder UAC», `src/main.js:561-564`): `$appDir`/`$appExe` строятся из
+`$env:LOCALAPPDATA` элевейтед-процесса (`handy.ps1:27-28`) и Handy встаёт в профиль
 АДМИНА, а `Grant-HmHandyMic -ExePath $appExe` (`:202`) пишет ключ согласия в `HKCU`
 РЕАЛЬНОГО пользователя — с путём из чужого профиля.
 
 Обещание, за которое можно спросить, — честность про два места, где «поставили» ещё не
 значит «работает». Первое: модель распознавания в установщик **не входит и сама не
 качается**, её выбирает человек при первом запуске Handy, и оба скрипта прямым текстом
-говорят, какую именно брать и сколько она весит (`scripts/windows/handy.ps1:205-215`,
+говорят, какую именно брать и сколько она весит (`scripts/windows/handy.ps1:242-252`,
 `scripts/macos/handy.sh:136-151`). Второе: галочка «Сразу разрешить доступ к
 микрофону» пишет согласие в настройки приватности Windows **только если она стоит**, и
 никогда не перезаписывает решение, которое человек уже принял сам — ни разрешение, ни
-запрет (`Grant-HmHandyMic`, `scripts/windows/handy.ps1:52-98`). Компонент по умолчанию
-выключен (`components.json:306`).
+запрет (`Grant-HmHandyMic`, `scripts/windows/handy.ps1:55-131`). Компонент по умолчанию
+выключен (`components.json:331`).
 
 ## Как работает
 
 **Шаг 0 — карточка и галочка (renderer).** Компонент объявлен в
-`components.json:300-330`: `default:false`, `needsAdmin:false`, `platforms:["win32","darwin"]`,
-`version:"0.9.4"`. Платформенный гейт `componentShownOnPlatform` (`src/main.js:603-606`)
+`components.json:324-356`: `default:false`, `needsAdmin:false`, `platforms:["win32","darwin"]`,
+`version:"0.9.4"`. Платформенный гейт `componentShownOnPlatform` (`src/main.js:714-717`)
 решает, показывать ли карточку на текущей ОС. Внутри карточки объявлена одна опция —
 `options[0]` с `id:"mic"`, `env:"HM_HANDY_MIC"`, `default:true`, `platforms:["win32"]`.
-Состояние опции инициализируется явно из `options[].default` (`src/renderer/app.js:95-97`),
+Состояние опции инициализируется явно из `options[].default` (`src/renderer/app.js:96-98`),
 читается строго `=== true` (`optionOn`, `:347`), рисуется `renderComponentOptions`
 (`:481-491`) и только у **выбранной** карточки (`:455`), а клики по строке опции
 останавливаются, чтобы не снять сам компонент (`wireComponentOptions`, `:494-504`).
@@ -59,7 +59,7 @@ Main принимает из renderer не любые env-ключи, а тол�
 **Шаг 2 — откуда берутся байты.** Вшитое издание: `%HM_VENDOR%\apps\handy-setup.exe`
 (Windows, sha256 и размер в `vendor/checksums.json:10`) либо
 `$HM_VENDOR/apps/handy-macos-<arch>.dmg` (macOS, две отдельные сборки — upstream не даёт
-universal, `mac-arch-support.json:40-47`). В `src/main.js:703-725` компонент записан в
+universal, `mac-arch-support.json:40-47`). В `src/main.js:824-846` компонент записан в
 `COMPONENT_VENDOR_ARTIFACT` как `apps/handy-setup.exe`, и это включает vendor-first:
 наличие вшитого файла считает `vendorHasArtifact` (`:972-974`), решение принимает
 `const useBundled = vendorHasArtifact || isOfflineEdition();` (`:987`), а пропускает
@@ -69,16 +69,16 @@ universal, `mac-arch-support.json:40-47`). В `src/main.js:703-725` компон
 единственная запись (`:722`), и `vendorHasArtifact` проверяет существование ИМЕННО этого
 файла (`:974`). В mac-раскладке такого файла нет никогда — там `apps/handy-macos-<arch>.dmg`
 (`mac-arch-support.json:43`, `scripts/macos/handy.sh:48`, `tools/sync-sizes.js:128`,
-`tools/fetch-vendor-mac.sh:563-564`), а слово `handy-macos` в `src/main.js` не встречается
+`tools/fetch-vendor-mac.sh:740-741`), а слово `handy-macos` в `src/main.js` не встречается
 ни разу (`grep` → 0 совпадений). Значит vendor-first по факту работает только на win32:
 на darwin `vendorHasArtifact` всегда `false`, и пропуск докачки держится ИСКЛЮЧИТЕЛЬНО на
 `isOfflineEdition()` внутри `useBundled`. Дыра, о которой предупреждает комментарий
-`src/main.js:719-723` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
+`src/main.js:840-844` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
 offlineEdition, полезло бы в сеть за тем, что уже лежит рядом»), на macOS остаётся
 открытой: mac-сборка с вшитыми dmg, но без маркера `offlineEdition`, пойдёт в сеть.
-Lite-издание качает по двум записям `remote-components.json:455-499`
+Lite-издание качает по двум записям `remote-components.json:461-505`
 (win32 и darwin, зеркала regru + yandex, хеши вложенных файлов в `gatedFiles`). В
-`SCRIPT_ONLINE_FALLBACK` (`src/main.js:744`) handy **не входит** — провал докачки не
+`SCRIPT_ONLINE_FALLBACK` (`src/main.js:865`) handy **не входит** — провал докачки не
 прощается и не выдаётся за успех.
 
 **Шаг 3 — установка на Windows (`scripts/windows/handy.ps1`).** Скрипт подключает
@@ -95,7 +95,7 @@ Lite-издание качает по двум записям `remote-components
   ненулевой код выхода → `exit 1` с подсказкой про отсутствующий WebView2 на Windows 10;
   и только после этого факт установки проверяется **по появлению файла**, а не по коду.
 - *Пре-сид настроек* (`:169-198`): если `%APPDATA%\com.pais.handy\settings_store.json`
-  уже есть — не трогаем. Если нет — пишем через временный файл и `Move-Item` четыре поля:
+  уже есть — не трогаем. Если нет — пишем через `Write-HmFileSafe` (случайный временный файл рядом, ссылка на каталоге данных отвергается) четыре поля:
   `selected_language='ru'`, `bindings.transcribe.current_binding='ctrl+alt+space'`,
   `history_limit=1000`, `recording_retention_period='months3'`. Неудача записи не
   фатальна: Handy стартует с дефолтами.
@@ -104,24 +104,34 @@ Lite-издание качает по двум записям `remote-components
   без галочки реестр не трогается даже на чтение. Дальше ключ
   `HKCU\...\CapabilityAccessManager\ConsentStore\microphone\NonPackaged\<путь к exe с `\`→`#`>`;
   в dry-run печатается только «WOULD». И чтение (`reg query`), и запись
-  (`reg add ... /d Allow`) идут через `Invoke-HmDeElevated` (`scripts/windows/_deelev.ps1:524-685`)
-  — одноразовую задачу планировщика от имени интерактивного пользователя, потому что
-  собственный `HKCU` элевейтед-процесса принадлежит админскому токену. `$null` или
-  `Gate -ne 'medium'` → не меняем ничего. `Code -eq 0` на запросе (значение уже есть) →
-  выходим, не трогая чужое решение.
-- *Хвост* (`:204-219`): инструкция про выбор модели и `HM-RECEIPT` строки.
+  (`reg add ... /d Allow`) идут через `Invoke-HmDeElevatedSafe` (`scripts/windows/_deelev.ps1:1340-1363`)
+  — одноразовую задачу планировщика от имени интерактивного пользователя, а если доказано,
+  что она ничего не запустила (у людей: «reg.exe вернул -2147024891» — это 0x80070005
+  самого планировщика, а не код reg.exe), — то же действие с проверенным medium-токеном
+  оболочки Explorer того же пользователя. Ни один путь не отработал (`Gate -ne 'medium'`) →
+  не меняем ничего. `Code -eq 0` на запросе (значение уже есть) → выходим, не трогая чужое
+  решение; «не найдено» дополнительно перепроверяется прямым ЧТЕНИЕМ ключа
+  (`$readConsent`, `[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(…, $false)`), чтобы
+  ложное «нет» не затёрло запрет человека. Запись засчитывается, только если `Value =
+  Allow` читается обратно из реестра (код `reg.exe` может лишь забраковать). Не вышло —
+  причина обычными словами: «запись от имени пользователя недоступна: <установщик работает
+  не с обычным уровнем прав (UAC выключен или вход под встроенным администратором) |
+  запустить действие от имени пользователя не получилось | планировщик Windows не запустил
+  действие | итог запуска неизвестен>» и технический текст причины в скобках; внутренние
+  слова примитива (`refused`, `unavailable`, `Gate`) на экран не попадают.
+- *Хвост* (`:216-231`): инструкция про выбор модели и `HM-RECEIPT` строки.
 
 **Шаг 4 — установка на macOS (`scripts/macos/handy.sh`).** Целевой путь
 `/Applications/Handy.app`, данные в `~/Library/Application Support/com.pais.handy`.
 Ветвления: уже установлен → receipt и выход (`:38-44`); dmg берётся по `arch_tag`
-(`:47-50`); если нужного нет — `hm_arch_note_missing` (`scripts/macos/_lib.sh:97-109`)
+(`:47-50`); если нужного нет — `hm_arch_note_missing` (`scripts/macos/_lib.sh:109-121`)
 отличает «в наборе нет вообще» от «есть только под другую архитектуру» и печатает разный
 текст, дальше `exit 120` (`:63-74`). Затем `verify_artifact` (sha256, fail-closed,
-`_lib.sh:219-246`), `hdiutil attach -nobrowse`, поиск `*.app` в образе и одна операция под
+`_lib.sh:254-281`), `hdiutil attach -nobrowse`, поиск `*.app` в образе и одна операция под
 root: `admin_run /bin/sh -c "$HM_APP_INSTALL_SH" hm_app_install "$MNT/$APP" "$HANDY_TEAM_ID" "$APP"`
-(`:95`). Примитив (`_lib.sh:319-328`) копирует бандл в root-owned staging, проверяет
+(`:95`). Примитив (`_lib.sh:371-414`) копирует бандл в root-owned staging, проверяет
 `codesign --verify --deep --strict -R "=anchor apple generic and certificate leaf[subject.OU] = \"UWFLB4GC25\""`,
-затем `spctl --assess --type execute`, и только потом кладёт копию в `/Applications`.
+затем `spctl --assess --type execute`, и только потом ставит проверенную копию в `/Applications` одним `mv -n` — при условии, что имя `$3` одно (`*.app`, без `/` и ведущей точки) и на месте назначения ничего нет (находка M-3; ранее здесь был второй `cp -R` поверх назначения). Первой строкой скрипта идёт `HOME=/var/root`.
 Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта, снят зондом
 `.github/workflows/probe-handy-teamid.yml` с официального релиза v0.9.4. Дальше — проверка
 появления каталога (`:102-105`) и пре-сид `settings_store.json`, если его нет: `ru`,
@@ -132,44 +142,45 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 ## Инварианты
 
 1. **Вшитый установщик не запускается без совпадения sha256.** Windows:
-   `Confirm-HmArtifact $local` (`scripts/windows/handy.ps1:137` → `_verify.ps1:64-104`) —
+   `Confirm-HmArtifact $local` (`scripts/windows/handy.ps1:170` → `_verify.ps1:66-106`) —
    нет файла (`:69`), нет `HM_VENDOR` (`:73`), нет `checksums.json` (`:78`), нет записи
    для имени (`:84`), не совпал хеш (`:90`) или размер (`:96-102`) → `exit 1`. macOS:
-   `verify_artifact "$DMG"` (`handy.sh:76` → `_lib.sh:219-246`) — набор условий ДРУГОЙ.
+   `verify_artifact "$DMG"` (`handy.sh:76` → `_lib.sh:254-281`) — набор условий ДРУГОЙ.
    Совпадают четыре первых (нет файла `:222`, нет `HM_VENDOR` `:225`, нет
    `checksums.json` `:228`, нет записи для имени — пустой `expected` `:232`) и сравнение
    хеша (`:239`). Проверки размера на macOS нет вообще — слова `bytes` в `verify_artifact`
    не встречается ни разу. Зато есть условие, которого нет на Windows: пустой результат
    вычисления sha, то есть отсутствие `shasum`/`openssl` (`:236-238`) → `exit 1`.
 2. **В `/Applications` попадает только бандл с подтверждённой подписью Team ID UWFLB4GC25
-   и принятой нотаризацией.** `handy.sh:95` → `HM_APP_INSTALL_SH` (`_lib.sh:319-328`):
+   и принятой нотаризацией.** `handy.sh:95` → `HM_APP_INSTALL_SH` (`_lib.sh:371-414`):
    проверка идёт на root-owned staged копии, любой сбой `codesign`/`spctl` → `exit 1`
    (`handy.sh:96-99`).
 3. **Без `HM_HANDY_MIC=1` реестр не читается и не пишется вообще.** Гейт стоит первой
-   строкой `Grant-HmHandyMic` (`handy.ps1:57`) — до построения ключа, до `reg.exe`, до
+   строкой `Grant-HmHandyMic` (`handy.ps1:60`) — до построения ключа, до `reg.exe`, до
    `Invoke-HmDeElevated`.
 4. **`HM_HANDY_MIC='1'` возникает только при «компонент выбран И галочка стоит».**
-   `src/renderer/app.js:1307` в паре с `optionOn` (`:347`), сравнение строго `=== true`.
+   `src/renderer/app.js:1383` в паре с `optionOn` (`:347`), сравнение строго `=== true`.
 5. **Из renderer до install-скрипта доезжают только ключи из allowlist.**
    `hm_handy_mic` перечислен явно в `RENDERER_ENV_ALLOW` (`src/install-env.js:19-27`);
    всё остальное режет `filterRendererEnv` (`:38-46`).
 6. **Согласие на микрофон читается и пишется только де-элевированно, fail-closed.**
-   `handy.ps1:74-79` (проверка) и `:86-91` (запись): `$null` либо `Gate -ne 'medium'` →
-   ничего не меняется; успех объявляется только при `Gate='medium'` И `Code=0`. Прямой
-   запуск `reg.exe` и `Set-ItemProperty` в коде отсутствуют.
+   `handy.ps1:88-93` (проверка) и `:105-111` (запись): `$null` либо `Gate -ne 'medium'` →
+   ничего не меняется; успех объявляется только при `Gate='medium'`, `Code=0` И значении
+   `Allow`, прочитанном обратно из реестра. Прямой запуск `reg.exe` и `Set-ItemProperty` в
+   коде отсутствуют; реестр elevated-код открывает только на чтение.
 7. **Уже принятое решение (Allow или Deny) не перезаписывается и не удаляется.**
-   `handy.ps1:80-83` — при `Code -eq 0` от `reg query` идёт `return` до записи; вызова
+   `handy.ps1:94-97` — при `Code -eq 0` от `reg query` идёт `return` до записи; вызова
    `reg delete` в файле нет.
-8. **Существующий `settings_store.json` не затирается.** `handy.ps1:170-172` и
+8. **Существующий `settings_store.json` не затирается.** `handy.ps1:203-205` и
    `handy.sh:113-115` — пре-сид только когда файла нет.
-9. **Пре-сид хоткея на Windows — `ctrl+alt+space`, не `ctrl+space`.** `handy.ps1:184`.
+9. **Пре-сид хоткея на Windows — `ctrl+alt+space`, не `ctrl+space`.** `handy.ps1:217`.
 10. **Успех объявляется по факту появления файла, а не по коду выхода установщика.**
-    `handy.ps1:159-163` (`Test-Path $appExe` перед «OK: Handy установлен»),
+    `handy.ps1:192-196` (`Test-Path $appExe` перед «OK: Handy установлен»),
     `handy.sh:102-106` (`[ ! -d "$APP_PATH" ]` перед «OK»).
 11. **Нет вшитого артефакта → осознанный пропуск (код 120), а не ошибка и не загрузка
-    мимо sha-канала.** `handy.ps1:127-134`, `handy.sh:63-74`. Код 120 = `EXIT_SKIP`
-    (`src/install-receipts.js:33-38`), при нём маркер установки не пишется.
-12. **Компонент не отмечен по умолчанию.** `components.json:306` (`default:false`).
+    мимо sha-канала.** `handy.ps1:160-167`, `handy.sh:63-74`. Код 120 = `EXIT_SKIP`
+    (`src/install-receipts.js:34-59`), при нём маркер установки не пишется.
+12. **Компонент не отмечен по умолчанию.** `components.json:331` (`default:false`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -203,20 +214,20 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
     этом не качается — установщик её не тянет ни на одной платформе (см. «Границы»,
     `scripts/windows/handy.ps1:11-14`, `scripts/macos/handy.sh:21-22`); добавляется вес
     только самого артефакта Handy: в lite-издании 20 927 084 Б на win32
-    (`remote-components.json:462`) или 40 693 722 Б на darwin (`:483`), в офлайновом на
+    (`remote-components.json:468`) или 40 693 722 Б на darwin (`:483`), в офлайновом на
     win32 — вшитые 20 946 752 Б (`vendor/checksums.json:10`, запись `handy-setup.exe`).
     Офлайн под macOS этим числом не описывается: `vendor/checksums.json` — win32-манифест
     (записей `handy-macos-*.dmg` в нём 0, слово `dmg` не встречается вовсе), а mac-набор
     кладёт ДВА арх-специфичных образа `handy-macos-arm64.dmg` + `handy-macos-x64.dmg`
-    (`tools/fetch-vendor-mac.sh:563-564`); порядок величины виден по lite-записи darwin —
-    40 693 722 Б (`remote-components.json:483`). Плюс на macOS у человека, который
+    (`tools/fetch-vendor-mac.sh:740-741`); порядок величины виден по lite-записи darwin —
+    40 693 722 Б (`remote-components.json:489`). Плюс на macOS у человека, который
     об этом компоненте не просил, спрашивают пароль администратора (`handy.sh:94-95`).
 
 ## Границы
 
 - **Модель распознавания не входит в дистрибутив и не качается установщиком.** Внутри
   бандла только VAD; загрузка (257–705 МБ) стартует после выбора человеком при первом
-  запуске Handy. Это записано и в `sizeNote` карточки (`components.json:313`), и в тексте
+  запуске Handy. Это записано и в `sizeNote` карточки (`components.json:339`), и в тексте
   обоих скриптов.
 - **Онлайн-фолбэка у компонента нет ни на одной платформе.** Нет вшитого/докачанного
   артефакта — компонент просто пропускается (`exit 120`), ссылка на ручную установку
@@ -226,39 +237,39 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 - **На macOS горячая клавиша не пре-сидится** — остаётся дефолт `Alt+Пробел`
   (`handy.sh:108-112`).
 - **Удаления нет.** `uninstallTargets` для `handy` уходит в `default: return null`
-  (`src/uninstall-targets.js:255-256`), а `REMOVABLE` в интерфейсе перечисляет только
+  (`src/uninstall-targets.js:283-284`), а `REMOVABLE` в интерфейсе перечисляет только
   `course, uv, mascot, bridge` (`src/renderer/app.js:43`) — кнопки «Удалить» у карточки
   не будет.
 - **Строки `HM-RECEIPT` из скриптов ничего не удаляют.** Они только фильтруются из
   UI-лога: `ALLOWED_TYPES` с комментарием «используются ТОЛЬКО чтобы отфильтровать эти
-  строки из UI-лога» (`src/install-receipts.js:40-43`), а сама фильтрация живёт в
-  `emitLine` — `src/main.js:1268-1276` (`const ri = receipts.parseReceiptLine(l);
+  строки из UI-лога» (`src/install-receipts.js:61-64`), а сама фильтрация живёт в
+  `emitLine` — `src/main.js:1458-1472` (`const ri = receipts.parseReceiptLine(l);
   if (ri) { logLine(l); return; }`: строка попадает в журнал и не уходит в `send`);
   объясняющий её комментарий — `:1256-1259`. Цели удаления
   считает доверенный код по своему аллоулисту. Строка
-  `HM-RECEIPT reg HKCU|...\Uninstall\Handy|UninstallString` (`handy.ps1:218`) — след, а
+  `HM-RECEIPT reg HKCU|...\Uninstall\Handy|UninstallString` (`handy.ps1:255`) — след, а
   не действие.
 - **Финальная проверка установки компонент не видит.** В `scripts/windows/verify.ps1` и
   `scripts/macos/verify.sh` слово `handy` не встречается ни разу (проверено `grep -c`,
   0 совпадений в обоих файлах) — отдельного «CHECK ok/fail» по Handy человек не увидит.
-- **`needsAdmin:false` — это только бейдж в интерфейсе** (`src/renderer/app.js:447`), и
+- **`needsAdmin:false` — это только бейдж в интерфейсе** (`src/renderer/app.js:452`), и
   фактическому поведению он не соответствует НИ НА ОДНОЙ платформе: установка Handy идёт
   под административными правами и там, и там. На Windows элевейтед весь процесс
-  установщика (`package.json:115`, `src/main.js:1748`), и запуск NSIS де-элевации не
-  проходит (`handy.ps1:144`); на macOS `handy.sh` вызывает `admin_run` (`:94-95`).
+  установщика (`package.json:116`, `src/main.js:2156`), и запуск NSIS де-элевации не
+  проходит (`handy.ps1:177`); на macOS `handy.sh` вызывает `admin_run` (`:94-95`).
   Разница только в моменте, когда спрашивают пароль: на macOS — отдельно внутри
   компонента, на Windows — заранее, при старте установщика. То же соглашение действует для
   `cursor` и `vscode` (`needsAdmin:false` у всех компонентов, кроме `bridge`), так что это
   проектная договорённость, а не частный дефект Handy.
-- Версия компонента зафиксирована как `0.9.4` (`components.json:303`); Team ID в
+- Версия компонента зафиксирована как `0.9.4` (`components.json:327`); Team ID в
   `handy.sh:35` запинен по этому же релизу.
 
 ## Риски и открытые вопросы
 
 1. **Галочка микрофона показывается на macOS, где не делает ничего.** Опция объявлена с
-   `platforms:["win32"]` (`components.json:321-323`), но `renderComponentOptions`
-   (`src/renderer/app.js:481-491`) поле `o.platforms` не читает, а платформенный гейт
-   `componentShownOnPlatform` (`src/main.js:603-606`) работает только на уровне компонента.
+   `platforms:["win32"]` (`components.json:347-349`), но `renderComponentOptions`
+   (`src/renderer/app.js:487-497`) поле `o.platforms` не читает, а платформенный гейт
+   `componentShownOnPlatform` (`src/main.js:714-717`) работает только на уровне компонента.
    Значит на macOS чекбокс рисуется, стоит включённым по умолчанию, `HM_HANDY_MIC='1'`
    реально уезжает в окружение — а `scripts/macos/handy.sh` это имя не читает вовсе
    (`grep -c HM_HANDY_MIC scripts/macos/handy.sh` → 0). Подсказка (`hint`) честно пишет,
@@ -266,29 +277,29 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
    проверки опций (`app.js: галочка опции рисуется у ВЫБРАННОЙ карточки…`) платформу не
    учитывают.
 2. **Описание карточки обещает `Ctrl+Alt+Space` на обеих платформах.** `desc`
-   (`components.json:304`) рендерится без платформенного ветвления
-   (`src/renderer/app.js:453`), тогда как на macOS хоткей не пре-сидится и скрипт в конце
+   (`components.json:328`) рендерится без платформенного ветвления
+   (`src/renderer/app.js:458`), тогда как на macOS хоткей не пре-сидится и скрипт в конце
    говорит «зажми Alt+Пробел» (`handy.sh:151`). Инвентарь (`docs/specs/_features.json`,
    поле `what`) повторяет ту же формулировку.
 3. **`why` обещает установку без прав администратора** — «Ставится в профиль
-   пользователя, без прав администратора» (`components.json:305`). Неверно на обеих
+   пользователя, без прав администратора» (`components.json:329`). Неверно на обеих
    платформах: на macOS установка идёт в `/Applications` через `admin_run` с запросом
    пароля (`handy.sh:94-95`), на Windows элевейтед весь установщик
-   (`package.json:115` → `requireAdministrator`), а запуск NSIS де-элевации не проходит
-   (`handy.ps1:144`). Ту же фразу печатает и сам скрипт: «Ставлю Handy (тихая установка,
-   без прав администратора)...» (`handy.ps1:139`).
+   (`package.json:116` → `requireAdministrator`), а запуск NSIS де-элевации не проходит
+   (`handy.ps1:177`). Ту же фразу печатает и сам скрипт: «Ставлю Handy (тихая установка,
+   без прав администратора)...» (`handy.ps1:172`).
 4. **macOS-ветка не покрыта собственными тестами.** Все handy-тесты читают только
    `scripts/windows/handy.ps1` (`const ps = () => fs.readFileSync(... 'handy.ps1')`).
    Пин `UWFLB4GC25` в `test/run-tests.js` не встречается, хотя аналогичные пины для
-   VS Code, Cursor, Node и Python проверяются явно (`test/run-tests.js:1586-1794`).
+   VS Code, Cursor, Node и Python проверяются явно (`test/run-tests.js:1637-1862`).
    Единственная автоматическая проверка macOS-стороны — общая
    «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json».
 5. **`HM_APP_INSTALL_SH` не снимает `com.apple.quarantine`**, в отличие от
-   `HM_VSCODE_INSTALL_SH`, который делает это явно (`_lib.sh:319-328` против `:336-352`).
+   `HM_VSCODE_INSTALL_SH`, который делает это явно (`_lib.sh:371-414` против `:336-352`).
    Практическое последствие именно для Handy кодом не подтверждено — фиксирую как
    расхождение двух соседних примитивов, которым пользуются и Cursor, и Handy.
 6. **Dry-run на уже установленном Handy печатает «WOULD: тихая установка».** Ветка
-   «уже установлен» выходит только вне dry-run (`handy.ps1:103`, `handy.sh:40`), поэтому
+   «уже установлен» выходит только вне dry-run (`handy.ps1:136`, `handy.sh:40`), поэтому
    при `HM_DRY_RUN` выполнение проваливается дальше и печатает план установки следом за
    строкой «Handy уже установлен». Поведение симметрично на обеих платформах, вреда не
    наносит, но текст противоречив. Тестом не покрыто.

@@ -1,0 +1,2 @@
+  const userId = (process.env.USERDOMAIN ? process.env.USERDOMAIN + '\\' : '') +
+    (process.env.USERNAME || (function () { try { return os.userInfo().username; } catch (e) { return ''; } })());

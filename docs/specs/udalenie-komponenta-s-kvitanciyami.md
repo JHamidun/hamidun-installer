@@ -3,8 +3,8 @@
 <!-- spec-id: udalenie-komponenta-s-kvitanciyami -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `src/uninstall-targets.js`, `src/uninstall-exec.js`, `src/install-receipts.js`, `src/main.js:3163-3283`, `src/main.js:3037-3161`, `src/main.js:3014-3029`, `src/main.js:2896-2971`, `src/main.js:2662-2696`, `src/main.js:1330-1365`, `src/main.js:368-375`, `src/renderer/app.js:38-43`, `src/renderer/app.js:506-575`, `src/preload.js:12`, `src/install-manifest.js:160-167`
-- **Тесты:** «targets: course (win32) — контент курса из известных мест; ярлык из вшитого config; НИ одной цели в ~/.claude», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «targets: mascot (darwin) БЕЗ vendor → НЕТ appbundle-цели (fail-closed); с vendor → точный путь + пин TeamID», «targets: неизвестный/не-removable id → null (деинсталляция отклоняется fail-closed)», «guard: сам ~/.claude, всё внутри него, дом, предок дома, ~/CLAUDE.md, ~/.hamidun-setup → отказ», «PRESERVE: деинсталляция курса — sandbox/state.json/identity.json/settings.local.json ЦЕЛЫ, контент курса удалён, ~/.claude цел», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «crafted-квитанция с artifacts на ~/.claude НЕ влияет на план: artifacts игнорируются целиком», «uninstall: REMOVABLE (app.js) гейтится квитанцией-маркером; все REMOVABLE имеют зашитую карту целей», «main.js: uninstall гейтится hasReceipt (маркер); receipted в detect-state; маркер пишется при успехе установки», «main.js (source): деактивация маркера ДО удаления, restore при провале, stillThere → ok:false, финальная очистка проверяется», «receipts: deactivate (атомарно, ДО удаления) → hasReceipt=false; restore → true; finalize с ПРОВЕРКОЙ результата», «прерванное удаление: маркер возвращается на старте, живой не затирается», «P0-4 (source): uninstall-component — platform-гейт ДО плана (win32-компонент на darwin → отказ)», «main.js (source) + app.js: Nomad-uninstall отбит ранним гейтом (UNINSTALL_DISABLED) и НЕ предлагается в UI», «P1-7 main.js: учёт чистится ТОЛЬКО после пост-детекции отсутствия; оставшийся компонент → ok:false», «цель hookurl заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё», «restoreHookUrl (реальная ФС): порт снят, чужие ключи целы, повтор идемпотентен»
+- **Код:** `src/uninstall-targets.js`, `src/uninstall-exec.js`, `src/fs-compat.js`, `src/install-receipts.js`, `src/main.js:3179-3299`, `src/main.js:3053-3177`, `src/main.js:3030-3045`, `src/main.js:2912-2987`, `src/main.js:2678-2712`, `src/main.js:1330-1365`, `src/main.js:368-375`, `src/renderer/app.js:38-43`, `src/renderer/app.js:506-575`, `src/preload.js:12`, `src/install-manifest.js:160-167`, `src/desktop-path.js`, `src/link-guard.js`
+- **Тесты:** «targets: course (win32) — контент курса из известных мест; ярлык из вшитого config; НИ одной цели в ~/.claude», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «targets: mascot (darwin) БЕЗ vendor → НЕТ appbundle-цели (fail-closed); с vendor → точный путь + пин TeamID», «targets: mascot — win32 убирает ярлык из меню Пуск и автозапуск прошлых версий; darwin — LaunchAgent прошлых версий», «targets: неизвестный/не-removable id → null (деинсталляция отклоняется fail-closed)», «guard: сам ~/.claude, всё внутри него, дом, предок дома, ~/CLAUDE.md, ~/.hamidun-setup → отказ», «PRESERVE: деинсталляция курса — sandbox/state.json/identity.json/settings.local.json ЦЕЛЫ, контент курса удалён, ~/.claude цел», «PRESERVE: мост — config.json с SSH-кредами ЦЕЛ, bridge_agent.py удалён, каталог остаётся (не пуст)», «crafted-квитанция с artifacts на ~/.claude НЕ влияет на план: artifacts игнорируются целиком», «uninstall: REMOVABLE (app.js) гейтится квитанцией-маркером; все REMOVABLE имеют зашитую карту целей», «main.js: uninstall гейтится hasReceipt (маркер); receipted в detect-state; маркер пишется при успехе установки», «main.js (source): деактивация маркера ДО удаления, restore при провале, stillThere → ok:false, финальная очистка проверяется», «receipts: deactivate (атомарно, ДО удаления) → hasReceipt=false; restore → true; finalize с ПРОВЕРКОЙ результата», «прерванное удаление: маркер возвращается на старте, живой не затирается», «P0-4 (source): uninstall-component — platform-гейт ДО плана (win32-компонент на darwin → отказ)», «main.js (source) + app.js: Nomad-uninstall отбит ранним гейтом (UNINSTALL_DISABLED) и НЕ предлагается в UI», «P1-7 main.js: учёт чистится ТОЛЬКО после пост-детекции отсутствия; оставшийся компонент → ok:false», «цель hookentries заводится ДЛЯ СКРЕПКИ на обеих платформах и только для неё», «isMascotHookUrl: только адрес скрепки — чужие хуки на том же порту, другой порт, мусор и не-URL не наши», «removeMascotHooks (реальная ФС): записи скрепки сняты, чужие хуки (в том числе хук-команда, похожая на скрепочную) и ключи целы, повтор идемпотентен», «removeMascotHooks: вид файла сохраняется (отступ, CRLF, завершающий перевод строки); опустевшее событие и hooks убираются, пустой массив до нас остаётся», «removeMascotHooks: плейсхолдер VSCODE_PORT в конфиг не возвращается — это не URL (A25/B01); прежняя подстановка ловится подлогом», «removeMascotHooks: подлоги отбиты — чужой путь, symlink/junction, битый JSON, нечисловой порт; dry-run не пишет; файл изменился под руками — отказ», «main.js: hookentries подключён и к описанию, и к исполнению (иначе цель молча ничья)», «verifyPostconditions: hookentries — остались записи скрепки или нечитаемый конфиг с нашим адресом — проблема; чужие хуки и отсутствие файла — нет», «runValueIsOurs и verifyPostconditions: запись Run снимается и считается снятой только если она наша; чужая с тем же именем остаётся законно», «removeFileBestEffort: ярлык за junction — kept, а не failed; обычный удаляется; оставшийся ярлык пост-проверку не краснит», «main.js: bestEffort-файл и ограничитель onlyIfValueIs подключены к исполнению (ограничитель — ДО удаления значения)», «removeTreeNoFollow: вложенная junction снимается как ссылка — дерево снесено, цель с файлами цела; ссылка названа в onLink (реальная ФС)», «removeTreeNoFollow: корень сноса — junction на каталог, и файловый симлинк: снимается сама ссылка, цель цела», «removeTreeNoFollow: junction на несуществующую цель и петля из двух junction не зависают и не мешают сносу», «removeTreeNoFollow: junction "через том" (lstat её за ссылку не считает) — вложенная, корневая и висячая: цель цела», «негативный контроль: наивный обход "только lstat" (без сверки канонического пути) ходит через junction "через том" и стирает цель», «негативный контроль: если обход смотрит stat вместо lstat (мутация), обычная junction ведёт его в цель и стирает её», «removeTreeNoFollow: предок корня — junction (профиль перенесён) и иной регистр букв в пути — обычный снос, ложных срабатываний нет», «removeTreeNoFollow: кириллица, пробелы и ’ (U+2019) в пути, пустые каталоги, одиночный файл и read-only файл на реальной ФС», «removeTreeNoFollow: force и ENOENT как у fs.rmSync — молчит только с force, код ошибки сохраняется; корень ФС, пустой путь и чужие типы отклоняются, Buffer и file:// принимаются», «removeTreeNoFollow: read-only (как у libc++ в Electron 40+) — EPERM → атрибут снят у файла и каталога → повтор ровно раз; EPERM не про атрибут — исходная ошибка без chmod», «removeTreeNoFollow: транзиентные EBUSY/EPERM/ENOTEMPTY/EMFILE повторяются maxRetries раз с линейной паузой retryDelay×n; остальные коды — сразу; исчерпание — та же ошибка», «removeTreeNoFollow: файл, который не удаляется, оставляет точную ошибку (код, путь, syscall); обход останавливается на нём, ранее снесённое не возвращается, дальнейшее не тронуто», «removeTreeNoFollow: глубина 8000 уровней — без рекурсии (стек цел), каталоги уходят строго снизу вверх», «removeTreeNoFollow: каталог подменён ссылкой/другим каталогом МЕЖДУ readdir и первой операцией — ERR_HM_TREE_CHANGED, ни одного обращения к чужим файлам», «removeTreeNoFollow: подмена дочернего каталога между проверкой и обходом, исчезновение каталога по ходу и висячие записи — без ложных падений и без захода по ссылке», «removeTreeNoFollow: перенаправление-каталог (redir) снимается rmdir, а "ссылка" с содержимым не удаляется и подписана в ошибке; unlink отказывает — rmdir как запасной путь», «clearReadOnlyTree (M-7): не идёт по ссылкам и не делает chmod за пределами дерева — ни по готовой ссылке, ни при подмене каталога по ходу; возвращает число снятых, не бросает», «wrapRmSync(noFollowRecursive): рекурсивные вызовы уходят в removeTreeNoFollow и не доходят до рантайма; нерекурсивные идут в рантайм с прежним EPERM-повтором; без опции — всё по-старому», «install(): на Windows рекурсивный fs.rmSync уходит в обход без перехода по ссылкам и пишет в журнал строку о снятой ссылке; вне Windows ничего не меняется», «removeDirTree и removeDirTreeGated: вложенная junction внутри цели снимается как ссылка — статус removed, цель цела, карантина не осталось; fs.rmSync(recursive) больше не зовётся», «removeDirTree и removeDirTreeGated: обычное дерево без ссылок — сообщения прежние (без приписки), сбой удаления возвращает дерево на место», «инвентарь рекурсивных сносов в src/: ни fs.rm/promises.rm/rimraf, рекурсивный rmSync только в проверенных местах (админ-деревья), в uninstall-exec — нет вовсе», «рантайм (системный Node): вложенная и корневая junction, junction "через том" — снос не трогает цель; removeDirTree/removeDirTreeGated и обёрнутый rmSync тоже», «рантайм (настоящий Electron из NODE_PATH): голый rmSync идёт по junction — это контроль; removeTreeNoFollow, removeDirTree* и install()-обёртка цель не трогают», «clearOneReadOnly: объект подменён ссылкой МЕЖДУ проверкой обхода и снятием атрибута — chmod не идёт по ссылке (clearReadOnlyTree, EPERM-повтор removeFile/removeDir), цель за ней остаётся read-only», «clearOneReadOnly: каталог-родитель подменён ПОСЛЕ отказа unlink/rmdir и ДО chmod — сверка каталога перед chmod останавливает снятие атрибута, чужой файл и каталог не тронуты», «classify: каталог подменён МЕЖДУ сверкой канонического пути и второй lstat — ERR_HM_TREE_CHANGED, в том числе для junction "через том" (её lstat отдаёт статистику цели, выдаёт только сравнение inode)», «removeTreeNoFollow: родитель подменён ссылкой после последней операции в каталоге и до его rmdir — ERR_HM_TREE_CHANGED, пустой каталог за ссылкой цел», «removeTreeNoFollow: каталог стал файлом между проверкой и readdir (ENOTDIR) — ERR_HM_TREE_CHANGED, а не сырой ENOTDIR», «сверка личности каталога: том (dev) и полный 64-битный inode — тот же inode на другом томе и соседний inode выше 2^53 различаются, подмена даёт ERR_HM_TREE_CHANGED», «clearReadOnlyTree (M-7): junction "через том" на реальной ФС — read-only файл за ней остаётся read-only (сверка канонических путей), без сверки атрибут цели снимался бы», «removeDirTree и removeDirTreeGated: отказ сноса называет причину по-русски, а не голым кодом — подмена каталога по ходу (ERR_HM_TREE_CHANGED) и "ссылка с содержимым" (ENOTEMPTY); цель цела, дерево возвращено», «u4 main.js: стол проверяется ДО записи памятки, open-path и цели удаления берут его из той же проверки, профиль — из токена (os.userInfo), а не из os.homedir()», «u10a/B том, removeMascotHooks: ~/.claude — junction на путь тома → правка хуков отказана, чужой settings.json цел; без сверки имён он переписан»
 
 ## Что обещает человеку
 
@@ -14,12 +14,12 @@
 `.claude/settings.local.json`), SSH-настройки моста (`config.json` в каталоге
 HamidunBridge), весь общий каталог `~/.claude` с ключами, памятью и историей. Это
 записано не пожеланием, а списком `preserve` в плане и защищённым набором guard-а
-(`src/uninstall-targets.js`, `src/uninstall-exec.js:73-79`).
+(`src/uninstall-targets.js`, `src/uninstall-exec.js:74-74`).
 
 Кнопка появляется только у компонентов, которые установщик ставил САМ: в UI её
 показывает `renderInstalledActions` при условии `REMOVABLE.has(c.id) && det.receipted`
-(`src/renderer/app.js:513`), а в main то же требование стоит гейтом
-`receipts.hasReceipt` (`src/main.js:3200`). Обещание «удалю только своё» проверяемо: у
+(`src/renderer/app.js:519`), а в main то же требование стоит гейтом
+`receipts.hasReceipt` (`src/main.js:3760`). Обещание «удалю только своё» проверяемо: у
 человека, который поставил uv руками год назад, кнопки не будет, а если он вызовет
 операцию в обход UI — она откажет с текстом «этот установщик его не ставил».
 
@@ -27,37 +27,41 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
 
 **Что вообще удаляемо.** Список в UI — `REMOVABLE = new Set(['course', 'uv', 'mascot',
 'bridge'])` (`src/renderer/app.js:43`). Со стороны main тот же набор получается из
-`switch (id)` в `uninstallTargets` (`src/uninstall-targets.js:106-257`): у `course`,
+`switch (id)` в `uninstallTargets` (`src/uninstall-targets.js:116-285`): у `course`,
 `uv`, `bridge`, `mascot` есть карта целей; `nomad` возвращает ПУСТОЙ план плюс
 `uninstallSupported: false`; любой другой id — `null`, то есть отказ.
 
-**Клик.** `uninstallComponent` (`src/renderer/app.js:560-575`) спрашивает
+**Клик.** `uninstallComponent` (`src/renderer/app.js:566-581`) спрашивает
 `window.confirm`, затем зовёт `window.installer.uninstallComponent(id, envForRun())` →
 `ipcRenderer.invoke('uninstall-component', { id, env })` (`src/preload.js:12`).
 
 **Гейты в обработчике** `ipcMain.handle('uninstall-component')`
-(`src/main.js:3163-3283`), строго по порядку:
+(`src/main.js:3720-3843`), строго по порядку:
 
 1. id из `VALID_COMPONENT_IDS`, иначе `Unknown component id`;
 2. `meta.hidden` → «Служебный компонент … не деинсталлируется»;
 3. `componentShownOnPlatform(meta, process.platform)` → отказ, если компонент чужой
    платформы (crafted-квитанция win32-компонента на macOS не исполнит win32-план);
 4. `uninstallTargets.UNINSTALL_DISABLED.has(id)` → ранний отказ (сейчас там один
-   `nomad`, `src/uninstall-targets.js:53`) — ДО построения плана и ДО деактивации
+   `nomad`, `src/uninstall-targets.js:55`) — ДО построения плана и ДО деактивации
    маркера;
 5. `receipts.hasReceipt(home, id)` → нет маркера, значит ставили не мы, отказ.
 
 **Построение плана.** `uninstallTargets(id, buildUninstallCtx())`
-(`src/main.js:3209`). Контекст `buildUninstallCtx` (`src/main.js:3014-3029`) собран
-только из доверенных источников: `process.platform`, `os.homedir()`,
-`app.getPath('desktop')`, вшитый `config.json` (`course.targetDirDefault`,
+(`src/main.js:3769`). Контекст `buildUninstallCtx` (`src/main.js:3565-3586`) собран
+только из доверенных источников: `process.platform`, `os.homedir()`, рабочий стол из
+`safeDesktopDir()` (ответ `app.getPath('desktop')` принят, только если он внутри профиля из
+токена и без ссылок на пути, — `src/desktop-path.js`; не прошёл — пусто, и карта целей берёт
+`<home>\Desktop`, а не то, что оболочка прочла из реестра пользователя; следствие — ярлык курса, который прошлый выпуск
+положил на стол ВНЕ профиля (другой диск, сетевая папка, OneDrive за пределами профиля), этим выпуском не находится и остаётся
+на столе, пока человек не уберёт его сам: ничего не ломается, но «удаление» его не касается), вшитый `config.json` (`course.targetDirDefault`,
 `course.shortcutName`, `nomad.packageName`) и — на macOS — vendor-бандл маскота через
 `resolveMascotVendorApp`. Значения из renderer-env в контекст не попадают. Пустой план
 или `null` → «Компонент … не поддерживает деинсталляцию».
 
 **Ветвление платформы — внутри карты целей**, `ctx.platform` передаётся явным
 параметром, а модуль пути выбирается по нему (`platformPath`,
-`src/uninstall-targets.js:47`), а не по хосту:
+`src/uninstall-targets.js:49`), а не по хосту:
 
 - `course` — одинаково на обеих: `dirtree` на `tracks`, `.claude/skills`,
   `.claude/commands`, `.course/knowledge`; `file` на `CLAUDE.md`, `AGENTS.md`,
@@ -72,112 +76,150 @@ HamidunBridge), весь общий каталог `~/.claude` с ключами
   `bridge_agent.py`, `emptydir`, и две `profileline`-цели с ТОЧНОЙ строкой
   `BRIDGE_RC_LINE` для `~/.zshrc` и `~/.bash_profile`. В обоих случаях
   `config.json` уходит в `preserve`.
-- `mascot` — сперва платформонезависимая цель `hookurl` на `~/.claude/settings.json`
-  (замена `127.0.0.1:45832/hook` обратно на `127.0.0.1:VSCODE_PORT/hook`). Дальше
+- `mascot` — сперва платформонезависимая цель `hookentries` на `~/.claude/settings.json`:
+  она убирает записи хуков скрепки (адрес `http://127.0.0.1:45832/hook`, с меткой
+  `?src=claude-mascot` и без), а всё прочее в файле оставляет. Раньше цель подставляла вместо
+  адреса `127.0.0.1:VSCODE_PORT/hook` — это не URL (`new URL` бросает `ERR_INVALID_URL`), и
+  Claude Code показывал Settings Error (строки A25 и B01 разбора диалогов). Дальше
   Windows: `killproc claude-mascot.exe`, `dirtree` каталога приложения,
-  `.claude-mascot/.installed`, `emptydir`, `reg`-значение `ClaudeMascot`. macOS:
-  `launchagent com.hamidun.claude-mascot` + plist, и `appbundle` в `~/Applications` —
+  `.claude-mascot/.installed`, `emptydir`, `file` на ярлык меню «Пуск»
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Claude Mascot.lnk` с признаком `bestEffort`: отказ защиты при junction в `AppData\Roaming` даёт `kept`, а не провал (`removeFileBestEffort`) (с 06.10.2026
+  установка кладёт его вместо автозапуска — решение владельца, строка A26) и
+  `reg`-значение `ClaudeMascot` с признаком `onlyIfValueIs` (снимается, только если ведёт на наш exe — `runValueIsOurs`; чужое под тем же именем остаётся) — автозапуск, который прописывали прошлые версии. macOS:
+  `launchagent com.hamidun.claude-mascot` + plist (тоже наследие прошлых версий: новая
+  установка агента не ставит, а оставшийся снимает), и `appbundle` в `~/Applications` —
   ТОЛЬКО если `ctx.mascotMac` дал ИМЯ `.app` из vendor: гейт проверяет ровно
-  `ctx.mascotMac.appName` и его расширение (`src/uninstall-targets.js:221`), bundleId
+  `ctx.mascotMac.appName` и его расширение (`src/uninstall-targets.js:230`), bundleId
   в условии не участвует и берётся строкой ниже как `String(bundleId || '')`
-  (`src/uninstall-targets.js:226`). Имени нет — цели `.app` нет вовсе и в план уходит
-  нота «Vendor недоступен» (`src/uninstall-targets.js:232`). Имя есть, а bundleId
+  (`src/uninstall-targets.js:235`). Имени нет — цели `.app` нет вовсе и в план уходит
+  нота «Vendor недоступен» (`src/uninstall-targets.js:253`). Имя есть, а bundleId
   вычислить не удалось (`macBundleIdOf` возвращает `''` при ЛЮБОМ сбое PlistBuddy,
-  `src/main.js:2974-2980`; `resolveMascotVendorApp` отдаёт результат как есть,
-  `src/main.js:2999-3010`) — цель ВСЁ РАВНО попадает в план с пустым эталоном, и ноты
+  `src/main.js:3525-3531`; `resolveMascotVendorApp` отдаёт результат как есть,
+  `src/main.js:3550-3561`) — цель ВСЁ РАВНО попадает в план с пустым эталоном, и ноты
   «Vendor недоступен» человек не видит. Fail-closed при этом не теряется, но
   срабатывает позже и — если бандл на месте — дороже: в `executeUninstallTarget`
-  сначала стоит проверка существования (`src/main.js:3121`), и при отсутствующем
+  сначала стоит проверка существования (`src/main.js:3678`), и при отсутствующем
   `~/Applications/<appName>.app` цель тихо отдаёт `absent`; существующий бандл
   отбивается как `failed` («ЗАЩИТА: нет эталонного CFBundleIdentifier (vendor) —
-  отказ удалять .app», `src/main.js:3124`), а один `failed` роняет ВСЮ деинсталляцию
-  маскота в `ok:false` с возвратом маркера (`src/main.js:3256-3264`).
+  отказ удалять .app», `src/main.js:3681`), а один `failed` роняет ВСЮ деинсталляцию
+  маскота в `ok:false` с возвратом маркера (`src/main.js:3816-3824`).
 
 **Dry-run.** `isDryRun` берётся из `process.env.HM_DRY_RUN` ИЛИ из renderer-подсказки
-(`src/main.js:3188`). В этом режиме печатаются строки `WOULD:` и `KEEP:` и возврат
+(`src/main.js:3745`). В этом режиме печатаются строки `WOULD:` и `KEEP:` и возврат
 происходит ДО деактивации маркера — ни одной операции над диском.
 
 **Учёт до и после.** `receipts.deactivateReceipt` атомарным `rename` превращает
 маркер в `<id>.json.uninst` ДО первой операции удаления; не смог — деинсталляция
 прерывается, ничего не удаляется. Дальше каждая цель исполняется
-`executeUninstallTarget` (`src/main.js:3056-3161`), который раскладывает тип на
+`executeUninstallTarget` (`src/main.js:3613-3718`), который раскладывает тип на
 исполнителя из `uninstall-exec` (`removeFile`, `removeEmptyDir`, `removeDirTree`,
-`removeProfileLine`, `restoreHookUrl`) либо на локальные `winRegDeleteValue` /
-`winRemoveUserPathEntry` (`src/main.js:2900-2971`), а неизвестный тип отбивает
+`removeProfileLine`, `removeMascotHooks`, `removeFileBestEffort`) либо на локальные `winRegDeleteValue` /
+`winRemoveUserPathEntry` (`src/main.js:3451-3522`), а неизвестный тип отбивает
 fail-closed. Каждая строка результата уходит и в UI (`component-log`), и в
 `install.log`.
 
+**Снос дерева не идёт по ссылкам.** `removeDirTree` и `removeDirTreeGated` сначала атомарно
+переименовывают цель в `.hm-quar.<hex>` рядом, а затем сносят карантин через `removeTreeNoFollow`
+(`src/fs-compat.js:396`, вызовы — `src/uninstall-exec.js:283` и `:452`), а не через `fs.rmSync`: с
+Electron 40 тот ходит по junction внутрь и стирает содержимое ЧУЖОЙ цели, тогда как `checkTarget`
+проверяет только саму цель и её предков, не нутро дерева. Обход идёт через `lstat`: ссылка
+(симлинк, junction, а также junction вида `mklink /J x \\?\Volume{guid}\dir`, которую libuv за
+ссылку не считает — её `lstat` отдаёт статистику самой цели) снимается КАК ссылка, и корень сноса
+тоже. На Windows каталог пускается внутрь только при совпадении его канонического пути с «путь
+родителя + имя»; перед каждой операцией внутри каталога сверяется, что по его пути лежит тот же
+каталог (не ссылка, тот же inode), иначе `ERR_HM_TREE_CHANGED`: удаление останавливается, за
+подменённым путём ничего не тронуто (то, что обход успел снести до подмены, назад не возвращается). Сносит
+`original-fs`: подменённый ради `.asar` `fs` Electron принимает архив за каталог и держит его
+открытым, и обход через него ломал бы снос деревьев с `node_modules.asar`. Найденные ссылки
+называются в сообщении результата («внутри были ссылки: N — сняты как ссылки…»); дерево без
+ссылок даёт прежний текст «удалено дерево».
+Отказ сноса тоже называет причину, а не один код (`treeFailWhy`, `src/uninstall-exec.js:309-318`):
+«не удалось удалить дерево: ERR_HM_TREE_CHANGED — каталог подменён во время сноса (…), удаление
+остановлено, за подменённым путём ничего не тронуто: <путь> (оставшееся дерево возвращено на место)»
+(хвост в скобках дописывает только `removeDirTree`; у `removeDirTreeGated` его нет) и «… ENOTEMPTY — это
+перенаправление/ссылка, но внутри есть содержимое — не трогаю: <путь>»; пояснение вынимается из
+конца сообщения, поэтому скобки `[` и `]` в самом пути его не портят; прочие коды остаются голыми,
+как раньше.
+
 **Пост-проверка и финал.** `uninstallExec.verifyPostconditions(plan, guardOpts, …)`
-(`src/uninstall-exec.js:597-675`) проверяет ИМЕННО цели этого плана, а не «есть ли на
+(`src/uninstall-exec.js:593-671`) проверяет ИМЕННО цели этого плана, а не «есть ли на
 машине uv вообще». `failed > 0 || stillThere` → `restoreReceipt` возвращает маркер и
 операция честно отдаёт `ok:false`. Только при подтверждённом успехе идут
 `finalizeRemoval` (снятие tombstone и хвостов `.bak`/`.tmp`) и
-`manifest.removeEntry` (`src/install-manifest.js:160-167`); их результат проверяется —
+`manifest.removeEntry` (`src/install-manifest.js:175-182`); их результат проверяется —
 если учёт не почистился, ответ всё равно `ok:false` с текстом «Артефакты удалены, но
 учётные записи не очищены».
 
 **Прерванное удаление.** При старте приложения `receipts.recoverOrphanTombstones`
-(`src/main.js:374`) возвращает осиротевшие tombstone обратно в маркеры — иначе кнопка
+(`src/main.js:463`) возвращает осиротевшие tombstone обратно в маркеры — иначе кнопка
 «Удалить» исчезла бы навсегда у наполовину удалённого компонента.
 
 ## Инварианты
 
 1. Ни один путь удаления не берётся из квитанции: `buildReceipt` не содержит поля
-   artifacts вовсе (`src/install-receipts.js:66-74`), а цели строит только
+   artifacts вовсе (`src/install-receipts.js:95-103`), а цели строит только
    `uninstallTargets` из `home`/вшитого config/vendor. Легаси-квитанция v1 с
    artifacts остаётся валидным маркером, её artifacts игнорируются целиком.
 2. Удаление без маркера невозможно: `receipts.hasReceipt(home, id)` — обязательный
-   гейт (`src/main.js:3200-3206`), а в UI кнопка вообще не рендерится без
-   `det.receipted` (`src/renderer/app.js:513`).
+   гейт (`src/main.js:3760-3766`), а в UI кнопка вообще не рендерится без
+   `det.receipted` (`src/renderer/app.js:519`).
 3. Ни одна УДАЛЯЮЩАЯ цель не может лежать в `~/.claude`, `~/CLAUDE.md`,
    `~/.hamidun-setup`, в самом доме или его предке: `checkTarget` отбивает и точное
    совпадение, и «внутри», и «предок существующего защищённого»
-   (`src/uninstall-exec.js:139-158`). На POSIX дополнительно сверяются device+inode
-   (`src/uninstall-exec.js:162-181`). Исключение ровно одно и оно ничего не удаляет:
-   цель `hookurl` на `~/.claude/settings.json` (`src/uninstall-targets.js:201-207`) —
+   (`src/uninstall-exec.js:107-126`). На POSIX дополнительно сверяются device+inode
+   (`src/uninstall-exec.js:130-149`). Исключение ровно одно и оно ничего не удаляет:
+   цель `hookentries` на `~/.claude/settings.json` (`src/uninstall-targets.js:227-231`) —
    первая в плане маскота на обеих платформах. Через `checkTarget` она НЕ проходит:
-   `executeUninstallTarget` отправляет её напрямую в `restoreHookUrl`
-   (`src/main.js:3077`), а тот заменяет guard собственным узким допуском — см.
+   `executeUninstallTarget` отправляет её напрямую в `removeMascotHooks`
+   (`src/main.js:3634`), а тот заменяет guard собственным узким допуском — см.
    инвариант 4.
-4. Единственная операция, которой разрешено писать в `~/.claude`, — `restoreHookUrl`,
-   и она ничего не удаляет: допущен ровно один путь `~/.claude/settings.json`
-   (`src/uninstall-exec.js:528-531`), проверяется, что это не symlink и обычный файл,
-   JSON парсится ДО и ПОСЛЕ замены, запись атомарная.
+4. Единственная операция, которой разрешено писать в `~/.claude`, — `removeMascotHooks`,
+   и она не удаляет файлов, а убирает из одного файла записи хуков скрепки: допущен ровно один путь `~/.claude/settings.json`
+   (`src/uninstall-exec.js:667-686`), проверяется, что в цепочке нет symlink/junction и это обычный файл
+   (сама проверка, `symlinkFreeChain`, с u10a живёт в `src/link-guard.js` — её же используют писатели под администратором, —
+   а `uninstall-exec.js` её импортирует; в раунде 2 u10a к ней добавлена сверка канонического имени цели: junction на путь тома `lstat` не отличает от каталога),
+   JSON парсится ДО и ПОСЛЕ правки, число записей сверяется, запись атомарная.
 5. Пути из `preserve` переживают удаление: они уходят в `guardOpts.extraProtected`
-   (`src/main.js:3213`), и `removeDirTree` отказывает всей цели, если внутри неё лежит
-   сохраняемый путь (`src/uninstall-exec.js:235-239`).
+   (`src/main.js:3773`), и `removeDirTree` отказывает всей цели, если внутри неё лежит
+   сохраняемый путь (`src/uninstall-exec.js:203-207`).
 6. `emptydir` физически не может удалить содержимое: используется `fs.rmdirSync` без
    рекурсии, а непустой каталог возвращает `kept`
-   (`src/uninstall-exec.js:209-228`).
+   (`src/uninstall-exec.js:177-196`).
 7. Запись PATH убирается только при реально отсутствующем каталоге: существует —
    `kept`; ошибка проверки, отличная от ENOENT/ENOTDIR — `failed`
-   (`src/main.js:2930-2937`). Само значение переписывается с сохранением типа и с
-   отказом при подозрении на потерю символов (`src/main.js:2953-2955`).
+   (`src/main.js:3481-3488`). Само значение переписывается с сохранением типа и с
+   отказом при подозрении на потерю символов (`src/main.js:3504-3506`).
 8. Из реестра удаляется только точное значение под единственным разрешённым ключом:
    `WIN_REG_ALLOWED_KEYS` содержит ровно `software\microsoft\windows\currentversion\run`
-   (`src/main.js:2896`), hive обязан быть `HKCU`, результат верифицируется повторным
+   (`src/main.js:3447`), hive обязан быть `HKCU`, результат верифицируется повторным
    чтением.
 9. Из rc-файла уходит только строка, ЦЕЛИКОМ равная installer-строке после `trim`
-   (`src/uninstall-exec.js:441-444`), и только из `~/.zshrc`, `~/.bash_profile`,
+   (`src/uninstall-exec.js:437-440`), и только из `~/.zshrc`, `~/.bash_profile`,
    `~/.bashrc` (`allowedRcFiles`).
 10. `.app` на macOS удаляется только при двойном совпадении идентичности:
     `CFBundleIdentifier` равен значению из vendor И `TeamIdentifier` равен пину
-    `3VN93XA9DY` (`src/main.js:3119-3133`, `src/uninstall-targets.js:56`). Vendor не
-    дал ИМЕНИ `.app` — цели `.app` в плане нет (`src/uninstall-targets.js:221`); дал
+    `3VN93XA9DY` (`src/main.js:3676-3690`, `src/uninstall-targets.js:58`). Vendor не
+    дал ИМЕНИ `.app` — цели `.app` в плане нет (`src/uninstall-targets.js:230`); дал
     имя, но не bundleId — цель в плане есть с пустым `expectBundleId`, и её отбивает
-    уже исполнитель (`src/main.js:3124`), а не построитель плана.
+    уже исполнитель (`src/main.js:3681`), а не построитель плана.
 11. Маркер деактивируется ДО первой операции удаления, и невозможность деактивации
-    прерывает всё (`src/main.js:3224-3228`).
+    прерывает всё (`src/main.js:3784-3788`).
 12. Учёт (tombstone + манифест) чистится только после подтверждённой пост-проверки, и
     результат чистки проверяется: `finalizeRemoval` возвращает `ok:false`, если
     tombstone остался или остались хвосты `.bak`/`.tmp`
-    (`src/install-receipts.js:268-291`).
+    (`src/install-receipts.js:309-333`).
 13. Неизвестный тип цели не исполняется: `default` в `executeUninstallTarget` →
-    `failed` с «ЗАЩИТА: неизвестный тип цели» (`src/main.js:3158-3159`).
+    `failed` с «ЗАЩИТА: неизвестный тип цели» (`src/main.js:3715-3716`).
 14. Компонент из `UNINSTALL_DISABLED` отбивается ДО построения плана даже при валидной
-    квитанции (`src/main.js:3181-3183`).
+    квитанции (`src/main.js:3738-3740`).
 15. В dry-run не деактивируется маркер, не исполняется ни одна цель и не пишется
-    `install.log` (`src/main.js:3190`, `3306-3310`).
+    `install.log` (`src/main.js:3747`, `3306-3310`).
+16. Ни один рекурсивный снос в main-процессе не идёт по ссылке: удаление компонентов зовёт
+    `removeTreeNoFollow` явно (`src/uninstall-exec.js:283`, `:452`), а `install()` в
+    `src/fs-compat.js:470` на Windows направляет туда любой `fs.rmSync(…, { recursive: true })`
+    (кэш докачки, staging, `pruneStaleSecureDirs`). Новое место с рекурсивным `rmSync` обязано
+    быть в списке теста-инвентаря (деревья в admin-only `%ProgramData%\HmDeElev-…`, куда процесс
+    пользователя не пишет) или звать `removeTreeNoFollow`.
 
 ## Что ломается, если инвариант нарушить
 
@@ -193,14 +235,14 @@ fail-closed. Каждая строка результата уходит и в U
    45832, где после удаления скрепки никто не слушает. **Масштаб этой потери кодом НЕ
    подтверждён.** «Четырнадцать хук-записей × 2,2 с ≈ полминуты мёртвого ожидания в
    каждой сессии» — цифры из комментариев того же кода, который спека документирует
-   (`src/uninstall-exec.js:514-518`, `src/uninstall-targets.js:188-193`); другого
+   (`src/uninstall-exec.js:510-514`, `src/uninstall-targets.js:194-199`); другого
    источника у них в репозитории нет. Вшитый пак их не подтверждает: в
    `vendor/config-pack/.claude/settings.json` блок `hooks` (строки 205-228) содержит
    РОВНО ДВЕ записи — `PreToolUse` → `node "${HOME}/.claude/hooks/guard.js"` и
    `SessionStart` → `node "${HOME}/.claude/hooks/gsd-check-update.js"`, обе
    `"type": "command"`, ни одна не ходит на порт; подстроки `VSCODE_PORT` нет ни в
    одном из 9 765 файлов `vendor/config-pack/`. Откуда взяться четырнадцати HTTP-хукам,
-   по репозиторию не прослеживается; `scripts/windows/mascot.ps1:60-62` указывает на
+   по репозиторию не прослеживается; `scripts/windows/mascot.ps1:64-66` указывает на
    другой источник — при отсутствующем `settings.json` «скрепка пропишет хуки сама при
    первом запуске». Чтобы цифра стала фактом, нужен замер на реальном конфиге.
 5. Потеря `preserve`: у ученика исчезает прогресс курса (`sandbox`, `state.json`), у
@@ -227,96 +269,105 @@ fail-closed. Каждая строка результата уходит и в U
     затереть чужой uv-tool с тем же именем пакета.
 15. Dry-run, который что-то делает, — это удаление без спроса у того, кто просил
     показать план.
+16. Голый `fs.rmSync(recursive)` вместо `removeTreeNoFollow`: процесс того же пользователя
+    подкладывает `mklink /J` (прав не нужно) внутрь `%LOCALAPPDATA%\Programs\ClaudeMascot` или
+    дерева курса, и кнопка «Удалить» стирает с правами администратора содержимое чужого каталога.
+    Проверено на Electron 44.5.1: цель за вложенной junction, за junction в корне сноса и за
+    junction «через том» теряет файлы (под системным Node 22 — нет). Обход, который смотрит
+    только `lstat().isSymbolicLink()`, пропускает последнюю разновидность — поэтому нужна сверка
+    канонического пути.
 
 ## Границы
 
 - Не удаляет Nomad: он ставится, но авто-удаление отключено (`UNINSTALL_DISABLED`), и
   ни одной цели для него не строится. Человек видит текст РАННЕГО ОТКАЗА обработчика
   («Авто-удаление компонента «nomad» в этой версии отключено — он остаётся
-  установленным. Удали вручную при необходимости», `src/main.js:3182`), а не ноту:
-  гейт `UNINSTALL_DISABLED` (`src/main.js:3181-3183`) возвращает ДО единственного в
-  файле вызова `uninstallTargets` (`src/main.js:3209`), поэтому ветка `case 'nomad'`
-  (`src/uninstall-targets.js:241-253`) вместе с её нотой
-  (`src/uninstall-targets.js:251`) на пути деинсталляции недостижима — печатать ноты
-  плана некому (`src/main.js:3216`). В UI кнопки «Удалить» у nomad нет вовсе:
+  установленным. Удали вручную при необходимости», `src/main.js:3739`), а не ноту:
+  гейт `UNINSTALL_DISABLED` (`src/main.js:3738-3740`) возвращает ДО единственного в
+  файле вызова `uninstallTargets` (`src/main.js:3769`), поэтому ветка `case 'nomad'`
+  (`src/uninstall-targets.js:269-281`) вместе с её нотой
+  (`src/uninstall-targets.js:279`) на пути деинсталляции недостижима — печатать ноты
+  плана некому (`src/main.js:3776`). В UI кнопки «Удалить» у nomad нет вовсе:
   `REMOVABLE` его не содержит (`src/renderer/app.js:43`).
 - Не удаляет `config`, `claude-code`, `node`, `git` и прочие компоненты: у них нет
   зашитой карты целей, `uninstallTargets` вернёт `null` и операция откажет.
 - Не деинсталлирует Python, uv-окружения других инструментов и вообще что-либо, чего
   нет в per-component аллоулисте.
 - На macOS не чистит `~/.local/bin` — только два файла внутри; общий каталог остаётся
-  сознательно (`src/uninstall-targets.js:153`).
+  сознательно (`src/uninstall-targets.js:163`).
 - На macOS без доступного vendor-бандла `.app` маскота НЕ удаляется — по коду это
   штатный fail-closed. Предложение удалить вручную человек видит только тогда, когда
   vendor не дал ИМЕНИ `.app`: тогда цели нет и печатается нота
-  (`src/uninstall-targets.js:232`). Если имя есть, а `CFBundleIdentifier` из vendor
+  (`src/uninstall-targets.js:253`). Если имя есть, а `CFBundleIdentifier` из vendor
   вычислить не удалось, `.app` тоже не удаляется и ноты нет, но исход зависит от того,
   лежит ли бандл на месте: проверка существования стоит РАНЬШЕ проверки эталона
-  (`src/main.js:3121`, `if (!fs.existsSync(t.path)) return { status: 'absent', … }`).
+  (`src/main.js:3678`, `if (!fs.existsSync(t.path)) return { status: 'absent', … }`).
   Есть `~/Applications/<appName>.app` — цель отдаёт `failed` («ЗАЩИТА: нет эталонного
-  CFBundleIdentifier», `src/main.js:3124`) и роняет всю деинсталляцию
-  (`src/main.js:3256-3264`). Бандла там нет (перетащен в `/Applications`, снесён
+  CFBundleIdentifier», `src/main.js:3681`) и роняет всю деинсталляцию
+  (`src/main.js:3816-3824`). Бандла там нет (перетащен в `/Applications`, снесён
   руками) — цель отдаёт `absent`, счётчик `failed` не растёт, и общий отказ приходит не
-  отсюда, а от `hookurl` в пост-проверке (риск №1). Защита от удаления чужого `.app` в
+   отсюда, а от `hookentries` в пост-проверке (риск №1). Защита от удаления чужого `.app` в
   обеих ветках одинакова.
 - Не откатывает частичное удаление: при провале возвращается только маркер установки,
   уже удалённые файлы обратно не появляются.
 - Каталоги, где остались чужие или сохраняемые файлы, остаются на диске (`kept`) — это
   ожидаемое поведение, а не сбой.
-- Возврат hook-url — не удаление, а замена подстроки в `settings.json`: механика
-  подтверждена (`src/uninstall-targets.js:201-207` → `src/main.js:3077` →
-  `src/uninstall-exec.js:525-562`), чужие записи и правки пользователя в файле не
-  трогаются. Но подставляемая строка `127.0.0.1:VSCODE_PORT/hook` — НЕ «плейсхолдер
-  пака»: в `vendor/config-pack/` её нет ни в одном файле, включая сам
-  `vendor/config-pack/.claude/settings.json` (10 247 байт, ноль вхождений
-  `VSCODE_PORT`). Обоснование «приводим конфиг к тому виду, в котором его раздаёт пак»
-  (`src/uninstall-targets.js:195-198`) и та же посылка в установщике
-  (`scripts/windows/mascot.ps1:50`, `scripts/macos/mascot.sh:174`) вшитым паком
-  опровергаются; происхождение этого плейсхолдера по репозиторию не прослеживается.
-  Обратимость («следующая установка скрепки снова подставит порт») держится только
-  если хуки с `VSCODE_PORT` кто-то реально прописал: `mascot.ps1:71` меняет файл ТОЛЬКО
-  при `$rawSettings.Contains($HOOK_OLD)`.
+- Снятие хуков скрепки — не удаление файла, а правка одного файла: из `settings.json` убираются
+  только записи скрепки (механика: `src/uninstall-targets.js:227-231` → `src/main.js:3770` →
+  `src/uninstall-exec.js:667-727`), а чужие хуки (в том числе на том же порту, но по другому пути, и
+  хук-команды), пустые массивы, бывшие до нас, и остальные ключи остаются. Прежняя подстановка
+  `127.0.0.1:VSCODE_PORT/hook` убрана: это не URL, а «плейсхолдера пака» в `vendor/config-pack/` нет
+  ни в одном файле, включая сам `vendor/config-pack/.claude/settings.json` (ноль вхождений
+  `VSCODE_PORT`). Установка (`scripts/windows/mascot.ps1:61`, `scripts/macos/mascot.sh:188`)
+  по-прежнему подставляет порт в этот плейсхолдер, если пак его несёт; когда не несёт, она в этом
+  месте ничего не меняет.
 - Квитанция отвечает ровно на один вопрос — «ставил ли этот установщик компонент»; она
   не хранит версию артефактов на диске и не является инвентарём.
+- Снос идёт по ПУТЯМ, а не по дескрипторам: у Node нет `openat` и открытия каталога без
+  перехода по ссылке. Окно подмены между сверкой каталога и операцией внутри него сужено до
+  пары системных вызовов, но не закрыто; полностью закрыть его может только удаление по
+  дескриптору (нативный код) либо удаление без прав администратора. Предков корня сноса
+  `removeTreeNoFollow` не проверяет: это делает `checkTarget` ДО переименования в карантин.
+  То же окно есть у снятия read-only: `chmod` ходит ПО ссылке, поэтому перед ним объект (lstat: не
+  ссылка, нужного вида) и каталог-родитель (личность: inode и том) перепроверяются, но между этой
+  проверкой и самим `chmod` остаётся промежуток в пару системных вызовов — в рамках той же оговорки.
+  Основные из этих сверок закреплены отдельными тестами с мутантом без них (подмена ссылкой, каталогом,
+  «junction через том», файлом вместо каталога; соседний inode выше 2^53; другой том с тем же inode).
+  Второстепенные ветки — сверка в режиме очистки read-only, повторное открытие каталога, терпимость
+  к ENOENT — отдельных тестов не имеют: поведенческой дыры за ними не найдено, но и «каждая» про них сказать нельзя.
 
 ## Риски и открытые вопросы
 
-1. **Пост-проверка не знает типа `hookurl` — удаление маскота всегда рапортует
-   провал.** `verifyPostconditions` разбирает `file`, `dirtree`, `emptydir`, `reg`,
-   `pathentry`, `profileline`, `launchagent`, `appbundle`, `killproc`, а всё прочее
+1. **Пост-проверка знает тип `hookentries`, но любой НОВЫЙ тип цели без своей ветки снова уронит
+   удаление.** `verifyPostconditions` разбирает `file`, `dirtree`, `emptydir`, `reg`,
+   `pathentry`, `profileline`, `launchagent`, `appbundle`, `hookentries`, `killproc`, а всё прочее
    уходит в `default` → `problems.push('неизвестный тип цели в пост-проверке: …')`
-   (`src/uninstall-exec.js:667-668`). План маскота содержит `hookurl` первой целью
-   (`src/uninstall-targets.js:201-207`). Проверено запуском на этой машине:
-   `verifyPostconditions` для плана `mascot` (win32) возвращает
-   `{ ok: false, problems: ['неизвестный тип цели в пост-проверке: hookurl'] }`. В
-   `main.js` это даёт `stillThere = true` → `restoreReceipt` → ответ `ok:false`
-   (`src/main.js:3245-3264`). То есть при фактически успешном удалении человек видит
-   «Не удалось удалить», маркер возвращается, кнопка «Удалить» остаётся, а файлы уже
-   снесены; повтор пройдёт по `absent`-целям и упрётся в ту же пост-проверку. Учёт
-   (`finalizeRemoval`, `manifest.removeEntry`) при этом не выполняется никогда.
-2. **Нота маскота противоречит его же цели.** В том же `case 'mascot'` в план
-   добавляется цель, правящая `~/.claude/settings.json`
-   (`src/uninstall-targets.js:201-207`), и тут же — нота «Хуки в ~/.claude/settings.json
-   НЕ трогаю (там могут быть твои правки)» (`src/uninstall-targets.js:237`). Обе строки
-   печатаются человеку в одном логе удаления (`src/main.js:3216`, `3324`).
+   (`src/uninstall-exec.js:885-886`). Первая редакция пост-проверки не знала цели хуков скрепки, и
+   каждое удаление скрепки рапортовало провал при фактически успешном удалении (`stillThere = true`
+   → `restoreReceipt` → ответ `ok:false`, `src/main.js:3796-3815`); ветка `hookentries`
+   (`src/uninstall-exec.js:859-884`) это закрыла. Держится тестом «verifyPostconditions: hookentries — остались записи скрепки или нечитаемый конфиг с нашим адресом — проблема; чужие хуки и отсутствие файла — нет».
+2. **Нота маскота больше не противоречит его цели.** Цель `hookentries` убирает записи хуков
+   скрепки, и нота плана говорит ровно это (`src/uninstall-targets.js:280`): «Из ~/.claude/settings.json
+   убираю только записи хуков скрепки …; твои хуки и остальные настройки НЕ трогаю». Обе строки
+   печатаются человеку в одном логе удаления.
 3. **Тестами не покрыт сквозной путь удаления маскота.** Тестовый исполнитель
    `execFsPlan` (test/run-tests.js) прогоняет только `file`, `emptydir`, `dirtree`,
-   `profileline`; `hookurl`, `reg`, `pathentry`, `launchagent`, `appbundle` через него
+   `profileline`; `hookentries`, `reg`, `pathentry`, `launchagent`, `appbundle` через него
    не проходят, а `verifyPostconditions` в связке с планом маскота не вызывается ни в
-   одном тесте. Именно поэтому риск №1 живёт незамеченным: `restoreHookUrl` покрыт
+   одном тесте. Именно поэтому риск №1 жил незамеченным: `removeMascotHooks` покрыт
    изолированно, связка «план маскота → пост-проверка → вердикт» — нет.
 4. **Частичный провал оставляет расхождение диска и учёта.** Ветка
    `failed > 0 || stillThere` возвращает маркер, но не восстанавливает удалённое
-   (`src/main.js:3256-3264`). Состояние «часть артефактов удалена, компонент числится
+   (`src/main.js:3816-3824`). Состояние «часть артефактов удалена, компонент числится
    установленным» штатно не разрешается ничем, кроме переустановки.
 5. **`restoreReceipt` может не сработать**, и код это честно печатает («Отметка
    установки НЕ восстановилась»), но никакого дальнейшего сценария для человека нет.
 6. **Остаток в карантине.** Если `removeDirTree` не смог удалить дерево И не смог
    вернуть его на место, каталог остаётся под именем `.hm-quar.<hex>` рядом с
    исходным; путь попадает в сообщение и лог, но автоматической уборки нет
-   (`src/uninstall-exec.js:270-281`).
+   (`src/uninstall-exec.js:238-249`).
 7. **Кнопка «Удалить» не гейтится идущим прогоном установки.** `STATE.runActive`
-   используется только для inline-«Повторить» (`src/renderer/app.js:1802`);
+   используется только для inline-«Повторить» (`src/renderer/app.js:1941`);
    `renderInstalledActions` его не смотрит, и повторные клики по «Удалить» ничем не
    блокируются на стороне UI. Что произойдёт при параллельном запуске установки того
    же компонента — кодом не подтверждено, отдельной защиты в обработчике я не нашёл.
@@ -324,3 +375,23 @@ fail-closed. Каждая строка результата уходит и в U
    (`course.targetDirDefault`, `course.shortcutName`) — эти значения читаются из
    вшитого ресурса на рантайме, самого файла я не открывал; поведение при их отсутствии
    покрыто дефолтами (`~/HamidunCourse`, «Курс вайбкодинг (Claude Code)»).
+9. **Снос стал медленнее нативного.** На каждый элемент обход делает `lstat` и сверку каталога
+   вместо одного вызова C++: на замере 2 400 файлов под Electron 44.5.1 это около 1,5–2× от
+   нативного `rmSync` (в основном цена антивируса на каждый файл; сверка канонического пути сама
+   почти ничего не стоит). Для десятков тысяч файлов в синхронном main-процессе это лишние
+   секунды. На машине без нагрузки замер не делался.
+10. **Не проверялось на настоящем Mac.** Там сверка канонического пути выключена (у POSIX
+    единственная ссылка — симлинк, и `lstat` её видит), снос идёт той же функцией. Её POSIX-ветка
+    прогнана вручную на Linux (WSL, Node 12: вложенный и корневой симлинк, петля, висячая ссылка,
+    жёсткая ссылка, подмена каталога симлинком по ходу, `removeDirTree`) и моделируется в тестах
+    на подставной ФС; запуска на macOS не было.
+11. **Теоретическое ложное срабатывание сверки пути.** Каталог, чей канонический путь не равен
+    «родитель + имя» по безобидной причине, принимается за перенаправление: `rmdir` непустого
+    каталога откажет с `ENOTEMPTY`, дерево вернётся из карантина, а строка результата (UI и
+    `install.log`) несёт пояснение «не трогаю» (`treeFailWhy`). Отказ безопасный, но заметен только
+    в логе. Известный случай — корень сноса, чьё ПОСЛЕДНЕЕ имя передано в виде 8.3 (`HM-LON~1`):
+    вложенные элементы берутся из `readdir` под настоящими
+    именами, а предки корня сверяются уже в каноническом виде, поэтому на деле это касается лишь
+    имени самого корня; все вызывающие передают длинные имена, которые сами породили (`.hm-quar.<hex>`,
+    `HmDeElev-<hex>`, `unpacking-<hex>`). В проверенных конфигурациях (junction в предках, другой
+    регистр, кириллица, пробелы, 8.3 в предках, длинные пути) срабатываний не было.

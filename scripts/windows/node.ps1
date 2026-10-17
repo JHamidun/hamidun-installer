@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
 . (Join-Path $PSScriptRoot '_deelev.ps1')  # New-HmSecureStagingDir (Admins-only secure-cache для онлайн-фолбэка)
+. (Join-Path $PSScriptRoot '_userpath.ps1')  # Send-HmEnvBroadcast: WM_SETTINGCHANGE без компиляции на лету
 function Update-Path {
     # SECURITY (#4): PATH для elevated-скрипта — ТОЛЬКО HKLM (Machine) + наши
     # админ-owned фиксированные каталоги. НИКОГДА не читаем HKCU (User) PATH: на чистой
@@ -70,19 +71,11 @@ function Add-HmMachinePath([string]$Dir) {
     # Прямая запись в реестр, в отличие от вызова .NET, никого не уведомляет: без
     # рассылки WM_SETTINGCHANGE уже открытый проводник и его дочерние окна терминала
     # продолжат жить со старым PATH, и обещание «новые окна увидят сразу» было бы ложью.
-    try {
-        if (-not ('HmEnvBroadcast' -as [type])) {
-            Add-Type -Namespace Hm -Name EnvBroadcast -MemberDefinition @'
-[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam,
-    string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-'@ -ErrorAction SilentlyContinue
-        }
-        $res = [UIntPtr]::Zero
-        # HWND_BROADCAST=0xffff, WM_SETTINGCHANGE=0x1A, SMTO_ABORTIFHUNG=0x0002
-        [void][Hm.EnvBroadcast]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero,
-            'Environment', 0x0002, 5000, [ref]$res)
-    } catch { /* уведомление не критично: новые процессы прочитают реестр сами */ }
+    # Рассылает общий помощник из _userpath.ps1 — средствами .NET, БЕЗ Add-Type: компиляция в %TEMP%
+    # под администратором давала процессу обычного пользователя окно для подмены исходника и dll
+    # (и собственная копия здесь, ещё и с ложной проверкой типа, расходилась с общей). Не критично:
+    # новые процессы прочитают реестр сами, помощник не бросает исключений.
+    try { [void](Send-HmEnvBroadcast) } catch { }
 
     Write-Host "  В системный PATH добавлено: $Dir (новые окна терминала увидят сразу)"
     return $true

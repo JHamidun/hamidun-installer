@@ -3,7 +3,7 @@
 <!-- spec-id: proba-servera-dokachki-preflight-lite -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:672-696`, `src/main.js:630-653`, `src/main.js:100-103`, `src/main.js:531-533`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:80`, `src/renderer/app.js:160-210`, `src/renderer/app.js:1246-1254`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:479-496`, `src/remote-fetch.js:571-595`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
+- **Код:** `src/main.js:793-817`, `src/main.js:751-774`, `src/main.js:122-125`, `src/main.js:639-641`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:81`, `src/renderer/app.js:163-216`, `src/renderer/app.js:1311-1319`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:490-507`, `src/remote-fetch.js:582-606`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
 - **Тесты:** «remote-fetch.js загружается и фильтрует URL/зеркала»
 
 ## Что обещает человеку
@@ -15,11 +15,11 @@
 установку и оборвать её посередине на первой же докачке.
 
 Предупреждение — мягкое, а не стоп: кнопку «Установить» оно не блокирует
-(`src/renderer/app.js:1253` — в гейт кнопки входит только факт завершения пробы,
+(`src/renderer/app.js:1318` — в гейт кнопки входит только факт завершения пробы,
 `netProbeDone`, а не её результат). Человек вправе попробовать всё равно: провайдер мог
 резать один хост, а второе зеркало ответить. Второе обещание — тихая работа в
 офлайн-издании: там качать нечего, и проба не ходит в сеть вовсе
-(`src/main.js:680`, `src/renderer/app.js:170`).
+(`src/main.js:801`, `src/renderer/app.js:176`).
 
 ## Как работает
 
@@ -30,22 +30,22 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 Единственный канал — IPC `probe-remote`, проброшенный через preload как
 `probeRemote: () => ipcRenderer.invoke('probe-remote')` (`src/preload.js:26`).
 
-**Renderer.** В конце `init()` вызывается `runNetProbe()` (`src/renderer/app.js:162`).
+**Renderer.** В конце `init()` вызывается `runNetProbe()` (`src/renderer/app.js:165`).
 Ветвления:
 
 1. `STATE.edition !== 'lite'` **или** в `window.installer` нет `probeRemote` (старый
    preload) → `netProbeDone = true`, `refreshDerived()`, выход. Сеть не трогается
-   (`app.js:170-174`). Само поле `edition` приходит из bootstrap и решается в main
-   (`src/main.js:531-533`).
+   (`app.js:176-180`). Само поле `edition` приходит из bootstrap и решается в main
+   (`src/main.js:639-641`).
 2. Иначе: `netProbeDone = false` + `refreshDerived()` — на время пробы «Установить»
-   выключается (`app.js:175-176` вместе с гейтом на `app.js:1253`). Дальше `await
+   выключается (`app.js:181-182` вместе с гейтом на `app.js:1318`). Дальше `await
    window.installer.probeRemote()`; `online = !(r && r.online === false)` — то есть
    баннер зажигается только на явном `online:false` от main. `catch` → `online = true`
-   (fail-open: сбой самого IPC не выдаётся за «сети нет», `app.js:181`).
+   (fail-open: сбой самого IPC не выдаётся за «сети нет», `app.js:187`).
 3. Результат кладётся в `STATE.netOnline`, `netProbeDone = true`, вызываются
-   `renderLiteNetBanner()` и `refreshDerived()` (`app.js:182-185`).
+   `renderLiteNetBanner()` и `refreshDerived()` (`app.js:188-191`).
 
-`renderLiteNetBanner()` (`app.js:191-210`) сначала удаляет прежний `#lite-net-warn`,
+`renderLiteNetBanner()` (`app.js:197-216`) сначала удаляет прежний `#lite-net-warn`,
 затем, если `STATE.netOnline` истинно, просто выходит — баннера нет. Иначе создаёт
 `div#lite-net-warn.preflight-warn` (жёлтая плашка, `src/renderer/styles.css:463-471`) с
 текстом про интернет, Wi-Fi/кабель и VPN и кнопкой `#lite-net-retry` «Проверить снова»,
@@ -53,11 +53,11 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 подпись «Проверяю…», `runNetProbe()` — то есть повтор идёт по тому же пути, а баннер
 пересоздаётся заново (кнопка снова активна).
 
-**Main, обработчик `probe-remote`** (`src/main.js:678-696`), по шагам:
+**Main, обработчик `probe-remote`** (`src/main.js:799-817`), по шагам:
 
 1. `if (!isLiteEdition()) return { online: true, skipped: true }` — издание определяется
-   по `edition === 'lite'` в `config.json` (`src/main.js:100-103`).
-2. `loadRemoteMaps()` (`src/main.js:630-653`) строит карту «id компонента → remoteId»:
+   по `edition === 'lite'` в `config.json` (`src/main.js:122-125`).
+2. `loadRemoteMaps()` (`src/main.js:751-774`) строит карту «id компонента → remoteId»:
    явный `remote` + `remoteId` из `components.json`, а в lite — автоматически по наличию
    записи в реестре `remote-components.json` (`id == remoteId`), кроме `BUNDLED_ONLY =
    {'uv'}`.
@@ -80,14 +80,14 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 Аргументов от renderer'а обработчик не принимает (объявлен как `async () => {…}`) — URL
 пробы задаётся только вшитым реестром.
 
-**Сама проба зеркала** — `probeMirror(url, timeoutMs)` (`src/remote-fetch.js:571-595`):
+**Сама проба зеркала** — `probeMirror(url, timeoutMs)` (`src/remote-fetch.js:582-606`):
 GET с заголовком `Range: bytes=0-0`, живым считается ответ `200` или `206`, тело сразу
 рвётся `res.destroy()` («заголовков достаточно»). Абсолютный дедлайн — `PROBE_DEADLINE =
 8000` мс (`src/remote-fetch.js:79`), по нему `finish()` гасит запрос через
 `activeReq.destroy()`; таймаут соединения — `Math.min(timeoutMs, PROBE_DEADLINE)`, а main
 и так передаёт 8000. Транспорт — общий `openStream`, где каждый хоп (первичный запрос и
 каждый редирект, максимум `MAX_REDIRECTS = 6`) проходит `guardUrl`
-(`src/remote-fetch.js:479-496`): только `https:`, и хост не должен резолвиться ни в один
+(`src/remote-fetch.js:490-507`): только `https:`, и хост не должен резолвиться ни в один
 приватный/loopback/link-local адрес — иначе соединение не открывается.
 
 **Платформенных различий у этой фичи нет:** ветвление идёт по изданию (lite/офлайн) и по
@@ -100,38 +100,38 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
    `probeRemote` (`src/preload.js:26`), а собственный сетевой запрос из страницы
    запрещён CSP `default-src 'self'` (`src/renderer/index.html:8-9`).
 2. Renderer не может выбрать, куда пойдёт проба: обработчик игнорирует аргументы
-   (`src/main.js:678`), а список URL строится из вшитого `remote-components.json` через
-   `loadRemoteMaps` + `pickEntry` (`src/main.js:681-688`).
+   (`src/main.js:799`), а список URL строится из вшитого `remote-components.json` через
+   `loadRemoteMaps` + `pickEntry` (`src/main.js:802-809`).
 3. Пробуются только https-URL без плейсхолдеров — фильтр `remoteFetch.isFetchableUrl`
-   (`src/main.js:688`, `src/remote-fetch.js:100-105`); каждое соединение и каждый
+   (`src/main.js:809`, `src/remote-fetch.js:100-105`); каждое соединение и каждый
    редирект дополнительно проходят `guardUrl`: https-only + отказ на приватный/loopback/
-   link-local адрес (`src/remote-fetch.js:479-496`).
+   link-local адрес (`src/remote-fetch.js:490-507`).
 4. Проба не качает содержимое: `Range: bytes=0-0`, «живо» = только 200/206, тело
-   немедленно уничтожается (`src/remote-fetch.js:585-592`).
+   немедленно уничтожается (`src/remote-fetch.js:596-603`).
 5. Проба ограничена по времени: абсолютный дедлайн 8000 мс на зеркало
-   (`PROBE_DEADLINE`, `src/remote-fetch.js:79,583`), main передаёт тот же 8000
-   (`src/main.js:690`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:580`).
+   (`PROBE_DEADLINE`, `src/remote-fetch.js:79,594`), main передаёт тот же 8000
+   (`src/main.js:811`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:591`).
 6. Достаточно ОДНОГО живого зеркала, чтобы вернуть `online: true`
-   (`settled.some(... r.value.ok)`, `src/main.js:690-691`).
+   (`settled.some(... r.value.ok)`, `src/main.js:811-812`).
 7. В нелайт-издании и когда докачивать нечего проба в сеть не ходит и отвечает
-   `{ online: true, skipped: true }` (`src/main.js:680`, `src/main.js:687`).
+   `{ online: true, skipped: true }` (`src/main.js:801`, `src/main.js:808`).
 8. Результат пробы НЕ запирает «Установить»: в гейт кнопки входит `netProbeDone`,
    `detectDone`, число выбранных компонентов и `vendorBlocked` — но не `netOnline`
-   (`src/renderer/app.js:1253`).
+   (`src/renderer/app.js:1318`).
 9. Пока проба не ответила, «Установить» выключена: `netProbeDone` = false на старте lite
-   (`src/renderer/app.js:80`) и на каждый заход в `runNetProbe`
-   (`src/renderer/app.js:175-176`).
+   (`src/renderer/app.js:81`) и на каждый заход в `runNetProbe`
+   (`src/renderer/app.js:181-182`).
 10. Сбой самого IPC — fail-open: `catch` в `runNetProbe` ставит `online = true`
-    (`src/renderer/app.js:181`); отсутствие `window.installer.probeRemote` — тоже no-op
-    с `netProbeDone = true` (`src/renderer/app.js:170-173`).
+    (`src/renderer/app.js:187`); отсутствие `window.installer.probeRemote` — тоже no-op
+    с `netProbeDone = true` (`src/renderer/app.js:176-179`).
 11. Баннер живёт ровно столько, сколько держится отказ: `renderLiteNetBanner` каждый раз
     удаляет старый `#lite-net-warn` и при `netOnline` не рисует новый
-    (`src/renderer/app.js:192-194`).
+    (`src/renderer/app.js:198-200`).
 12. «Проверить снова» запускает ровно ту же пробу и не плодит второй баннер: кнопка
     гасится и переименовывается, вызывается `runNetProbe`, узел пересоздаётся
-    (`src/renderer/app.js:204-209`).
+    (`src/renderer/app.js:210-215`).
 13. Исключение внутри обработчика превращается в честный `{ online: false }`, а не в
-    «всё хорошо» (`src/main.js:693-695`).
+    «всё хорошо» (`src/main.js:814-816`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -176,7 +176,7 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
 ## Границы
 
 - **Это не проверка интернета.** Пробуются зеркала ОДНОЙ записи реестра — первой, для
-  которой нашлась платформенная запись (`src/main.js:683-686`). Доступность остальных
+  которой нашлась платформенная запись (`src/main.js:804-807`). Доступность остальных
   хостов, DNS, прокси и корпоративных политик фича не проверяет.
 - **Не связана с выбором пользователя.** Проба идёт при старте окна, до всякого выбора
   компонентов, и не смотрит, какие из них выбраны и являются ли они remote.
@@ -188,8 +188,8 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
 - **Не различает причины отказа.** «Нет интернета», «зеркала лежат», «провайдер режет
   хост» и «все URL реестра отфильтрованы как непригодные» дают один и тот же баннер с
   одним и тем же текстом.
-- **В офлайн-издании фичи фактически нет** — ни на стороне renderer'а (`app.js:170`), ни
-  на стороне main (`main.js:678`).
+- **В офлайн-издании фичи фактически нет** — ни на стороне renderer'а (`app.js:176`), ни
+  на стороне main (`main.js:799`).
 - **Нет индикации процесса при первой пробе.** Пока идёт первый заход, кнопка просто
   выключена; подпись «Проверяю…» есть только у кнопки повтора внутри баннера.
 
@@ -205,22 +205,22 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   строительные блоки, которые обработчик вызывает: `isFetchableUrl` и `pickEntry`.
   Инвентарь при этом помечает фичу `tested: "yes"` — это покрытие блоков, а не фичи.
 - **Причина отказа теряется.** Main умеет вернуть `{ online: false, error }`
-  (`src/main.js:694`), но `runNetProbe` читает только `r.online`
-  (`src/renderer/app.js:180`); текст ошибки никуда не попадает — ни в баннер, ни в лог
+  (`src/main.js:815`), но `runNetProbe` читает только `r.online`
+  (`src/renderer/app.js:186`); текст ошибки никуда не попадает — ни в баннер, ни в лог
   (в обработчике `probe-remote` нет ни одного вызова логирования). Диагностика «почему
   не ответило» недоступна ни человеку, ни поддержке.
 - **Асимметрия fail-open/fail-closed.** Внутренняя ошибка main трактуется как «сервера
   нет» (баннер), а ошибка транспорта IPC в renderer — как «всё в порядке». Намеренным в
-  коде помечено только ОДНО решение из двух — fail-open в renderer: `src/renderer/app.js:181`
+  коде помечено только ОДНО решение из двух — fail-open в renderer: `src/renderer/app.js:187`
   (`} catch (e) { online = true; } // fail-open: ошибка пробы ≠ «сети нет»`) плюс шапка
-  `runNetProbe` (`src/renderer/app.js:165-168`). Fail-closed в main не помечен никак: у
-  `catch` (`src/main.js:693-695`) нет ни одного комментария, шапка обработчика
-  (`src/main.js:672-677`) объясняет CSP, отсутствие аргументов, `probeMirror`, дедлайн 8 с
+  `runNetProbe` (`src/renderer/app.js:168-174`). Fail-closed в main не помечен никак: у
+  `catch` (`src/main.js:814-816`) нет ни одного комментария, шапка обработчика
+  (`src/main.js:793-798`) объясняет CSP, отсутствие аргументов, `probeMirror`, дедлайн 8 с
   и ветки `online:true`, но про поведение на исключении молчит — обдуманный это выбор или
   побочный эффект общего `catch`, из кода не видно. Вместе же они означают: одинаковая по
   сути неполадка даёт противоположный UI в зависимости от того, на какой стороне моста она
   случилась.
-- **Пустой список URL = `{ online: false }`** (`src/main.js:689`) — то есть реестр, где
+- **Пустой список URL = `{ online: false }`** (`src/main.js:810`) — то есть реестр, где
   все зеркала окажутся плейсхолдерами, зажжёт баннер «сервер недоступен» при идеальной
   сети. Сегодня это не срабатывает: в `remote-components.json` у каждой записи два
   реальных https-зеркала (`s3.regru.cloud` и `storage.yandexcloud.net`), плейсхолдеров
@@ -229,12 +229,12 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   перестановка групп/компонентов молча сменит проверяемую запись. Комментарий об этой
   зависимости в коде ЕСТЬ — и он указывает не на тот файл: шапка обработчика обещает
   «пробуем зеркала ПЕРВОГО платформенного remote-компонента **реестра**»
-  (`src/main.js:674-675`), тогда как очерёдность задаёт `compRemote`, построенный обходом
-  `components.json` (`src/main.js:635`, `src/main.js:642-650`) и перебираемый в порядке
-  вставки (`for (const rid of new Set(compRemote.values()))`, `src/main.js:683`). Реестр
+  (`src/main.js:795-796`), тогда как очерёдность задаёт `compRemote`, построенный обходом
+  `components.json` (`src/main.js:756`, `src/main.js:763-771`) и перебираемый в порядке
+  вставки (`for (const rid of new Set(compRemote.values()))`, `src/main.js:804`). Реестр
   `remote-components.json` решает лишь, попадёт ли компонент в карту авто-выводом в lite
-  (`ids.has(c.id)`, `src/main.js:647`) и найдётся ли платформенная запись
-  (`pickEntry`, `src/main.js:684`), но не то, какая из них проверится первой. То есть
+  (`ids.has(c.id)`, `src/main.js:768`) и найдётся ли платформенная запись
+  (`pickEntry`, `src/main.js:805`), но не то, какая из них проверится первой. То есть
   комментарий не отсутствует, а расходится с кодом — и переставившего группы в
   `components.json` он от смены объекта пробы не убережёт, а уведёт искать причину в
   другом файле. Теста, который зафиксировал бы выбор записи, нет: во всём `test/` нет ни
@@ -247,17 +247,17 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   реальный uv-архив из CDN (Reg.ru S3)… Требует интернет» (его собственная шапка, строки
   3-8). Он берёт запись реестра `uv` (`test/remote-fetch-live.js:21`) и зовёт
   `rf.fetchRemote` (строка 35), а тот перед скачиванием пробует зеркала тем же примитивом:
-  `src/remote-fetch.js:957` (`Promise.allSettled(mirrors.map((u) => probeMirror(u,
-  timeoutMs)))`) → `Range: bytes=0-0` (`src/remote-fetch.js:585`). То есть этим запросом
+  `src/remote-fetch.js:968` (`Promise.allSettled(mirrors.map((u) => probeMirror(u,
+  timeoutMs)))`) → `Range: bytes=0-0` (`src/remote-fetch.js:596`). То есть этим запросом
   живьём бьют ровно по `s3.regru.cloud` и `storage.yandexcloud.net` — зеркалам записи `uv`
   (`remote-components.json:26-31`). Но в `npm test` этот тест не входит (`package.json`:
   `"test": "node test/run-tests.js"`), запускается вручную (`node test/remote-fetch-live.js`),
   и его результат в репозитории нигде не записан — поэтому ответ «200/206 или нет» из репо
   не виден, хотя получить его штатным способом можно. Подмена транспорта через
   `__setOpenStreamImpl` — не общее свойство тестов: в `test/run-tests.js` (9592 строки)
-  она встречается ровно дважды — `test/run-tests.js:5129`
+  она встречается ровно дважды — `test/run-tests.js:5518`
   (`rf.__setOpenStreamImpl(makeTransport(port))` сразу после
-  `server.listen(0, '127.0.0.1', resolve)`) и `test/run-tests.js:5224`
+  `server.listen(0, '127.0.0.1', resolve)`) и `test/run-tests.js:5613`
   (`rf.__setOpenStreamImpl(null)` в `finally` того же блока), — то есть в одном локальном
   блоке против сервера на `127.0.0.1`. Если зеркало ответит, например, 403 или 405, проба
   посчитает его мёртвым.

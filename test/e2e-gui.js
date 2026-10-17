@@ -116,10 +116,15 @@ function stageApp() {
   const src = path.join(ROOT, 'release', 'win-unpacked');
   // HM_E2E_SOURCE=1 — принудительно из исходников. Нужно для НЕэлевейтед-машины:
   // упакованный exe несёт requireAdministrator и без UAC просто не стартует.
-  if (process.env.HM_E2E_SOURCE === '1' || !fs.existsSync(src)) {
+  // На Windows — ВСЕГДА из исходников: упакованный установщик берёт корни профиля из токена и подмену
+  // USERPROFILE/APPDATA/LOCALAPPDATA ниже НАМЕРЕННО игнорирует (src/profile-env.js), так что изоляция
+  // профиля в упакованной сборке невозможна; пятак HM_ALLOW_PROFILE_ENV работает только в неупакованной.
+  if (process.env.HM_E2E_SOURCE === '1' || process.platform === 'win32' || !fs.existsSync(src)) {
     // CI/чистая машина: собранного пакета нет — гоняем ТОТ ЖЕ код из исходников
     // (electron <repo>). Проверяется реальный main/renderer/scripts-контур.
-    log('release/win-unpacked нет — запускаю из исходников (source mode)');
+    log('запускаю из исходников (source mode): ' + (process.platform === 'win32'
+      ? 'на Windows всегда (корни профиля упакованной сборки берутся из токена)'
+      : 'release/win-unpacked нет или задан HM_E2E_SOURCE=1'));
     return { dir: ROOT, source: true };
   }
   const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-e2e-app-'));
@@ -213,13 +218,16 @@ function makeContext() {
     APPDATA: path.join(home, 'AppData', 'Roaming'),
     LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
     HM_E2E: '1',
+    // Установщик на Windows берёт корни профиля из ТОКЕНА (src/profile-env.js) и без этого пятака вернул бы
+    // подменённый профиль обратно в настоящий. Пятак действует только в неупакованной сборке (source mode).
+    HM_ALLOW_PROFILE_ENV: '1',
   });
-  // Наследованное окружение может СЛОМАТЬ запуск Electron, и падение выглядит как
-  // «Process failed to launch!» без причины. ELECTRON_RUN_AS_NODE=1 (его выставляют
-  // терминалы внутри Electron-приложений — VS Code, Claude Code) заставляет наш
-  // бинарь стартовать обычным Node: require('electron') отдаёт строку с путём,
-  // app === undefined, main.js падает на app.whenReady(). NODE_OPTIONS с --require
-  // так же вмешивается в main-процесс. Обе переменные из дочернего env выпиливаем.
+  // Наследованное окружение может СЛОМАТЬ запуск Electron: «Process failed to launch!» без
+  // причины. ELECTRON_RUN_AS_NODE=1 (его выставляют терминалы внутри Electron-приложений — VS
+  // Code, Claude Code) делает из ЗАВОДСКОГО бинаря (source mode: electron из node_modules)
+  // обычный Node: app === undefined, main.js падает на app.whenReady(). NODE_OPTIONS с --require
+  // так же лезет в main-процесс. У упакованного exe оба fuse выключены (tools/after-pack.js) и
+  // эти переменные игнорируются сами — там удаление ничего не меняет, но и не мешает. Чистим всегда.
   for (const k of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS']) delete env[k];
   return { appDir: staged.dir, source: staged.source, home, env };
 }
@@ -417,7 +425,7 @@ async function launchApp(ctx) {
     ? { executablePath: require('electron'), args: [ROOT], env: ctx.env, timeout: 180000 }
     : { executablePath: path.join(ctx.appDir, 'Hamidun Setup.exe'), args: [], env: ctx.env, timeout: 180000 };
   log('запуск:', ctx.source ? 'source (electron ' + ROOT + ')' : launchOpts.executablePath);
-  const app = await electron.launch(launchOpts);
+  const app = await electron.launch(await withInspectFuse(ctx, launchOpts));
 
   // Улики, ПЕРЕЖИВАЮЩИЕ смерть страницы. Без них падение выглядит как безликий
   // «page.textContent: Timeout» — при этом и скриншот молча не сохраняется, потому
@@ -1240,6 +1248,28 @@ const SCENARIOS = {
   selftest: scenarioSelftest,
 };
 
+/** Playwright цепляется к main-процессу через `--inspect=0` и ждёт строку «Debugger listening».
+ * У упакованного exe fuse EnableNodeCliInspectArguments ВЫКЛЮЧЕН (tools/after-pack.js: иначе
+ * --inspect открывал бы отладчик в elevated-процессе), и launch() молча упёрся бы в таймаут —
+ * проверено на настоящем Electron 44.5.1: 25 с таймаут, а с одним этим fuse в копии — старт за 5 с.
+ *
+ * Включаем ЕГО ОДИН и только в КОПИИ приложения (ctx.appDir — временный каталог из stageApp):
+ * release/win-unpacked и итоговый exe остаются закалёнными, RunAsNode и NODE_OPTIONS выключены и в
+ * копии. Source mode (заводской electron из node_modules) не трогаем. Файл вне временного каталога
+ * не правим никогда — сюда не должен попасть настоящий exe сборки. */
+async function withInspectFuse(ctx, launchOpts) {
+  if (ctx.source) return launchOpts;
+  const exe = path.resolve(launchOpts.executablePath);
+  const tmp = path.resolve(os.tmpdir()) + path.sep;
+  if (!exe.toLowerCase().startsWith(tmp.toLowerCase())) {
+    throw new Error('e2e: отказ править fuse вне временного каталога (' + exe + ') — правим только копию из stageApp()');
+  }
+  const lib = await require('../tools/after-pack.js').assertReady();
+  await lib.flipFuses(exe, { version: lib.FuseVersion.V1, [lib.FuseV1Options.EnableNodeCliInspectArguments]: true });
+  log('fuse EnableNodeCliInspectArguments включён в КОПИИ приложения (Playwright иначе не подключится):', exe);
+  return launchOpts;
+}
+
 async function main() {
   const run = SCENARIOS[SCENARIO];
   if (!run) {
@@ -1289,5 +1319,6 @@ if (require.main === module) {
   module.exports = {
     makeContext, cleanupContext, launchApp, gotoSelect, selectExactly, collectSteps,
     finalScreen, seedUserData, verifyUserData, walkTree, listBackups, componentArtifacts,
+    withInspectFuse,
   };
 }

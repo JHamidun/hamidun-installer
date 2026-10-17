@@ -9,9 +9,9 @@
       "what": "Ставит систему контроля версий, чтобы Claude сам сохранял историю проекта и откатывал правки. Три источника по очереди: вшитый exe, winget, прямая загрузка.",
       "codeRefs": [
         {
-          "raw": "components.json:8-20",
+          "raw": "components.json:8-21",
           "file": "components.json",
-          "lines": "8-20"
+          "lines": "8-21"
         },
         {
           "raw": "scripts/windows/git.ps1:64-92",
@@ -34,14 +34,14 @@
       "what": "Движок, на котором работает сам Claude Code и всё, что человек соберёт на JS. На macOS `.pkg` ставится через root-staging с пином Team ID.",
       "codeRefs": [
         {
-          "raw": "components.json:21-34",
+          "raw": "components.json:22-36",
           "file": "components.json",
-          "lines": "21-34"
+          "lines": "22-36"
         },
         {
-          "raw": "scripts/windows/node.ps1:107-134",
+          "raw": "scripts/windows/node.ps1:100-127",
           "file": "scripts/windows/node.ps1",
-          "lines": "107-134"
+          "lines": "100-127"
         },
         {
           "raw": "scripts/macos/node.sh",
@@ -59,9 +59,9 @@
       "what": "Редактор и панель Claude внутри него, чтобы новичок не сидел в терминале. Успех засчитывается только при обоих расширениях.",
       "codeRefs": [
         {
-          "raw": "components.json:36-49",
+          "raw": "components.json:38-52",
           "file": "components.json",
-          "lines": "36-49"
+          "lines": "38-52"
         },
         {
           "raw": "scripts/windows/vscode.ps1",
@@ -84,9 +84,9 @@
       "what": "Альтернативный AI-редактор для тех, кто к нему привык. `default: false`.",
       "codeRefs": [
         {
-          "raw": "components.json:50-63",
+          "raw": "components.json:53-68",
           "file": "components.json",
-          "lines": "50-63"
+          "lines": "53-68"
         },
         {
           "raw": "scripts/windows/cursor.ps1:83-92",
@@ -104,14 +104,14 @@
       "what": "Сам ИИ-агент — команда `claude`, которой пишешь задачу словами. Офлайн из `vendor/npm-cache`, иначе установочный скрипт с сайта.",
       "codeRefs": [
         {
-          "raw": "components.json:64-80",
+          "raw": "components.json:69-86",
           "file": "components.json",
-          "lines": "64-80"
+          "lines": "69-86"
         },
         {
-          "raw": "scripts/windows/claude.ps1:184-247",
+          "raw": "scripts/windows/claude.ps1:168-231",
           "file": "scripts/windows/claude.ps1",
-          "lines": "184-247"
+          "lines": "168-231"
         }
       ],
       "tested": "yes",
@@ -124,14 +124,14 @@
       "what": "Кнопка Claude внутри Cursor. Оба VS Code-расширения ставит `vscode.ps1` — здесь только Cursor, чтобы не было второго elevated-пути.",
       "codeRefs": [
         {
-          "raw": "components.json:81-96",
+          "raw": "components.json:87-104",
           "file": "components.json",
-          "lines": "81-96"
+          "lines": "87-104"
         },
         {
-          "raw": "scripts/windows/extension.ps1:34-48",
+          "raw": "scripts/windows/extension.ps1:35-49",
           "file": "scripts/windows/extension.ps1",
-          "lines": "34-48"
+          "lines": "35-49"
         }
       ],
       "tested": "yes",
@@ -144,19 +144,19 @@
       "what": "В конце сам проверяет git/node/claude/конфиг/расширение и рисует галочки на финале. Диагностика никогда не роняет установку (всегда `exit 0`).",
       "codeRefs": [
         {
-          "raw": "components.json:97-106",
+          "raw": "components.json:105-114",
           "file": "components.json",
-          "lines": "97-106"
+          "lines": "105-114"
         },
         {
-          "raw": "scripts/windows/verify.ps1:43-241",
+          "raw": "scripts/windows/verify.ps1:186-443",
           "file": "scripts/windows/verify.ps1",
-          "lines": "43-241"
+          "lines": "186-443"
         },
         {
-          "raw": "src/renderer/app.js:1480-1483",
+          "raw": "src/renderer/app.js:1556-1559",
           "file": "src/renderer/app.js",
-          "lines": "1480-1483"
+          "lines": "1556-1559"
         }
       ],
       "tested": "yes",
@@ -169,14 +169,14 @@
       "what": "Раскладывает готовую настройку Claude — правила, агентов, команды, скиллы. Два режима: дополнить недостающее или переустановить начисто. `~/.claude` никогда не переносится и не стирается.",
       "codeRefs": [
         {
-          "raw": "components.json:114-130",
+          "raw": "components.json:122-139",
           "file": "components.json",
-          "lines": "114-130"
+          "lines": "122-139"
         },
         {
-          "raw": "scripts/windows/config.ps1:33-48",
+          "raw": "scripts/windows/config.ps1:35-50",
           "file": "scripts/windows/config.ps1",
-          "lines": "33-48"
+          "lines": "35-50"
         },
         {
           "raw": "src/install-mode.js",
@@ -199,14 +199,14 @@
           "lines": ""
         },
         {
-          "raw": "src/renderer/app.js:1213-1257",
+          "raw": "src/renderer/app.js:1278-1326",
           "file": "src/renderer/app.js",
-          "lines": "1213-1257"
+          "lines": "1278-1326"
         },
         {
-          "raw": "scripts/windows/config.ps1:292-337",
+          "raw": "scripts/windows/config.ps1:488-541",
           "file": "scripts/windows/config.ps1",
-          "lines": "292-337"
+          "lines": "488-541"
         }
       ],
       "tested": "yes",
@@ -219,14 +219,14 @@
       "what": "Python и библиотеки для продвинутых навыков — картинки, документы, автоматизация. Офлайн из `vendor/pywheels`, при неудаче — с PyPI.",
       "codeRefs": [
         {
-          "raw": "components.json:132-150",
+          "raw": "components.json:141-160",
           "file": "components.json",
-          "lines": "132-150"
+          "lines": "141-160"
         },
         {
-          "raw": "scripts/windows/pydeps.ps1:144-186",
+          "raw": "scripts/windows/pydeps.ps1:146-201",
           "file": "scripts/windows/pydeps.ps1",
-          "lines": "144-186"
+          "lines": "146-201"
         }
       ],
       "tested": "yes",
@@ -239,14 +239,14 @@
       "what": "Личный автономный агент с командой `nmd`: свой ключ к любой нейросети или облако без VPN. Только из вшитого `vendor/nomad-src` — клонирования нет вовсе.",
       "codeRefs": [
         {
-          "raw": "components.json:180-193",
+          "raw": "components.json:191-206",
           "file": "components.json",
-          "lines": "180-193"
+          "lines": "191-206"
         },
         {
-          "raw": "scripts/windows/nomad.ps1:69-83,240",
+          "raw": "scripts/windows/nomad.ps1:71-138,300",
           "file": "scripts/windows/nomad.ps1",
-          "lines": "69-83,240"
+          "lines": "71-138,300"
         },
         {
           "raw": "config.json:5-17",
@@ -264,9 +264,9 @@
       "what": "Даёт вставить ключ из кабинета уже после установки — раньше вставить было некуда. Пишет управляемый блок в `HERMES_HOME/config.yaml`.",
       "codeRefs": [
         {
-          "raw": "src/main.js:1940-1996",
+          "raw": "src/main.js:2463-2524",
           "file": "src/main.js",
-          "lines": "1940-1996"
+          "lines": "2463-2524"
         },
         {
           "raw": "src/preload.js:37",
@@ -274,9 +274,9 @@
           "lines": "37"
         },
         {
-          "raw": "src/renderer/app.js:2313-2320",
+          "raw": "src/renderer/app.js:2534-2541",
           "file": "src/renderer/app.js",
-          "lines": "2313-2320"
+          "lines": "2534-2541"
         }
       ],
       "tested": "yes",
@@ -289,9 +289,9 @@
       "what": "Быстрый менеджер Python для продвинутых навыков, полностью офлайн. Единственный компонент, который в lite-издании не докачивается.",
       "codeRefs": [
         {
-          "raw": "components.json:201-218",
+          "raw": "components.json:214-233",
           "file": "components.json",
-          "lines": "201-218"
+          "lines": "214-233"
         },
         {
           "raw": "scripts/windows/uv.ps1:1-13",
@@ -309,9 +309,9 @@
       "what": "Зарубежный адрес только ИИ-доменам через SSH, остальной интернет напрямую. Автозапуск прописывается только после успешного self-test.",
       "codeRefs": [
         {
-          "raw": "components.json:226-238",
+          "raw": "components.json:241-256",
           "file": "components.json",
-          "lines": "226-238"
+          "lines": "241-256"
         },
         {
           "raw": "agent/bridge_agent.py",
@@ -319,9 +319,9 @@
           "lines": ""
         },
         {
-          "raw": "scripts/windows/bridge.ps1:130-169",
+          "raw": "scripts/windows/bridge.ps1:184-241",
           "file": "scripts/windows/bridge.ps1",
-          "lines": "130-169"
+          "lines": "184-241"
         }
       ],
       "tested": "yes",
@@ -334,14 +334,14 @@
       "what": "Помощник поверх окон: показывает, что делает Claude, и даёт кнопки «Разрешить/Отклонить» прямо на экране. Правит `~/.claude/settings.json` атомарно, с бэкапом.",
       "codeRefs": [
         {
-          "raw": "components.json:245-259",
+          "raw": "components.json:263-279",
           "file": "components.json",
-          "lines": "245-259"
+          "lines": "263-279"
         },
         {
-          "raw": "scripts/windows/mascot.ps1:8,18,55-88",
+          "raw": "scripts/windows/mascot.ps1:9,19,59-91",
           "file": "scripts/windows/mascot.ps1",
-          "lines": "8,18,55-88"
+          "lines": "9,19,59-91"
         }
       ],
       "tested": "yes",
@@ -354,9 +354,9 @@
       "what": "Нативное приложение Claude отдельным окном. Скачивается в Admins-only кэш, подпись проверяется до запуска.",
       "codeRefs": [
         {
-          "raw": "components.json:267-281",
+          "raw": "components.json:287-303",
           "file": "components.json",
-          "lines": "267-281"
+          "lines": "287-303"
         },
         {
           "raw": "scripts/windows/claude-desktop.ps1:1-12",
@@ -374,9 +374,9 @@
       "what": "ChatGPT отдельным окном: на Windows из Microsoft Store, на macOS с сайта OpenAI (точный Team ID + bundle id).",
       "codeRefs": [
         {
-          "raw": "components.json:283-297",
+          "raw": "components.json:305-321",
           "file": "components.json",
-          "lines": "283-297"
+          "lines": "305-321"
         },
         {
           "raw": "scripts/windows/chatgpt-desktop.ps1:1-12",
@@ -394,14 +394,14 @@
       "what": "Диктовка вместо печати: зажал Ctrl+Alt+Space, продиктовал — текст вставился, распознавание локальное. Опция микрофона пишет согласие в реестр только при явном выборе.",
       "codeRefs": [
         {
-          "raw": "components.json:299-328",
+          "raw": "components.json:323-354",
           "file": "components.json",
-          "lines": "299-328"
+          "lines": "323-354"
         },
         {
-          "raw": "scripts/windows/handy.ps1:57-61,122",
+          "raw": "scripts/windows/handy.ps1:60-64,155",
           "file": "scripts/windows/handy.ps1",
-          "lines": "57-61,122"
+          "lines": "60-64,155"
         }
       ],
       "tested": "yes",
@@ -419,14 +419,14 @@
           "lines": ""
         },
         {
-          "raw": "scripts/windows/config.ps1:337-386",
+          "raw": "scripts/windows/config.ps1:541-605",
           "file": "scripts/windows/config.ps1",
-          "lines": "337-386"
+          "lines": "541-605"
         },
         {
-          "raw": "package.json:93-96",
+          "raw": "package.json:94-97",
           "file": "package.json",
-          "lines": "93-96"
+          "lines": "94-97"
         }
       ],
       "tested": "yes",
@@ -439,9 +439,9 @@
       "what": "Перед установкой честно показывает, что на машине уже стоит, и не предлагает ставить поверх рабочего. Если системный PATH не прочитался — честный баннер вместо ложного «не установлено».",
       "codeRefs": [
         {
-          "raw": "src/main.js:2540-2784",
+          "raw": "src/main.js:3090-3335",
           "file": "src/main.js",
-          "lines": "2540-2784"
+          "lines": "3090-3335"
         },
         {
           "raw": "src/install-manifest.js",
@@ -459,9 +459,9 @@
       "what": "Кнопка «Удалить» сносит только то, что поставил этот установщик. Удаляемых компонентов четыре: `course`, `uv`, `mascot`, `bridge`.",
       "codeRefs": [
         {
-          "raw": "src/main.js:3236-3356",
+          "raw": "src/main.js:3796-3916",
           "file": "src/main.js",
-          "lines": "3236-3356"
+          "lines": "3796-3916"
         },
         {
           "raw": "src/uninstall-targets.js",
@@ -489,9 +489,9 @@
       "what": "Форсирует чистую переустановку конфига, но только после явного диалога-подтверждения — нужны оба флага сразу.",
       "codeRefs": [
         {
-          "raw": "src/renderer/app.js:462-513",
+          "raw": "src/renderer/app.js:467-519",
           "file": "src/renderer/app.js",
-          "lines": "462-513"
+          "lines": "467-519"
         },
         {
           "raw": "src/install-mode.js",
@@ -499,9 +499,9 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:1164-1176",
+          "raw": "src/main.js:1328-1340",
           "file": "src/main.js",
-          "lines": "1164-1176"
+          "lines": "1328-1340"
         }
       ],
       "tested": "yes",
@@ -549,9 +549,9 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:1064-1077",
+          "raw": "src/main.js:1213-1238",
           "file": "src/main.js",
-          "lines": "1064-1077"
+          "lines": "1213-1238"
         },
         {
           "raw": "scripts/windows/_verify.ps1",
@@ -574,9 +574,9 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:1605-1877",
+          "raw": "src/main.js:2001-2398",
           "file": "src/main.js",
-          "lines": "1605-1877"
+          "lines": "2001-2398"
         },
         {
           "raw": "scripts/macos/_lib.sh",
@@ -599,9 +599,9 @@
           "lines": "20-28"
         },
         {
-          "raw": "src/main.js:812-862,1177-1187",
+          "raw": "src/main.js:935-998,1341-1351",
           "file": "src/main.js",
-          "lines": "812-862,1177-1187"
+          "lines": "935-998,1341-1351"
         }
       ],
       "tested": "yes",
@@ -614,14 +614,14 @@
       "what": "Не даёт запустить заведомо сломанную установку, когда офлайн-файлы рядом с приложением недоступны. Проверка идёт по изданию, а не по одному файлу.",
       "codeRefs": [
         {
-          "raw": "src/main.js:32-152,890-895",
+          "raw": "src/main.js:54-174,1029-1034",
           "file": "src/main.js",
-          "lines": "32-152,890-895"
+          "lines": "54-174,1029-1034"
         },
         {
-          "raw": "src/renderer/app.js:810-832",
+          "raw": "src/renderer/app.js:858-880",
           "file": "src/renderer/app.js",
-          "lines": "810-832"
+          "lines": "858-880"
         }
       ],
       "tested": "yes",
@@ -634,14 +634,14 @@
       "what": "До нажатия «Установить» проверяет, отвечает ли сервер, и предупреждает жёлтым баннером с кнопкой «Проверить снова». Сеть трогает только main — CSP renderer'а запрещает fetch.",
       "codeRefs": [
         {
-          "raw": "src/main.js:676-694",
+          "raw": "src/main.js:797-815",
           "file": "src/main.js",
-          "lines": "676-694"
+          "lines": "797-815"
         },
         {
-          "raw": "src/renderer/app.js:161-201",
+          "raw": "src/renderer/app.js:164-207",
           "file": "src/renderer/app.js",
-          "lines": "161-201"
+          "lines": "164-207"
         }
       ],
       "tested": "yes",
@@ -654,9 +654,9 @@
       "what": "Второй запуск не плодит вторую установку; закрытие окна не оставляет висящих инсталляторов и гигабайтов мусора. Замок живёт в main, переживает Ctrl+R.",
       "codeRefs": [
         {
-          "raw": "src/main.js:196-242,298-340,348-385",
+          "raw": "src/main.js:257-308,387-429,437-479",
           "file": "src/main.js",
-          "lines": "196-242,298-340,348-385"
+          "lines": "257-308,387-429,437-479"
         }
       ],
       "tested": "yes",
@@ -669,14 +669,14 @@
       "what": "Объясняет новичку, что будет поставлено, сколько займёт и куда бежать за помощью.",
       "codeRefs": [
         {
-          "raw": "src/renderer/index.html:18-87",
+          "raw": "src/renderer/index.html:18-100",
           "file": "src/renderer/index.html",
-          "lines": "18-87"
+          "lines": "18-100"
         },
         {
-          "raw": "src/renderer/app.js:298-324",
+          "raw": "src/renderer/app.js:304-330",
           "file": "src/renderer/app.js",
-          "lines": "298-324"
+          "lines": "304-330"
         }
       ],
       "tested": "yes",
@@ -689,14 +689,14 @@
       "what": "Карточки компонентов, автоматическое включение зависимостей, платформенный гейт (чужая ОС — компонент не показывается вовсе и отбивается на запуске).",
       "codeRefs": [
         {
-          "raw": "src/renderer/index.html:90-142",
+          "raw": "src/renderer/index.html:103-164",
           "file": "src/renderer/index.html",
-          "lines": "90-142"
+          "lines": "103-164"
         },
         {
-          "raw": "src/renderer/app.js:365-542",
+          "raw": "src/renderer/app.js:371-548",
           "file": "src/renderer/app.js",
-          "lines": "365-542"
+          "lines": "371-548"
         },
         {
           "raw": "src/renderer/deps.js:8-21",
@@ -714,9 +714,9 @@
       "what": "Снимает страх «а не вирус ли это»: список всего с честными размерами. Где размера нет — прочерк, а не выдуманное число.",
       "codeRefs": [
         {
-          "raw": "src/renderer/app.js:868-918",
+          "raw": "src/renderer/app.js:925-975",
           "file": "src/renderer/app.js",
-          "lines": "868-918"
+          "lines": "925-975"
         },
         {
           "raw": "tools/sync-sizes.js",
@@ -739,14 +739,14 @@
       "what": "Шаги, живой лог, проценты, часы на идущем шаге. Лог — кольцо из 800 строк с одной перерисовкой на кадр.",
       "codeRefs": [
         {
-          "raw": "src/renderer/index.html:145-192",
+          "raw": "src/renderer/index.html:167-214",
           "file": "src/renderer/index.html",
-          "lines": "145-192"
+          "lines": "167-214"
         },
         {
-          "raw": "src/renderer/app.js:1275-1416",
+          "raw": "src/renderer/app.js:1351-1492",
           "file": "src/renderer/app.js",
-          "lines": "1275-1416"
+          "lines": "1351-1492"
         }
       ],
       "tested": "yes",
@@ -759,9 +759,9 @@
       "what": "«Скачиваю N% · X из Y МБ», чтобы не казалось, что всё зависло. Дедлайн считается от размера архива, но не меньше 20 минут.",
       "codeRefs": [
         {
-          "raw": "src/main.js:1033",
+          "raw": "src/main.js:1182",
           "file": "src/main.js",
-          "lines": "1033"
+          "lines": "1182"
         },
         {
           "raw": "src/preload.js:19-23",
@@ -769,9 +769,9 @@
           "lines": "19-23"
         },
         {
-          "raw": "src/renderer/app.js:1716-1735",
+          "raw": "src/renderer/app.js:1845-1867",
           "file": "src/renderer/app.js",
-          "lines": "1716-1735"
+          "lines": "1845-1867"
         }
       ],
       "tested": "yes",
@@ -784,14 +784,14 @@
       "what": "Пока идёт долгая установка, крутятся короткие советы — раз в 12 секунд.",
       "codeRefs": [
         {
-          "raw": "src/renderer/app.js:1757-1795",
+          "raw": "src/renderer/app.js:1889-1934",
           "file": "src/renderer/app.js",
-          "lines": "1757-1795"
+          "lines": "1889-1934"
         },
         {
-          "raw": "src/renderer/index.html:178-185",
+          "raw": "src/renderer/index.html:200-207",
           "file": "src/renderer/index.html",
-          "lines": "178-185"
+          "lines": "200-207"
         }
       ],
       "tested": "yes",
@@ -809,9 +809,9 @@
           "lines": ""
         },
         {
-          "raw": "src/renderer/app.js:282-293,1905-1908",
+          "raw": "src/renderer/app.js:288-299,2061-2064",
           "file": "src/renderer/app.js",
-          "lines": "282-293,1905-1908"
+          "lines": "288-299,2061-2064"
         }
       ],
       "tested": "yes",
@@ -824,9 +824,9 @@
       "what": "Ровно три следующих действия и большая кнопка «Открыть VS Code». Если упал редактор — кнопка гасится, первый шаг меняется.",
       "codeRefs": [
         {
-          "raw": "src/renderer/app.js:1971-2270",
+          "raw": "src/renderer/app.js:2153-2491",
           "file": "src/renderer/app.js",
-          "lines": "1971-2270"
+          "lines": "2153-2491"
         }
       ],
       "tested": "yes",
@@ -844,14 +844,14 @@
           "lines": "14-47"
         },
         {
-          "raw": "src/renderer/app.js:2041-2057",
+          "raw": "src/renderer/app.js:2232-2248",
           "file": "src/renderer/app.js",
-          "lines": "2041-2057"
+          "lines": "2232-2248"
         },
         {
-          "raw": "config.json:60",
+          "raw": "config.json:62",
           "file": "config.json",
-          "lines": "60"
+          "lines": "62"
         }
       ],
       "tested": "yes",
@@ -869,14 +869,14 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:1526-1562",
+          "raw": "src/main.js:1826-1943",
           "file": "src/main.js",
-          "lines": "1526-1562"
+          "lines": "1826-1943"
         },
         {
-          "raw": "src/renderer/app.js:920-1010",
+          "raw": "src/renderer/app.js:977-1067",
           "file": "src/renderer/app.js",
-          "lines": "920-1010"
+          "lines": "977-1067"
         }
       ],
       "tested": "yes",
@@ -889,14 +889,14 @@
       "what": "Даёт вписать ключи Google/OpenAI/ElevenLabs на финише. Fail-closed на чтении: любая ошибка кроме «файла нет» — ключи не сохраняются.",
       "codeRefs": [
         {
-          "raw": "src/main.js:2253-2303",
+          "raw": "src/main.js:2800-2840",
           "file": "src/main.js",
-          "lines": "2253-2303"
+          "lines": "2800-2840"
         },
         {
-          "raw": "src/renderer/app.js:2414-2434",
+          "raw": "src/renderer/app.js:2656-2682",
           "file": "src/renderer/app.js",
-          "lines": "2414-2434"
+          "lines": "2656-2682"
         }
       ],
       "tested": "yes",
@@ -909,9 +909,9 @@
       "what": "Открывает VS Code на папке проекта, Cursor, папку курса или терминал с `claude`. Терминал не запускается напрямую из elevated-процесса.",
       "codeRefs": [
         {
-          "raw": "src/main.js:1583-1600,1938,2003-2029,2180-2248",
+          "raw": "src/main.js:1975-1992,2461,2534-2562,2720-2800",
           "file": "src/main.js",
-          "lines": "1583-1600,1938,2003-2029,2180-2248"
+          "lines": "1975-1992,2461,2534-2562,2720-2800"
         }
       ],
       "tested": "yes",
@@ -924,14 +924,14 @@
       "what": "Ловит случай, когда UAC-пароль дал другой пользователь и всё встало бы в чужой профиль. Отдельный async-IPC, чтобы не морозить стартовый экран.",
       "codeRefs": [
         {
-          "raw": "src/main.js:439-511,564-566",
+          "raw": "src/main.js:543-619,675-677",
           "file": "src/main.js",
-          "lines": "439-511,564-566"
+          "lines": "543-619,675-677"
         },
         {
-          "raw": "src/renderer/app.js:109-118",
+          "raw": "src/renderer/app.js:110-119",
           "file": "src/renderer/app.js",
-          "lines": "109-118"
+          "lines": "110-119"
         }
       ],
       "tested": "yes",
@@ -944,9 +944,9 @@
       "what": "Свободное место и версия ОС до старта. Best-effort: не смог замерить — просто не показывает цифру.",
       "codeRefs": [
         {
-          "raw": "src/main.js:513-559",
+          "raw": "src/main.js:621-670",
           "file": "src/main.js",
-          "lines": "513-559"
+          "lines": "621-670"
         }
       ],
       "tested": "yes",
@@ -959,9 +959,9 @@
       "what": "Когда падает один компонент и за ним встают пять — объясняет одной фразой, что чинить первым. Различает целостность / сеть / окружение.",
       "codeRefs": [
         {
-          "raw": "src/renderer/app.js:1418-1444,1459-1473",
+          "raw": "src/renderer/app.js:1494-1520,1535-1549",
           "file": "src/renderer/app.js",
-          "lines": "1418-1444,1459-1473"
+          "lines": "1494-1520,1535-1549"
         }
       ],
       "tested": "yes",
@@ -974,9 +974,9 @@
       "what": "Если шаг десять минут не выдаёт ни строчки — честно пишет, что установка идёт и закрывать окно рано. Процесс не убивает.",
       "codeRefs": [
         {
-          "raw": "src/main.js:1288-1308",
+          "raw": "src/main.js:1487-1525",
           "file": "src/main.js",
-          "lines": "1288-1308"
+          "lines": "1487-1525"
         }
       ],
       "tested": "yes",
@@ -989,14 +989,14 @@
       "what": "Вместо простыни из cargo/pip/npm говорит словами, что случилось и виноват ли человек. Девять видов причин, выжимка строится всегда.",
       "codeRefs": [
         {
-          "raw": "src/failure-explain.js:23-144",
+          "raw": "src/failure-explain.js:23-161",
           "file": "src/failure-explain.js",
-          "lines": "23-144"
+          "lines": "23-161"
         },
         {
-          "raw": "src/main.js:1376-1409",
+          "raw": "src/main.js:1616-1657",
           "file": "src/main.js",
-          "lines": "1376-1409"
+          "lines": "1616-1657"
         }
       ],
       "tested": "yes",
@@ -1009,14 +1009,14 @@
       "what": "Кнопкой чинит «повреждённый» установщик: сам находит образ, снимает карантин, проверяет факт и перезапускается — без команд в Терминале.",
       "codeRefs": [
         {
-          "raw": "src/main.js:3358-3540",
+          "raw": "src/main.js:3918-4122",
           "file": "src/main.js",
-          "lines": "3358-3540"
+          "lines": "3918-4122"
         },
         {
-          "raw": "src/renderer/app.js:719-808",
+          "raw": "src/renderer/app.js:763-856",
           "file": "src/renderer/app.js",
-          "lines": "719-808"
+          "lines": "763-856"
         }
       ],
       "tested": "yes",
@@ -1039,9 +1039,9 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:89-101,628-651",
+          "raw": "src/main.js:111-123,749-772",
           "file": "src/main.js",
-          "lines": "89-101,628-651"
+          "lines": "111-123,749-772"
         }
       ],
       "tested": "yes",
@@ -1064,9 +1064,9 @@
           "lines": ""
         },
         {
-          "raw": "src/main.js:950-1078",
+          "raw": "src/main.js:1092-1239",
           "file": "src/main.js",
-          "lines": "950-1078"
+          "lines": "1092-1239"
         }
       ],
       "tested": "yes",
@@ -1229,14 +1229,14 @@
       "what": "Интерактивный курс: открываешь папку в Claude Code, агент-наставник ведёт по миссиям офлайн. На macOS распаковка через `ditto` — `unzip` ломает кириллицу в именах.",
       "codeRefs": [
         {
-          "raw": "components.json:158-172",
+          "raw": "components.json:168-183",
           "file": "components.json",
-          "lines": "158-172"
+          "lines": "168-183"
         },
         {
-          "raw": "scripts/windows/course.ps1:29-57",
+          "raw": "scripts/windows/course.ps1:31-59",
           "file": "scripts/windows/course.ps1",
-          "lines": "29-57"
+          "lines": "31-59"
         },
         {
           "raw": "vendor/course/vibecoding-course.zip",
@@ -1254,19 +1254,19 @@
       "what": "Сигналит академии, что человек дошёл до конца.",
       "codeRefs": [
         {
-          "raw": "config.json:38-45",
+          "raw": "config.json:40-47",
           "file": "config.json",
-          "lines": "38-45"
+          "lines": "40-47"
         },
         {
-          "raw": "src/main.js:1132-1151",
+          "raw": "src/main.js:1296-1315",
           "file": "src/main.js",
-          "lines": "1132-1151"
+          "lines": "1296-1315"
         },
         {
-          "raw": "scripts/windows/course.ps1:46-50",
+          "raw": "scripts/windows/course.ps1:48-52",
           "file": "scripts/windows/course.ps1",
-          "lines": "46-50"
+          "lines": "48-52"
         }
       ],
       "tested": "no",
@@ -1279,9 +1279,9 @@
       "what": "Отправляет в академию, что и как встало, чтобы бот помогал адресно. Закрытый список событий, чистка ПД, uid ставит только главный процесс. Галочку можно снять.",
       "codeRefs": [
         {
-          "raw": "src/main.js:1444-1496",
+          "raw": "src/main.js:1692-1772",
           "file": "src/main.js",
-          "lines": "1444-1496"
+          "lines": "1692-1772"
         },
         {
           "raw": "src/uid-telemetry.js",
@@ -1289,14 +1289,14 @@
           "lines": ""
         },
         {
-          "raw": "src/renderer/app.js:1825-1966",
+          "raw": "src/renderer/app.js:1964-2146",
           "file": "src/renderer/app.js",
-          "lines": "1825-1966"
+          "lines": "1964-2146"
         },
         {
-          "raw": "config.json:46-49",
+          "raw": "config.json:48-51",
           "file": "config.json",
-          "lines": "46-49"
+          "lines": "48-51"
         }
       ],
       "tested": "yes",
@@ -1309,9 +1309,9 @@
       "what": "Пишет всё в один файл `~/.hamidun-setup/install.log`, который человек может целиком отправить в поддержку. Один удерживаемый дескриптор вместо записи на каждой строке.",
       "codeRefs": [
         {
-          "raw": "src/main.js:169-191,1935",
+          "raw": "src/main.js:191-242,2458",
           "file": "src/main.js",
-          "lines": "169-191,1935"
+          "lines": "191-242,2458"
         }
       ],
       "tested": "yes",
@@ -1349,9 +1349,9 @@
       "what": "Показывает, что именно будет сделано, ничего не трогая: без докачки, без записи журнала, деинсталляция печатает WOULD/KEEP.",
       "codeRefs": [
         {
-          "raw": "src/main.js:930-935,980-985,3291-3295",
+          "raw": "src/main.js:1072-1077,1122-1127,3851-3855",
           "file": "src/main.js",
-          "lines": "930-935,980-985,3291-3295"
+          "lines": "1072-1077,1122-1127,3851-3855"
         },
         {
           "raw": "scripts/*/*.ps1|sh",

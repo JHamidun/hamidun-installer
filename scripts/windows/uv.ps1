@@ -14,6 +14,7 @@
 # Успех — ТОЛЬКО при exit-коде 0 И валидном формате вывода `uv --version`. Honor HM_DRY_RUN.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_verify.ps1')  # Confirm-HmArtifact (fail-closed SHA-256)
+. (Join-Path $PSScriptRoot '_linksafe.ps1')  # Find-HmLinkOnPath / Write-HmUserFile: копия uv ложится без хода по ссылке
 $DRY = [bool]$env:HM_DRY_RUN
 
 # P1-8: dry-run ветвится ДО проверки vendor — никаких обращений к диску.
@@ -76,8 +77,13 @@ function Test-HmReparse([string]$p) {
     catch { return $false }
 }
 $destParent = Split-Path -Parent $dest
-if ((Test-Path -LiteralPath $destParent) -and (Test-HmReparse $destParent)) {
-    Write-Host "ОШИБКА: родитель $destParent — reparse-point (junction/symlink); отказ копировать uv в перенаправленный путь."
+# Проверка родителя — по ВСЕЙ цепочке от профиля (Find-HmLinkOnPath), а не только по самому Programs: junction на %LOCALAPPDATA%
+# или на AppData уводил New-Item и Copy-Item в чужую папку так же. Облачные папки OneDrive ссылкой не считаются.
+$destParentLink = $null
+try { $destParentLink = Find-HmLinkOnPath -Path $destParent -Anchor (Get-HmTrustAnchor -Path $destParent) }
+catch { $destParentLink = "$destParent (проверка не удалась: $($_.Exception.Message))" }
+if ($destParentLink) {
+    Write-Host "ОШИБКА: на пути к $destParent ссылка (junction/symlink) или путь не удалось проверить: $destParentLink; отказ копировать uv в перенаправленный путь."
     exit 1
 }
 if ((Test-Path -LiteralPath $dest) -and (Test-HmReparse $dest)) {
@@ -86,9 +92,11 @@ if ((Test-Path -LiteralPath $dest) -and (Test-HmReparse $dest)) {
 }
 $target = Join-Path $dest 'uv.exe'
 try {
-    New-Item -ItemType Directory -Force $dest -ErrorAction Stop | Out-Null
-    Copy-Item -Force -LiteralPath $srcUv $target -ErrorAction Stop
-    if ($srcUvxPath) { Copy-Item -Force -LiteralPath $srcUvxPath (Join-Path $dest 'uvx.exe') -ErrorAction Stop }
+    # Копия — переносом по имени (Write-HmUserFile): Copy-Item -Force открывает САМО имя на запись и идёт по file-symlink,
+    # подложенной на uv.exe/uvx.exe; каталог при этом закрепляется и сверяется по цепочке (подмена Programs\uv между
+    # проверкой выше и записью). Бинарь — наш: «только чтение» снимается, как снимал Copy-Item -Force.
+    Write-HmUserFile -Path $target -Bytes ([System.IO.File]::ReadAllBytes($srcUv)) -ClearReadOnly
+    if ($srcUvxPath) { Write-HmUserFile -Path (Join-Path $dest 'uvx.exe') -Bytes ([System.IO.File]::ReadAllBytes($srcUvxPath)) -ClearReadOnly }
 } catch {
     Write-Host "ОШИБКА: не удалось скопировать uv в $dest — $($_.Exception.Message)"
     exit 1
