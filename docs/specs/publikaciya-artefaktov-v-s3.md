@@ -3,7 +3,7 @@
 <!-- spec-id: publikaciya-artefaktov-v-s3 -->
 
 - **Раздел:** Публикация и издания
-- **Код:** `tools/publish-dist.py:49-205`, `tools/publish-vendor.py:48-257`, `tools/push-component.py:74-471`, `tools/release-check.js`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:92-190`, `.github/workflows/build-mac.yml:219-257`
+- **Код:** `tools/publish-dist.py:49-205`, `tools/publish-vendor.py:48-273`, `tools/push-component.py:74-471`, `tools/release-check.js`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:92-190`, `.github/workflows/build-mac.yml:219-257`
 - **Тесты:** «каждая запись реестра докачки корректна (sha256/size/mirrors)», «реестр: неплейсхолдерные mirror-URL содержат sha256 (content-addressed)», «реестр: нет дублей (remoteId, platform)», «реестр: platform только из enum win32|darwin|linux (опечатка "wind32" — провал)», «BUG #11: remote-компонент имеет сборку в реестре для КАЖДОЙ показанной платформы». Все пять проверяют remote-components.json — артефакт публикации; ни один не запускает сами tools/publish-dist.py, tools/publish-vendor.py, tools/push-component.py (grep по test/run-tests.js этих имён не находит).
 
 ## Что обещает человеку
@@ -103,7 +103,7 @@ apps/handy-macos-*.dmg`, при том что в `vendor/` нет ни одно�
 ключ `vibecoding/downloads/Hamidun-Setup-Windows.exe`, рамки 20-250 МиБ, зеркала
 `REGRU_S3` и `YCLOUD_S3`. Имена локальных файлов совпадают с тем, что реально
 собирается: `artifactName` полной сборки — `Hamidun-Setup-Windows.${ext}`
-(`package.json:114`), лёгкой — `Hamidun-Setup-Windows-Lite.exe`
+(`package.json:115`), лёгкой — `Hamidun-Setup-Windows-Lite.exe`
 (`tools/build-lite.js:68-69`). Порядок: план и отсев по рамкам (127-138) → печать
 плана → на `--dry-run` выход → релиз-гейт `node tools/release-check.js --platform
 win32`, при ненулевом коде публикация останавливается (161-174) → по каждому
@@ -225,12 +225,12 @@ win32`, при ненулевом коде публикация останавл
     зашёл на ссылку во время многоминутной заливки, а при обрыве заливки — до
     следующего ручного прогона.
 12. Опубликованный неполный составной компонент — например, `extension` без
-    `claude-code.vsix`. Комментарий `publish-vendor.py:186-187` называет цену ровно
+    `claude-code.vsix`. Комментарий `publish-vendor.py:202-203` называет цену ровно
     так: «молчаливый silent-skip публиковал бы неполный составной артефакт … с кодом
     0», и дальше этого код не утверждает. Что происходит у человека, видно в
     `scripts/windows/extension.ps1`: он ставит расширение ТОЛЬКО в Cursor (163),
     установка в VS Code оттуда убрана (165-166) — панель Claude в VS Code ставит
-    компонент `vscode` (`scripts/windows/vscode.ps1:92, 246-247`), и её эта дыра не
+    компонент `vscode` (`scripts/windows/vscode.ps1:132, 246-247`), и её эта дыра не
     задевает. Молчания тоже нет: без vsix переменная `$vsix` остаётся пустой (37),
     `$target` подставляется как `$extId` (135), то есть офлайн-путь подменяется
     Marketplace — ровно той зависимостью от интернета, ради снятия которой vsix и
@@ -256,7 +256,7 @@ win32`, при ненулевом коде публикация останавл
   ничего не удаляют, кроме своих осиротевших multipart.
 - **Креды берутся ровно из одного места** — `~/.claude/.credentials.master.env`
   (`push-component.py:48`, `publish-dist.py:70`); переменные окружения не читаются,
-  поэтому CI сначала пишет этот файл (`build-mac-lite.yml:92-134`).
+  поэтому CI сначала пишет этот файл (`build-mac-lite.yml:129-180`).
 - **Ни одна публикация не запускается из npm-скриптов.** В `package.json` нет
   цели, которая бы вызывала эти три файла; всё запускается руками или из
   mac-workflow.
@@ -287,11 +287,11 @@ win32`, при ненулевом коде публикация останавл
   трижды: `publish-dist.py:186-195`, `.github/workflows/build-mac-lite.yml:385-399`
   и `.github/workflows/build-mac.yml:250-256`. У второй копии размерный
   fail-closed гейт ЕСТЬ, но односторонний — только верхняя граница 600 МБ, нижней
-  нет — и стоит он в предыдущем шаге (`build-mac-lite.yml:357-359`, при `set -e`
+  нет — и стоит он в предыдущем шаге (`build-mac-lite.yml:417-419`, при `set -e`
   и последовательности шагов провал гейта не даёт залить); проверки ПОСЛЕ заливки
   у неё нет, только печать локального sha в summary (402-411). Третья копия
   опаснее всех: у неё нет ни размерного гейта, ни проверки после заливки вовсе, а
-  пишет она в БОЕВОЙ ключ `Hamidun-Setup-Mac.dmg` (`build-mac.yml:239`).
+  пишет она в БОЕВОЙ ключ `Hamidun-Setup-Mac.dmg` (`build-mac.yml:287`).
   Расхождение между копиями ничем не отслеживается.
 - **Комментарий CI про KeyError не подтверждается кодом.**
   `.github/workflows/build-mac-lite.yml:124-125` утверждает, что
@@ -312,7 +312,7 @@ win32`, при ненулевом коде публикация останавл
   том числе ещё не опубликованные компоненты, идущие после него по списку. Это
   сделано намеренно (комментарий 186-188), но из docstring не следует.
 - **Парность `handy` win32+darwin держится только комментарием.**
-  `publish-vendor.py:63-67` предписывает публиковать обе платформы парой, иначе
+  `publish-vendor.py:79-83` предписывает публиковать обе платформы парой, иначе
   lite на macOS сочтёт компонент удалённым и упрётся в «нет сборки для платформы».
   Машинной проверки на самой публикации нет; ловит это уже после — тест «BUG #11:
   remote-компонент имеет сборку в реестре для КАЖДОЙ показанной платформы» и

@@ -3,13 +3,13 @@
 <!-- spec-id: de-elevaciya -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `scripts/windows/_deelev.ps1`, `src/staging-paths.js`, `src/deelev-route.js`, `src/main.js:1608-2040`, `src/main.js:303-344`, `src/main.js:998-1027`, `src/main.js:2218-2240`, `src/remote-fetch.js:296-331`, `scripts/windows/vscode.ps1:132-258`, `scripts/windows/extension.ps1:111-150`, `scripts/windows/bridge.ps1:60-186`, `scripts/windows/mascot.ps1`, `scripts/windows/handy.ps1:43-121`, `scripts/windows/claude.ps1:88-110`, `scripts/windows/cursor.ps1:52-95`, `scripts/windows/git.ps1:74-105`, `scripts/windows/node.ps1:117-150`, `scripts/windows/pydeps.ps1:63-95`, `scripts/windows/claude-desktop.ps1:196-215`, `scripts/macos/_lib.sh`, `.github/workflows/staging-primitive.yml`, `test/staging-primitive.ps1`, `package.json`
+- **Код:** `scripts/windows/_deelev.ps1`, `src/staging-paths.js`, `src/deelev-route.js`, `src/main.js:1715-2188`, `src/main.js:363-411`, `src/main.js:1084-1113`, `src/main.js:2380-2402`, `src/remote-fetch.js:296-331`, `scripts/windows/vscode.ps1:132-258`, `scripts/windows/extension.ps1:111-150`, `scripts/windows/bridge.ps1:60-186`, `scripts/windows/mascot.ps1`, `scripts/windows/handy.ps1:44-122`, `scripts/windows/claude.ps1:88-110`, `scripts/windows/cursor.ps1:52-95`, `scripts/windows/git.ps1:74-105`, `scripts/windows/node.ps1:110-143`, `scripts/windows/pydeps.ps1:63-95`, `scripts/windows/claude-desktop.ps1:144-163`, `scripts/macos/_lib.sh`, `.github/workflows/staging-primitive.yml`, `test/staging-primitive.ps1`, `package.json`
 - **Тесты:** «_deelev.ps1: НЕТ %TEMP% control-файлов; -EncodedCommand; PRIVATE staging; env-литералы до cmdlet; абс. whoami; gate; Last Result; fail-closed», «_deelev.ps1: round-trip — де-элевирует команду на MEDIUM (маркер содержит S-1-16-8192), Gate=medium; либо fail-closed $null», «_deelev.ps1: Test-HmExtInstalled — ^${extId}-<цифра> + Directory-only (helper НЕ проходит, файл НЕ проходит, <extId>-<ver> проходит)», «P0-D/P1-1 launch (main.js): -EncodedCommand + PRIVATE staging (нет %TEMP%); env-литералы; абс. whoami; gate; Last Result аттестация; folder-fallback; quoting пробела», «P0 regate#4: launch secure-dir атомарен (_deelev [IO.Directory]::CreateDirectory($dir,$sd) + main.js делегирует, нет fs.mkdirSync+icacls)», «P0 regate#4 (round-trip): New-HmSecureStagingDir -> каталог PROTECTED (наследование снято) без посторонних ACE; либо fail-closed $null», «P0 регресс: PSModulePath от pwsh 7 не ломает staging (модуль Security не требуется)», «P0 install (vscode.ps1): install-extension де-элевированно + FS-аттестация (Test-HmExtInstalled), НЕ через --list-extensions/вывод; fail-closed», «P0-A (extension.ps1): Cursor install де-элевированно + FS-аттестация (.cursor), НЕ --list-extensions; нет дубля VS Code; fail-closed», «ИНВАРИАНТ: нет user-writable control/attestation-файлов в trust-пути (_deelev.ps1 + main.js launch)», «_deelev.ps1: парсится Windows PowerShell 5.1 (боевой интерпретатор)», «_deelev.ps1: объявления ДО первого использования; авто-уборка стоит ПОСЛЕДНЕЙ», «_deelev.ps1 (поведение, PS 5.1): предикат сироты — возраст/состояние/исключение/fail-safe», «_deelev.ps1 (интеграция, реальный планировщик): сирота снесена; свежая/бегущая/исключённая целы», «_deelev.ps1: уборка staging — ТОЛЬКО через Remove-HmSecureStagingDir (подъём от w + шаблон имени, fail-closed)», «PS 5.1: Remove-HmSecureStagingDir(…\\w) сносит ВНЕШНИЙ HmDeElev-<hex>; постороннее имя цело (fail-closed)», «staging-paths: rmStagingTree сносит ВНЕШНИЙ HmDeElev-<hex>; чужое имя цело (fail-closed)», «main.js: все сносы staging идут через rmStagingTree, голого rmSync(stagingRootOf) нет», «main.js: путь вне %ProgramData% -> отказ БЕЗ удаления», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «главный процесс: примитив staging запускается с ДОВЕРЕННЫМ env (COR_PROFILER не наследуется)», «claude.ps1: офлайн-путь проверяется ЗАПУСКОМ claude --version (де-элевированно); сломанная обёртка убирается; финал БЕЗ квитанции при broken», «долгие шаги не выглядят зависшими: де-элевированная установка печатает отсчёт, сторож не обвиняет MSI», «причина отказа staging-каталога приходит в UTF-8», «_lib.sh: HM_PKG_INSTALL_SH + HM_APP_INSTALL_SH — root-staging (/var/root 0700), verify+install на STAGED, позиционные $N, fail-closed; verify_pkg_team_id удалён», «deelev-route: Last Result 0x80070005 и SCHED_E_* — не стартовало; 210 — отказ гейта; 267014 — прервана; код программы — medium», «deelev-route: второй путь — ТОЛЬКО при доказанной тишине задачи (до /Run, 210, HRESULT); 0/211/служебные/таймаут — нет», «A1 (прогон PS 5.1): Get-HmTaskVerdict и deelev-route.taskVerdict дают ОДИН вердикт на одних числах», «A1 (прогон PS 5.1): второй путь и повтор — только при доказанной тишине; итог и строка журнала», «A1 (прогон PS 5.1): запасной путь — обе строки не длиннее 1024 знаков на реалистичных вызовах (pip с колёсами, Handy, самопроверка, vsix); прежняя строка выходила за предел», «A1 (прогон cmd.exe): подготовка журнала — каталог, ротация, заголовок, код выхода; недоступный журнал даёт код 1, основная строка — код и вывод программы», «A1c (прогон PS 5.1): типографские кавычки в пути (O’Brien) не ломают обёртку задачи — разбор без ошибок, литералы означают ровно исходные значения; прежнее удвоение одного ASCII ломало», «A1c (прогон PS 5.1): deelev-route.psQuoteBody/psLit/psArgList — те же литералы со стороны Node; значения доходят неискажёнными (настоящий парсер PowerShell)», «main.js: литералы PowerShell в запуске скриптов, защищённом каталоге, запасном пути и обёртке запуска редактора — только через deelevRoute.psQuoteBody/psLit», «A1c (прогон PS 5.1): Invoke-HmDeElevatedSafe зовёт запасной путь РОВНО при доказанной тишине задачи; во всех остальных исходах — нет», «extension.ps1: Cursor ставится через Invoke-HmDeElevatedSafe, голого Invoke-HmDeElevated нет, второй запуск только после доказанно отработавшего первого», «extension.ps1 (прогон PS 5.1): расширение Cursor встало — exit 0; отказ по политике — fail-closed exit 1 с одним запуском; vsix не встал при Gate medium — второй запуск из Marketplace; ещё идёт — второго нет», «A1 (прогон PS 5.1): токен оболочки Explorer читается (medium, та же учётная запись); запуск без SeImpersonate — честный отказ, а не обход», «_deelev.ps1: запасной путь — без Add-Type/csc и без explorer.exe; токен проверен ДО CreateProcessWithTokenW; родитель журнал ребёнка НЕ читает», «сторож порядка запасного пути краснеет на мутанте без проверки токена (подлог)», «vscode.ps1/bridge.ps1/handy.ps1: де-элевированные шаги идут через Invoke-HmDeElevatedSafe; итог — по диску/реестру», «A1c (прогон PS 5.1): Invoke-HmAsShellUser на подменённом системном слое — подготовка журнала, затем программа; журнал не открылся — программа напрямую; слишком длинная строка — отказ без запуска; политика токена стоит ДО любого запуска», «U5 (прогон PS 5.1): mascot.ps1 запускает скрепку токеном оболочки (Invoke-HmAsShellUser -NoWait), не через explorer.exe; при отказе не запускается ничего, названы причина и способ запуска, код шага прежний», «U5 (прогон PS 5.1, настоящий _deelev.ps1): mascot.ps1 подключает примитив в свою область видимости, переменные скрепки целы; когда запуск токеном оболочки не вышел — запуска нет, причина дошла до человека», «U5 (прогон PS 5.1): bridge.ps1 запускает трей токеном оболочки без файла-лаунчера; при отказе автозапуск и итог установки прежние, explorer и повышенный запуск не используются», «U5 (прогон main.js с заглушками): Войти в Claude на Windows — без файла-лаунчера и без spawn/explorer; окно открывает токен оболочки; при refused/unavailable/unknown/коде≠0 ответ false и запасного запуска нет», «U5 (негативный контроль): прежний запуск через explorer.exe, вставленный на место нового, роняет проверки скрепки, трея и Войти в Claude», «U5 (прогон cmd.exe): команда окна Войти в Claude при враждебных именах профиля (пробел, &, ^, %, !, скобки, кириллица, ’) — claude находится, рабочая папка ~/HamidunStart, pause после ошибки, без claude — pause и код 1; PATH без кавычек, версия без pause и без проверки where ловятся», «U5 (прогон PS 5.1): New-HmShellScriptLine и план запуска -CmdScript — строка cmd /d /e:on /v:off /s /c "<текст>" с % и кавычками внутри; пустой текст, перевод строки и NUL отвергаются; предел 1024 знаков; журнала у такого запуска нет», «U5 (прогон PS 5.1): Resolve-HmShellWorkingDirectory — папка внутри профиля, без ссылок; враждебное имя, слэши и регистр принимаются; junction, выход из профиля, относительный и сетевой путь, кавычка, файл — отказ; мутант без проверки ссылок пропускает junction», «U5 (прогон PS 5.1): Invoke-HmAsShellUser -CmdScript -WorkingDirectory на подменённом системном слое — ровно один запуск cmd.exe с проверенной папкой и видимым окном; политика токена и проверка папки идут ДО запуска; файл+текст и ни того ни другого — отказ», «U5 (прогон PS 5.1 + Node): shellTokenInline — текст команды, рабочая папка, программа и аргументы со всеми видами кавычек, % и кириллицей доходят до Invoke-HmAsShellUser без искажений (граница -Command, настоящий парсер); для редакторов строка прежняя, кроме флага без подметания задач; значение без литерала ломает разбор», «U5 (статика): скрепка и трей моста запускаются только через Invoke-HmAsShellUser -NoWait; в коде нет explorer.exe, Start-Process и файла-лаунчера; примитив подключается после холостого выхода и до запуска», «U5 (статика): main.js — Войти в Claude на Windows без spawn/записи файла/explorer, через winShellTokenRun; explorer.exe остаётся только в четырёх известных местах (проба владельца, фильтр, открытие ПАПКИ)», «U5 (статика): _deelev.ps1 — рабочая папка проверяется ПОСЛЕ токена и ДО первого запуска; профиль берётся от системы; -CmdScript не пишет журнал; Exe больше не обязателен, но ничего или файл вместе с текстом — отказ», «U5 (прогон PS 5.1): Get-HmUserProfileDir берёт профиль у системы — подложенный USERPROFILE игнорируется; мутант на $env:USERPROFILE пойман», «U5 (прогон PS 5.1, настоящий _deelev.ps1): подметание осиротевших задач при подключении файла выключается $script:HmSkipOrphanSweep; без флага работает как раньше; шаг скрепки флаг ставит; мутант без проверки флага пойман», «U5 (прогон main.js с заглушками): Войти в Claude — повторные нажатия, пока окно открывается, второго окна не открывают и получают тот же ответ; после ответа запуск снова возможен; отказ — тоже одним запуском», «u9/M-3: HM_APP_INSTALL_SH принимает только одно имя *.app из безопасных символов и проверяет его до любых действий», «u9/M-3: HM_APP_INSTALL_SH отвергает подложенную ссылку, каталог или файл на месте назначения», «u9/M-3: HM_APP_INSTALL_SH ставит проверенную staged-копию одним переименованием (mv -n)», «u9/M-3: HM_VSCODE_INSTALL_SH — назначение строго /Applications/<имя>.app, занятое отвергается, xattr и chown на staged-копии до переименования», «u9/M-3: HM_APP_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)», «u9/M-3: HM_VSCODE_INSTALL_SH — назначение занято во время проверки подписи или за микросекунду до rename: отказ, каталог жертвы пуст (исполняется, с мутантами)», «u9/M-8: первая строка каждого HM_*_INSTALL_SH — HOME=/var/root, root-инструменты не видят HOME пользователя», «u3-A: в scripts/windows/*.ps1 нет компиляции на лету (Add-Type, csc.exe, CodeDom, Assembly.Load*); сторож видит нарушение и не путает комментарий с кодом»
 
 ## Что обещает человеку
 
 Установщик на Windows просит права администратора один раз и работает с ними всю
-установку (`package.json:115`, `"requestedExecutionLevel": "requireAdministrator"`).
+установку (`package.json:116`, `"requestedExecutionLevel": "requireAdministrator"`).
 Обещание этой фичи: ни один файл, лежащий в личных папках пользователя
 (`%LOCALAPPDATA%\Programs\…\Code.exe`, `Cursor.exe`, `python.exe` из пользовательской
 установки, `code.cmd`), администраторскими правами **не запускается**. Такие программы
@@ -22,7 +22,7 @@
 такой программы лифтом наверх. Цена обещания — иногда честное «не смог»: когда
 безопасный путь недоступен, шаг отказывается делать работу вместо того, чтобы сделать
 её под администратором (в тексте шага дословно: «— пропускаю (fail-closed, НЕ
-запускаю под админом).» — `vscode.ps1:191`, `extension.ps1:139`).
+запускаю под админом).» — `vscode.ps1:229`, `extension.ps1:141`).
 
 ## Как работает
 
@@ -54,10 +54,10 @@
    Administrators и «в DACL нет посторонних SID» — fail-closed **только при
    elevated**. Посторонний ACE всегда печатает `HMSECFAIL`, но снос каталога и
    `return $null` стоят внутри `if ($Elevated)` — и на самом `HmDeElev-<hex>`
-   (`_deelev.ps1:265-277`, снос на `:273-275`), и на рабочем подкаталоге
+   (`_deelev.ps1:279-291`, снос на `:273-275`), и на рабочем подкаталоге
    (`:337-348`, снос на `:344-346`). При `-Elevated $false` функция логирует
    посторонний SID и **продолжает**, возвращая путь на `:349`; комментарий в коде
-   это признаёт прямо (`_deelev.ps1:271-272`: «Medium -> нет privesc (родитель уже
+   это признаёт прямо (`_deelev.ps1:285-286`: «Medium -> нет privesc (родитель уже
    medium), но такой ACE не должен появляться при protection on»).
    Наружу отдаётся **не** сам `HmDeElev-<hex>`, а
    подкаталог `w` внутри него — он рождается, когда родитель уже заперт, что
@@ -77,10 +77,10 @@
    и `$env:Path` литералами, до них нет ни одного cmdlet.
 6. **Гейт внутри обёртки — первой инструкцией после чистки env.**
    `if(-not (@(& '<абс. whoami>' /groups) -match 'S-1-16-8192')){ exit 210 }` — на
-   не-medium обёртка выходит, не сделав ничего (`_deelev.ps1:647`). Дальше, уже на
+   не-medium обёртка выходит, не сделав ничего (`_deelev.ps1:748`). Дальше, уже на
    medium, вывод целевого бинаря (stdout+stderr) дописывается в его диагностический
    журнал `~/.hamidun-setup/deelev/<метка>.log` (`Get-HmDeElevLogPath`,
-   `_deelev.ps1:576-585`; файл режется на 512 КБ). Пишет **только** ребёнок на medium;
+   `_deelev.ps1:677-686`; файл режется на 512 КБ). Пишет **только** ребёнок на medium;
    elevated-родитель этот user-writable каталог не читает и не пишет — итог шага
    решается диском/реестром у вызывающего, а журнал нужен поддержке. Сбой записи
    журнала программу не останавливает.
@@ -95,7 +95,7 @@
    запускалась, иное = exit-код обёртки. Дедлайн — 630 секунд; раз в минуту
    печатается строка «…устанавливается, прошло N мин». Результат — объект
    `{ Gate; Code; Hex; Kind; LastResult }`, классификацию делает чистая функция
-   `Get-HmTaskVerdict` (`_deelev.ps1:552-570`, вызов на `:758`; её зеркало для JS —
+   `Get-HmTaskVerdict` (`_deelev.ps1:653-671`, вызов на `:758`; её зеркало для JS —
    `src/deelev-route.js`, согласие обеих сторожит тест на одних числах):
    - `'refused'` — Last Result = 210: обёртка увидела не medium, бинарь не запускался;
    - `'not-started'` — HRESULT самого планировщика, `0x8007xxxx` (Win32-ошибка запуска:
@@ -112,7 +112,7 @@
    ≥ `0x80000000` в PowerShell сравниваются как long (суффикс `L`): литерал без него в
    PS 5.1 — отрицательный Int32, и сравнение молча не совпадало бы. `claude.ps1`
    по-прежнему сам отбрасывает сентинелы и всё, что вне 0..255, в `'unverified'`
-   (`claude.ps1:112, 121`) — с новой классификацией его исход не меняется.
+   (`claude.ps1:92, 121`) — с новой классификацией его исход не меняется.
 9. **Уборка.** В `finally`: `schtasks /Delete`, удаление XML,
    `Remove-HmSecureStagingDir` (поднимается от `w` к родителю и удаляет только
    каталог с именем строго `HmDeElev-<32 hex>`), восстановление `PATH`/`PSModulePath`.
@@ -130,17 +130,17 @@
 Одноразовая задача — общая точка отказа сразу для пяти шагов (панели VS Code, pip и
 самопроверка моста, разрешение микрофона Handy, проверка claude). Поэтому шаги, где
 она отказывала у людей, зовут не `Invoke-HmDeElevated`, а обёртку
-`Invoke-HmDeElevatedSafe` (`_deelev.ps1:1157-1172`):
+`Invoke-HmDeElevatedSafe` (`_deelev.ps1:1340-1363`):
 
 1. Сначала та же задача планировщика. Примитив по ходу пишет этап в
    `$script:HmDeElevStage`: `prereq` → `staging` → `create` → `run` → `running`
    (после успешного `/Run`) → `done`.
 2. **Второй путь — только при доказанной тишине первого** (чистая
-   `Test-HmShellFallbackAllowed`, `_deelev.ps1:786-790`): `$null` на этапах до `/Run`,
+   `Test-HmShellFallbackAllowed`, `_deelev.ps1:887-891`): `$null` на этапах до `/Run`,
    `Gate='not-started'` или `'refused'`. При `'medium'` (отработало), `'unknown'`,
    `'terminated'` и сбое после `/Run` второго запуска нет — первый мог ещё идти, а две
    установки в один `~/.vscode/extensions` портят каталог.
-3. Запасной путь — `Invoke-HmAsShellUser` (`_deelev.ps1:978-1092`): окно оболочки
+3. Запасной путь — `Invoke-HmAsShellUser` (`_deelev.ps1:1104-1218`): окно оболочки
    (`GetShellWindow`) → её процесс → токен (`TOKEN_QUERY|TOKEN_DUPLICATE`) → политика
    `Test-HmShellTokenAcceptable` (`:953-967`): уровень ровно `S-1-16-8192` и тот же
    пользователь, что у установщика; иначе `'refused'` с причиной для человека (high —
@@ -275,7 +275,7 @@ CLAUDE_TERMINAL_SCRIPT, cwd: ~/HamidunStart, label: 'claude-terminal' })`, ус�
 Result `0`. Если задача доказанно ничего не запустила — сбой до `/Run` (нет системных
 программ, staging, XML, `/Create`, `/Run`), Last Result `210` или HRESULT планировщика
 (решает чистая `deelevRoute.shellFallbackAllowed`, `src/deelev-route.js`), — тот же
-редактор запускается запасным путём `winShellTokenLaunch` (`src/main.js:1828-1882`):
+редактор запускается запасным путём `winShellTokenLaunch` (`src/main.js:2229-2287`):
 отдельный `powershell.exe` с `detectSpawnEnv()` дот-сорсит вшитый `_deelev.ps1` и зовёт
 `Invoke-HmAsShellUser -NoWait` (проверенный medium-токен оболочки, см. выше), ответ —
 маркер `HMSHELL::<gate>::<code>::<причина>::END`, таймаут 30 с. Подтвердил запуск
@@ -289,7 +289,7 @@ Result `0`. Если задача доказанно ничего не запу�
 вшитый `_deelev.ps1` (путь из `winDeElevScript()` → `resourceRoot()`) и зовёт
 `New-HmSecureStagingDir -Elevated $true`, читая путь из маркера `HMSECDIR::…::END`.
 Запуск асинхронный (`spawn`, таймаут 20 с), окружение — `detectSpawnEnv()`
-(`src/main.js:2131`), а не унаследованное; stderr читается ради причины отказа
+(`src/main.js:2661`), а не унаследованное; stderr читается ради причины отказа
 (`HMSECFAIL`), которая попадает в `lastSecureDirError` и в текст ошибки шага.
 После возврата JS перепроверяет независимо: путь строго под ProgramData и
 `remoteFetch.verifyDirSecureWin(dir)` (SID-based owner + DACL, `src/remote-fetch.js:303`).
@@ -336,7 +336,7 @@ Result `0`. Если задача доказанно ничего не запу�
   найдено» перепроверяется чтением ДО записи.
 - `cursor.ps1`, `git.ps1`, `node.ps1`, `pydeps.ps1` — используют из того же файла
   только `New-HmSecureStagingDir` (Admins-only кэш докачки) и `Test-HmTrustedSigner`
-  (`cursor.ps1:90`, `git.ps1:103`, `node.ps1:147`, `pydeps.ps1:94`); сам
+  (`cursor.ps1:90`, `git.ps1:103`, `node.ps1:140`, `pydeps.ps1:95`); сам
   `Invoke-HmDeElevated` там не вызывается.
 - `claude-desktop.ps1` — берёт из `_deelev.ps1` `New-HmSecureStagingDir`
   (`claude-desktop.ps1:159`) и, с 10.10.2026, `Test-HmTrustedSigner`
@@ -359,7 +359,7 @@ Result `0`. Если задача доказанно ничего не запу�
 ### macOS: инверсия вместо де-элевации
 
 На macOS компонентные скрипты запускаются `/bin/bash -p <script>` из процесса Electron
-(`src/main.js:1314`), который сам **не** повышен, и с окружением, очищенным списком
+(`src/main.js:1397`), который сам **не** повышен, и с окружением, очищенным списком
 запретов (`installEnv.sanitizePosixEnv`: без `BASH_ENV`, `ENV`, `SHELLOPTS`+`PS4`,
 `BASH_FUNC_*`, `DYLD_*`, `NODE_OPTIONS`, `PYTHON*`, `GIT_*`, `npm_config_*` и чужих
 `HM_*`; подробности — «Строгий allowlist окружения»). Де-элевировать нечего: по
@@ -430,11 +430,11 @@ staged-копия действительно ушла, по назначению
 2. **Ни одного control- или attestation-файла в общем `%TEMP%`.** Тело обёртки —
    целиком в `-EncodedCommand`; единственный транзиентный файл `task.xml` лежит в
    `%ProgramData%\HmDeElev-<hex>\w` и удаляется сразу после `/Create`
-   (`_deelev.ps1`; `src/main.js:1809, 1948`).
+   (`_deelev.ps1`; `src/main.js:2210, 1948`).
 3. **Результат берётся только из БД планировщика или из ядра.** Признак успеха —
    поле №6 «Last Result» из `schtasks /Query … /HRESULT /FO CSV /NH /V`, а у
    запасного пути — код выхода по хэндлу процесса (`GetExitCodeProcess`); не файл и не
-   stdout бинаря (`_deelev.ps1`; `readLastResult()` в `src/main.js:1915`). Журнал
+   stdout бинаря (`_deelev.ps1`; `readLastResult()` в `src/main.js:2320`). Журнал
    ребёнка `~/.hamidun-setup/deelev/*.log` — только диагностика: elevated-код его не
    читает и не пишет.
 4. **Staging-каталог рождается атомарно защищённым.** DACL `{S-1-5-18, S-1-5-32-544}`
@@ -446,22 +446,22 @@ staged-копия действительно ушла, по назначению
    при отсутствии системного бинаря, незапертом staging, провале
    `schtasks /Create` или `/Run`, исключении. Все вызывающие проверяют
    `$null -eq $r` или `Gate -ne 'medium'` перед тем, как считать работу сделанной
-   (`vscode.ps1:190`, `extension.ps1:137-146`, `bridge.ps1:78,83,143`,
-   `handy.ps1:75,87`, `claude.ps1:101`).
+   (`vscode.ps1:228`, `extension.ps1:139-153`, `bridge.ps1:111,116,183`,
+   `handy.ps1:89,107`, `claude.ps1:81`).
 6. **Успех установки подтверждается диском, а не выводом бинаря.**
    `Test-HmExtInstalled` ищет каталог `^<extId>-\d` (`-Directory`, ordinal
    regex-match) — вывод `--list-extensions` не используется вовсе
-   (`_deelev.ps1:59`, `vscode.ps1:169, 186`, `extension.ps1:120`).
+   (`_deelev.ps1:73`, `vscode.ps1:203, 186`, `extension.ps1:122`).
 7. **Окружение привилегированных вызовов доверенное, не унаследованное — но не
    у всех вызовов.** `env: detectSpawnEnv()` получают три точки: `spawn` примитива
    staging, `execFileSync` для `schtasks /Create|/Run|/Delete` и `execFileSync` для
-   `schtasks /Query` (`src/main.js:1712, 1796, 1847`). Внутри самого примитива
+   `schtasks /Query` (`src/main.js:2120, 1796, 1847`). Внутри самого примитива
    `PATH`/`PSModulePath` перебиты литералами и восстановлены в `finally`.
    Квантор «все» здесь НЕ выполняется: в том же `winLaunchDeElevated`
    `folderFallback` запускает explorer с полностью унаследованным окружением —
    `spawn(exp, [String(folderArg)], { detached: true, stdio: 'ignore',
-   windowsHide: true })` (`src/main.js:1774`, поля `env` нет). Вторая такая точка —
-   `spawnSync('explorer.exe', [dir])` в `launchVsCodeOn` (`src/main.js:1918`, см.
+   windowsHide: true })` (`src/main.js:2192`, поля `env` нет). Вторая такая точка —
+   `spawnSync('explorer.exe', [dir])` в `launchVsCodeOn` (`src/main.js:2431`, см.
    «Риски» №1). Отдельно: `verifyDirSecureWin`, на которую опирается независимая
    перепроверка каталога, собирает окружение своим `trustedEnv()`, а не
    `detectSpawnEnv()` (`src/remote-fetch.js:324`).
@@ -471,7 +471,7 @@ staged-копия действительно ушла, по назначению
    `^Hm(DeElev|Launch)_[0-9a-fA-F]{8,64}$`, не Running/Queued, старше 60 минут;
    неизвестный возраст → не трогаем (`Test-HmTaskIsOrphan`).
 9. **Уборка staging сносит внешний каталог, а не только `w`, и обе стороны
-   fail-closed по имени.** `Remove-HmSecureStagingDir` (`_deelev.ps1:113-125`)
+   fail-closed по имени.** `Remove-HmSecureStagingDir` (`_deelev.ps1:127-139`)
    поднимается от `w` к родителю (`:118-120`) и удаляет каталог **только** если имя
    совпало с `^HmDeElev-[0-9a-f]{32}$` (`:122`), иначе выходит молча. То же в JS —
    `src/staging-paths.js`: `stagingRootOf()` поднимается к родителю **лишь когда
@@ -498,7 +498,7 @@ staged-копия действительно ушла, по назначению
     ровно против своей цели. Правильный ответ на «путь не наш» — не удалять его.
 
 11. **Удаление чужих каталогов невозможно.** `pruneStaleSecureDirs()`
-    (`src/main.js:320`) требует одновременно: имя `^HmDeElev-[0-9a-f]{32}$`,
+    (`src/main.js:409`) требует одновременно: имя `^HmDeElev-[0-9a-f]{32}$`,
     не symlink, «остыл» ≥ 6 часов и `verifyDirSecureWin(dir)` = true. Свою копию
     шаблона (с флагом `/i`) она держит намеренно — это подметание мусора ПРОШЛЫХ
     запусков, а не уборка своего staging, и защищено оно ещё тремя условиями.
@@ -519,7 +519,7 @@ staged-копия действительно ушла, по назначению
 14. **macOS: root исполняет только root-owned проверенную копию.** Каждый из трёх
     `HM_*_INSTALL_SH` сначала копирует артефакт в `mktemp -d /var/root/…`, потом
     проверяет подпись именно staged-объекта, потом ставит именно его
-    (`scripts/macos/_lib.sh:302-352`).
+    (`scripts/macos/_lib.sh:353-466`).
 13. **macOS: root-шелл стартует из стёртого окружения.** `admin_run` запускает
     `osascript` под `/usr/bin/env -i` с фиксированным `PATH`
     (`scripts/macos/_lib.sh:66`), первой строкой каждого root-скрипта идёт
@@ -594,15 +594,15 @@ staged-копия действительно ушла, по назначению
 9. **Уборка сносит только `w`.** В `%ProgramData%` остаются пустые каталоги
    `HmDeElev-*` с правами «только администраторы» — сам обычный пользователь удалить
    их не может. Накопления, однако, не происходит: их подметает
-   `pruneStaleSecureDirs()` (`src/main.js:320-343`) — имя
+   `pruneStaleSecureDirs()` (`src/main.js:409-432`) — имя
    `^HmDeElev-[0-9a-f]{32}$` (`:325`), не symlink (`:329`), ничего не менялось ≥ 6
    часов (`:323, :336`), `verifyDirSecureWin(dir)` = true (`:337`) →
    `fs.rmSync(dir, { recursive: true, force: true })` (`:338`), и вызывается она на
-   КАЖДОМ запуске установщика (`src/main.js:371`). Пустой каталог с
+   КАЖДОМ запуске установщика (`src/main.js:460`). Пустой каталог с
    owner = `S-1-5-32-544` и ACE только `{S-1-5-18, S-1-5-32-544}` эту проверку
    проходит по построению (`src/remote-fetch.js:309, 318-322`). Не подметётся лишь
    каталог, рождённый при `-Elevated $false`: там в DACL намеренно добавлен SID
-   пользователя (`_deelev.ps1:156-165`), и `verifyDirSecureWin` его отвергнет.
+   пользователя (`_deelev.ps1:170-179`), и `verifyDirSecureWin` его отвергнет.
    Цена нарушения инварианта — не «мусор до переустановки Windows», а до шести
    часов и одного запуска установщика.
 10. **Проверка границы отвечает удалением.** Ветка «путь вне `%ProgramData%`»,
@@ -683,47 +683,47 @@ staged-копия действительно ушла, по назначению
   установок мог остаться в `%LOCALAPPDATA%\HamidunBridge` — он никем не исполняется и
   уходит вместе с каталогом при удалении компонента.
 - **`folderFallback` тоже опирается на поведение explorer**, а не на проверку:
-  комментарий в `src/main.js:1769` утверждает, что explorer наследует токен
+  комментарий в `src/main.js:2187` утверждает, что explorer наследует токен
   оболочки (medium). Кодом это не подтверждается — гейта на уровень там нет. Мера
   предосторожности другая: в fallback открывается **только папка**, exe не
   передаётся никогда.
 - **`Get-HmSelfIntegrity` знает про low, обёртка — нет.** Родитель с уровнем `low`
-  считается неэлевированным (`$elevated = $false`, `_deelev.ps1:554`), а гейт в
-  обёртке пропускает только `S-1-16-8192` (`_deelev.ps1:572`). Асимметрия в коде на
+  считается неэлевированным (`$elevated = $false`, `_deelev.ps1:770`), а гейт в
+  обёртке пропускает только `S-1-16-8192` (`_deelev.ps1:777`). Асимметрия в коде на
   этом и заканчивается: на уровень целостности самой обёртки уровень родителя не
   влияет. Обёртку запускает планировщик по принципалу задачи —
   `<LogonType>InteractiveToken</LogonType>` + `<RunLevel>LeastPrivilege</RunLevel>`
-  (`_deelev.ps1:604-605`), то есть отфильтрованным токеном интерактивного
+  (`_deelev.ps1:807-808`), то есть отфильтрованным токеном интерактивного
   пользователя, а это medium. Гейт увидит `S-1-16-8192` и пропустит →
   `Gate='medium'`. Второй возможный исход при low-родителе — `$null`: low-процесс не
   пишет в `%ProgramData%`, `New-HmSecureStagingDir` отдаёт `$null` — но не через
-  ветку «не удалось создать каталог даже фолбэком» (`_deelev.ps1:196-197`), а через
-  **внешний catch функции** (`_deelev.ps1:350-356`, текст `HMSECFAIL: <сообщение
+  ветку «не удалось создать каталог даже фолбэком» (`_deelev.ps1:210-211`), а через
+  **внешний catch функции** (`_deelev.ps1:364-370`, текст `HMSECFAIL: <сообщение
   исключения>`): `[void][System.IO.Directory]::CreateDirectory($dir)` на `:194` не
   обёрнут в try/catch, а отказ в доступе бросает `UnauthorizedAccessException`, и в
   PowerShell исключение .NET-метода терминирующее. Ветка `:196-197` достижима лишь
   тогда, когда `CreateDirectory` вернулась БЕЗ исключения, а каталога нет. Дальше
   примитив выходит на `:584`. `Gate='refused'` из-за
   low-родителя не получится ни на одной ветке: `'refused'` присваивается
-  ИСКЛЮЧИТЕЛЬНО при Last Result = 210 (`_deelev.ps1:672`), а 210 отдаёт обёртка,
+  ИСКЛЮЧИТЕЛЬНО при Last Result = 210 (`_deelev.ps1:880`), а 210 отдаёт обёртка,
   чей уровень от родителя не зависит.
 - **XML в `winLaunchDeElevated` не содержит `<RegistrationInfo><Date>`** — в отличие
   от XML в `_deelev.ps1`. Возраст задач `HmLaunch_*` определяется по `CreationTime`
-  файла в `System32\Tasks`; это прямо оговорено в комментарии `_deelev.ps1:455-457`.
+  файла в `System32\Tasks`; это прямо оговорено в комментарии `_deelev.ps1:568-570`.
 - **Полного E2E de-elevation-теста на реальной elevated-Windows нет** — но не потому,
   что round-trip гоняется только вручную. Отдельный workflow `staging-primitive.yml`
   действительно проверяет **только** `New-HmSecureStagingDir`, а не весь примитив.
   Однако round-trip самого `Invoke-HmDeElevated` (с реальной задачей планировщика,
-  `test/run-tests.js:1150`) входит в **обязательный** CI-гейт: `unit-tests.yml`,
+  `test/run-tests.js:1190`) входит в **обязательный** CI-гейт: `unit-tests.yml`,
   джоба `unit-tests-windows` на `windows-latest`, шаг «Юнит-тесты — ОБЯЗАТЕЛЬНЫЙ гейт
   (без continue-on-error)» гоняет `npm test` (`package.json:27` →
   `node test/run-tests.js`) на push и pull_request в `main`, а `gate` объявлен
   единственной обязательной проверкой ветки. Тест стоит под
-  `if (powershellAvailable())` (`test/run-tests.js:1149`), а `powershellAvailable()`
+  `if (powershellAvailable())` (`test/run-tests.js:1189`), а `powershellAvailable()`
   (`:2167-2172`) истинна на любом win32 с рабочим `powershell.exe` — то есть и на
   раннере. Оговорка: джоба идёт только при `changes.outputs.code == 'true'`, поэтому
   PR, правящий одни документы, её не поднимает. Слабое место в другом: тест
-  принимает `$null` и `refused` как валидный исход (`test/run-tests.js:1162-1169`),
+  принимает `$null` и `refused` как валидный исход (`test/run-tests.js:1202-1209`),
   и на машине, где задача не создаётся или не даёт medium, прогон зелёный без
   фактической де-элевации.
 - Дедлайны — 630 с у примитива (при `ExecutionTimeLimit` 10 минут), 30 с у запуска
@@ -735,17 +735,17 @@ staged-копия действительно ушла, по назначению
 ## Риски и открытые вопросы
 
 1. **`launchVsCodeOn` запускает `explorer.exe` по короткому имени.**
-   `src/main.js:1918`: `spawnSync('explorer.exe', [dir], { stdio: 'ignore', timeout: 10000 })`
+   `src/main.js:2431`: `spawnSync('explorer.exe', [dir], { stdio: 'ignore', timeout: 10000 })`
    — без абсолютного пути и без `detectSpawnEnv()`, то есть с унаследованным `PATH`
    в elevated-процессе. Соседний `folderFallback` в том же файле
-   (`src/main.js:1770-1778`) делает обратное только в части пути:
+   (`src/main.js:2188-2196`) делает обратное только в части пути:
    `path.join(sysRoot, 'explorer.exe')` — абсолютный, но `env` там тоже нет
-   (`src/main.js:1774`, см. инвариант 7). Ветка достижима, когда
+   (`src/main.js:2192`, см. инвариант 7). Ветка достижима, когда
    не найден ни `Code.exe`, ни `Cursor.exe`. Тест «P0-D/P1-1 launch (main.js): …»
    проверяет абсолютный explorer только внутри среза `winLaunchDeElevated` (до
    комментария «Открыть VS Code НА ПАПКЕ»), а срез `lvh` для `launchVsCodeOn`
    ограничен 900 символами от начала функции — эта строка в него не попадает.
-2. **Копия vsix кладётся в общий `%TEMP%`** (`vscode.ps1:144`) — с случайным GUID в
+2. **Копия vsix кладётся в общий `%TEMP%`** (`vscode.ps1:178`) — с случайным GUID в
    имени и проверкой читаемости, но это единственное место фичи, где артефакт
    покидает защищённый каталог. Комментарий обосновывает это тем, что vsix и так
    исполняется редактором при medium; отдельной проверки того, что скопированный

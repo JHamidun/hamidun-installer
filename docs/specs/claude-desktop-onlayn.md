@@ -3,21 +3,21 @@
 <!-- spec-id: claude-desktop-onlayn -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:264-283`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:113-125`, `src/main.js:2638-2652`, `src/main.js:571-575`, `src/install-receipts.js:33-37`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
+- **Код:** `components.json:284-305`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:127-139`, `src/main.js:3188-3193`, `src/main.js:682-686`, `src/install-receipts.js:34-58`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
 - **Тесты:** «components: claude-desktop + chatgpt-desktop опциональны (default:false), online, platforms win32+darwin», «claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпись (chain→LocalMachine\\Root + exact O= + EKU) ДО запуска; exit 120; идемпотентно; cleanup», «claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl (require, fail-closed) + Team ID + bundle id ДО ditto; curl https; exit 120», «grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи», «6b: нет spoofable substring-пина подписи + есть проверяемая криптоцепочка (все 4 desktop-скрипта)», «main.js: detectComponents знает claude-desktop и chatgpt-desktop (идемпотентность)», «claude-desktop.ps1: вердикт через Wait-HmClaudeDesktopVerdict (факт завершения процесса), гоночный опрос 90 c убран, вечного ожидания нет», «claude-desktop.ps1 (прогон PS 5.1): вердикт ждёт живой процесс, НЕ ждёт вечно, успех — сразу по маркеру», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
 
 ## Что обещает человеку
 
 Галочка ставит нативное приложение Claude отдельным окном на рабочем столе. Приложение
 не вшито в установщик, а качается во время установки с сайта Anthropic — поэтому по
-умолчанию галочка снята (`components.json:274` `"default": false`), а в карточке стоит
-пометка «скачивается во время установки» (`components.json:282`). Компонент ни от чего
-не зависит (`"requires": []`, `components.json:275`) и доступен только на Windows и
-macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
+умолчанию галочка снята (`components.json:295` `"default": false`), а в карточке стоит
+пометка «скачивается во время установки» (`components.json:304`). Компонент ни от чего
+не зависит (`"requires": []`, `components.json:297`) и доступен только на Windows и
+macOS (`"platforms": ["win32","darwin"]`, `components.json:300-303`).
 
 Обещание, за которое можно спросить: чужой установщик не будет запущен, пока его
 подпись не подтверждена. На Windows проверяется Authenticode — цепочка сертификатов
-до корня в машинном сторе, точное поле `O=Anthropic, PBC` и EKU Code Signing (общая функция `Test-HmTrustedSigner`, `scripts/windows/_deelev.ps1:465-544`; вызывается из `scripts/windows/claude-desktop.ps1:206`). На macOS — Developer ID с Team ID
+до корня в машинном сторе, точное поле `O=Anthropic, PBC` и EKU Code Signing (общая функция `Test-HmTrustedSigner`, `scripts/windows/_deelev.ps1:467-548`; вызывается из `scripts/windows/claude-desktop.ps1:206`). На macOS — Developer ID с Team ID
 `Q6L2SF6YDW`, bundle id `com.anthropic.claudefordesktop` и обязательная нотаризация
 (`scripts/macos/claude-desktop.sh:88-111`). Любая невыполненная проверка означает, что
 компонент будет пропущен, а не поставлен «на авось». Второе обещание: пропуск не
@@ -27,13 +27,13 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 ## Как работает
 
 Общий каркас одинаков на обеих платформах: `main.js` находит скрипт по имени
-компонента — `scripts/<windows|macos>/<id>.<ps1|sh>` (`src/main.js:571-575`), сверяет,
-что компонент разрешён на этой платформе (`src/main.js:917-921`), и что файл скрипта
-существует (`src/main.js:923-926`). Код возврата 120 разбирается как «осознанно
-пропущен»: `EXIT_SKIP = 120` и `isSkipExit` (`src/install-receipts.js:33-34`),
-`const skipped = receipts.isSkipExit(code)` (`src/main.js:1332`); при таком коде маркер
+компонента — `scripts/<windows|macos>/<id>.<ps1|sh>` (`src/main.js:682-686`), сверяет,
+что компонент разрешён на этой платформе (`src/main.js:1056-1060`), и что файл скрипта
+существует (`src/main.js:1065-1068`). Код возврата 120 разбирается как «осознанно
+пропущен»: `EXIT_SKIP = 120` и `isSkipExit` (`src/install-receipts.js:34-35`),
+`const skipped = receipts.isSkipExit(code)` (`src/main.js:1549`); при таком коде маркер
 установки и запись в манифест НЕ пишутся (`shouldRecordInstall`,
-`src/install-receipts.js:35-37`).
+`src/install-receipts.js:36-58`).
 
 Компонент не значится в реестре докачки: тест «lite: тяжёлые компоненты авто-remote по
 реестру; uv bundled-only» проверяет, что для `claude-desktop` записи в реестре нет —
@@ -57,7 +57,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 6. `New-HmSecureStagingDir -Elevated $true` (строка 211) создаёт свежий каталог
    `%ProgramData%\HmDeElev-<32 hex>` с владельцем Administrators и DACL
    {SYSTEM, Administrators}, protection on, и возвращает вложенный рабочий подкаталог
-   `w` (`scripts/windows/_deelev.ps1:293`). Вернулся `$null` → `exit 120` (212-215).
+   `w` (`scripts/windows/_deelev.ps1:307`). Вернулся `$null` → `exit 120` (212-215).
 7. Скачивание (строки 220-236): включается TLS 1.2, URL проверяется на префикс
    `https://`, `Invoke-WebRequest -OutFile $installer -MaximumRedirection 5
    -TimeoutSec 600` пишет файл в `$cache\ClaudeSetup.exe` (строка 217). Исключение или
@@ -71,12 +71,12 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 9. Гейт подписи (строки 204-210) — `Test-HmTrustedSigner -Path $installer
    -ExpectedOrg $PUBLISHER_O -ExpectedThumbprint $LEAF_THUMBPRINT`. Своей копии проверки в
    скрипте больше нет (до 10.10.2026 здесь жила локальная `Test-HmSignerTrusted`): гейт —
-   общая функция примитива (`scripts/windows/_deelev.ps1:465-544`). Внутри по порядку:
+   общая функция примитива (`scripts/windows/_deelev.ps1:467-548`). Внутри по порядку:
    `Get-AuthenticodeSignature` со `Status -eq 'Valid'`; цепочка листа через
-   `Get-HmSignerChainRoot` (`_deelev.ps1:399-429`: `IgnoreNotTimeValid`, `ApplicationPolicy`
+   `Get-HmSignerChainRoot` (`_deelev.ps1:401-431`: `IgnoreNotTimeValid`, `ApplicationPolicy`
    Code Signing, `RevocationMode = NoCheck`; срок КАЖДОГО звена считается отдельно —
    `OutOfWindow`); отпечаток корня обязан лежать в списке `Get-HmMachineRootThumbprints`
-   (`_deelev.ps1:373-381`, только `StoreLocation::LocalMachine`); для цепочки со звеном
+   (`_deelev.ps1:375-383`, только `StoreLocation::LocalMachine`); для цепочки со звеном
    вне срока — метка времени, чья цепочка (EKU Time Stamping) тоже кончается в
    `LocalMachine\Root`; EKU `1.3.6.1.5.5.7.3.3`; разбор RDN `O=` из
    `SubjectName.Format($true)` со снятием кавычек, которые .NET ставит вокруг значения с
@@ -95,7 +95,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 13. `finally` (251-259): ограниченное ожидание процесса `Wait-Process -Timeout 120`,
     затем `Remove-HmSecureStagingDir -Path $cache`. Помощник поднимается от подкаталога
     `w` к внешнему каталогу и удаляет только имя строго вида `HmDeElev-<32 hex>`
-    (`scripts/windows/_deelev.ps1:113-125`).
+    (`scripts/windows/_deelev.ps1:127-139`).
 
 **macOS (`scripts/macos/claude-desktop.sh`).** Путь другой: элевации нет вообще,
 приложение ставится в `~/Applications` под токеном пользователя (строки 41-42).
@@ -128,15 +128,15 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 `/darwin/universal/dmg/`.
 
 **Идемпотентность в UI.** Независимо от скриптов, `main.js` сам определяет, установлено
-ли приложение, для отрисовки карточки (`src/main.js:2638-2652`): на Windows — те же два
+ли приложение, для отрисовки карточки (`src/main.js:3188-3193`): на Windows — те же два
 пути к `claude.exe`, плюс подкаталог вида `Claude-<цифра>` внутри
-`%LOCALAPPDATA%\Packages` (`dirHasChildStarting`, `src/main.js:2408-2414`); на macOS —
+`%LOCALAPPDATA%\Packages` (`dirHasChildStarting`, `src/main.js:2935-2941`); на macOS —
 `/Applications/Claude.app` и `~/Applications/Claude.app`.
 
 Третья проверка — подкаталог внутри `AnthropicClaude` — в коде есть
-(`dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-')`, `src/main.js:2646`),
+(`dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-')`, `src/main.js:3188`),
 но она **мертва**: `dirHasChildStarting` дописывает к переданному префиксу собственный
-`-\d` (`src/main.js:2410`), поэтому из `app-` получается регулярка `^app--\d` с двойным
+`-\d` (`src/main.js:2937`), поэтому из `app-` получается регулярка `^app--\d` с двойным
 дефисом. Реальный Squirrel-каталог `app-0.13.0` под неё не подходит; совпало бы только
 имя вида `app--1` (воспроизведено запуском той же строки в node). Ветка с префиксом
 `Claude` от этого не страдает — там префикс без дефиса, и регулярка выходит `^Claude-\d`.
@@ -148,10 +148,10 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    `assertOrder` в тестах.
 2. **Доверие подписи не строится на подстроке.** Требуются одновременно: цепочка,
    корень которой лежит в `LocalMachine\Root`, точное значение RDN `O=` = `Anthropic,
-   PBC` и EKU Code Signing (общая функция `scripts/windows/_deelev.ps1:465-544`, вызов — `scripts/windows/claude-desktop.ps1:206`). Корни из `CurrentUser\Root` не принимаются: список машинных корней читает только `Get-HmMachineRootThumbprints` (`scripts/windows/_deelev.ps1:373-381`) и только из `LocalMachine\Root`.
+   PBC` и EKU Code Signing (общая функция `scripts/windows/_deelev.ps1:467-548`, вызов — `scripts/windows/claude-desktop.ps1:206`). Корни из `CurrentUser\Root` не принимаются: список машинных корней читает только `Get-HmMachineRootThumbprints` (`scripts/windows/_deelev.ps1:375-383`) и только из `LocalMachine\Root`.
 3. **Загрузка идёт не в user-writable каталог.** Файл лежит в
    `$cache\ClaudeSetup.exe`, где `$cache` — результат `New-HmSecureStagingDir`
-   (`scripts/windows/claude-desktop.ps1:211,217`); ни одного `-OutFile` в `%TEMP%`/
+   (`scripts/windows/claude-desktop.ps1:159,165`); ни одного `-OutFile` в `%TEMP%`/
    `%TMP%` в файле нет.
 4. **Установщик запускается из того же защищённого каталога.**
    `Start-Process -FilePath $installer -WorkingDirectory $cache` (`scripts/windows/claude-desktop.ps1:224`).
@@ -162,11 +162,11 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    (`scripts/windows/claude-desktop.ps1:234-236`).
 7. **Любой отказ — graceful skip 120, а не ошибка и не тихий успех.** Все ветки отказа
    в обоих скриптах выходят с 120; `main.js` трактует 120 как «пропущен» и не пишет
-   маркер установки (`src/main.js:1332`, `src/install-receipts.js:33-37`).
+   маркер установки (`src/main.js:1549`, `src/install-receipts.js:34-58`).
 8. **Защищённый кэш убирается ровно одним помощником.** `Remove-HmSecureStagingDir` в
    `finally` (`scripts/windows/claude-desktop.ps1:251,258`), который поднимается от `w` к
    внешнему каталогу и удаляет только имя вида `HmDeElev-<32 hex>`
-   (`scripts/windows/_deelev.ps1:117-123`).
+   (`scripts/windows/_deelev.ps1:131-137`).
 9. **macOS: отсутствие инструмента проверки — отказ, а не пропуск проверки.**
    `[ ! -x "$CODESIGN" ]` и `[ ! -x "$SPCTL" ]` возвращают 1 из `verify_desktop_app`
    (`scripts/macos/claude-desktop.sh:91-96`); `spctl` вызывается безусловно (107).
@@ -175,17 +175,17 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
     (`scripts/macos/claude-desktop.sh:125-135`).
 11. **Уже установленное приложение не переустанавливается и ничего не качает.**
     `Test-ClaudeDesktopInstalled` → `exit 0` до всех сетевых действий
-    (`scripts/windows/claude-desktop.ps1:186-189`); аналогично `-d` проверки на macOS
+    (`scripts/windows/claude-desktop.ps1:134-137`); аналогично `-d` проверки на macOS
     (`scripts/macos/claude-desktop.sh:45-48`).
 12. **Dry-run не создаёт защищённый каталог и не выходит в сеть.** Ветка `$DRY`
-    стоит выше создания кэша (`scripts/windows/claude-desktop.ps1:195-198`), ветка
+    стоит выше создания кэша (`scripts/windows/claude-desktop.ps1:143-146`), ветка
     `$DRY` на macOS — выше `mktemp` (`scripts/macos/claude-desktop.sh:50-53`).
 13. **Компонент не показывается и не запускается на неподдерживаемой платформе.**
-    `platforms: ["win32","darwin"]` (`components.json:278-281`) + гейт
-    `componentShownOnPlatform` перед запуском скрипта (`src/main.js:917-921`).
+    `platforms: ["win32","darwin"]` (`components.json:300-303`) + гейт
+    `componentShownOnPlatform` перед запуском скрипта (`src/main.js:1056-1060`).
 14. **Кнопки «Удалить» у компонента нет.** `REMOVABLE` содержит только
     `course, uv, mascot, bridge` (`src/renderer/app.js:43`), и кнопка рисуется только
-    для членов этого множества (`src/renderer/app.js:513`).
+    для членов этого множества (`src/renderer/app.js:519`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -219,9 +219,9 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 12. Сухой прогон перестаёт быть сухим: создаёт каталоги в `ProgramData` и тянет файл из
     сети — то есть тестовый режим меняет систему.
 13. На Linux резолвер путей выбирает каталог по одному признаку `IS_WIN`
-    (`const dir = IS_WIN ? 'windows' : 'macos'`, `src/main.js:572`), то есть на любой
+    (`const dir = IS_WIN ? 'windows' : 'macos'`, `src/main.js:683`), то есть на любой
     не-Windows платформе берёт `macos`. Путь разрешится в существующий
-    `scripts/macos/claude-desktop.sh`, проверка `fs.existsSync` (`src/main.js:924`)
+    `scripts/macos/claude-desktop.sh`, проверка `fs.existsSync` (`src/main.js:1066`)
     пройдёт — и bash-скрипт будет реально запущен вместо того, чтобы компонент просто не
     показывался. `Script not found` при этом не появится; сломается позже и невнятно
     (например, на отсутствующем `hdiutil`).
@@ -232,41 +232,41 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 
 - Компонент только **ставит**. Обновления и удаления нет: авто-удаление чужого
   приложения не поддерживается сознательно (комментарий
-  `scripts/windows/claude-desktop.ps1:47-48`, `scripts/macos/claude-desktop.sh:20`), и
+  `scripts/windows/claude-desktop.ps1:49-50`, `scripts/macos/claude-desktop.sh:20`), и
   в `REMOVABLE` его нет (`src/renderer/app.js:43`).
 - Если приложение уже стоит, скрипт **не проверяет его версию и не обновляет** — просто
   выходит с 0.
-- Linux не поддерживается (`components.json:278-281`).
+- Linux не поддерживается (`components.json:300-303`).
 - SHA-пиннинг бинаря **не применяется намеренно**: версии десктопа меняются, вшитый sha
   устарел бы (`scripts/windows/claude-desktop.ps1:18-19`,
   `scripts/macos/claude-desktop.sh:9-10`). Гарантия целостности здесь — подпись.
 - Пин отпечатка leaf-сертификата на Windows **выключен по умолчанию**:
-  `$LEAF_THUMBPRINT = ''` (`scripts/windows/claude-desktop.ps1:70`).
+  `$LEAF_THUMBPRINT = ''` (`scripts/windows/claude-desktop.ps1:72`).
 - Windows: запуск идёт **элевейтед**, де-элевации нет — это осознанная уступка,
   описанная в комментарии (строки 32-41). Остаточный риск (доверенный установщик сам
   распаковывает бутстрап в пользовательский `%TEMP%`) принят и вынесен в
   `THREAT-MODEL.md`.
 - Windows: отзыв сертификата отдельно не проверяется —
-  `ChainPolicy.RevocationMode = NoCheck` (`scripts/windows/_deelev.ps1:407`, `Get-HmSignerChainRoot`), с расчётом на то, что отзыв уже
+  `ChainPolicy.RevocationMode = NoCheck` (`scripts/windows/_deelev.ps1:409`, `Get-HmSignerChainRoot`), с расчётом на то, что отзыв уже
   проверил WinVerifyTrust при `Status = Valid`.
 - macOS: установка идёт в `~/Applications`, а не в `/Applications` (строка 41), то есть
   приложение ставится только текущему пользователю.
 - Компонент не логинит в аккаунт, не настраивает приложение и не связан с панелью
-  Claude в VS Code (`components.json:272-273`).
+  Claude в VS Code (`components.json:292-293`).
 - Размер заранее неизвестен: у компонента нет `sizeBytes`, только текстовая пометка
-  (`components.json:282`, `tools/sync-sizes.js:141-142`).
+  (`components.json:304`, `tools/sync-sizes.js:141-142`).
 - Компонент отсутствует в реестре докачки — его файл не проходит через
   sha-проверенный конвейер `main.js`, скрипт качает сам.
 
 ## Риски и открытые вопросы
 
-1. **`THREAT-MODEL.md:85` расходится с кодом.** Там написано, что в
+1. **`THREAT-MODEL.md:87` расходится с кодом.** Там написано, что в
    `claude-desktop.ps1` есть «пин отпечатка leaf». В коде пин по умолчанию выключен:
    `$LEAF_THUMBPRINT = ''` (`scripts/windows/claude-desktop.ps1:72`), а комментарий 55-60 прямо помечает его как опциональное усиление. Читатель модели угроз
    пересчитает защиту на один вентиль больше, чем есть.
 2. **Две копии проверки подписи (закрыто 10.10.2026).** Раньше `claude-desktop.ps1` и
    `chatgpt-desktop.ps1` объявляли каждый свою `Test-HmSignerTrusted`, а
-   `THREAT-MODEL.md:83-84` называл гейтом `Test-HmTrustedSigner` из `_deelev.ps1`, которую
+   `THREAT-MODEL.md:85-86` называл гейтом `Test-HmTrustedSigner` из `_deelev.ps1`, которую
    скрипт не вызывал. Копии разошлись с общей функцией и держали два дефекта: цепочка
    «на сегодня» отвергала подписанта с истёкшим коротким листом, а пин `O=Anthropic, PBC`
    не совпадал НИКОГДА — .NET берёт значение с запятой в кавычки, и сравнивалось
@@ -279,14 +279,14 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    действительной подписи Anthropic установщик реально запускается (повышенно, из
    защищённого кэша — как и задумано в шапке скрипта).
 3. **Два незакрытых TODO-verify в самих скриптах.**
-   `scripts/windows/claude-desktop.ps1:53-58` — снять и вписать реальный отпечаток
+   `scripts/windows/claude-desktop.ps1:55-60` — снять и вписать реальный отпечаток
    leaf-серта; `scripts/macos/claude-desktop.sh:26-29` — подтвердить Team ID и bundle
    id на реальной desktop-сборке. Оба помечены как fail-closed при несовпадении, то
    есть цена ошибки — тихий пропуск компонента, а не небезопасная установка.
-4. **Детект в UI и детект в скрипте не совпадают.** `scripts/windows/claude-desktop.ps1:153-155`
-   спрашивает `Get-AppxPackage`, а `src/main.js:2647` ищет подкаталог
+4. **Детект в UI и детект в скрипте не совпадают.** `scripts/windows/claude-desktop.ps1:101-103`
+   спрашивает `Get-AppxPackage`, а `src/main.js:3188` ищет подкаталог
    `%LOCALAPPDATA%\Packages\Claude-<цифра>`: регулярка `dirHasChildStarting`
-   (`src/main.js:2410`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
+   (`src/main.js:2937`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
    каталога MSIX-пакета с этим шаблоном — **кодом не подтверждено**; если нет, карточка
    может показывать «не установлено» там, где скрипт корректно выйдет с 0.
 5. **Развилка архитектуры на Windows читает только `PROCESSOR_ARCHITECTURE`** (строка 140). Переменная `PROCESSOR_ARCHITEW6432` в скрипте не используется, хотя в
@@ -304,8 +304,8 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    нет.
 8. **Идемпотентный выход с кодом 0 приводит к записи маркера установки.**
    `shouldRecordInstall` возвращает true при `code === 0`
-   (`src/install-receipts.js:35-37`), а скрипт отдаёт 0 и в случае «уже стоит»
-   (`scripts/windows/claude-desktop.ps1:188`). То есть квитанция пишется для
+   (`src/install-receipts.js:36-58`), а скрипт отдаёт 0 и в случае «уже стоит»
+   (`scripts/windows/claude-desktop.ps1:136`). То есть квитанция пишется для
    приложения, которое установщик не ставил. Сегодня это безвредно, потому что
    компонента нет в `REMOVABLE`; при добавлении его туда квитанция стала бы основанием
    для удаления чужого приложения.
@@ -315,5 +315,5 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
    проверки тесты не заметят.
 10. **`$DRY = [bool]$env:HM_DRY_RUN`** (строка 62) включает сухой прогон по непустоте
     значения. Это единый паттерн всех Windows-скриптов проекта (`bridge.ps1:25`,
-    `cursor.ps1:26`, `node.ps1:91` и другие), а не особенность этого файла, но значение
+    `cursor.ps1:26`, `node.ps1:84` и другие), а не особенность этого файла, но значение
     `HM_DRY_RUN=0` сухой прогон **не** выключит.

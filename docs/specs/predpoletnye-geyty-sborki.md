@@ -297,7 +297,7 @@ Windows-ветки `build-lite.js` стоит `tools/verify-signature.js`: `Get-
 - **Не проверяет, что пак работает.** Связность считает `tools/audit-pack.js`, и он —
   чисто **статический** анализатор: читает `vendor/config-pack/.claude/settings.json` и
   проверяет ФОРМУ объявлений, ничего не запуская (в файле подключены только `fs` и
-  `path`, ни `execFileSync`, ни `spawn` в нём нет). Секция MCP (`audit-pack.js:34-95`)
+  `path`, ни `execFileSync`, ни `spawn` в нём нет). Секция MCP (`audit-pack.js:79-140`)
   делает ровно три вещи: считает, сколько активных серверов стартуют через npx
   (`isNpx`, строки 45-48, применение 49) и кладёт это в `notes` (52-55); ищет
   захардкоженные пути конкретной машины регуляркой `HARDCODED` (строка 65, применение
@@ -335,11 +335,11 @@ Windows-ветки `build-lite.js` стоит `tools/verify-signature.js`: `Get-
 - **Накопление версий в кеше не блокирует никогда** — максимум `warn`; без дублей гейт
   даёт `ok`, при недоступном модуле или кеше — `skip`, `fail` не возвращается.
 - **Потолок makensis — только Windows и только офлайн-издание.** У lite свой size-assert
-  в `tools/build-lite.js`, у mac `.dmg` собирает `hdiutil`, и `release-check.js:325-329`
+  в `tools/build-lite.js`, у mac `.dmg` собирает `hdiutil`, и `release-check.js:356-360`
   явно отказывается судить о потолке вне win32.
 - **`assert-clean.js` подключён только к npm-скриптам** `dist`, `dist:win`, `dist:mac`,
   но не к `beforePack`.
-- **`assert-clean.js` не проверяет `configRepoBranch`**, хотя `build-lite.js:326` его
+- **`assert-clean.js` не проверяет `configRepoBranch`**, хотя `build-lite.js:339` его
   тоже переписывает. Сейчас он пишет туда `'main'` — то же значение, что в коммите, —
   поэтому остаток невидим; при смене ветки по умолчанию это перестанет быть верным.
 - **Отсутствие правила `extraResources` → `vendor` у `build.mac` ошибкой не считается**
