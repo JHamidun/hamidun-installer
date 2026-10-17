@@ -3,7 +3,7 @@
 <!-- spec-id: claude-desktop-onlayn -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:284-305`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:127-139`, `src/main.js:3188-3193`, `src/main.js:682-686`, `src/install-receipts.js:34-58`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
+- **Код:** `components.json:284-305`, `scripts/windows/claude-desktop.ps1`, `scripts/macos/claude-desktop.sh`, `scripts/windows/_deelev.ps1:127-139`, `src/main.js:3198-3203`, `src/main.js:682-686`, `src/install-receipts.js:34-58`, `src/renderer/app.js:43`, `mac-arch-support.json:135-140`, `tools/sync-sizes.js:141-142`
 - **Тесты:** «components: claude-desktop + chatgpt-desktop опциональны (default:false), online, platforms win32+darwin», «claude-desktop.ps1: secure-cache (НЕ %TEMP%); НАДЁЖНАЯ подпись (chain→LocalMachine\\Root + exact O= + EKU) ДО запуска; exit 120; идемпотентно; cleanup», «claude-desktop.sh: абсолютные /usr/bin/codesign + /usr/sbin/spctl (require, fail-closed) + Team ID + bundle id ДО ditto; curl https; exit 120», «grep-инвариант: нет download-в-user-writable + нет запуска бинаря без проверки подписи», «6b: нет spoofable substring-пина подписи + есть проверяемая криптоцепочка (все 4 desktop-скрипта)», «main.js: detectComponents знает claude-desktop и chatgpt-desktop (идемпотентность)», «claude-desktop.ps1: вердикт через Wait-HmClaudeDesktopVerdict (факт завершения процесса), гоночный опрос 90 c убран, вечного ожидания нет», «claude-desktop.ps1 (прогон PS 5.1): вердикт ждёт живой процесс, НЕ ждёт вечно, успех — сразу по маркеру», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
 
 ## Что обещает человеку
@@ -128,15 +128,15 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:300-303`).
 `/darwin/universal/dmg/`.
 
 **Идемпотентность в UI.** Независимо от скриптов, `main.js` сам определяет, установлено
-ли приложение, для отрисовки карточки (`src/main.js:3188-3193`): на Windows — те же два
+ли приложение, для отрисовки карточки (`src/main.js:3198-3203`): на Windows — те же два
 пути к `claude.exe`, плюс подкаталог вида `Claude-<цифра>` внутри
-`%LOCALAPPDATA%\Packages` (`dirHasChildStarting`, `src/main.js:2935-2941`); на macOS —
+`%LOCALAPPDATA%\Packages` (`dirHasChildStarting`, `src/main.js:2945-2951`); на macOS —
 `/Applications/Claude.app` и `~/Applications/Claude.app`.
 
 Третья проверка — подкаталог внутри `AnthropicClaude` — в коде есть
-(`dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-')`, `src/main.js:3188`),
+(`dirHasChildStarting(path.join(la, 'AnthropicClaude'), 'app-')`, `src/main.js:3198`),
 но она **мертва**: `dirHasChildStarting` дописывает к переданному префиксу собственный
-`-\d` (`src/main.js:2937`), поэтому из `app-` получается регулярка `^app--\d` с двойным
+`-\d` (`src/main.js:2947`), поэтому из `app-` получается регулярка `^app--\d` с двойным
 дефисом. Реальный Squirrel-каталог `app-0.13.0` под неё не подходит; совпало бы только
 имя вида `app--1` (воспроизведено запуском той же строки в node). Ветка с префиксом
 `Claude` от этого не страдает — там префикс без дефиса, и регулярка выходит `^Claude-\d`.
@@ -284,9 +284,9 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:300-303`).
    id на реальной desktop-сборке. Оба помечены как fail-closed при несовпадении, то
    есть цена ошибки — тихий пропуск компонента, а не небезопасная установка.
 4. **Детект в UI и детект в скрипте не совпадают.** `scripts/windows/claude-desktop.ps1:101-103`
-   спрашивает `Get-AppxPackage`, а `src/main.js:3188` ищет подкаталог
+   спрашивает `Get-AppxPackage`, а `src/main.js:3198` ищет подкаталог
    `%LOCALAPPDATA%\Packages\Claude-<цифра>`: регулярка `dirHasChildStarting`
-   (`src/main.js:2937`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
+   (`src/main.js:2947`) требует дефис и цифру после префикса. Совпадёт ли реальное имя
    каталога MSIX-пакета с этим шаблоном — **кодом не подтверждено**; если нет, карточка
    может показывать «не установлено» там, где скрипт корректно выйдет с 0.
 5. **Развилка архитектуры на Windows читает только `PROCESSOR_ARCHITECTURE`** (строка 140). Переменная `PROCESSOR_ARCHITEW6432` в скрипте не используется, хотя в

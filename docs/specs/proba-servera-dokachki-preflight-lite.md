@@ -3,7 +3,7 @@
 <!-- spec-id: proba-servera-dokachki-preflight-lite -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:793-817`, `src/main.js:751-774`, `src/main.js:122-125`, `src/main.js:639-641`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:81`, `src/renderer/app.js:163-216`, `src/renderer/app.js:1311-1319`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:479-496`, `src/remote-fetch.js:571-595`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
+- **Код:** `src/main.js:793-817`, `src/main.js:751-774`, `src/main.js:122-125`, `src/main.js:639-641`, `src/preload.js:26`, `src/renderer/app.js:29-30`, `src/renderer/app.js:81`, `src/renderer/app.js:163-216`, `src/renderer/app.js:1311-1319`, `src/remote-fetch.js:79`, `src/remote-fetch.js:100-119`, `src/remote-fetch.js:490-507`, `src/remote-fetch.js:582-606`, `src/renderer/index.html:8-9`, `src/renderer/styles.css:463-471`, `remote-components.json`, `components.json`
 - **Тесты:** «remote-fetch.js загружается и фильтрует URL/зеркала»
 
 ## Что обещает человеку
@@ -80,14 +80,14 @@ style-src 'self' 'unsafe-inline'; script-src 'self';` — директивы `co
 Аргументов от renderer'а обработчик не принимает (объявлен как `async () => {…}`) — URL
 пробы задаётся только вшитым реестром.
 
-**Сама проба зеркала** — `probeMirror(url, timeoutMs)` (`src/remote-fetch.js:571-595`):
+**Сама проба зеркала** — `probeMirror(url, timeoutMs)` (`src/remote-fetch.js:582-606`):
 GET с заголовком `Range: bytes=0-0`, живым считается ответ `200` или `206`, тело сразу
 рвётся `res.destroy()` («заголовков достаточно»). Абсолютный дедлайн — `PROBE_DEADLINE =
 8000` мс (`src/remote-fetch.js:79`), по нему `finish()` гасит запрос через
 `activeReq.destroy()`; таймаут соединения — `Math.min(timeoutMs, PROBE_DEADLINE)`, а main
 и так передаёт 8000. Транспорт — общий `openStream`, где каждый хоп (первичный запрос и
 каждый редирект, максимум `MAX_REDIRECTS = 6`) проходит `guardUrl`
-(`src/remote-fetch.js:479-496`): только `https:`, и хост не должен резолвиться ни в один
+(`src/remote-fetch.js:490-507`): только `https:`, и хост не должен резолвиться ни в один
 приватный/loopback/link-local адрес — иначе соединение не открывается.
 
 **Платформенных различий у этой фичи нет:** ветвление идёт по изданию (lite/офлайн) и по
@@ -105,12 +105,12 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
 3. Пробуются только https-URL без плейсхолдеров — фильтр `remoteFetch.isFetchableUrl`
    (`src/main.js:809`, `src/remote-fetch.js:100-105`); каждое соединение и каждый
    редирект дополнительно проходят `guardUrl`: https-only + отказ на приватный/loopback/
-   link-local адрес (`src/remote-fetch.js:479-496`).
+   link-local адрес (`src/remote-fetch.js:490-507`).
 4. Проба не качает содержимое: `Range: bytes=0-0`, «живо» = только 200/206, тело
-   немедленно уничтожается (`src/remote-fetch.js:585-592`).
+   немедленно уничтожается (`src/remote-fetch.js:596-603`).
 5. Проба ограничена по времени: абсолютный дедлайн 8000 мс на зеркало
-   (`PROBE_DEADLINE`, `src/remote-fetch.js:79,583`), main передаёт тот же 8000
-   (`src/main.js:811`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:580`).
+   (`PROBE_DEADLINE`, `src/remote-fetch.js:79,594`), main передаёт тот же 8000
+   (`src/main.js:811`), зависший запрос гасится `destroy()` (`src/remote-fetch.js:591`).
 6. Достаточно ОДНОГО живого зеркала, чтобы вернуть `online: true`
    (`settled.some(... r.value.ok)`, `src/main.js:811-812`).
 7. В нелайт-издании и когда докачивать нечего проба в сеть не ходит и отвечает
@@ -247,8 +247,8 @@ GET с заголовком `Range: bytes=0-0`, живым считается о
   реальный uv-архив из CDN (Reg.ru S3)… Требует интернет» (его собственная шапка, строки
   3-8). Он берёт запись реестра `uv` (`test/remote-fetch-live.js:21`) и зовёт
   `rf.fetchRemote` (строка 35), а тот перед скачиванием пробует зеркала тем же примитивом:
-  `src/remote-fetch.js:957` (`Promise.allSettled(mirrors.map((u) => probeMirror(u,
-  timeoutMs)))`) → `Range: bytes=0-0` (`src/remote-fetch.js:585`). То есть этим запросом
+  `src/remote-fetch.js:968` (`Promise.allSettled(mirrors.map((u) => probeMirror(u,
+  timeoutMs)))`) → `Range: bytes=0-0` (`src/remote-fetch.js:596`). То есть этим запросом
   живьём бьют ровно по `s3.regru.cloud` и `storage.yandexcloud.net` — зеркалам записи `uv`
   (`remote-components.json:26-31`). Но в `npm test` этот тест не входит (`package.json`:
   `"test": "node test/run-tests.js"`), запускается вручную (`node test/remote-fetch-live.js`),

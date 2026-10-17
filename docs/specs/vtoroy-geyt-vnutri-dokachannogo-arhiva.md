@@ -3,14 +3,14 @@
 <!-- spec-id: vtoroy-geyt-vnutri-dokachannogo-arhiva -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:1235-1248`, `src/main.js:1267-1302`, `src/main.js:865`, `src/remote-fetch.js:897-1013`, `scripts/windows/_verify.ps1:66-120`, `scripts/macos/_lib.sh:231-295`, `remote-components.json`, `vendor/checksums.json`, `tools/push-component.py:74-124`, `tools/build-lite.js:159-239`, `tools/release-check.js:228-267`, `src/renderer/app.js:1581-1599`
+- **Код:** `src/main.js:1235-1248`, `src/main.js:1267-1302`, `src/main.js:865`, `src/remote-fetch.js:908-1024`, `scripts/windows/_verify.ps1:66-120`, `scripts/macos/_lib.sh:231-295`, `remote-components.json`, `vendor/checksums.json`, `tools/push-component.py:74-124`, `tools/build-lite.js:159-239`, `tools/release-check.js:228-267`, `src/renderer/app.js:1581-1599`
 - **Тесты:** «nomad.sh (функц.): вшитый vendor (HM_NOMAD_SRC с pyproject + аттестация) → install БЕЗ клона + брендинг, exit 0; git НЕ вызван», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «vscode.ps1: ставит ОБА расширения; no-vendor → exit 120; идемпотентно; тихая установка; fail-closed», «vscode.sh: ставит ОБА расширения; no-vendor → exit 120; установка через HM_VSCODE_INSTALL_SH (root-staging); идемпотентно; fail-closed», «каждая запись реестра докачки корректна (sha256/size/mirrors)», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only»
 
 ## Что обещает человеку
 
 В лёгком издании установщик качает из облака сотни мегабайт и запускает то, что скачал,
 с правами администратора. Первый гейт проверяет архив целиком: SHA-256 ZIP-а сверяется с
-реестром `remote-components.json` ещё до распаковки (`src/remote-fetch.js:911-915, 988-995`).
+реестром `remote-components.json` ещё до распаковки (`src/remote-fetch.js:922-926, 988-995`).
 Второй гейт — обещание, что и после распаковки под администратором стартует не «файл из
 скачанной папки», а конкретный, поимённо ожидаемый бинарь: перед каждым запуском
 установщика компонента его SHA-256 сверяется с манифестом, который приехал внутри самого
@@ -27,10 +27,10 @@
 ## Как работает
 
 **1. Успешная докачка отдаёт проверенный каталог.** `remoteFetch.fetchRemote`
-(`src/remote-fetch.js:897`) отказывается работать без валидного 64-hex `sha256` в записи
+(`src/remote-fetch.js:908`) отказывается работать без валидного 64-hex `sha256` в записи
 реестра (`:911-915`), считает хеш потоково по удерживаемому дескриптору и при несовпадении
 удаляет файл и идёт на следующее зеркало (`:988-995`). Распаковка — во временный каталог с
-последующим атомарным переименованием (`freshUnpack`, `src/remote-fetch.js:855-887`).
+последующим атомарным переименованием (`freshUnpack`, `src/remote-fetch.js:866-898`).
 Возвращается `{ ok:true, path:<распакованный каталог> }`.
 
 **2. Манифест кладётся в staging — это и есть точка включения второго гейта.**
@@ -138,7 +138,7 @@ dry-run. На этой ветке не выполняется только ко�
 4. **`HM_VENDOR` для докачанного компонента указывает на sha-проверенный staging.**
    `vroot = stagingVendor || bundledVendorEarly`, `childEnv.HM_VENDOR = vroot`
    (`src/main.js:1267, 1135`); `fr.path` — путь, возвращённый `fetchRemote` только после
-   совпадения SHA-256 архива (`src/remote-fetch.js:988-995, 1011`).
+   совпадения SHA-256 архива (`src/remote-fetch.js:999-1006, 1011`).
 5. **Ни один вшитый исполняемый артефакт не запускается без совпадения SHA-256.**
    `Confirm-HmArtifact` (`_verify.ps1:66-106`) и `verify_artifact` (`_lib.sh:254-281`) при
    любом расхождении делают `exit 1`; вызовы стоят до первого использования артефакта —

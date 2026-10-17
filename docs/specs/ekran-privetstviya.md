@@ -192,7 +192,7 @@ Claude Desktop, ChatGPT и Cursor (их сайты без VPN могут не о
   чтением `config.json` (`src/main.js:635`), и это происходит ДО первого кадра: renderer
   ждёт ответ на `app.js:65`. Дальше, уже при видимом приветствии, `init` продолжает
   работу: `detectAndApply()` (`app.js:162`) уходит в IPC `detect-state`
-  (`src/main.js:3211`) — чтение манифеста в домашней папке и детекция установленного, —
+  (`src/main.js:3221`) — чтение манифеста в домашней папке и детекция установленного, —
   а `runNetProbe()` (`app.js:165`) в лёгком издании через IPC `probe-remote`
   (`src/main.js:799-817`) реально ходит в сеть: `remoteFetch.probeMirror` по зеркалам
   докачки. Оба вызова стоят ПОСЛЕ `showInitialScreen()` (`app.js:122`). Верно другое:

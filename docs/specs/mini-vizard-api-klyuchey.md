@@ -38,7 +38,7 @@
 `contextBridge` в `src/preload.js:40`, канал `save-credentials`.
 
 **Запись.** Обработчик `ipcMain.handle('save-credentials', …)` — однострочная делегация
-(`src/main.js:2790`) в `saveCredentials()` из модуля `src/credentials-merge.js`
+(`src/main.js:2800`) в `saveCredentials()` из модуля `src/credentials-merge.js`
 (`src/credentials-merge.js:52-103`). Слияние работает так:
 
 1. Считает путь: `file = ~/.claude/.credentials.master.env` — `credentialsPath()`

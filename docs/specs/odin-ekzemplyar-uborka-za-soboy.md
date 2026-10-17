@@ -3,7 +3,7 @@
 <!-- spec-id: odin-ekzemplyar-uborka-za-soboy -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:195-244`, `src/main.js:300-342`, `src/main.js:350-387`, `src/main.js:877-888`, `src/main.js:955-1034`, `src/main.js:1247-1256`, `src/main.js:1324`, `src/main.js:1373`, `src/main.js:1427-1429`, `src/main.js:1643-1649`, `src/main.js:1651-1746`, `src/main.js:3355-3448`, `src/remote-fetch.js:249-331`, `src/remote-fetch.js:925-1010`, `scripts/windows/_deelev.ps1:103-357`, `src/renderer/app.js:560-575`, `package.json`, `src/window-guards.js:1-73`, `src/main.js:354-372`, `test/window-guards-probe.js`
+- **Код:** `src/main.js:195-244`, `src/main.js:300-342`, `src/main.js:350-387`, `src/main.js:877-888`, `src/main.js:955-1034`, `src/main.js:1247-1256`, `src/main.js:1324`, `src/main.js:1373`, `src/main.js:1427-1429`, `src/main.js:1643-1649`, `src/main.js:1651-1746`, `src/main.js:3365-3458`, `src/remote-fetch.js:249-349`, `src/remote-fetch.js:936-1021`, `scripts/windows/_deelev.ps1:103-357`, `src/renderer/app.js:560-575`, `package.json`, `src/window-guards.js:1-73`, `src/main.js:354-372`, `test/window-guards-probe.js`
 - **Тесты:** «второй запуск установщика невозможен (блокировка + уникальный каталог распаковки)», «замок установки живёт в main и снимается только после завершения шага», «#6 main.js: no short-name fallback (taskkill.exe/cmd.exe fail-closed)», «main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only), не reuse предсказуемого; HM_REMOTE_CACHE внутри», «u10a/D window-guards: на will-navigate, will-redirect и will-frame-navigate чужие адреса получают preventDefault, своя страница (с якорем) — нет; window.open всегда deny», «u10a/D window-guards: на Windows регистр пути не важен, на POSIX — важен; негативный контроль: слабые проверки (любой file:, без хоста, пустая) таблицей отвергаются», «u10a/D main.js: sandbox:true, охрана ставится ДО loadFile, отказы идут в журнал очищенной строкой; preload использует только electron; в разметке нет ссылок, которым нужно новое окно», «u10a/D createWindow из настоящего main.js (подставной Electron): sandbox:true, охрана ставится один раз ДО loadFile на ту же страницу, отказ уходит в журнал очищенной строкой», «u10a/D живой Electron (sandbox:true из настоящего main.js): window.installer есть, один обмен с main проходит, процесс страницы в песочнице ОС; чужие адреса и window.open не доходят», «u10a/D живой Electron, приложение из app.asar (как в упакованной сборке): sandbox:true с preload из архива, window.installer и обмен с main работают, чужие адреса и окна не доходят», «u10a/D контроль живого Electron: БЕЗ охраны окно уходит на чужой адрес, получает window.installer и открывает новые окна; при sandbox:false процесс страницы не в песочнице ОС»
 
 ## Что обещает человеку
@@ -40,7 +40,7 @@
 В ветке `else` лежат только регистрация `second-instance` (`src/main.js:442-455`) и
 `app.whenReady()` с `createWindow()` внутри (`src/main.js:457-467`). Всё остальное — нет:
 `window-all-closed` и `before-quit` (`src/main.js:470-481`) и все 21 регистрация
-`ipcMain.handle(...)` (от `src/main.js:623` до `src/main.js:4021`) стоят на верхнем уровне
+`ipcMain.handle(...)` (от `src/main.js:623` до `src/main.js:4031`) стоят на верхнем уровне
 ПОСЛЕ закрывающей скобки `else` (`src/main.js:468`) и исполняются в проигравшем процессе
 тоже: `app.quit()` не прерывает синхронное исполнение модуля, а раннего `return` или
 `process.exit()` в файле нет. Значит, проигравший процесс не доходит до окна — но до
@@ -94,7 +94,7 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 Примитив создаёт **пару**: внешний `%ProgramData%\HmDeElev-<32 hex>` с DACL
 `{SYSTEM, Administrators}` и рабочий подкаталог `w` внутри него; наружу отдаётся именно
 `…\HmDeElev-<hex>\w`. Внутрь `w` `remote-fetch` кладёт и архив `<remoteId>.zip`, и
-распакованную копию `unpacked-<sha>` (`src/remote-fetch.js:932-933`), то есть занятое
+распакованную копию `unpacked-<sha>` (`src/remote-fetch.js:943-944`), то есть занятое
 место примерно вдвое больше самого артефакта. Поэтому снос по отданному пути убрал бы
 только `w`, оставив запертый внешний каталог навсегда. Для этого есть
 `stagingRootOf()` (`src/staging-paths.js`): имя каталога `w` → поднимаемся к
@@ -126,8 +126,8 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 не менялся 6 часов (`src/main.js:420-426`: `let newest = st.mtimeMs` плюс однослойный
 `for (const child of fs.readdirSync(dir))`, рекурсии нет) → `verifyDirSecureWin`
 подтверждает, что владелец входит в список `{SYSTEM, Administrators}`
-(`$allow=@('S-1-5-18','S-1-5-32-544')`, `src/remote-fetch.js:309`, сверка владельца —
-`src/remote-fetch.js:318-319`), и что посторонних ACE нет (`src/remote-fetch.js:303-331`).
+(`$allow=@('S-1-5-18','S-1-5-32-544')`, `src/remote-fetch.js:316`, сверка владельца —
+`src/remote-fetch.js:318-319`), и что посторонних ACE нет (`src/remote-fetch.js:320-322`).
 То есть каталог с владельцем SYSTEM этот гейт проходит наравне с Administrators.
 
 Возрастной гейт живую докачку **не страхует**, хотя комментарий `src/main.js:406-407`
@@ -135,8 +135,8 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 однослойный, а `.part` лежит на уровень глубже: примитив отдаёт наружу `…\HmDeElev-<hex>\w`
 (`scripts/windows/_deelev.ps1:307` — `$work = Join-Path $dir 'w'`, возврат — `:349`), этот
 путь становится `cacheDir`, и временный файл рождается уже внутри него
-(`src/remote-fetch.js:370` — `path.join(dir, '.dl-' + … + '.part')`, вызов с `cacheDir` —
-`src/remote-fetch.js:972`). Обход берёт `HmDeElev-<hex>` и его прямых детей, то есть
+(`src/remote-fetch.js:381` — `path.join(dir, '.dl-' + … + '.part')`, вызов с `cacheDir` —
+`src/remote-fetch.js:983`). Обход берёт `HmDeElev-<hex>` и его прямых детей, то есть
 только подкаталог `w`; mtime самого `.part` код не читает никогда. Создание и
 переименование `.part` двигают mtime `w` (меняется запись каталога), но дозапись в уже
 открытый дескриптор — нет. Значит докачка, которая пишет в один и тот же `.part` дольше
@@ -158,13 +158,13 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 `~/Library/Caches/HamidunSetup/<remoteId>` на macOS. `secureCacheDir` в этой ветке остаётся
 пустым, и `cleanupSecureCache()` становится no-op по первой же строке (`src/main.js:1102`).
 
-**Взаимодействие с самолечением macOS (`src/main.js:3899-4002`).** Замок единственного
+**Взаимодействие с самолечением macOS (`src/main.js:3909-4012`).** Замок единственного
 экземпляра здесь мешает по существу: свежая копия, запущенная с перемонтированного
 образа, закрылась бы сама, пока жив прежний процесс. Поэтому отцеплённый помощник ждёт
 исчезновения нашего PID вторым же элементом своего массива строк — первый разбирает
-аргументы (`'DMG="$1"; PID="$2"; ST="$3";'`, `src/main.js:3931`), а ожидание стоит на
-`src/main.js:3935` (`kill -0 "$PID"`, потолок 120 с: `[ $i -lt 240 ]` × `sleep 0.5`).
-Главный процесс сам инициирует `app.quit()` через 6 секунд (`src/main.js:3997`) — раньше
+аргументы (`'DMG="$1"; PID="$2"; ST="$3";'`, `src/main.js:3941`), а ожидание стоит на
+`src/main.js:3945` (`kill -0 "$PID"`, потолок 120 с: `[ $i -lt 240 ]` × `sleep 0.5`).
+Главный процесс сам инициирует `app.quit()` через 6 секунд (`src/main.js:4007`) — раньше
 это делал таймер в окне, и человек, закрывший окно руками, уничтожал таймер вместе с ним.
 
 **u10a (находка F18): окно создаётся с `sandbox: true` и охраной навигации.** `createWindow` (`src/main.js:354-372`): `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` (процесс страницы в песочнице ОС — `ProcessMetric.sandboxed`), и `windowGuards.install(mainWindow.webContents, { indexFile, onBlock })` (`src/window-guards.js`) до `loadFile`: `will-navigate`, `will-redirect`, `will-frame-navigate` получают `preventDefault`, если адрес — не наша `index.html` (`file:` без хоста, тот же путь, регистр на Windows не важен; якорь и запрос не в счёт); `setWindowOpenHandler` всегда `deny`. Внешние ссылки открываются как раньше — кнопками через IPC `open-external` с проверкой схем в main. Почему это важно: окно — Chromium с preload, который отдаёт странице весь IPC установщика, а установщик работает с токеном администратора; без охраны уход окна на чужой адрес оставлял бы чужой странице тот же `window.installer` (воспроизведено под Electron 44.5.1: страница `http://127.0.0.1:…` получила его). Совместимость `sandbox: true` с настоящим `preload.js` (только `contextBridge` и `ipcRenderer`) доказана живым запуском `test/window-guards-probe.js`: страница видит ровно тот интерфейс, что объявлен в preload, обмен `invoke` проходит, процесс страницы в песочнице; то же — на копии `src/`, упакованной в `app.asar` настоящим упаковщиком (страница и preload читаются изнутри архива, как в упакованной сборке). Не проверено: настоящий portable-exe (electron-builder, fuses, подпись) и сборка macOS (на этой машине их нет).
@@ -203,7 +203,7 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
    `src/main.js` четыре: `cleanupAllSecureDirs` (`src/main.js:396`),
    `cleanupSecureCache` (`src/main.js:1102`), локальный `rm` внутри
    `winMakeSecureDir` (`src/main.js:2138`) и замыкание `cleanup` внутри
-   `winLaunchDeElevated` (`src/main.js:2280`). Голого
+   `winLaunchDeElevated` (`src/main.js:2290`). Голого
    `fs.rmSync(stagingRootOf(…))` в `main.js` не осталось — это сторожит тест.
 
    До 30.08 обе функции лежали прямо в `main.js`, и гейта по имени у них не было:
@@ -213,7 +213,7 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
     `src/main.js:408-430`: строгое имя `^HmDeElev-[0-9a-f]{32}$`, каталог и не симлинк
     (`src/main.js:419` — `!st.isDirectory() || st.isSymbolicLink()`; отдельной проверки
     атрибута `ReparsePoint`, как у PowerShell-двойника в `_deelev.ps1:318-322`, здесь нет),
-    возраст ≥6 часов, `verifyDirSecureWin` (`src/remote-fetch.js:303-331`).
+    возраст ≥6 часов, `verifyDirSecureWin` (`src/remote-fetch.js:328-349`).
 11. **Успешный или осознанно пропущенный шаг чистит свой staging немедленно.**
     `src/main.js:1613` (`if (okRun || skipped) cleanupSecureCache()`); при провале каталог
     остаётся для ретрая, но гарантированно исчезает на выходе (инвариант 8).
@@ -278,7 +278,7 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 ## Границы
 
 - **Замок операции покрывает только установку, не удаление.** `uninstall-component`
-  (`src/main.js:3710`) `_installBusy` не берёт и не проверяет — в файле имя встречается
+  (`src/main.js:3720`) `_installBusy` не берёт и не проверяет — в файле имя встречается
   ровно четыре раза (`src/main.js:262, 883, 886, 1426`), из них три внутри `run-component`
   (обработчик открывается на `src/main.js:1016`), а `src/main.js:262` — это объявление
   `let _installBusy = false;` на верхнем уровне модуля, рядом с `CHILDREN`
@@ -288,16 +288,16 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 - **Не все дочерние процессы попадают в `CHILDREN` — и это осознанно.** `spawn(` в файле
   встречается семь раз (`src/main.js:1433, 1603, 1709, 1772, 2221, 2244, 3513`), а
   `CHILDREN.add` — ровно один (`src/main.js:1440`, дочерний процесс шага установки). Вне
-  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2329`; снят 09.10.2026 вместе
+  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2339`; снят 09.10.2026 вместе
   с самим `spawn`: окно «Войти в Claude» теперь открывает токен оболочки через `winShellTokenRun`,
   у которого свой рабочий PowerShell с 30-секундным таймером), `osascript` для
-  Терминала (`src/main.js:2734`), folder-fallback explorer (`src/main.js:2192`), запуск
+  Терминала (`src/main.js:2744`), folder-fallback explorer (`src/main.js:2192`), запуск
   Cursor через `/usr/bin/open` (`src/main.js:2001`), помощник самолечения macOS
-  (`src/main.js:3975`) и рабочий PowerShell внутри `winMakeSecureDir` (`src/main.js:2116`).
+  (`src/main.js:3985`) и рабочий PowerShell внутри `winMakeSecureDir` (`src/main.js:2116`).
   Два explorer-лаунчера на Windows (`2221`, `1772`; первый снят 09.10.2026) отцеплены ради де-элевации, запуск
   Cursor (`1603`) — просто `detached: true` fire-and-forget на macOS; помощник самолечения
   обязан пережить наш выход. Два случая в этот перечень не укладываются: `osascript`
-  спавнится с опциями ровно `{ stdio: 'ignore' }` (`src/main.js:2737`) — без `detached`, и
+  спавнится с опциями ровно `{ stdio: 'ignore' }` (`src/main.js:2747`) — без `detached`, и
   к де-элевации отношения не имеет (это macOS-ветка); а PowerShell на `src/main.js:2116` —
   не лаунчер, а живой ребёнок со своим 20-секундным таймером (`src/main.js:2122`).
   Закрытие окна ни один из шести не убивает.
@@ -337,15 +337,18 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 3. **`execFileSync` с `taskkill` вызывается без `timeout`** (`src/main.js:297-298`). Все
    прочие синхронные вызовы внешних бинарей в этом файле таймаут задают: `tasklist` — 4000
    (`src/main.js:587`), `schtasks` — 20000 в `runSchtasks` (`src/main.js:2216`) и 15000 в
-   `readLastResult` (`src/main.js:2346`), `taskkill` в
-   `killproc` — 20000 (`src/main.js:3696`). Зависший `taskkill` в обработчике выхода
+   `readLastResult` (`src/main.js:2356`), `taskkill` в
+   `killproc` — 20000 (`src/main.js:3706`). Зависший `taskkill` в обработчике выхода
    заблокирует завершение процесса без верхней границы.
 4. **`pruneStaleSecureDirs` синхронно запускает PowerShell на старте.**
-   `verifyDirSecureWin` внутри — это `spawnSync` (`src/remote-fetch.js:325-326`), причём
-   тоже **без `timeout`**, и вызывается он в цикле по каждому «остывшему» кандидату сразу
-   после `createWindow()`. На машине с несколькими залежавшимися каталогами это
-   последовательные запуски `powershell.exe` в главном процессе — то самое замораживание
-   окна, от которого в этом же файле специально ушли в `winMakeSecureDir`
+   `verifyDirSecureWin` внутри — это `spawnSync` (`src/remote-fetch.js:339-340`) с запасом 30 с
+   (`VERIFY_DIR_TIMEOUT_MS`, `src/remote-fetch.js:326`); он вызывается в цикле по каждому «остывшему»
+   кандидату сразу после `createWindow()`. Раньше таймаута не было вовсе, потом стоял 20 с — и на
+   чистой машине он срабатывал на каждой проверке (см. спеку де-элевации). Скрипт проверки теперь без
+   командлетов и отвечает за доли секунды, так что на обычной машине окно не замирает. Граница сверху
+   остаётся: на очень медленной машине с несколькими залежавшимися каталогами это всё равно
+   последовательные запуски `powershell.exe` в главном процессе — то самое замораживание окна, от
+   которого в этом же файле специально ушли в `winMakeSecureDir`
    (комментарий `src/main.js:2095-2098`: «синхронный вызов морозил главный процесс, и окно
    установщика переставало отвечать»).
 5. **В JS-уборке нет fail-closed гейта по имени, который есть в PowerShell-уборке.**

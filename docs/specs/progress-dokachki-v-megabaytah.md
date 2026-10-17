@@ -3,7 +3,7 @@
 <!-- spec-id: progress-dokachki-v-megabaytah -->
 
 - **Раздел:** Экраны и сценарий ученика
-- **Код:** `src/renderer/app.js:1901-1927`, `src/renderer/app.js:1699-1707`, `src/renderer/app.js:1447-1478`, `src/renderer/app.js:1512-1517`, `src/preload.js:18-23`, `src/main.js:848-854`, `src/main.js:1187-1196`, `src/main.js:1087-1092`, `src/remote-fetch.js:603-744`, `src/remote-fetch.js:897-990`, `remote-components.json`
+- **Код:** `src/renderer/app.js:1901-1927`, `src/renderer/app.js:1699-1707`, `src/renderer/app.js:1447-1478`, `src/renderer/app.js:1512-1517`, `src/preload.js:18-23`, `src/main.js:848-854`, `src/main.js:1187-1196`, `src/main.js:1087-1092`, `src/remote-fetch.js:614-755`, `src/remote-fetch.js:908-1001`, `remote-components.json`
 - **Тесты:** «докачка дошла до конца → подпись БЕЗ «Скачиваю», часы продолжают тикать», «E2E: «докачка стартовала» доказывается ПРОЦЕНТАМИ, а не подписью до обращения к сети», «каждая запись реестра докачки корректна (sha256/size/mirrors)»
 
 ## Что обещает человеку
@@ -25,7 +25,7 @@
    `remoteId`+`platform` поле `sizeBytes` (например `claude` win32 —
    1 051 595 315). `remoteFetch.pickEntry` выбирает запись под текущую платформу
    (`src/remote-fetch.js`, `pickEntry`), `fetchRemote` кладёт её в
-   `expectedSize = Number(entry.sizeBytes || 0)` (`src/remote-fetch.js:916`).
+   `expectedSize = Number(entry.sizeBytes || 0)` (`src/remote-fetch.js:927`).
 
 2. **Дедлайн считается от размера.** `downloadDeadlineFor(sizeBytes)`
    (`src/main.js:850-854`) даёт
@@ -34,25 +34,25 @@
    `fetchRemote` как `downloadDeadlineMs` (`src/main.js:1191`). Внутри `fetchRemote`
    дедлайн назначается **на каждое зеркало заново**:
    `const deadlineAt = Date.now() + dlDeadline` стоит внутри цикла по зеркалам
-   (`src/remote-fetch.js:966-967`). Если `downloadDeadlineMs` не передан, работает
+   (`src/remote-fetch.js:977-978`). Если `downloadDeadlineMs` не передан, работает
    константа `DOWNLOAD_DEADLINE = 20 * 60 * 1000` (`src/remote-fetch.js:80`).
 
 3. **Байты считает `downloadToFd`.** На каждый чанк она пишет его в удерживаемый
-   fd и увеличивает `written` (`src/remote-fetch.js:695-711`). Дальше две ветки:
+   fd и увеличивает `written` (`src/remote-fetch.js:706-722`). Дальше две ветки:
    - `cap > 0` (размер из реестра известен): `pct = Math.min(100, Math.floor(written/cap*100))`,
      и `onProgress({received, total: cap, pct})` вызывается **только при смене
      процента** (`lastPct`) — не чаще 101 раза **на один вызов `downloadToFd`
-     без рестарта** (`src/remote-fetch.js:713-715`). Общего потолка «≤101 за
+     без рестарта** (`src/remote-fetch.js:724-726`). Общего потолка «≤101 за
      файл» код не держит: `lastPct` объявлена внутри `downloadToFd`
-     (`src/remote-fetch.js:620`), обнуляется в `restartFresh()`
-     (`src/remote-fetch.js:648`), а `fetchRemote` перебирает зеркала циклом и на
-     каждое зовёт `downloadToFd` заново (`src/remote-fetch.js:966-977`) — счёт
+     (`src/remote-fetch.js:631`), обнуляется в `restartFresh()`
+     (`src/remote-fetch.js:659`), а `fetchRemote` перебирает зеркала циклом и на
+     каждое зовёт `downloadToFd` заново (`src/remote-fetch.js:977-988`) — счёт
      процентов каждый раз начинается с нуля;
    - `cap === 0` (размера нет): `onProgress({received, total: 0, pct: null})` на
-     **каждый** чанк (`src/remote-fetch.js:716-718`).
+     **каждый** чанк (`src/remote-fetch.js:727-729`).
    При обрыве и рестарте с нуля (`restartFresh`, HTTP 416 или проигнорированный
    Range) сбрасываются и `written`, и `lastPct = -1` — проценты пойдут заново
-   (`src/remote-fetch.js:641-649`).
+   (`src/remote-fetch.js:652-660`).
 
 4. **Main пересылает событие в окно.** Колбэк
    `onProgress: (p) => sendChannel('remote-progress', { id, remoteId: declared, pct: p.pct, received: p.received, total: p.total })`
@@ -101,7 +101,7 @@ renderer не считает компонент remote — подписи «Ск
 
 1. **Событие прогресса рождается только от реально полученных байтов.**
    `onProgress` вызывается исключительно из обработчика `res.on('data')`
-   (`src/remote-fetch.js:713-718`) — ни при старте, ни при выборе зеркала, ни при
+   (`src/remote-fetch.js:724-729`) — ни при старте, ни при выборе зеркала, ни при
    ошибке. Поэтому проценты в UI — доказательство, что байты пошли.
 2. **Renderer обновляет подпись только своего шага.** `handleRemoteProgress`
    первой строкой делает `if (!p || p.id !== id) return;`
@@ -114,9 +114,9 @@ renderer не считает компонент remote — подписи «Ск
    (`src/renderer/app.js:1903-1909`) + `STEP_CLOCK_PHASE` в тике
    (`src/renderer/app.js:1469-1471`).
 5. **Показанный процент никогда не больше 100.**
-   `Math.min(100, Math.floor((written / cap) * 100))` (`src/remote-fetch.js:714`);
+   `Math.min(100, Math.floor((written / cap) * 100))` (`src/remote-fetch.js:725`);
    перебор фактического размера над `cap` вообще обрывает загрузку ошибкой
-   «превышен ожидаемый размер» (`src/remote-fetch.js:712`).
+   «превышен ожидаемый размер» (`src/remote-fetch.js:723`).
 6. **Дедлайн скачивания никогда не меньше 20 минут и растёт вместе с размером.**
    `Math.max(20 * 60 * 1000, est)` в `downloadDeadlineFor`
    (`src/main.js:850-854`). Порог, с которого пол в 20 минут перестаёт быть
@@ -181,14 +181,14 @@ renderer не считает компонент remote — подписи «Ск
    1 051 595 315 / 1200 с ≈ 876 000 байт/с, то есть при той самой
    консервативной посылке ~300 КБ/с, из которой считает `downloadDeadlineFor`.
    Фактическую пропускную способность код нигде не проверяет: дедлайн — это
-   только верхняя граница времени (`src/remote-fetch.js:633`), а единственный
-   контроль скорости — min-rate watchdog (`src/remote-fetch.js:635-638`) с
+   только верхняя граница времени (`src/remote-fetch.js:644`), а единственный
+   контроль скорости — min-rate watchdog (`src/remote-fetch.js:646-649`) с
    порогом 1024 байта за окно 20 с (`src/remote-fetch.js:81-82`), то есть ~51
    Б/с — на порядки ниже. На канале быстрее ≈876 000 байт/с `claude` укладывается
    и в плоские 20 минут. Безусловно подтверждается другое: `claude` —
    declared-remote без собственного фолбэка, поэтому его провал возвращает
    `stage:'fetch'`, а каждый ретрай стартует с нуля — при провале temp-файл
-   удаляется (`try { fs.unlinkSync(tmp.name); }`, `src/remote-fetch.js:983`), уже
+   удаляется (`try { fs.unlinkSync(tmp.name); }`, `src/remote-fetch.js:994`), уже
    скачанные байты не наследуются.
 7. `sizeBytes: 0` в реестре переводит загрузку в ветку без `cap`: подпись
    деградирует до «Скачиваю… X МБ» без процентов и доли, а события летят на каждый
@@ -196,7 +196,7 @@ renderer не считает компонент remote — подписи «Ск
 8. Отправка в разрушенное окно — исключение `webContents.send` посреди докачки.
    Ни загрузку, ни шаг оно НЕ уронит: оба вызова `onProgress` в `downloadToFd`
    обёрнуты в глушитель `catch (e) { /* ignore */ }`
-   (`src/remote-fetch.js:715,717` — тот самый, о котором п.6 «Рисков»). Цена
+   (`src/remote-fetch.js:726,728` — тот самый, о котором п.6 «Рисков»). Цена
    нарушения инварианта не падение, а тишина: события прогресса перестают
    доходить, подпись замирает на последнем проценте, и в логе следа не остаётся.
 9. Не снятая подписка означает, что после шага в окне остаются висеть слушатели
@@ -213,22 +213,22 @@ renderer не считает компонент remote — подписи «Ск
   на старте.
 - Проценты считаются от `sizeBytes` **из реестра**, а не от `Content-Length`
   ответа. Транспортную длину код использует отдельно и только для решения
-  «дотянуть ли хвост» (`respExpected`, `src/remote-fetch.js:691-693,728`).
+  «дотянуть ли хвост» (`respExpected`, `src/remote-fetch.js:702-704,739`).
 - Общая полоса прогресса прогона (`setRunProgress`,
   `src/renderer/app.js:1483-1503`) — другая механика: она считает пройденные
   компоненты, а не байты, и к этой фиче не относится.
 - Дедлайн — **на одно зеркало**, а не на всю операцию: при переборе зеркал каждая
-  попытка получает свой полный бюджет (`src/remote-fetch.js:966-967`).
+  попытка получает свой полный бюджет (`src/remote-fetch.js:977-978`).
 - Ни `pct`, ни `received` не переживают перезапуск установщика: кэш-хит
   (`cached: true`) вообще проходит без единого события прогресса
-  (`src/remote-fetch.js:938-946`).
+  (`src/remote-fetch.js:949-957`).
 
 ## Риски и открытые вопросы
 
 1. **Завышенный `sizeBytes` навсегда оставляет подпись «Скачиваю 98%».**
    Код прямо разрешает `written < cap` при совпавшем sha и считает это нормой
-   (`src/remote-fetch.js:734-737`), а финального `onProgress` при успехе нет
-   (`src/remote-fetch.js:723-738`). Тогда `doneDl` не наступает никогда: подпись
+   (`src/remote-fetch.js:745-748`), а финального `onProgress` при успехе нет
+   (`src/remote-fetch.js:734-749`). Тогда `doneDl` не наступает никогда: подпись
    застывает на последнем проценте <100, а часы продолжают ей уступать (в тексте
    есть `%`) — то есть возвращается ровно тот дефект, ради которого сделана ветка
    «Устанавливаю…». Теста на эту комбинацию я не нашёл.
@@ -260,5 +260,5 @@ renderer не считает компонент remote — подписи «Ск
    тестом реестра, — то есть ветка в проде мертва, а тестом не покрыта ни та, ни
    другая сторона.
 6. **`try/catch` вокруг `onProgress` глотает ошибку молча**
-   (`src/remote-fetch.js:715,717`): сломанный обработчик прогресса не уронит
+   (`src/remote-fetch.js:726,728`): сломанный обработчик прогресса не уронит
    загрузку — это осознанно, — но и не оставит следа в логе.
