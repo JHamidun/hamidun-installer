@@ -29402,18 +29402,19 @@ ok('config.json в репозитории без сборочных маркер
     try {
       const marker = work + '/PWNED';
       const env = Object.assign({}, process.env, { SHELLOPTS: 'xtrace', PS4: '$(: > "' + marker + '")' });
+      // На macOS продукт зовёт /bin/sh (bash 3.2 под именем sh): без -p он исполняет PS4 из окружения, а с явным --posix — уже нет (замер на раннере
+      // GitHub, macOS 26), поэтому проба идёт тем же /bin/sh и теми же флагами, что в main.js. Не macOS: bash с --posix, как на Windows у разработчика.
+      const onMac = process.platform === 'darwin';
+      const probeShell = onMac ? '/bin/sh' : 'bash';
       const probe = (flags) => {
         try { fs.rmSync(marker, { force: true }); } catch (e) { /* */ }
-        const r = spawnSync('bash', flags.concat(['-c', 'echo helper-ran']), { encoding: 'utf8', timeout: 30000, env });
-        assert.strictEqual(r.status, 0, 'bash отработал: ' + (r.stderr || '') + String(r.error || ''));
+        const r = spawnSync(probeShell, flags.concat(['-c', 'echo helper-ran']), { encoding: 'utf8', timeout: 30000, env });
+        assert.strictEqual(r.status, 0, probeShell + ' отработал: ' + (r.stderr || '') + String(r.error || ''));
         assert(/helper-ran/.test(r.stdout || ''), 'позитивный контроль: тело выполнилось');
         return fs.existsSync(marker);
       };
-      // Контроль доказывает, что проба вообще видит дыру. Системный bash 3.2 и Homebrew bash 5 на macOS не обязаны исполнять подстановку
-      // в PS4 из окружения в режиме POSIX — там вектора нет, и требовать его показа нельзя; защита `-p` ниже проверяется на всех системах.
-      const vectorReal = probe(['--posix']);
-      if (process.platform !== 'darwin') assert.strictEqual(vectorReal, true, 'КОНТРОЛЬ: без -p (прежний запуск `sh -c`) PS4 из окружения исполняется — вектор реален');
-      assert.strictEqual(probe(['--posix', '-p']), false, 'с -p PS4/SHELLOPTS из окружения игнорируются');
+      assert.strictEqual(probe(onMac ? [] : ['--posix']), true, 'КОНТРОЛЬ: без -p (прежний запуск `sh -c`) PS4 из окружения исполняется — вектор реален');
+      assert.strictEqual(probe(onMac ? ['-p'] : ['--posix', '-p']), false, 'с -p PS4/SHELLOPTS из окружения игнорируются');
       // и сам помощник (настоящий текст из buildHelperScript) под теми же флагами, с очищенным окружением
       const dir = work + '/h';
       fs.mkdirSync(dir + '/Volumes/Hamidun Setup/Hamidun Setup.app', { recursive: true });
@@ -34032,5 +34033,12 @@ public static class HmConv {
         assert.strictEqual(b[2], a[2], k + ': короткое написание корня не меняет хеш дерева');
       });
     } finally { try { fs.rmSync(base, { recursive: true, force: true }); } catch (e) { /* */ } }
+  });
+
+  // Слияние 14.10 оставило в спеке маркеры конфликта (<<<<<<< ours … >>>>>>> theirs), и они ушли в ветку: спеки-гейт проверяет ссылки, но не это.
+  ok('u12: в отслеживаемых файлах нет маркеров конфликта слияния (<<<<<<<, |||||||, >>>>>>>)', () => {
+    const r = spawnSync('git', ['grep', '-n', '-I', '-E', '^(<<<<<<<|>>>>>>>) |^[|]{7} ', '--', '.', ':!node_modules'], { cwd: ROOT, encoding: 'utf8', timeout: 120000 });
+    if (r.error || (r.status !== 0 && r.status !== 1)) SKIP('git grep недоступен (не репозиторий или нет git): ' + String(r.error ? r.error.message : r.stderr).slice(0, 200));
+    assert.strictEqual(r.status, 1, 'маркеры конфликта в файлах репозитория:\n' + String(r.stdout).split('\n').slice(0, 12).join('\n'));
   });
 })();
