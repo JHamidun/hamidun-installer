@@ -34331,6 +34331,11 @@ public static class HmConv {
     const c = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
     return fs.existsSync(c) ? c : '';
   };
+  // Встроенный npmrc из установки Node: у MSI-Node в нём prefix=${APPDATA}\npm (так и ставит Node установщик), у Node из кэша инструментов
+  // раннера GitHub строки нет, и штатный prefix — сам каталог Node.
+  const builtinPrefixIsAppData = () => {
+    try { return /^\s*prefix\s*=\s*\$\{APPDATA\}/mi.test(fs.readFileSync(path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'npmrc'), 'utf8')); } catch (e) { return false; }
+  };
   const npmRun = (cli, args, env, cwd) => spawnSync(process.execPath, [cli].concat(args),
     { env, cwd, encoding: 'utf8', timeout: 280000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const npmCfg = (cli, env, cwd) => {
@@ -34356,6 +34361,7 @@ public static class HmConv {
       fs.writeFileSync(path.join(P.appData, 'npm', 'etc', 'npmrc'), 'registry=http://127.0.0.1:8/global/\n');
       const unpack = path.join(root, 'unpack');                   // «каталог распаковки portable-exe»: текущая папка прежних потомков
       fs.mkdirSync(unpack, { recursive: true });
+      fs.writeFileSync(path.join(unpack, 'package.json'), '{"name":"hm-u10a-unpack","version":"0.0.0","private":true}');   // корень проекта для npm — эта папка, а не предок %TEMP%
       fs.writeFileSync(path.join(unpack, '.npmrc'), 'registry=http://127.0.0.1:7/project/\nprefix=' + evilProj + '\n');
       const control = Object.assign({}, env);
       delete control.NPM_CONFIG_USERCONFIG; delete control.NPM_CONFIG_GLOBALCONFIG;
@@ -34372,7 +34378,10 @@ public static class HmConv {
       const s32 = require(path.join(ROOT, 'src', 'remote-fetch.js')).winSystem32();
       const after = npmCfg(cli, env, s32);
       assert.strictEqual(after.registry, 'https://registry.npmjs.org/', 'registry — по умолчанию (прежний кэш поставки лежит именно под этим адресом)');
-      assert.strictEqual(path.resolve(after.prefix), path.resolve(path.join(P.appData, 'npm')), '`npm config get prefix` — штатный %APPDATA%\\npm (он и так в списке Test-HmOurClaudeDir)');
+      // Штатный prefix = то, что даёт встроенный npmrc этой установки Node; главное — это НЕ prefix из ~/.npmrc и не из проектного .npmrc.
+      const defaultPrefix = builtinPrefixIsAppData() ? path.join(P.appData, 'npm') : path.dirname(process.execPath);
+      assert.strictEqual(path.resolve(after.prefix), path.resolve(defaultPrefix), '`npm config get prefix` — штатный (%APPDATA%\\npm у MSI-Node; он и так в списке Test-HmOurClaudeDir)');
+      assert(path.resolve(after.prefix) !== path.resolve(evilUser) && path.resolve(after.prefix) !== path.resolve(evilProj), 'prefix не из чужих .npmrc');
       assert.strictEqual(after['script-shell'], null, 'script-shell человека не виден');
       assert.strictEqual(path.resolve(after.userconfig), path.resolve(env.NPM_CONFIG_USERCONFIG));
       assert.strictEqual(path.resolve(after.globalconfig), path.resolve(env.NPM_CONFIG_GLOBALCONFIG));
@@ -34389,6 +34398,7 @@ public static class HmConv {
     if (!cli) SKIP('npm рядом с node не найден');
     const tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
     if (!fs.existsSync(tar)) SKIP('нет tar.exe для сборки пробного пакета');
+    if (!builtinPrefixIsAppData()) SKIP('у этого Node нет встроенного prefix=${APPDATA}\\npm (не MSI): штатный prefix — каталог самого Node, и пробный пакет встал бы глобально в него');
     const root = mkScratch('npmi');
     try {
       const P = mkProfile(root);

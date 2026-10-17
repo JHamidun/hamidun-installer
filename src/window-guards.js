@@ -26,13 +26,18 @@ const caseFold = (platform) => platform === 'win32' || platform === 'darwin';
 
 /** Адрес указывает на нашу страницу indexFile? file: без хоста (UNC file://сервер/… — нет), тот же путь. */
 function isOwnIndexUrl(url, indexFile, platform) {
+  const plat = platform || process.platform;
+  const win = plat === 'win32';
   let u;
   try { u = new URL(String(url)); } catch (e) { return false; }
   if (u.protocol !== 'file:') return false;
   if (u.hostname) return false;
   let p;
-  try { p = fileURLToPath(u); } catch (e) { return false; }
-  const norm = (x) => { const n = path.resolve(x); return caseFold(platform || process.platform) ? n.toLowerCase() : n; };
+  // Разбор адреса и пути — по аргументу platform, а не по системе, где идёт проверка: «Windows-ветку» нельзя проверить на Mac, пока
+  // fileURLToPath и path.resolve читают C:\... как POSIX-путь. На настоящей платформе поведение прежнее.
+  try { p = fileURLToPath(u, { windows: win }); } catch (e) { return false; }
+  const pth = win ? path.win32 : path;
+  const norm = (x) => { const n = pth.resolve(x); return caseFold(plat) ? n.toLowerCase() : n; };
   return norm(p) === norm(indexFile);
 }
 
