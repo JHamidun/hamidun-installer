@@ -3,7 +3,7 @@
 <!-- spec-id: odin-ekzemplyar-uborka-za-soboy -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `src/main.js:195-244`, `src/main.js:300-342`, `src/main.js:350-387`, `src/main.js:877-888`, `src/main.js:955-1034`, `src/main.js:1247-1256`, `src/main.js:1324`, `src/main.js:1373`, `src/main.js:1427-1429`, `src/main.js:1643-1649`, `src/main.js:1651-1746`, `src/main.js:3365-3458`, `src/remote-fetch.js:249-349`, `src/remote-fetch.js:936-1021`, `scripts/windows/_deelev.ps1:103-357`, `src/renderer/app.js:560-575`, `package.json`, `src/window-guards.js:1-73`, `src/main.js:354-372`, `test/window-guards-probe.js`
+- **Код:** `src/main.js:195-244`, `src/main.js:300-342`, `src/main.js:350-387`, `src/main.js:890-901`, `src/main.js:968-1047`, `src/main.js:1260-1269`, `src/main.js:1337`, `src/main.js:1386`, `src/main.js:1440-1442`, `src/main.js:1656-1662`, `src/main.js:1664-1759`, `src/main.js:3378-3471`, `src/remote-fetch.js:249-349`, `src/remote-fetch.js:990-1075`, `scripts/windows/_deelev.ps1:103-357`, `src/renderer/app.js:560-575`, `package.json`, `src/window-guards.js:1-73`, `src/main.js:354-372`, `test/window-guards-probe.js`
 - **Тесты:** «второй запуск установщика невозможен (блокировка + уникальный каталог распаковки)», «замок установки живёт в main и снимается только после завершения шага», «#6 main.js: no short-name fallback (taskkill.exe/cmd.exe fail-closed)», «main.js: win32 remote-cache = winMakeSecureDir (атомарно Admins-only), не reuse предсказуемого; HM_REMOTE_CACHE внутри», «u10a/D window-guards: на will-navigate, will-redirect и will-frame-navigate чужие адреса получают preventDefault, своя страница (с якорем) — нет; window.open всегда deny», «u10a/D window-guards: на Windows регистр пути не важен, на POSIX — важен; негативный контроль: слабые проверки (любой file:, без хоста, пустая) таблицей отвергаются», «u10a/D main.js: sandbox:true, охрана ставится ДО loadFile, отказы идут в журнал очищенной строкой; preload использует только electron; в разметке нет ссылок, которым нужно новое окно», «u10a/D createWindow из настоящего main.js (подставной Electron): sandbox:true, охрана ставится один раз ДО loadFile на ту же страницу, отказ уходит в журнал очищенной строкой», «u10a/D живой Electron (sandbox:true из настоящего main.js): window.installer есть, один обмен с main проходит, процесс страницы в песочнице ОС; чужие адреса и window.open не доходят», «u10a/D живой Electron, приложение из app.asar (как в упакованной сборке): sandbox:true с preload из архива, window.installer и обмен с main работают, чужие адреса и окна не доходят», «u10a/D контроль живого Electron: БЕЗ охраны окно уходит на чужой адрес, получает window.installer и открывает новые окна; при sandbox:false процесс страницы не в песочнице ОС»
 
 ## Что обещает человеку
@@ -14,7 +14,7 @@
 Ставить одно и то же в `~/.claude`, в npm prefix и в uv tools двумя административными
 процессами сразу нельзя, а portable-стаб вдобавок рекурсивно чистит общий каталог
 распаковки, то есть второй запуск выдёргивал бы файлы из-под первого
-(`src/main.js:433-438`). Тот же замок держится и внутри одного окна: перезагрузка
+(`src/main.js:444-449`). Тот же замок держится и внутри одного окна: перезагрузка
 интерфейса (Ctrl+R) не позволит начать шаг заново поверх ещё работающего —
 защёлка живёт в главном процессе, а не на экране.
 
@@ -28,7 +28,7 @@
 
 ## Как работает
 
-**Замок единственного экземпляра (`src/main.js:439-468`).** Замок берётся строкой 348 —
+**Замок единственного экземпляра (`src/main.js:450-481`).** Замок берётся строкой 348 —
 `if (!app.requestSingleInstanceLock()) { app.quit(); }`, — но это не первая исполняемая
 инструкция файла: до неё на верхнем уровне отрабатывают 14 вызовов `require(...)`
 (`src/main.js:2-32`) плюс `require('./uid-telemetry')` (`src/main.js:189`), реальный вызов
@@ -37,23 +37,23 @@
 `const SECURE_DIRS = new Map()` (`src/main.js:278`). Верно то, что замок стоит **до**
 `app.whenReady()` и `createWindow()`.
 
-В ветке `else` лежат только регистрация `second-instance` (`src/main.js:442-455`) и
-`app.whenReady()` с `createWindow()` внутри (`src/main.js:457-467`). Всё остальное — нет:
-`window-all-closed` и `before-quit` (`src/main.js:470-481`) и все 21 регистрация
-`ipcMain.handle(...)` (от `src/main.js:623` до `src/main.js:4031`) стоят на верхнем уровне
-ПОСЛЕ закрывающей скобки `else` (`src/main.js:468`) и исполняются в проигравшем процессе
+В ветке `else` лежат только регистрация `second-instance` (`src/main.js:453-466`) и
+`app.whenReady()` с `createWindow()` внутри (`src/main.js:468-480`). Всё остальное — нет:
+`window-all-closed` и `before-quit` (`src/main.js:483-494`) и все 21 регистрация
+`ipcMain.handle(...)` (от `src/main.js:636` до `src/main.js:4044`) стоят на верхнем уровне
+ПОСЛЕ закрывающей скобки `else` (`src/main.js:481`) и исполняются в проигравшем процессе
 тоже: `app.quit()` не прерывает синхронное исполнение модуля, а раннего `return` или
 `process.exit()` в файле нет. Значит, проигравший процесс не доходит до окна — но до
 регистрации IPC-обработчиков доходит.
 
-Владелец замка получает событие `second-instance` (`src/main.js:442-455`) и разбирает
+Владелец замка получает событие `second-instance` (`src/main.js:453-466`) и разбирает
 два случая:
 
 - окно есть — `restore()` при свёрнутом, затем `show()` и `focus()`;
 - окон нет вовсе — `createWindow()`. Эта ветка нужна именно macOS: там закрытие окна не
   завершает приложение, процесс живёт дальше и держит замок. Раньше здесь стоял голый
   `return`, и второй запуск молча умирал — человек видел, что «установщик не
-  открывается», хотя тот висел в памяти невидимкой (комментарий `src/main.js:445-448`).
+  открывается», хотя тот висел в памяти невидимкой (комментарий `src/main.js:456-459`).
 
 Третья часть замка лежит не в коде, а в сборке: `package.json` → `build.portable.unpackDirName: true`.
 В app-builder-lib значение `true` — единственное, при котором имя каталога распаковки
@@ -66,7 +66,7 @@
 запуская. Флаг снимается в `finally`, и обработчик специально возвращает
 `return await new Promise(...)`, а не голый промис: без `await` `finally` отработал бы
 сразу после возврата промиса, не дождавшись завершения дочернего процесса
-(комментарий `src/main.js:1400-1401`). Флаг объявлен в модуле главного процесса,
+(комментарий `src/main.js:1413-1414`). Флаг объявлен в модуле главного процесса,
 поэтому перезагрузка окна его не сбрасывает.
 
 **Учёт и убийство дочерних (`src/main.js:260, 216-242, 1245-1254, 1322`).** Каждый
@@ -78,23 +78,23 @@
   нет: `sysBin` вернул null → fail-closed на `c.kill()`, который порвёт только саму
   оболочку. Это и стережёт тест «#6 main.js: no short-name fallback…».
 - macOS/Linux — `process.kill(-c.pid, 'SIGKILL')` по группе процессов. Группа существует
-  потому, что не-Windows дети запускаются с `detached: true` (`src/main.js:1421`); при
+  потому, что не-Windows дети запускаются с `detached: true` (`src/main.js:1434`); при
   сбое — откат на `c.kill('SIGKILL')`.
 
 После обхода `CHILDREN.clear()`.
 
-**Точки уборки (`src/main.js:470-481`).** `window-all-closed` вызывает `killChildren()` и
+**Точки уборки (`src/main.js:483-494`).** `window-all-closed` вызывает `killChildren()` и
 `cleanupAllSecureDirs()`, и только затем `app.quit()` — и то лишь на не-macOS.
 `before-quit` вызывает те же две функции. Обе идемпотентны (множество и Map очищаются),
 поэтому двойной вызов на Windows безвреден.
 
 **Двухуровневый staging и почему уборка идёт от внешнего каталога.** На Windows кэш
-докачки — свежий каталог, рождённый `winMakeSecureDir()` (`src/main.js:2049-2154`) через
+докачки — свежий каталог, рождённый `winMakeSecureDir()` (`src/main.js:2062-2167`) через
 PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.ps1:145-371`).
 Примитив создаёт **пару**: внешний `%ProgramData%\HmDeElev-<32 hex>` с DACL
 `{SYSTEM, Administrators}` и рабочий подкаталог `w` внутри него; наружу отдаётся именно
 `…\HmDeElev-<hex>\w`. Внутрь `w` `remote-fetch` кладёт и архив `<remoteId>.zip`, и
-распакованную копию `unpacked-<sha>` (`src/remote-fetch.js:943-944`), то есть занятое
+распакованную копию `unpacked-<sha>` (`src/remote-fetch.js:997-998`), то есть занятое
 место примерно вдвое больше самого артефакта. Поэтому снос по отданному пути убрал бы
 только `w`, оставив запертый внешний каталог навсегда. Для этого есть
 `stagingRootOf()` (`src/staging-paths.js`): имя каталога `w` → поднимаемся к
@@ -102,32 +102,34 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 как есть и снос его отклонит. Сам снос идёт через `rmStagingTree()` из того же
 модуля — он сверяет имя с `^HmDeElev-[0-9a-f]{32}$` и при несовпадении не трогает
 ничего. Оба вызова из этого сценария: `cleanupAllSecureDirs()` (`src/main.js:396`)
-и `cleanupSecureCache()` внутри шага (`src/main.js:1102`).
+и `cleanupSecureCache()` внутри шага (`src/main.js:1115`).
 
 **Три момента, когда staging исчезает.**
 
 1. Шаг завершился успехом или осознанным пропуском — `if (okRun || skipped) cleanupSecureCache()`
-   (`src/main.js:1613`). При провале каталог **намеренно оставляют**: повтор шага в той же
+   (`src/main.js:1626`). При провале каталог **намеренно оставляют**: повтор шага в той же
    сессии переиспользует уже скачанный и sha-проверенный архив вместо повторной закачки
    сотен мегабайт.
 2. Выход из приложения — `cleanupAllSecureDirs()` проходит по всем значениям `SECURE_DIRS`.
-3. Следующий запуск — `pruneStaleSecureDirs()` (`src/main.js:408-431`), вызываемый в
-   `whenReady` сразу после `createWindow()` (`src/main.js:459`). Он существует потому, что
+3. Следующий запуск — `pruneStaleSecureDirs()` (`src/main.js:414-443`), вызываемый в
+   `whenReady` через 5 с после `createWindow()` (`src/main.js:473`), то есть уже после показа окна. Он существует потому, что
    краш, антивирус или пропажа питания не дают отработать `before-quit`.
 
 **Гейты `pruneStaleSecureDirs`.** Код исполняется под администратором, поэтому удаление
 обвешано пятью последовательными условиями, и любое несовпадение означает «не трогаем»:
-`if (!IS_WIN) return;` (`src/main.js:409`) → имя по шаблону `/^HmDeElev-[0-9a-f]{32}$/i`
-(`src/main.js:415`; флаг `/i` — то есть регистр не важен, тот же шаблон, что у
+`if (!IS_WIN) return;` (`src/main.js:415`) → имя по шаблону `/^HmDeElev-[0-9a-f]{32}$/i`
+(`src/main.js:422`; флаг `/i` — то есть регистр не важен, тот же шаблон, что у
 `Remove-HmSecureStagingDir` в `_deelev.ps1:136`, и имя всё равно рождается lowercase-GUID'ом
 в `_deelev.ps1:154`) → `lstatSync` и отказ от не-каталога и
 симлинка (защита от подмены junction'ом: `%ProgramData%` доступен группе Users на
 создание) → каталог «остыл», то есть ни у него самого, ни у его **прямых** детей mtime
-не менялся 6 часов (`src/main.js:420-426`: `let newest = st.mtimeMs` плюс однослойный
-`for (const child of fs.readdirSync(dir))`, рекурсии нет) → `verifyDirSecureWin`
-подтверждает, что владелец входит в список `{SYSTEM, Administrators}`
-(`$allow=@('S-1-5-18','S-1-5-32-544')`, `src/remote-fetch.js:316`, сверка владельца —
-`src/remote-fetch.js:318-319`), и что посторонних ACE нет (`src/remote-fetch.js:320-322`).
+не менялся 6 часов (`src/main.js:427-433`: `let newest = st.mtimeMs` плюс однослойный
+`for (const child of fs.readdirSync(dir))`, рекурсии нет) → давние кандидаты собираются в список
+(`src/main.js:434`), и `verifyDirsSecureWin` проверяет их ОДНИМ запуском PowerShell (`src/main.js:437`):
+владелец входит в список `{SYSTEM, Administrators}`
+(`$allow=@('S-1-5-18','S-1-5-32-544')`, `src/remote-fetch.js:359`, сверка владельца —
+`src/remote-fetch.js:367`), и посторонних ACE нет (`src/remote-fetch.js:368`); удаляется только каталог,
+которому проверка ответила строгим `true` (`src/main.js:439`), нет ответа — не удаляется ничего.
 То есть каталог с владельцем SYSTEM этот гейт проходит наравне с Administrators.
 
 Возрастной гейт живую докачку **не страхует**, хотя комментарий `src/main.js:406-407`
@@ -135,95 +137,95 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 однослойный, а `.part` лежит на уровень глубже: примитив отдаёт наружу `…\HmDeElev-<hex>\w`
 (`scripts/windows/_deelev.ps1:307` — `$work = Join-Path $dir 'w'`, возврат — `:349`), этот
 путь становится `cacheDir`, и временный файл рождается уже внутри него
-(`src/remote-fetch.js:381` — `path.join(dir, '.dl-' + … + '.part')`, вызов с `cacheDir` —
-`src/remote-fetch.js:983`). Обход берёт `HmDeElev-<hex>` и его прямых детей, то есть
+(`src/remote-fetch.js:435` — `path.join(dir, '.dl-' + … + '.part')`, вызов с `cacheDir` —
+`src/remote-fetch.js:1037`). Обход берёт `HmDeElev-<hex>` и его прямых детей, то есть
 только подкаталог `w`; mtime самого `.part` код не читает никогда. Создание и
 переименование `.part` двигают mtime `w` (меняется запись каталога), но дозапись в уже
 открытый дескриптор — нет. Значит докачка, которая пишет в один и тот же `.part` дольше
 шести часов, гейт возраста не переживёт.
 
-**Переиспользование в пределах сессии (`src/main.js:1159-1165`).** `SECURE_DIRS`
+**Переиспользование в пределах сессии (`src/main.js:1172-1178`).** `SECURE_DIRS`
 отображает `remoteId → каталог`. Перед повторным использованием каталог проверяется
 дважды: существует ли он и всё ли ещё защищён
-(`fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir)`, `src/main.js:1162`);
+(`fs.existsSync(cacheDir) && remoteFetch.verifyDirSecureWin(cacheDir)`, `src/main.js:1175`);
 не прошёл — запись выбрасывается (`SECURE_DIRS.delete(declared); cacheDir = ''`,
-`src/main.js:1163`) и рождается новый каталог (`src/main.js:1165`). Пред-существующий на
+`src/main.js:1176`) и рождается новый каталог (`src/main.js:1178`). Пред-существующий на
 диске чужой каталог не переиспользуется никогда.
 
-**Ветвление по платформе для кэша.** `if (IS_WIN)` (`src/main.js:1156`) →
+**Ветвление по платформе для кэша.** `if (IS_WIN)` (`src/main.js:1169`) →
 `winMakeSecureDir()`, при `null` — fail-closed отказ шага «не удалось подготовить
-защищённый каталог для загрузки» (`src/main.js:1166-1173`), иначе `SECURE_DIRS.set(...)`
-(`src/main.js:1179`) и `secureCacheDir = cacheDir` (`src/main.js:1180`). Ветка `else`
-(`src/main.js:1181-1183`) вызывает `remoteCacheDir(declared)` (`src/main.js:1182`), то есть
+защищённый каталог для загрузки» (`src/main.js:1179-1186`), иначе `SECURE_DIRS.set(...)`
+(`src/main.js:1192`) и `secureCacheDir = cacheDir` (`src/main.js:1193`). Ветка `else`
+(`src/main.js:1194-1196`) вызывает `remoteCacheDir(declared)` (`src/main.js:1195`), то есть
 `~/Library/Caches/HamidunSetup/<remoteId>` на macOS. `secureCacheDir` в этой ветке остаётся
-пустым, и `cleanupSecureCache()` становится no-op по первой же строке (`src/main.js:1102`).
+пустым, и `cleanupSecureCache()` становится no-op по первой же строке (`src/main.js:1115`).
 
-**Взаимодействие с самолечением macOS (`src/main.js:3909-4012`).** Замок единственного
+**Взаимодействие с самолечением macOS (`src/main.js:3922-4025`).** Замок единственного
 экземпляра здесь мешает по существу: свежая копия, запущенная с перемонтированного
 образа, закрылась бы сама, пока жив прежний процесс. Поэтому отцеплённый помощник ждёт
 исчезновения нашего PID вторым же элементом своего массива строк — первый разбирает
-аргументы (`'DMG="$1"; PID="$2"; ST="$3";'`, `src/main.js:3941`), а ожидание стоит на
-`src/main.js:3945` (`kill -0 "$PID"`, потолок 120 с: `[ $i -lt 240 ]` × `sleep 0.5`).
-Главный процесс сам инициирует `app.quit()` через 6 секунд (`src/main.js:4007`) — раньше
+аргументы (`'DMG="$1"; PID="$2"; ST="$3";'`, `src/main.js:3954`), а ожидание стоит на
+`src/main.js:3958` (`kill -0 "$PID"`, потолок 120 с: `[ $i -lt 240 ]` × `sleep 0.5`).
+Главный процесс сам инициирует `app.quit()` через 6 секунд (`src/main.js:4020`) — раньше
 это делал таймер в окне, и человек, закрывший окно руками, уничтожал таймер вместе с ним.
 
 **u10a (находка F18): окно создаётся с `sandbox: true` и охраной навигации.** `createWindow` (`src/main.js:354-372`): `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` (процесс страницы в песочнице ОС — `ProcessMetric.sandboxed`), и `windowGuards.install(mainWindow.webContents, { indexFile, onBlock })` (`src/window-guards.js`) до `loadFile`: `will-navigate`, `will-redirect`, `will-frame-navigate` получают `preventDefault`, если адрес — не наша `index.html` (`file:` без хоста, тот же путь, регистр на Windows не важен; якорь и запрос не в счёт); `setWindowOpenHandler` всегда `deny`. Внешние ссылки открываются как раньше — кнопками через IPC `open-external` с проверкой схем в main. Почему это важно: окно — Chromium с preload, который отдаёт странице весь IPC установщика, а установщик работает с токеном администратора; без охраны уход окна на чужой адрес оставлял бы чужой странице тот же `window.installer` (воспроизведено под Electron 44.5.1: страница `http://127.0.0.1:…` получила его). Совместимость `sandbox: true` с настоящим `preload.js` (только `contextBridge` и `ipcRenderer`) доказана живым запуском `test/window-guards-probe.js`: страница видит ровно тот интерфейс, что объявлен в preload, обмен `invoke` проходит, процесс страницы в песочнице; то же — на копии `src/`, упакованной в `app.asar` настоящим упаковщиком (страница и preload читаются изнутри архива, как в упакованной сборке). Не проверено: настоящий portable-exe (electron-builder, fuses, подпись) и сборка macOS (на этой машине их нет).
 
 ## Инварианты
 
-1. **Второй процесс установщика не доживает до работы.** `src/main.js:439-441`: условие —
+1. **Второй процесс установщика не доживает до работы.** `src/main.js:450-452`: условие —
    ровно `!app.requestSingleInstanceLock()`, тело — `app.quit()`; `app.whenReady()`,
    `createWindow()` и регистрация `second-instance` лежат в ветке `else` (регистрации
-   `ipcMain.handle` — нет, они на верхнем уровне после `src/main.js:468`). Структуру (а не
+   `ipcMain.handle` — нет, они на верхнем уровне после `src/main.js:481`). Структуру (а не
    наличие вызова) проверяет тест «второй запуск установщика невозможен…».
-2. **Второй запуск не остаётся немым.** `src/main.js:442-455`: обработчик `second-instance`
+2. **Второй запуск не остаётся немым.** `src/main.js:453-466`: обработчик `second-instance`
    поднимает существующее окно, а при отсутствии окон создаёт новое.
 3. **Каталог распаковки portable-стаба уникален на каждый запуск.**
    `package.json` → `build.portable.unpackDirName === true`.
 4. **В одном процессе одновременно идёт не более одного `run-component`.**
-   `src/main.js:1024-1027` (вход отклоняется при `_installBusy`), `1425-1427` (снятие в
+   `src/main.js:1037-1040` (вход отклоняется при `_installBusy`), `1425-1427` (снятие в
    `finally`), `1230` (`return await new Promise`).
 5. **Каждый дочерний процесс шага учтён.** `CHILDREN.add(child)` сразу после `spawn`
-   (`src/main.js:1440`, `spawn` — `1247`), `CHILDREN.delete(child)` в `close`
-   (`src/main.js:1541`).
+   (`src/main.js:1453`, `spawn` — `1247`), `CHILDREN.delete(child)` в `close`
+   (`src/main.js:1554`).
 6. **Убивается дерево процессов, а не обёртка.** Windows — `taskkill /T /F`
    (`src/main.js:297-298`); POSIX — `process.kill(-pid, 'SIGKILL')` (`src/main.js:306`),
-   что работает только благодаря `spawnOpts.detached = true` (`src/main.js:1421`).
+   что работает только благодаря `spawnOpts.detached = true` (`src/main.js:1434`).
 7. **`taskkill` вызывается только абсолютным путём из валидированного System32.**
    `src/main.js:295` (`remoteFetch.sysBin('taskkill.exe')`), при `null` — fail-closed на
    `c.kill()` (`src/main.js:301`). Отсутствие фолбэка в короткое имя стережёт тест
    «#6 main.js: no short-name fallback…».
 8. **Обе точки выхода убирают за собой.** `window-all-closed` и `before-quit` вызывают
-   `killChildren()` и `cleanupAllSecureDirs()` (`src/main.js:470-481`).
+   `killChildren()` и `cleanupAllSecureDirs()` (`src/main.js:483-494`).
 9. **Сносится ВНЕШНИЙ каталог staging-пары, а не рабочий подкаталог `w` — и только
    если имя внешнего совпало с `^HmDeElev-[0-9a-f]{32}$`.** Обе половины живут в
    `src/staging-paths.js`: `stagingRootOf()` поднимается от `w` к родителю лишь
    когда родитель действительно наш staging, а `rmStagingTree()` сверяет имя и
    возвращает `false`, ничего не тронув, при любом несовпадении. Потребителей в
    `src/main.js` четыре: `cleanupAllSecureDirs` (`src/main.js:396`),
-   `cleanupSecureCache` (`src/main.js:1102`), локальный `rm` внутри
-   `winMakeSecureDir` (`src/main.js:2138`) и замыкание `cleanup` внутри
-   `winLaunchDeElevated` (`src/main.js:2290`). Голого
+   `cleanupSecureCache` (`src/main.js:1115`), локальный `rm` внутри
+   `winMakeSecureDir` (`src/main.js:2151`) и замыкание `cleanup` внутри
+   `winLaunchDeElevated` (`src/main.js:2303`). Голого
    `fs.rmSync(stagingRootOf(…))` в `main.js` не осталось — это сторожит тест.
 
    До 30.08 обе функции лежали прямо в `main.js`, и гейта по имени у них не было:
    `<любой каталог>\w` превращался в рекурсивное удаление этого каталога под
    администратором. Разбор — в [спеке де-элевации](de-elevaciya.md), инвариант 9.
 10. **Мусор прошлых запусков удаляется только при совпадении всех четырёх гейтов.**
-    `src/main.js:408-430`: строгое имя `^HmDeElev-[0-9a-f]{32}$`, каталог и не симлинк
-    (`src/main.js:419` — `!st.isDirectory() || st.isSymbolicLink()`; отдельной проверки
+    `src/main.js:414-443`: строгое имя `^HmDeElev-[0-9a-f]{32}$`, каталог и не симлинк
+    (`src/main.js:426` — `!st.isDirectory() || st.isSymbolicLink()`; отдельной проверки
     атрибута `ReparsePoint`, как у PowerShell-двойника в `_deelev.ps1:318-322`, здесь нет),
-    возраст ≥6 часов, `verifyDirSecureWin` (`src/remote-fetch.js:328-349`).
+    возраст ≥6 часов, `verifyDirsSecureWin` (`src/remote-fetch.js:374-403`, один запуск на всех кандидатов).
 11. **Успешный или осознанно пропущенный шаг чистит свой staging немедленно.**
-    `src/main.js:1613` (`if (okRun || skipped) cleanupSecureCache()`); при провале каталог
+    `src/main.js:1626` (`if (okRun || skipped) cleanupSecureCache()`); при провале каталог
     остаётся для ретрая, но гарантированно исчезает на выходе (инвариант 8).
 12. **Переиспользуется только каталог, рождённый этим же процессом и всё ещё защищённый.**
-    `src/main.js:1159` (запись из `SECURE_DIRS`), `1018` (`fs.existsSync` +
+    `src/main.js:1172` (запись из `SECURE_DIRS`), `1018` (`fs.existsSync` +
     `verifyDirSecureWin`), `1019` (не прошёл — запись удаляется), `1021` (создаётся новый
     каталог).
 13. **Сбой уборки не ломает установку.** Все `rmSync` обёрнуты в `try/catch` с пустым
     телом (`src/main.js:397, 337, 959`), `pruneStaleSecureDirs` целиком обёрнут в `try`
-    (`src/main.js:410-430`).
+    (`src/main.js:416-442`).
 
 ## Что ломается, если инвариант нарушить
 
@@ -278,42 +280,42 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 ## Границы
 
 - **Замок операции покрывает только установку, не удаление.** `uninstall-component`
-  (`src/main.js:3720`) `_installBusy` не берёт и не проверяет — в файле имя встречается
+  (`src/main.js:3733`) `_installBusy` не берёт и не проверяет — в файле имя встречается
   ровно четыре раза (`src/main.js:262, 883, 886, 1426`), из них три внутри `run-component`
-  (обработчик открывается на `src/main.js:1016`), а `src/main.js:262` — это объявление
+  (обработчик открывается на `src/main.js:1029`), а `src/main.js:262` — это объявление
   `let _installBusy = false;` на верхнем уровне модуля, рядом с `CHILDREN`
   (`src/main.js:260`) и `SECURE_DIRS` (`src/main.js:278`); интерфейс тоже не блокирует
   соседние кнопки на время удаления (`src/renderer/app.js:566-581` — только текст статуса
   в строке компонента). Кодом не запрещено нажать «Удалить» во время идущей установки.
 - **Не все дочерние процессы попадают в `CHILDREN` — и это осознанно.** `spawn(` в файле
-  встречается семь раз (`src/main.js:1433, 1603, 1709, 1772, 2221, 2244, 3513`), а
-  `CHILDREN.add` — ровно один (`src/main.js:1440`, дочерний процесс шага установки). Вне
-  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2339`; снят 09.10.2026 вместе
+  встречается семь раз (`src/main.js:1446, 1603, 1709, 1772, 2221, 2244, 3513`), а
+  `CHILDREN.add` — ровно один (`src/main.js:1453`, дочерний процесс шага установки). Вне
+  учёта остаются шесть: лаунчер Claude через explorer (`src/main.js:2352`; снят 09.10.2026 вместе
   с самим `spawn`: окно «Войти в Claude» теперь открывает токен оболочки через `winShellTokenRun`,
   у которого свой рабочий PowerShell с 30-секундным таймером), `osascript` для
-  Терминала (`src/main.js:2744`), folder-fallback explorer (`src/main.js:2192`), запуск
-  Cursor через `/usr/bin/open` (`src/main.js:2001`), помощник самолечения macOS
-  (`src/main.js:3985`) и рабочий PowerShell внутри `winMakeSecureDir` (`src/main.js:2116`).
+  Терминала (`src/main.js:2757`), folder-fallback explorer (`src/main.js:2205`), запуск
+  Cursor через `/usr/bin/open` (`src/main.js:2014`), помощник самолечения macOS
+  (`src/main.js:3998`) и рабочий PowerShell внутри `winMakeSecureDir` (`src/main.js:2129`).
   Два explorer-лаунчера на Windows (`2221`, `1772`; первый снят 09.10.2026) отцеплены ради де-элевации, запуск
   Cursor (`1603`) — просто `detached: true` fire-and-forget на macOS; помощник самолечения
   обязан пережить наш выход. Два случая в этот перечень не укладываются: `osascript`
-  спавнится с опциями ровно `{ stdio: 'ignore' }` (`src/main.js:2747`) — без `detached`, и
-  к де-элевации отношения не имеет (это macOS-ветка); а PowerShell на `src/main.js:2116` —
-  не лаунчер, а живой ребёнок со своим 20-секундным таймером (`src/main.js:2122`).
+  спавнится с опциями ровно `{ stdio: 'ignore' }` (`src/main.js:2760`) — без `detached`, и
+  к де-элевации отношения не имеет (это macOS-ветка); а PowerShell на `src/main.js:2129` —
+  не лаунчер, а живой ребёнок со своим 20-секундным таймером (`src/main.js:2135`).
   Закрытие окна ни один из шести не убивает.
 - **На macOS и Linux кэш докачки не убирается никогда.** `SECURE_DIRS` наполняется только
-  внутри `if (IS_WIN)` (`SECURE_DIRS.set(declared, cacheDir)`, `src/main.js:1179`),
+  внутри `if (IS_WIN)` (`SECURE_DIRS.set(declared, cacheDir)`, `src/main.js:1192`),
   `pruneStaleSecureDirs` первой строкой делает
-  `if (!IS_WIN) return;` (`src/main.js:409`). Скачанное остаётся в
-  `~/Library/Caches/HamidunSetup/<remoteId>` (`src/main.js:876-885`) вместе с распакованной
+  `if (!IS_WIN) return;` (`src/main.js:415`). Скачанное остаётся в
+  `~/Library/Caches/HamidunSetup/<remoteId>` (`src/main.js:889-898`) вместе с распакованной
   копией. Записи для darwin в реестре докачки есть (`remote-components.json`), то есть речь
-  о реальных сотнях мегабайт на компонент. Комментарий `src/main.js:1099` называет это
+  о реальных сотнях мегабайт на компонент. Комментарий `src/main.js:1112` называет это
   осознанным решением («POSIX: '' → cleanup no-op»), но обещание «не оставляет гигабайтов
   мусора» на macOS выполняется лишь частично — в отличие от Windows, там ничего не
   удаляется ни на выходе, ни при следующем старте.
 - **Уборка прошлых запусков ждёт следующего запуска и шести часов.** Единственный вызов
-  `pruneStaleSecureDirs` — в `whenReady` (`src/main.js:459`), порог остывания — 6 часов
-  (`src/main.js:413`). Если человек больше не откроет установщик, каталоги останутся.
+  `pruneStaleSecureDirs` — в `whenReady` (`src/main.js:473`, с задержкой 5 с), порог остывания — 6 часов
+  (`src/main.js:419`). Если человек больше не откроет установщик, каталоги останутся.
 - **Замок — на процесс, а не на машину.** Он не мешает второму пользователю той же машины
   запустить свою копию; поведение Electron за пределами этого репозитория здесь не
   проверялось.
@@ -336,35 +338,39 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
    шаблона имени; сама функция из `main.js` не исполняется и не разбирается.
 3. **`execFileSync` с `taskkill` вызывается без `timeout`** (`src/main.js:297-298`). Все
    прочие синхронные вызовы внешних бинарей в этом файле таймаут задают: `tasklist` — 4000
-   (`src/main.js:587`), `schtasks` — 20000 в `runSchtasks` (`src/main.js:2216`) и 15000 в
-   `readLastResult` (`src/main.js:2356`), `taskkill` в
-   `killproc` — 20000 (`src/main.js:3706`). Зависший `taskkill` в обработчике выхода
+   (`src/main.js:600`), `schtasks` — 20000 в `runSchtasks` (`src/main.js:2229`) и 15000 в
+   `readLastResult` (`src/main.js:2369`), `taskkill` в
+   `killproc` — 20000 (`src/main.js:3719`). Зависший `taskkill` в обработчике выхода
    заблокирует завершение процесса без верхней границы.
-4. **`pruneStaleSecureDirs` синхронно запускает PowerShell на старте.**
-   `verifyDirSecureWin` внутри — это `spawnSync` (`src/remote-fetch.js:339-340`) с запасом 30 с
-   (`VERIFY_DIR_TIMEOUT_MS`, `src/remote-fetch.js:326`); он вызывается в цикле по каждому «остывшему»
-   кандидату сразу после `createWindow()`. Раньше таймаута не было вовсе, потом стоял 20 с — и на
-   чистой машине он срабатывал на каждой проверке (см. спеку де-элевации). Скрипт проверки теперь без
-   командлетов и отвечает за доли секунды, так что на обычной машине окно не замирает. Граница сверху
-   остаётся: на очень медленной машине с несколькими залежавшимися каталогами это всё равно
-   последовательные запуски `powershell.exe` в главном процессе — то самое замораживание окна, от
-   которого в этом же файле специально ушли в `winMakeSecureDir`
-   (комментарий `src/main.js:2095-2098`: «синхронный вызов морозил главный процесс, и окно
-   установщика переставало отвечать»).
+4. **`pruneStaleSecureDirs` синхронно запускает PowerShell на старте — но один раз и после показа окна.**
+   Прежде это был цикл «запуск `powershell.exe` на каждый давний каталог» сразу после `createWindow()`:
+   у человека, запускавшего установщик много раз без прав администратора, в `%ProgramData%` лежат
+   сотни запертых `HmDeElev-*` (у автора 17.10.2026 — 693; их рождает `-Elevated $false`, они принадлежат
+   пользователю, проверка защищённости их отвергает, и уборка не удаляла их НИКОГДА, а проверяла заново
+   на каждом запуске), и главный поток был занят минутами: окно создаётся скрытым и показывается по
+   `ready-to-show`, которое тот же поток и доставляет (поймано дымовым запуском подписанного Lite).
+   Теперь проверка пакетная: `verifyDirsSecureWin` (`src/remote-fetch.js:374-403`) — один `spawnSync`
+   (`src/remote-fetch.js:384-385`, запас 30 с плюс 0,1 с на каталог, не больше 120 с) на все кандидаты,
+   пути идут через stdin, скрипт без командлетов (`VERIFY_DIRS_SCRIPT`, `src/remote-fetch.js:357-370`);
+   на 693 каталогах это ≈1,3 с вместо ≈30 минут. Вызов уборки отложен на 5 с (`src/main.js:473`), то есть
+   до показа окна не мешает. Остаётся: эти ≈1–3 с главный поток всё равно занят (после показа окна), а
+   пользовательские каталоги по-прежнему не удаляются — их надо стирать вручную (они принадлежат пользователю).
+   Окно создаётся скрытым и без этой уборки — комментарий `src/main.js:2108-2111` про замораживание
+   окна в `winMakeSecureDir` относится к другому месту.
 5. **В JS-уборке нет fail-closed гейта по имени, который есть в PowerShell-уборке.**
    `Remove-HmSecureStagingDir` (`scripts/windows/_deelev.ps1:127-139`) после подъёма от `w`
    отказывается удалять каталог, чьё имя не совпало с `^HmDeElev-[0-9a-f]{32}$`, и
    комментарий прямо объясняет почему: «ошибка в вычислении пути не должна стоить
    пользователю чужого каталога». `cleanupAllSecureDirs` (`src/main.js:397`) и
-   `cleanupSecureCache` (`src/main.js:1103`) такой проверки не делают — они доверяют тому,
+   `cleanupSecureCache` (`src/main.js:1116`) такой проверки не делают — они доверяют тому,
    что в `SECURE_DIRS` попадает только результат `winMakeSecureDir` (а тот валидирует путь
    строго под `%ProgramData%`: `const root = path.resolve(pd);` и
    `if (!path.resolve(dir).startsWith(root + path.sep)) { rm(); return null; }`,
-   `src/main.js:2148-2149`). Сегодня это ограничивает ущерб, но
+   `src/main.js:2161-2162`). Сегодня это ограничивает ущерб, но
    асимметрия между двумя реализациями одной уборки — готовая ловушка при следующей правке.
-6. **Windows-ветка `remoteCacheDir` мертва.** `src/main.js:876-885` строит
+6. **Windows-ветка `remoteCacheDir` мертва.** `src/main.js:889-898` строит
    `%ProgramData%\HamidunSetup\cache\<remoteId>`, но единственный вызов функции —
-   `src/main.js:1182`, в ветке `else` от `if (IS_WIN)` (грепом по `remoteCacheDir` в файле
+   `src/main.js:1195`, в ветке `else` от `if (IS_WIN)` (грепом по `remoteCacheDir` в файле
    только объявление на `753` и этот вызов). То есть предсказуемый win-путь не
    используется никогда, а его существование в коде наводит на мысль, что уборка должна
    покрывать и его.
@@ -379,9 +385,9 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
    следующего `createWindow()`.
 9. **Порог «остывания» в 6 часов — эвристика по единственному признаку.** «Каталог ещё
    живой» определяется только по mtime самого каталога и его детей
-   (`src/main.js:420-426`); ни pid-файла, ни блокировки нет. Формально это допускает снос
+   (`src/main.js:427-433`); ни pid-файла, ни блокировки нет. Формально это допускает снос
    staging у процесса, который шесть часов ничего в него не писал. Насколько такой сценарий
    достижим на практике, **из кода не следует однозначно**: `pruneStaleSecureDirs`
    вызывается внутри ветки `else`, то есть уже после успешного получения замка
-   (`src/main.js:457-459`), так что второй экземпляр установщика до этой функции не
+   (`src/main.js:468-470`), так что второй экземпляр установщика до этой функции не
    доходит; иных вызывающих у неё нет.

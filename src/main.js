@@ -406,12 +406,18 @@ function cleanupAllSecureDirs() {
 // пред-создать HmDeElev-* junction): строгий шаблон имени, НЕ reparse-point, каталог
 // защищён (owner=Admins, посторонних ACE нет) и «остыл» (ничего не менялось 6 часов —
 // живая докачка другого инстанса обновляет mtime своего .part).
+//
+// Проверка защищённости — ОДНИМ запуском PowerShell на все кандидаты (verifyDirsSecureWin), а не по запуску на каталог:
+// у того, кто запускал установщик много раз без прав администратора, в %ProgramData% лежат сотни запертых HmDeElev-*
+// (у автора на 17.10.2026 — 693), и прежний цикл «запуск PowerShell на каталог» держал главный поток минутами, пока окно
+// не могло показаться. Сам вызов отложен до показа окна (см. whenReady): уборка — домашнее хозяйство, а не условие старта.
 function pruneStaleSecureDirs() {
   if (!IS_WIN) return;
   try {
     const pd = remoteFetch.winProgramData();
     if (!pd || !fs.existsSync(pd)) return;
     const cutoff = Date.now() - 6 * 60 * 60 * 1000;
+    const stale = [];
     for (const name of fs.readdirSync(pd)) {
       if (!/^HmDeElev-[0-9a-f]{32}$/i.test(name)) continue;
       const dir = path.join(pd, name);
@@ -425,7 +431,12 @@ function pruneStaleSecureDirs() {
         }
       } catch (e) { /* ignore */ }
       if (newest > cutoff) continue;                                // возможно живой каталог другого инстанса
-      if (!remoteFetch.verifyDirSecureWin(dir)) continue;           // не наш/не защищён → не удаляем
+      stale.push(dir);
+    }
+    if (!stale.length) return;
+    const verdicts = remoteFetch.verifyDirsSecureWin(stale);
+    for (const dir of stale) {
+      if (verdicts.get(dir) !== true) continue;                     // не наш/не защищён/не ответили → не удаляем
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* best-effort */ }
     }
   } catch (e) { /* уборка мусора не должна ломать запуск */ }
@@ -457,7 +468,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     createWindow();
-    try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ }
+    // Уборка прошлых запусков — ПОСЛЕ показа окна (через несколько секунд), а не до него: она синхронна и держит главный
+    // поток, а окно создаётся скрытым и показывается по ready-to-show, которое тот же поток и доставляет.
+    setTimeout(() => { try { pruneStaleSecureDirs(); } catch (e) { /* best-effort */ } }, 5000);
     // Прерванное удаление (антивирус убил процесс, пропало питание) оставляло
     // маркер переименованным — и кнопка «Удалить» исчезала навсегда. Возвращаем
     // маркер, чтобы человек мог просто повторить удаление.

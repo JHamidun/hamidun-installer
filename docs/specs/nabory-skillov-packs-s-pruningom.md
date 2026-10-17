@@ -3,7 +3,7 @@
 <!-- spec-id: nabory-skillov-packs-s-pruningom -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `packs.json`, `src/renderer/app.js:83-90`, `src/renderer/app.js:583-677`, `src/renderer/app.js:1293-1329`, `src/renderer/app.js:1333-1385`, `src/renderer/index.html:127-135`, `src/renderer/styles.css:406-407`, `src/main.js:638`, `src/install-env.js:20-46`, `scripts/windows/config.ps1:46-48`, `scripts/windows/config.ps1:308-358`, `scripts/windows/config.ps1:432-534`, `scripts/macos/config.sh:197-221`, `scripts/macos/config.sh:298-382`, `package.json:92-95`
+- **Код:** `packs.json`, `src/renderer/app.js:83-90`, `src/renderer/app.js:583-677`, `src/renderer/app.js:1293-1329`, `src/renderer/app.js:1333-1385`, `src/renderer/index.html:127-135`, `src/renderer/styles.css:406-407`, `src/main.js:651`, `src/install-env.js:20-46`, `scripts/windows/config.ps1:46-48`, `scripts/windows/config.ps1:308-358`, `scripts/windows/config.ps1:432-534`, `scripts/macos/config.sh:197-221`, `scripts/macos/config.sh:298-382`, `package.json:92-95`
 - **Тесты:** «no duplicate skill across packs», «core has no overlap with packs», «every core skill exists in repo», «every pack skill exists in repo», «config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $preExisting щадит скиллы юзера в add-missing; reparse skip», «config.sh: прунинг fail-closed (PRUNE_DISABLED/RC); mktemp+trap+симлинк-реджект; PRE_EXISTING щадит», «config.sh add-missing: прунинг удаляет ТОЛЬКО доложенное нами, щадит пред-существующий скилл юзера», «config.sh REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)», «config.sh: TMPDIR недоступен → прунинг паков отключён (fail-closed, 0 удалений), скилл юзера ЦЕЛ», «config.sh: пред-существующий SYMLINK-скилл переживает прунинг (fail-closed, чужая цель цела)», «config.ps1 REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)», «config.ps1 ADD-MISSING ×3: .hamidun-skills.txt НЕ присваивает пред-существующий скилл юзера (data-loss на 2-м прогоне), снятие пака живо на 3-м», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен», «u10b config.ps1: прунинг скиллов снятого набора убирает наш скилл целиком (в нём read-only файл и вложенная папка), остальные скиллы и пред-существующие цел; подмена ~/.claude/skills ссылкой перед перечислением — прунинг останавливается, чужие файлы целы; контроль: прежний Remove-Item -Recurse стирает чужое»
 
 ## Что обещает человеку
@@ -57,7 +57,7 @@ merge-копия перезаписывает внутри него одноим
 состав на момент чтения: **core — 23 скилла, 11 паков, 186 скиллов в паках** (пересчитано
 по файлу, не по документации). Дублей между паками нет, пересечения `core` с паками нет.
 
-**Загрузка.** `src/main.js:638` читает файл через `readJson('packs.json', { core: [], packs: [] })`
+**Загрузка.** `src/main.js:651` читает файл через `readJson('packs.json', { core: [], packs: [] })`
 и отдаёт в renderer полем `packs` результата `bootstrap()`. `src/renderer/app.js:83-90`
 кладёт это в `STATE.packsData`, помечает **все** паки выбранными (`STATE.selectedPacks[p.id] = true`)
 и **все** скиллы внутри них включёнными (`STATE.selectedSkills[s] = true`).
@@ -271,7 +271,7 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
    Так что риск здесь не в тестах, а в логе: человек читает «убрано: 1» как подтверждение
    удаления, хотя это счётчик попыток.
 3. **Нечитаемый `packs.json` деградирует молча.** `readJson('packs.json', { core: [], packs: [] })`
-   (`src/main.js:638`) при любой ошибке чтения/парсинга возвращает пустую заглушку: секция
+   (`src/main.js:651`) при любой ошибке чтения/парсинга возвращает пустую заглушку: секция
    паков рисуется пустой, `envForRun` отдаёт две пустые строки, прунинг не запускается вовсе
    (`config.ps1:488`), всё содержимое конфиг-пака ставится целиком. Ни сообщения в интерфейсе,
    ни строки в логе установки об этом нет.

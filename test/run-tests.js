@@ -22948,6 +22948,20 @@ ok('config.json в репозитории без сборочных маркер
     return null;
   }
 
+  // Переименование exe, который только что копировали или запускали. На Windows такой файл ещё держит антивирус (сканирует
+  // свежую копию в 190 МБ) или дочерние процессы Electron (GPU, crashpad), которые живут чуть дольше родителя: rename
+  // падает EBUSY. CI, 17.10.2026, два прогона подряд: красный тест «настоящий Electron 44» (rename electron.exe → Hamidun
+  // Setup.exe в finally проверки «неупакованного» режима) и следом ENOENT во втором тесте на той же копии. Это гонка с
+  // чужим процессом, а не дефект продукта; повторяем с паузой, прочие ошибки — сразу наружу.
+  function renameRetry(from, to) {
+    for (let attempt = 0; ; attempt++) {
+      try { fs.renameSync(from, to); return; } catch (e) {
+        if (attempt >= 40 || !/^(EBUSY|EPERM|EACCES)$/.test(String(e && e.code))) throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+      }
+    }
+  }
+
   let REAL; // undefined — ещё не готовили; null — недоступно; объект — копия dist во временной папке
   function realCopy() {
     if (REAL === null) SKIP('нет настоящего Electron для рантайм-проверки');
@@ -22960,7 +22974,7 @@ ok('config.json в репозитории без сборочных маркер
     const dist = path.join(base, 'dist');
     fs.cpSync(src.dist, dist, { recursive: true }); // ~370 МБ: ~2 с на SSD; exe меняем ТОЛЬКО в копии
     const exe = path.join(dist, 'Hamidun Setup.exe');
-    fs.renameSync(path.join(dist, src.rel), exe);
+    renameRetry(path.join(dist, src.rel), exe);
     // Раскладка как у настоящей сборки: resources/app есть, поэтому `exe скрипт.js` не запускает скрипт
     // как приложение, а ELECTRON_RUN_AS_NODE — единственный способ выполнить чужой JS через аргумент.
     const appDir = path.join(dist, 'resources', 'app');
@@ -22998,9 +23012,9 @@ ok('config.json в репозитории без сборочных маркер
   // То же, но под именем electron.exe: «неупакованный» режим, где NODE_OPTIONS Electron не режет сам.
   function asUnpackaged(real, fn) {
     const alt = path.join(real.dist, 'electron.exe');
-    fs.renameSync(real.exe, alt);
+    renameRetry(real.exe, alt);
     real.cur = alt;
-    try { return fn(); } finally { fs.renameSync(alt, real.exe); real.cur = real.exe; }
+    try { return fn(); } finally { renameRetry(alt, real.exe); real.cur = real.exe; }
   }
   const VEC = {
     control: (real) => probe(real, 'control', {}, []),
@@ -38428,5 +38442,201 @@ function Get-HmTouchupFilesOld {
       assert.strictEqual(RF.verifyDirSecureWin(outer, (l) => lines2.push(l)), false, 'после выдачи Users доступа каталог отвергнут');
       assert(/INSECURE:ace=S-1-5-32-545/.test(lines2.join('\n')), 'назван посторонний SID Users: ' + lines2.join(' | '));
     } finally { drop(base); }
+  });
+})();
+
+// ===========================================================================
+// u14. Стартовая уборка staging-каталогов: ОДИН запуск PowerShell на все кандидаты и не раньше показа окна.
+// Живой случай 17.10.2026 (дымовой запуск подписанного Lite на машине автора): окно «Hamidun Setup» создано, но 5 минут не
+// показывается. Причина — pruneStaleSecureDirs() сразу после createWindow() синхронно запускала PowerShell на КАЖДЫЙ
+// давний каталог HmDeElev-* в %ProgramData% (≈2,8 с на каталог под нагрузкой), а их там 693: каталоги, рождённые запуском
+// без прав администратора, принадлежат пользователю, проверка защищённости их отвергает, значит удалить их уборка не
+// может, и они перепроверялись на КАЖДОМ запуске. Главный поток занят — ready-to-show не доставляется — окна нет.
+// Теперь: одна пакетная проверка (verifyDirsSecureWin, ≈1,3 с на 693 каталога), вызов отложен до показа окна.
+// ===========================================================================
+(function u14StartupPrune() {
+  console.log('\n== Стартовая уборка HmDeElev-*: один запуск на все каталоги, после показа окна (u14) ==');
+  const { spawnSync } = require('child_process');
+  const IS_WIN = process.platform === 'win32';
+  const RF = require(path.join(ROOT, 'src', 'remote-fetch.js'));
+  const MAINJS = () => fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const SYS32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  const ICACLS = path.join(SYS32, 'icacls.exe');
+  const WHOAMI = path.join(SYS32, 'whoami.exe');
+  const drop = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+  const cmdletsIn = (s) => (String(s).match(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/g) || []);
+  const fnBody = (src, head) => {
+    const i = src.indexOf(head);
+    assert(i > 0, 'на месте: ' + head);
+    const tail = src.slice(i);
+    return tail.slice(0, tail.search(/\r?\n\}\r?\n/));
+  };
+
+  ok('u14: скрипт пакетной проверки — без командлетов, пути со stdin, ответ «вердикт TAB путь»; проверка отсутствия пути названа типом ошибки', () => {
+    const s = RF.VERIFY_DIRS_SCRIPT;
+    assert.strictEqual(typeof s, 'string', 'скрипт экспортирован для теста (VERIFY_DIRS_SCRIPT)');
+    assert.deepStrictEqual(cmdletsIn(s), [], 'командлеты в пакетном скрипте: ' + cmdletsIn(s).join(', '));
+    assert(/\[Console\]::In\.ReadToEnd\(\)/.test(s), 'пути читаются со stdin');
+    assert(/GetAccessRules\(\$true,\$true,\$sid\)/.test(s) && /SecurityIdentifier\];/.test(s), 'правила читаются как SecurityIdentifier');
+    assert(!/\.Access\b|\.Translate\(/.test(s), 'нет .Access и Translate');
+    assert(/\[Console\]::Out\.WriteLine\(\$v\+\[string\]\[char\]9\+\$d\)/.test(s), 'ответ: вердикт, табуляция, путь');
+    assert(/'INSECURE:owner='/.test(s) && /'INSECURE:ace='/.test(s) && /'ERROR:'\+\$e\.GetType\(\)\.Name/.test(s), 'вердикты INSECURE:owner / INSECURE:ace / ERROR:<тип исключения>');
+    // одиночная проверка тоже называет причину отказа чтения ACL (типом исключения, а не текстом в кодовой странице консоли)
+    assert(/ERROR:'\+\$e\.GetType\(\)\.Name/.test(RF.VERIFY_DIR_SCRIPT), 'одиночная проверка называет тип исключения');
+  });
+
+  ok('u14: verifyDirsSecureWin (настоящий PowerShell 5.1): 300 каталогов — один запуск, ответ быстрее 15 с; чужой владелец, отсутствующий путь и System32 — false; пустой список — без запуска', () => {
+    if (!IS_WIN) SKIP('только Windows');
+    assert.strictEqual(RF.verifyDirsSecureWin([]).size, 0, 'пустой список — пустой ответ');
+    if (/[^\x00-\x7f]/.test(os.tmpdir())) SKIP('каталог TEMP с не-ASCII знаками: пути идут через stdin в кодовой странице консоли');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u14-'));
+    try {
+      const dirs = [];
+      for (let i = 0; i < 300; i++) { const d = path.join(base, 'd' + i); fs.mkdirSync(d); dirs.push(d); }
+      const missing = path.join(base, 'missing');
+      const asked = dirs.concat([missing, path.join(SYS32)]);
+      const lines = [];
+      const t0 = Date.now();
+      const m = RF.verifyDirsSecureWin(asked, (l) => lines.push(l));
+      const ms = Date.now() - t0;
+      assert.strictEqual(m.size, asked.length, 'на каждый запрошенный путь есть ответ: ' + m.size + ' из ' + asked.length + ' | ' + lines.slice(0, 2).join(' | '));
+      assert(asked.every((d) => m.get(d) === false), 'ни один обычный каталог, отсутствующий путь или System32 не признан защищённым');
+      assert(/ERROR:DirectoryNotFoundException/.test(lines.join('\n')), 'отсутствующий путь назван типом ошибки: ' + lines.filter((l) => /missing/.test(l)).join(' | '));
+      // Один запуск: по запуску на каталог (прежний цикл) 300 проверок не уложились бы в этот предел даже без командлетов.
+      assert(ms < 15000, '300 каталогов проверены за ' + ms + ' мс — один запуск PowerShell укладывается в секунды');
+      // путь с переводом строки не должен разорвать протокол и не получает true
+      const evil = RF.verifyDirsSecureWin([dirs[0] + '\nC:\\Windows'], () => {});
+      assert(![...evil.values()].includes(true), 'путь с переводом строки не признан защищённым');
+    } finally { drop(base); }
+  });
+
+  ok('u14: verifyDirsSecureWin на повышенном раннере: каталоги настоящего примитива — true, обычный каталог рядом — false, ответ одним запуском', () => {
+    if (!IS_WIN) SKIP('только Windows');
+    const who = spawnSync(WHOAMI, ['/groups'], { encoding: 'utf8', timeout: 60000 });
+    if (!/S-1-16-(12288|16384)\b/.test(String(who.stdout || ''))) SKIP('нужен повышенный запуск (администратор): примитив с -Elevated $true иначе откажет');
+    const PS = RF.winPowershellPath();
+    if (!PS) SKIP('нет Windows PowerShell 5.1');
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u14-locked-'));
+    try {
+      const script = "$ErrorActionPreference='Stop';. $env:HM_U14_DEELEV;" +
+        "$d=New-HmSecureStagingDir -ProgramData $env:HM_U14_PD -Icacls $env:HM_U14_ICACLS -Elevated $true;" +
+        "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
+      const mk = () => {
+        const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+          encoding: 'utf8', timeout: 180000,
+          env: Object.assign({}, process.env, { HM_U14_DEELEV: path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), HM_U14_PD: base, HM_U14_ICACLS: ICACLS })
+        });
+        const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(r.stdout || ''));
+        assert(m, 'примитив отдал путь: ' + String(r.stdout || '').slice(0, 200) + ' | ' + String(r.stderr || '').slice(0, 400));
+        return m[1].trim();
+      };
+      const w1 = mk(); const o1 = path.dirname(w1);
+      const plain = path.join(base, 'plain'); fs.mkdirSync(plain);
+      const lines = [];
+      const t0 = Date.now();
+      const m = RF.verifyDirsSecureWin([o1, w1, plain], (l) => lines.push(l));
+      const ms = Date.now() - t0;
+      assert.strictEqual(m.get(o1), true, 'внешний каталог примитива принят: ' + lines.join(' | '));
+      assert.strictEqual(m.get(w1), true, 'рабочий каталог примитива принят: ' + lines.join(' | '));
+      assert.strictEqual(m.get(plain), false, 'обычный каталог отвергнут');
+      assert(ms < 15000, 'пакет из трёх каталогов занял ' + ms + ' мс');
+      // с доступом Users внешний каталог из принятых выпадает, внутренний остаётся
+      const g = spawnSync(ICACLS, [o1, '/grant', '*S-1-5-32-545:(OI)(CI)R'], { encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(g.status, 0, 'icacls выдал Users доступ: ' + g.stdout + g.stderr);
+      const lines2 = [];
+      const m2 = RF.verifyDirsSecureWin([o1, w1], (l) => lines2.push(l));
+      assert.strictEqual(m2.get(o1), false, 'после выдачи Users доступа внешний каталог отвергнут');
+      assert(/INSECURE:ace=S-1-5-32-545/.test(lines2.join('\n')), 'назван посторонний SID: ' + lines2.join(' | '));
+    } finally { drop(base); }
+  });
+
+  // main.js: сама логика уборки, вырезанная и ИСПОЛНЕННАЯ на подставных fs и remoteFetch.
+  const buildPrune = (state) => {
+    const src = MAINJS();
+    const body = fnBodyWithEnd(src, 'function pruneStaleSecureDirs() {');
+    const make = new Function('IS_WIN', 'remoteFetch', 'fs', 'path', body + '\nreturn pruneStaleSecureDirs;');
+    return make(state.isWin !== false, state.remoteFetch, state.fs, path.win32);
+  };
+  function fnBodyWithEnd(src, head) {
+    const i = src.indexOf(head);
+    assert(i > 0, 'на месте: ' + head);
+    const tail = src.slice(i);
+    const e = tail.search(/\r?\n\}\r?\n/);
+    return tail.slice(0, e) + '\n}';
+  }
+
+  ok('u14: pruneStaleSecureDirs (исполняется): ОДИН вызов пакетной проверки на давние кандидаты; удаляются только подтверждённые; свежие, чужие по имени, ссылки и файлы не проверяются и не удаляются; нет ответа — не удаляется ничего', () => {
+    const H = (c) => 'HmDeElev-' + String(c).repeat(32);
+    const PD = 'C:\\ProgramData';
+    const now = Date.now(); const old = now - 7 * 3600 * 1000; const fresh = now - 60 * 1000;
+    const tree = {
+      [PD]: { names: [H('a'), H('b'), H('c'), H('d'), 'HmDeElev-' + 'e'.repeat(31), 'not-ours', H('f'), H('9')] },
+      [PD + '\\' + H('a')]: { dir: true, mtime: old, kids: [] },                       // давний и подтверждённый → удалить
+      [PD + '\\' + H('b')]: { dir: true, mtime: old, kids: [] },                       // давний, проверка отвергла → оставить
+      [PD + '\\' + H('c')]: { dir: true, mtime: fresh, kids: [] },                     // свежий → не проверять
+      [PD + '\\' + H('d')]: { dir: true, link: true, mtime: old, kids: [] },           // ссылка → не трогать
+      [PD + '\\' + H('f')]: { dir: true, mtime: old, kids: ['x.part'] },               // у ребёнка свежий mtime → «живой»
+      [PD + '\\' + H('f') + '\\x.part']: { dir: false, mtime: fresh },
+      [PD + '\\' + H('9')]: { dir: false, mtime: old }                                 // файл с таким именем → не каталог
+    };
+    const removed = []; const calls = [];
+    const mkState = (verdictMap) => ({
+      remoteFetch: {
+        winProgramData: () => PD,
+        verifyDirsSecureWin: (dirs) => { calls.push(dirs.slice()); return verdictMap(dirs); }
+      },
+      fs: {
+        existsSync: () => true,
+        readdirSync: (p) => { const n = tree[p]; if (!n) throw new Error('ENOENT ' + p); return n.names || n.kids || []; },
+        lstatSync: (p) => { const n = tree[p]; if (!n) throw new Error('ENOENT ' + p); return { isDirectory: () => !!n.dir, isSymbolicLink: () => !!n.link, mtimeMs: n.mtime }; },
+        rmSync: (p) => removed.push(p)
+      }
+    });
+    // 1) обычный ответ: a безопасен, b нет
+    buildPrune(mkState((dirs) => new Map(dirs.map((d) => [d, d.endsWith(H('a'))]))))();
+    assert.strictEqual(calls.length, 1, 'ровно ОДИН вызов пакетной проверки: ' + calls.length);
+    assert.deepStrictEqual(calls[0].map((d) => d.slice(PD.length + 1)).sort(), [H('a'), H('b')].sort(), 'проверяются только давние настоящие каталоги: ' + JSON.stringify(calls[0]));
+    assert.deepStrictEqual(removed, [PD + '\\' + H('a')], 'удалён только подтверждённый: ' + JSON.stringify(removed));
+    // 2) проверка не ответила (пустая карта) → fail-closed
+    calls.length = 0; removed.length = 0;
+    buildPrune(mkState(() => new Map()))();
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual(removed, [], 'нет ответа проверки — не удалено ничего');
+    // 3) ответили не true (строка, 1) → не удаляем
+    calls.length = 0; removed.length = 0;
+    buildPrune(mkState((dirs) => new Map(dirs.map((d) => [d, 'SECURE']))))();
+    assert.deepStrictEqual(removed, [], 'только строго true разрешает удаление');
+    // 4) кандидатов нет → проверка не запускается вовсе
+    calls.length = 0; removed.length = 0;
+    const emptyTree = Object.assign({}, tree);
+    const st = mkState(() => new Map());
+    st.fs.readdirSync = (p) => (p === PD ? ['not-ours'] : []);
+    buildPrune(st)();
+    assert.strictEqual(calls.length, 0, 'без кандидатов PowerShell не запускается');
+    // 5) не Windows → ничего
+    calls.length = 0;
+    const stm = mkState(() => new Map());
+    stm.isWin = false;
+    buildPrune(stm)();
+    assert.strictEqual(calls.length, 0, 'вне Windows уборка не работает');
+    // 6) сбой удаления одного каталога не мешает остальным и не бросает
+    calls.length = 0; removed.length = 0;
+    const st6 = mkState((dirs) => new Map(dirs.map((d) => [d, true])));
+    let n = 0; st6.fs.rmSync = (p) => { n++; if (n === 1) throw new Error('EPERM'); removed.push(p); };
+    buildPrune(st6)();
+    assert.strictEqual(removed.length, 1, 'второй каталог удалён после сбоя первого: ' + JSON.stringify(removed));
+  });
+
+  ok('u14: whenReady — уборка вызывается через setTimeout ПОСЛЕ createWindow(), а не синхронно перед показом окна', () => {
+    const mj = MAINJS();
+    const i = mj.indexOf('app.whenReady().then(() => {');
+    assert(i > 0, 'app.whenReady на месте');
+    const blk = mj.slice(i, i + 1600);
+    assert(/createWindow\(\);[\s\S]*?setTimeout\(\(\) => \{ try \{ pruneStaleSecureDirs\(\); \} catch \(e\)[^}]*\} \}, \d{4,5}\);/.test(blk), 'уборка отложена таймером после createWindow()');
+    assert(!/createWindow\(\);\s*\r?\n\s*try \{ pruneStaleSecureDirs\(\)/.test(blk), 'прежнего синхронного вызова сразу после createWindow() нет');
+    const body = fnBody(mj, 'function pruneStaleSecureDirs() {');
+    assert(/verifyDirsSecureWin\(stale\)/.test(body) && !/verifyDirSecureWin\(/.test(body), 'внутри уборки только пакетная проверка, одиночной в цикле нет');
+    assert(/verdicts\.get\(dir\) !== true/.test(body), 'удаляется только при строгом true');
+    assert((body.match(/rmSync\(/g) || []).length === 1, 'рекурсивный rmSync в уборке один (счётчик теста инвентаря сносов)');
   });
 })();

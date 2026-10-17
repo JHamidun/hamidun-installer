@@ -3,7 +3,7 @@
 <!-- spec-id: dva-izdaniya-oflayn-i-legkoe -->
 
 - **Раздел:** Публикация и издания
-- **Код:** `tools/build-lite.js`, `config.json`, `src/main.js:113-125,146-156,167-176,641,751-774,780-791,799-817,1112-1249,1750`, `src/renderer/app.js:27-28,78-81,175-192,1231-1291`, `package.json:17-21`, `tools/assert-clean.js:39-81`, `tools/preflight-build.js:390-413`, `tools/before-pack.js:12-16`, `tools/fetch-vendor.ps1:1326-1356`, `tools/fetch-vendor-mac.sh:897-920`, `src/remote-fetch.js:908-1026`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:235-340`
+- **Код:** `tools/build-lite.js`, `config.json`, `src/main.js:113-125,146-156,167-176,654,764-787,793-804,812-830,1125-1262,1763`, `src/renderer/app.js:27-28,78-81,175-192,1231-1291`, `package.json:17-21`, `tools/assert-clean.js:39-81`, `tools/preflight-build.js:390-413`, `tools/before-pack.js:12-16`, `tools/fetch-vendor.ps1:1326-1356`, `tools/fetch-vendor-mac.sh:897-920`, `src/remote-fetch.js:962-1080`, `remote-components.json`, `.github/workflows/build-mac-lite.yml:235-340`
 - **Тесты:** «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «config.json в репозитории без сборочных маркеров», «lite (macOS): том dmg БЕЗ config-pack считается «сиблинг на месте» — ложной плашки нет», «lite (macOS): .app перетащили в «Программы» → сиблинга нет → плашка ОБЯЗАНА гореть», «lite (macOS): неполный сиблинг (нет checksums.json / нет uv / нет курса) → плашка горит», «МУТАЦИЯ: вернуть проверку config-pack в lite-ветку → тест краснеет (фикс не косметический)», «bootstrap отдаёт renderer editionVendorPresent, а не vendorAvailable; текст плашки верен для ОБОИХ изданий», «окно «что попадёт на мой ПК»: единица измерения названа словами, заголовок честен в офлайне», «CI: build-mac-lite больше НЕ удаляет опубликованный dmg перед заливкой (404-окно)»
 
 ## Что обещает человеку
@@ -96,7 +96,7 @@
   vendor; `useBundled = vendorHasArtifact || isOfflineEdition()`. При `useBundled` печатается
   «[локально] … докачка не нужна» и сеть не трогается. Иначе `remoteFetch.pickEntry` выбирает
   запись под платформу, на win32 создаётся свежий Admins-only каталог, и
-  `remoteFetch.fetchRemote` (`src/remote-fetch.js:908-1026`) качает с зеркал по возрастанию
+  `remoteFetch.fetchRemote` (`src/remote-fetch.js:962-1080`) качает с зеркал по возрастанию
   латентности с обязательной проверкой sha256. После успеха в staging копируется вшитый
   `checksums.json` (не удалось — компонент отклоняется со стадией `fetch`), `HM_VENDOR`
   указывает на staging, а конкретные пути резолвятся через `vendorPick()` (1109-1115): есть в
@@ -141,11 +141,11 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 ## Инварианты
 
 1. **Офлайн-издание не ходит в сеть за компонентами.** `useBundled = vendorHasArtifact || isOfflineEdition()`
-   (`src/main.js:1131`), и при истине ветка 990-993 печатает «докачка не нужна» вместо
+   (`src/main.js:1144`), и при истине ветка 990-993 печатает «докачка не нужна» вместо
    `fetchRemote`. Плюс в офлайне `compRemote` пуста, потому что в `components.json` нет явных
    `remote`-флагов (проверено чтением файла).
 2. **`uv` в lite никогда не докачивается.** `BUNDLED_ONLY = new Set(['uv'])` в `loadRemoteMaps`
-   (`src/main.js:762`) исключает его из авто-remote; он вшит списком `LITE_KEEP_WIN` /
+   (`src/main.js:775`) исключает его из авто-remote; он вшит списком `LITE_KEEP_WIN` /
    `LITE_KEEP_MAC` (`tools/build-lite.js:45-60`). Тест
    «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only» под этим держит только
    данные про тяжёлые компоненты: его тело (`test/run-tests.js:297-306`) сверяет два списка id
@@ -154,11 +154,11 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
    про законные исключения реестра (uv/course)» (`test/run-tests.js:9648-9653`), и проверяет он
    список `NO_REGISTRY_OK` в `tools/release-check.js`, а не `BUNDLED_ONLY` в `src/main.js`.
 3. **Ни один докачанный архив не распаковывается без совпадения sha256 из реестра.**
-   `fetchRemote` отвергает запись без валидного sha (`src/remote-fetch.js:922-927`) и удаляет
+   `fetchRemote` отвергает запись без валидного sha (`src/remote-fetch.js:976-981`) и удаляет
    файл при несовпадении, переходя к следующему зеркалу (989-996).
 4. **Второй гейт целостности едет вместе со staging.** После успешной докачки в каталог
    staging копируется вшитый `checksums.json`; не скопировался — компонент отклоняется со
-   стадией `fetch` (`src/main.js:1241-1246`).
+   стадией `fetch` (`src/main.js:1254-1259`).
 5. **Лёгкий артефакт не превышает потолок своей платформы.** 320 МиБ win / 400 МиБ mac —
    `TARGETS[*].maxBytes` и проверка после сборки (`tools/build-lite.js:71,82,361-366`).
 6. **Lite не собирается, если вшиваемый `checksums.json` разошёлся с опубликованными
@@ -191,7 +191,7 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
     показываем); в офлайне только из `components.json`. Держит тест «окно «что попадёт на мой
     ПК»: единица измерения названа словами, заголовок честен в офлайне».
 14. **В lite пути к файлам чужого компонента не теряются за staging.** `vendorPick()`
-    (`src/main.js:1275-1281`) резолвит по факту существования: staging → bundled vendor.
+    (`src/main.js:1288-1294`) резолвит по факту существования: staging → bundled vendor.
 15. **macOS lite-dmg не выпускается из не-lite `.app`.** Python-гейт в шаге «Assemble final
     lite dmg» падает, если во вшитом `config.json` не `edition=lite` и `offlineEdition=false`
     (`.github/workflows/build-mac-lite.yml:270-275`).
@@ -203,7 +203,7 @@ final lite dmg» в `.github/workflows/build-mac-lite.yml:246-340`: он про�
 2. `uv` — единственный менеджер окружения для Nomad и pydeps. Уйдя в докачку, он бы качался
    там, где для него нет записи-источника, а в ветке `nomad` установка свалилась бы в
    `irm https://astral.sh/uv/install.ps1 | iex` под админом (об этом прямо сказано в
-   комментарии «LITE-ГОЧА №2 (nomad)» — `src/main.js:1282-1289`, URL на 1118) — то есть
+   комментарии «LITE-ГОЧА №2 (nomad)» — `src/main.js:1295-1302`, URL на 1118) — то есть
    исполнение скачанного скрипта с правами
    администратора вместо байтов, лежащих внутри установщика.
 3. Подменённый на зеркале архив был бы распакован и запущен под админскими правами — это

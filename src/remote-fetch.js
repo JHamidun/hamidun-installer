@@ -314,7 +314,7 @@ const VERIFY_DIR_SCRIPT =
   "$ErrorActionPreference='Stop';" +
   "$d=$env:HM_VERIFY_DIR;" +
   "$allow=@('S-1-5-18','S-1-5-32-544');" +
-  "$acl=[System.IO.Directory]::GetAccessControl($d);" +
+  "try{$acl=[System.IO.Directory]::GetAccessControl($d)}catch{$e=$_.Exception;if($null -ne $e.InnerException){$e=$e.InnerException};[Console]::Out.Write('ERROR:'+$e.GetType().Name);exit 0};" +
   "$o=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value;" +
   "if($allow -notcontains $o){[Console]::Out.Write('INSECURE:owner='+$o);exit 0};" +
   "foreach($a in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){" +
@@ -346,6 +346,60 @@ function verifyDirSecureWin(dir, log) {
     || ('exit ' + r.status);
   log && log('  [sec] проверка ACL не пройдена для ' + dir + ': ' + why);
   return false;
+}
+
+// Пакетная проверка: ОДИН запуск PowerShell на все каталоги. Нужна стартовой уборке (main.js pruneStaleSecureDirs):
+// на машине, где установщик запускали много раз без прав администратора (разработка, тесты, сбои), в %ProgramData% копятся
+// сотни запертых HmDeElev-* (у автора их 693), и проверка «по запуску на каталог» держала главный поток минутами —
+// окно не показывалось вовсе (замер 17.10.2026: ≈2,8 с на каталог под нагрузкой). Один запуск на всех — доли секунды.
+// Тот же принцип, что у VERIFY_DIR_SCRIPT: ни одного командлета; список путей идёт через stdin (в переменной окружения
+// на сотнях путей легко упереться в предел блока окружения). Ответ — по строке на каталог: «вердикт TAB путь».
+const VERIFY_DIRS_SCRIPT =
+  "$ErrorActionPreference='Stop';" +
+  "$allow=@('S-1-5-18','S-1-5-32-544');" +
+  "$sid=[System.Security.Principal.SecurityIdentifier];" +
+  "foreach($d in [Console]::In.ReadToEnd().Split([char]10)){" +
+  "$d=$d.Trim();if($d.Length -eq 0){continue};" +
+  "$v='SECURE';" +
+  "try{" +
+  "$acl=[System.IO.Directory]::GetAccessControl($d);" +
+  "$o=$acl.GetOwner($sid).Value;" +
+  "if($allow -notcontains $o){$v='INSECURE:owner='+$o}" +
+  "else{foreach($a in $acl.GetAccessRules($true,$true,$sid)){$s=$a.IdentityReference.Value;if($allow -notcontains $s){$v='INSECURE:ace='+$s;break}}}" +
+  "}catch{$e=$_.Exception;if($null -ne $e.InnerException){$e=$e.InnerException};$v='ERROR:'+$e.GetType().Name};" +
+  "[Console]::Out.WriteLine($v+[string][char]9+$d)}";
+
+// → Map<путь, true|false>. true — ТОЛЬКО если PowerShell назвал этот путь и вердикт SECURE; всё остальное (нет ответа,
+// таймаут, ошибка чтения ACL, посторонний владелец или ACE) — false: тот, кто удаляет по этому ответу, не удаляет.
+function verifyDirsSecureWin(dirs, log) {
+  const verdicts = new Map();
+  const list = Array.from(new Set((dirs || []).map(String).filter(Boolean)));
+  if (!list.length) return verdicts;
+  const ps = winPowershellPath();
+  if (!ps) { log && log('  [sec] powershell не найден — не могу проверить ACL'); return verdicts; }
+  // Путь с переводом строки или табуляцией разорвал бы протокол «строка = путь» — такой не проверяем вовсе (false).
+  const clean = list.filter((d) => !/[\r\n\t]/.test(d));
+  if (!clean.length) return verdicts;
+  const budget = Math.min(120000, VERIFY_DIR_TIMEOUT_MS + 100 * clean.length);
+  const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', VERIFY_DIRS_SCRIPT],
+    { encoding: 'utf8', windowsHide: true, env: trustedEnv(), input: clean.join('\n') + '\n', timeout: budget, maxBuffer: 16 * 1024 * 1024 });
+  if (r.error || r.status !== 0) {
+    const timedOut = r.error && (r.error.code === 'ETIMEDOUT' || /ETIMEDOUT/.test(String(r.error.message || '')));
+    log && log('  [sec] пакетная проверка ACL не удалась (' + clean.length + ' каталогов): ' +
+      (timedOut ? 'PowerShell не ответил за ' + Math.round(budget / 1000) + ' с' : (trimOut(r) || (r.error && r.error.message) || ('exit ' + r.status))));
+    return verdicts;                                                // ответа нет → ни один каталог не «безопасен»
+  }
+  const asked = new Set(clean);
+  for (const line of String(r.stdout || '').split(/\r?\n/)) {
+    const i = line.indexOf('\t');
+    if (i < 0) continue;
+    const verdict = line.slice(0, i);
+    const dir = line.slice(i + 1);
+    if (!asked.has(dir)) continue;                                  // чужая строка — не берём
+    verdicts.set(dir, verdict === 'SECURE');
+    if (verdict !== 'SECURE') log && log('  [sec] ' + dir + ': ' + verdict);
+  }
+  return verdicts;
 }
 
 // Убедиться, что кэш докачки безопасен. Fail-closed: небезопасно → { ok:false } и
@@ -1074,6 +1128,8 @@ module.exports = {
   ensureCacheSecure,      // Windows: проверка атомарно-защищённого кэша (без create/icacls)
   verifyDirSecureWin,     // SID-based проверка owner+DACL (Windows)
   VERIFY_DIR_SCRIPT,      // тест-хук: текст скрипта проверки (тест следит, что в нём нет командлетов)
+  verifyDirsSecureWin,    // пакетная проверка одним запуском PowerShell (стартовая уборка main.js)
+  VERIFY_DIRS_SCRIPT,     // тест-хук: скрипт пакетной проверки (тоже без командлетов)
   // тест-хук: подмена транспорта openStream для детерминированных resume-тестов.
   __setOpenStreamImpl: (fn) => { openStreamImpl = fn || null; }
 };

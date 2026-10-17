@@ -3,7 +3,7 @@
 <!-- spec-id: handy-golosovoy-vvod -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:324-356`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,96-98,348-353,452-464,487-510,1333-1384`, `src/install-env.js:19-46`, `src/main.js:561-564,714-717,824-846,865,1112-1137,1448-1472,2156`, `package.json:116`, `scripts/windows/_verify.ps1:66-106`, `scripts/windows/_deelev.ps1:736-896`, `scripts/macos/_lib.sh:109-121,254-281,366-414`, `src/install-receipts.js:34-64`, `src/uninstall-targets.js:283-284`, `vendor/checksums.json:10`, `remote-components.json:461-505`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:334-349`, `tools/fetch-vendor-mac.sh:55-77,736-741`, `tools/release-check.js:176-194`
+- **Код:** `components.json:324-356`, `scripts/windows/handy.ps1`, `scripts/macos/handy.sh`, `src/renderer/app.js:43,96-98,348-353,452-464,487-510,1333-1384`, `src/install-env.js:19-46`, `src/main.js:574-577,727-730,837-859,878,1125-1150,1461-1485,2169`, `package.json:116`, `scripts/windows/_verify.ps1:66-106`, `scripts/windows/_deelev.ps1:736-896`, `scripts/macos/_lib.sh:109-121,254-281,366-414`, `src/install-receipts.js:34-64`, `src/uninstall-targets.js:283-284`, `vendor/checksums.json:10`, `remote-components.json:461-505`, `mac-arch-support.json:40-47`, `tools/sync-sizes.js:110-111,128`, `tools/fetch-vendor.ps1:334-349`, `tools/fetch-vendor-mac.sh:55-77,736-741`, `tools/release-check.js:176-194`
 - **Тесты:** «handy: компонент объявлен, опционален и не требует администратора», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «handy.ps1: честно про ручной шаг и про то, что верхняя модель не знает русского», «handy.ps1: настройки пользователя не затираются, хоткей не конфликтует с раскладкой», «handy: опция «микрофон» объявлена в components.json и её env-ключ разрешён allowlist-ом», «app.js: HM_HANDY_MIC = «1» ТОЛЬКО когда и компонент выбран, и галочка стоит», «app.js: галочка опции рисуется у ВЫБРАННОЙ карточки и её клик не снимает компонент», «handy.ps1: БЕЗ HM_HANDY_MIC=1 реестр не трогается вообще (гейт — первым делом)», «handy.ps1: согласие пишется ДЕ-ЭЛЕВИРОВАННО (HKCU админа — не тот пользователь), fail-closed», «handy.ps1: уже принятое решение (Allow ИЛИ Deny) не перезаписывается», «scripts/macos/*.sh: каждый $(arch_tag)-артефакт ОБЪЯВЛЕН в mac-arch-support.json», «A1c (прогон PS 5.1): Handy — причина отказа записи микрофона обычным языком (refused/unavailable не печатаются), ручной способ назван», «u3-B: handy.ps1 — settings_store.json пишется безопасно: ссылка на каталоге данных и подмена во время сериализации не дают записи сквозь, байты прежние»
 
 ## Что обещает человеку
@@ -14,7 +14,7 @@
 никуда не уходят. На Windows программа ставится не в `Program Files`, а в
 `%LOCALAPPDATA%\Handy` — но **прав администратора это не отменяет**. Весь установщик
 объявлен `"requestedExecutionLevel": "requireAdministrator"` (`package.json:116`; то же
-дословно в комментарии `src/main.js:2156`), то есть без UAC до компонента не дойти, а
+дословно в комментарии `src/main.js:2169`), то есть без UAC до компонента не дойти, а
 per-user у NSIS означает лишь «не в `Program Files`». Запуск установщика де-элевацию не
 проходит — `Start-Process -FilePath $local -ArgumentList '/S' -Wait -PassThru`
 (`scripts/windows/handy.ps1:177`), в отличие от реестровых операций того же файла
@@ -22,7 +22,7 @@ per-user у NSIS означает лишь «не в `Program Files`». Запу
 (`handy.ps1:40-42`), «установщик работает ПОД АДМИНОМ, поэтому его HKCU — ветка
 АДМИНСКОГО токена; а если админ — отдельная учётка, то вообще мимо человека за машиной».
 Отсюда расхождение половин в сценарии, который кодовая база сама считает рабочим
-(«over-the-shoulder UAC», `src/main.js:561-564`): `$appDir`/`$appExe` строятся из
+(«over-the-shoulder UAC», `src/main.js:574-577`): `$appDir`/`$appExe` строятся из
 `$env:LOCALAPPDATA` элевейтед-процесса (`handy.ps1:27-28`) и Handy встаёт в профиль
 АДМИНА, а `Grant-HmHandyMic -ExePath $appExe` (`:202`) пишет ключ согласия в `HKCU`
 РЕАЛЬНОГО пользователя — с путём из чужого профиля.
@@ -41,7 +41,7 @@ per-user у NSIS означает лишь «не в `Program Files`». Запу
 
 **Шаг 0 — карточка и галочка (renderer).** Компонент объявлен в
 `components.json:324-356`: `default:false`, `needsAdmin:false`, `platforms:["win32","darwin"]`,
-`version:"0.9.4"`. Платформенный гейт `componentShownOnPlatform` (`src/main.js:714-717`)
+`version:"0.9.4"`. Платформенный гейт `componentShownOnPlatform` (`src/main.js:727-730`)
 решает, показывать ли карточку на текущей ОС. Внутри карточки объявлена одна опция —
 `options[0]` с `id:"mic"`, `env:"HM_HANDY_MIC"`, `default:true`, `platforms:["win32"]`.
 Состояние опции инициализируется явно из `options[].default` (`src/renderer/app.js:96-98`),
@@ -59,7 +59,7 @@ Main принимает из renderer не любые env-ключи, а тол�
 **Шаг 2 — откуда берутся байты.** Вшитое издание: `%HM_VENDOR%\apps\handy-setup.exe`
 (Windows, sha256 и размер в `vendor/checksums.json:10`) либо
 `$HM_VENDOR/apps/handy-macos-<arch>.dmg` (macOS, две отдельные сборки — upstream не даёт
-universal, `mac-arch-support.json:40-47`). В `src/main.js:824-846` компонент записан в
+universal, `mac-arch-support.json:40-47`). В `src/main.js:837-859` компонент записан в
 `COMPONENT_VENDOR_ARTIFACT` как `apps/handy-setup.exe`, и это включает vendor-first:
 наличие вшитого файла считает `vendorHasArtifact` (`:972-974`), решение принимает
 `const useBundled = vendorHasArtifact || isOfflineEdition();` (`:987`), а пропускает
@@ -73,12 +73,12 @@ universal, `mac-arch-support.json:40-47`). В `src/main.js:824-846` компон
 ни разу (`grep` → 0 совпадений). Значит vendor-first по факту работает только на win32:
 на darwin `vendorHasArtifact` всегда `false`, и пропуск докачки держится ИСКЛЮЧИТЕЛЬНО на
 `isOfflineEdition()` внутри `useBundled`. Дыра, о которой предупреждает комментарий
-`src/main.js:840-844` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
+`src/main.js:853-857` («издание с ВШИТЫМ apps/handy-setup.exe, но без маркера
 offlineEdition, полезло бы в сеть за тем, что уже лежит рядом»), на macOS остаётся
 открытой: mac-сборка с вшитыми dmg, но без маркера `offlineEdition`, пойдёт в сеть.
 Lite-издание качает по двум записям `remote-components.json:461-505`
 (win32 и darwin, зеркала regru + yandex, хеши вложенных файлов в `gatedFiles`). В
-`SCRIPT_ONLINE_FALLBACK` (`src/main.js:865`) handy **не входит** — провал докачки не
+`SCRIPT_ONLINE_FALLBACK` (`src/main.js:878`) handy **не входит** — провал докачки не
 прощается и не выдаётся за успех.
 
 **Шаг 3 — установка на Windows (`scripts/windows/handy.ps1`).** Скрипт подключает
@@ -243,7 +243,7 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 - **Строки `HM-RECEIPT` из скриптов ничего не удаляют.** Они только фильтруются из
   UI-лога: `ALLOWED_TYPES` с комментарием «используются ТОЛЬКО чтобы отфильтровать эти
   строки из UI-лога» (`src/install-receipts.js:61-64`), а сама фильтрация живёт в
-  `emitLine` — `src/main.js:1458-1472` (`const ri = receipts.parseReceiptLine(l);
+  `emitLine` — `src/main.js:1471-1485` (`const ri = receipts.parseReceiptLine(l);
   if (ri) { logLine(l); return; }`: строка попадает в журнал и не уходит в `send`);
   объясняющий её комментарий — `:1256-1259`. Цели удаления
   считает доверенный код по своему аллоулисту. Строка
@@ -255,7 +255,7 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 - **`needsAdmin:false` — это только бейдж в интерфейсе** (`src/renderer/app.js:452`), и
   фактическому поведению он не соответствует НИ НА ОДНОЙ платформе: установка Handy идёт
   под административными правами и там, и там. На Windows элевейтед весь процесс
-  установщика (`package.json:116`, `src/main.js:2156`), и запуск NSIS де-элевации не
+  установщика (`package.json:116`, `src/main.js:2169`), и запуск NSIS де-элевации не
   проходит (`handy.ps1:177`); на macOS `handy.sh` вызывает `admin_run` (`:94-95`).
   Разница только в моменте, когда спрашивают пароль: на macOS — отдельно внутри
   компонента, на Windows — заранее, при старте установщика. То же соглашение действует для
@@ -269,7 +269,7 @@ Team ID `UWFLB4GC25` запинен в `:35` и, по шапке скрипта,
 1. **Галочка микрофона показывается на macOS, где не делает ничего.** Опция объявлена с
    `platforms:["win32"]` (`components.json:347-349`), но `renderComponentOptions`
    (`src/renderer/app.js:487-497`) поле `o.platforms` не читает, а платформенный гейт
-   `componentShownOnPlatform` (`src/main.js:714-717`) работает только на уровне компонента.
+   `componentShownOnPlatform` (`src/main.js:727-730`) работает только на уровне компонента.
    Значит на macOS чекбокс рисуется, стоит включённым по умолчанию, `HM_HANDY_MIC='1'`
    реально уезжает в окружение — а `scripts/macos/handy.sh` это имя не читает вовсе
    (`grep -c HM_HANDY_MIC scripts/macos/handy.sh` → 0). Подсказка (`hint`) честно пишет,

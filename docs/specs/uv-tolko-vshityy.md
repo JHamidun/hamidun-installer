@@ -3,7 +3,7 @@
 <!-- spec-id: uv-tolko-vshityy -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:209-235`, `scripts/windows/uv.ps1`, `scripts/macos/uv.sh`, `scripts/windows/_verify.ps1:66-106`, `scripts/macos/_lib.sh:81-121`, `src/main.js:762`, `src/main.js:146-156`, `src/main.js:1282-1300`, `src/install-receipts.js:34-35`, `src/uninstall-targets.js:150-167`, `src/renderer/app.js:43`, `tools/build-lite.js:45-60`, `tools/fetch-vendor.ps1:507-792`, `tools/fetch-vendor-mac.sh:777-794`, `tools/release-check.js:48`, `remote-components.json:19-40`, `vendor/checksums.json`, `scripts/windows/nomad.ps1:183-243`
+- **Код:** `components.json:209-235`, `scripts/windows/uv.ps1`, `scripts/macos/uv.sh`, `scripts/windows/_verify.ps1:66-106`, `scripts/macos/_lib.sh:81-121`, `src/main.js:775`, `src/main.js:146-156`, `src/main.js:1295-1313`, `src/install-receipts.js:34-35`, `src/uninstall-targets.js:150-167`, `src/renderer/app.js:43`, `tools/build-lite.js:45-60`, `tools/fetch-vendor.ps1:507-792`, `tools/fetch-vendor-mac.sh:777-794`, `tools/release-check.js:48`, `remote-components.json:19-40`, `vendor/checksums.json`, `scripts/windows/nomad.ps1:183-243`
 - **Тесты:** «P1-A uv.ps1: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed SHA; никакой сети», «P1-A uv.sh: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed verify_artifact; никакой сети», «uv.ps1: fail-closed guards (run-from-source, Leaf, reparse, exit-code, формат версии)», «uv.sh: fail-closed guards (run-from-source, non-symlink, exit-code, формат версии)», «#7 uv.ps1: junction-guard перед Copy-Item (reparse родителя → фейл, leaf → .Delete)», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «offline: uv вшит — НЕ remote-компонент (нет remote:true/remoteId), platforms win32+darwin», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «targets: uv (win32) — ТОЧНЫЕ файлы (не рекурсивный каталог), emptydir, pathentry только при опустевшем каталоге», «P1-B fetch-vendor.ps1: uv качается в .part → проверка zip содержит uv.exe/uvx.exe → atomic move; сбой → .part удалён», «P1 fetch-vendor.ps1: skip валидирует существующий uv (оба EXE) — битый → Remove+перекачка; FATAL требует uv+uvx», «P1-B fetch-vendor-mac.sh: uv качается в .part → проверка tar содержит uv+uvx → atomic mv; сбой → .part удалён», «P1 fetch-vendor-mac.sh: skip валидирует существующий tarball (tar+uv/uvx) — битый → rm+перекачка; FATAL требует uv+uvx», «release-check загружается и знает про законные исключения реестра (uv/course)», «lite (macOS): неполный сиблинг (нет checksums.json / нет uv / нет курса) → плашка горит», «u10b uv.ps1: uv.exe и uvx.exe копируются побайтно, повтор заменяет, атрибут только-чтение снимается; junction на Programs\\uv снимается как ссылка (цель цела) — как раньше», «u10b uv.ps1: junction на любом звене выше Programs (AppData\\Local) — отказ (код 1) без записи в чужую папку, symlink на uv.exe не пишется насквозь; контроль: прежняя проверка (только Programs) пропускает ссылку выше и Copy-Item пишет»
 
 ## Что обещает человеку
@@ -49,7 +49,7 @@ macOS-аналог — `tools/fetch-vendor-mac.sh:777-794`: два арх-спе
 под macOS (`LITE_KEEP_MAC`, строки 55-60): `checksums.json`, `apps/uv-macos-*.tar.gz`,
 архив курса и каталог `licenses`. Последний помечен третьим элементом `true` =
 «необязательно» (нет в vendor → просто не кладём), см. комментарий на строке 54.
-`src/main.js:762` объявляет `const BUNDLED_ONLY = new Set(['uv'])`: авто-вывод
+`src/main.js:775` объявляет `const BUNDLED_ONLY = new Set(['uv'])`: авто-вывод
 remote-компонентов по реестру (`loadRemoteMaps`, ветка `lite && ids.has(c.id)`)
 **исключает** uv, поэтому даже при наличии записи в `remote-components.json:19-40`
 (запись есть, `platform: "win32"`, sha и два зеркала) main её не использует.
@@ -85,7 +85,7 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
 поэтому при отсутствии установленного uv он вызывает **тот же** `uv.ps1`, временно
 подменив `HM_VENDOR` на корень, где вшитый uv реально лежит. Чтобы в lite-издании этот
 путь работал (там `HM_VENDOR` указывает на staging самого nomad, где `apps/uv` нет),
-`src/main.js:1282-1300` физически докладывает вшитый `apps/uv` в staging nomad перед
+`src/main.js:1295-1313` физически докладывает вшитый `apps/uv` в staging nomad перед
 запуском скрипта: комментарий-обоснование на 1116-1123, ветка `if (stagingVendor && id
 === 'nomad')` на 1124, само копирование `fs.cpSync(uvSrc, uvDst, { recursive: true })` —
 на строке 1130.
@@ -103,7 +103,7 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
 3. **Нет vendor → осознанный пропуск, а не падение и не фолбэк.** `exit 120`
    (`uv.ps1:31`, `uv.sh:37`) = `EXIT_SKIP` (`src/install-receipts.js:34`); main не пишет
    маркер установки (`shouldRecordInstall` требует `code === 0`).
-4. **uv никогда не докачивается из облака.** `BUNDLED_ONLY` в `src/main.js:762`
+4. **uv никогда не докачивается из облака.** `BUNDLED_ONLY` в `src/main.js:775`
    исключает его из авто-remote lite-издания; `components.json` не содержит `remote`/
    `remoteId` у uv; `tools/release-check.js:48` фиксирует это как норму
    (`const NO_REGISTRY_OK = new Set(['uv', 'course']);`).
@@ -256,7 +256,7 @@ com.apple.quarantine`; отвергается симлинк (`[ -L "$UV" ]`); �
    скрипте столько защит от TOCTOU. На macOS `uv.sh` действительно неэлевейтед — там
    поле соответствует реальности.
 6. **Cross-user elevation.** `uv.ps1` пишет в `%LOCALAPPDATA%` и `HKCU\Environment`
-   того токена, под которым исполняется. Комментарий `src/main.js:1903-1904` (перед
+   того токена, под которым исполняется. Комментарий `src/main.js:1916-1917` (перед
    IPC-хендлером `save-start-here`) называет это «известным ограничением… см. TODO про
    cross-user elevation выше» — но самого TODO в файле нет: `TODO` и `cross-user`
    встречаются в `src/main.js` ровно один раз, в строке 1532. Ссылка висит в пустоту, а ограничение (UAC-креды дал другой
