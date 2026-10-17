@@ -129,9 +129,9 @@
           "lines": "87-104"
         },
         {
-          "raw": "scripts/windows/extension.ps1:34-48",
+          "raw": "scripts/windows/extension.ps1:35-49",
           "file": "scripts/windows/extension.ps1",
-          "lines": "34-48"
+          "lines": "35-49"
         }
       ],
       "tested": "yes",
@@ -149,9 +149,9 @@
           "lines": "105-114"
         },
         {
-          "raw": "scripts/windows/verify.ps1:183-440",
+          "raw": "scripts/windows/verify.ps1:186-443",
           "file": "scripts/windows/verify.ps1",
-          "lines": "183-440"
+          "lines": "186-443"
         },
         {
           "raw": "src/renderer/app.js:1556-1559",
@@ -174,9 +174,9 @@
           "lines": "122-139"
         },
         {
-          "raw": "scripts/windows/config.ps1:34-49",
+          "raw": "scripts/windows/config.ps1:35-50",
           "file": "scripts/windows/config.ps1",
-          "lines": "34-49"
+          "lines": "35-50"
         },
         {
           "raw": "src/install-mode.js",
@@ -204,9 +204,9 @@
           "lines": "1278-1326"
         },
         {
-          "raw": "scripts/windows/config.ps1:472-525",
+          "raw": "scripts/windows/config.ps1:488-541",
           "file": "scripts/windows/config.ps1",
-          "lines": "472-525"
+          "lines": "488-541"
         }
       ],
       "tested": "yes",
@@ -224,9 +224,9 @@
           "lines": "141-160"
         },
         {
-          "raw": "scripts/windows/pydeps.ps1:145-187",
+          "raw": "scripts/windows/pydeps.ps1:146-201",
           "file": "scripts/windows/pydeps.ps1",
-          "lines": "145-187"
+          "lines": "146-201"
         }
       ],
       "tested": "yes",
@@ -244,9 +244,9 @@
           "lines": "191-206"
         },
         {
-          "raw": "scripts/windows/nomad.ps1:70-137,299",
+          "raw": "scripts/windows/nomad.ps1:71-138,300",
           "file": "scripts/windows/nomad.ps1",
-          "lines": "70-137,299"
+          "lines": "71-138,300"
         },
         {
           "raw": "config.json:5-17",
@@ -319,9 +319,9 @@
           "lines": ""
         },
         {
-          "raw": "scripts/windows/bridge.ps1:167-224",
+          "raw": "scripts/windows/bridge.ps1:184-241",
           "file": "scripts/windows/bridge.ps1",
-          "lines": "167-224"
+          "lines": "184-241"
         }
       ],
       "tested": "yes",
@@ -419,9 +419,9 @@
           "lines": ""
         },
         {
-          "raw": "scripts/windows/config.ps1:525-574",
+          "raw": "scripts/windows/config.ps1:541-605",
           "file": "scripts/windows/config.ps1",
-          "lines": "525-574"
+          "lines": "541-605"
         },
         {
           "raw": "package.json:94-97",
@@ -1234,9 +1234,9 @@
           "lines": "168-183"
         },
         {
-          "raw": "scripts/windows/course.ps1:30-58",
+          "raw": "scripts/windows/course.ps1:31-59",
           "file": "scripts/windows/course.ps1",
-          "lines": "30-58"
+          "lines": "31-59"
         },
         {
           "raw": "vendor/course/vibecoding-course.zip",
@@ -1264,9 +1264,9 @@
           "lines": "1296-1315"
         },
         {
-          "raw": "scripts/windows/course.ps1:47-51",
+          "raw": "scripts/windows/course.ps1:48-52",
           "file": "scripts/windows/course.ps1",
-          "lines": "47-51"
+          "lines": "48-52"
         }
       ],
       "tested": "no",

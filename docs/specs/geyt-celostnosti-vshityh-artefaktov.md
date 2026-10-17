@@ -3,7 +3,7 @@
 <!-- spec-id: geyt-celostnosti-vshityh-artefaktov -->
 
 - **Раздел:** Целостность и гейты
-- **Код:** `scripts/windows/_verify.ps1:1-120`, `scripts/macos/_lib.sh:202-300`, `vendor/checksums.json`, `tools/regen-checksums.js`, `tools/fetch-vendor.ps1:444-555`, `tools/fetch-vendor-mac.sh:526-557`, `scripts/windows/nomad.ps1:250-268`, `scripts/macos/nomad.sh:42-65`, `scripts/windows/uv.ps1`, `scripts/windows/vscode.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/git.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/mascot.ps1`, `scripts/windows/node.ps1`, `scripts/windows/pydeps.ps1`, `scripts/macos/uv.sh`, `scripts/macos/vscode.sh`, `scripts/macos/course.sh`, `scripts/macos/extension.sh`, `scripts/macos/mascot.sh`, `src/main.js:1166-1171`, `src/main.js:1212-1222`, `src/failure-explain.js:51-66`, `tools/build-lite.js:150-239`, `tools/release-check.js:50-101`, `tools/push-component.py:105-124`, `tools/vendor-signers.json`, `test/fetch-vendor-harness.ps1`
+- **Код:** `scripts/windows/_verify.ps1:1-120`, `scripts/macos/_lib.sh:202-300`, `vendor/checksums.json`, `tools/regen-checksums.js`, `tools/fetch-vendor.ps1:444-555`, `tools/fetch-vendor-mac.sh:526-557`, `scripts/windows/nomad.ps1:251-269`, `scripts/macos/nomad.sh:42-65`, `scripts/windows/uv.ps1`, `scripts/windows/vscode.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/git.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/mascot.ps1`, `scripts/windows/node.ps1`, `scripts/windows/pydeps.ps1`, `scripts/macos/uv.sh`, `scripts/macos/vscode.sh`, `scripts/macos/course.sh`, `scripts/macos/extension.sh`, `scripts/macos/mascot.sh`, `src/main.js:1166-1171`, `src/main.js:1212-1222`, `src/failure-explain.js:51-66`, `tools/build-lite.js:150-239`, `tools/release-check.js:50-101`, `tools/push-component.py:105-124`, `tools/vendor-signers.json`, `test/fetch-vendor-harness.ps1`
 - **Тесты:** «P1-A uv.ps1: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed SHA; никакой сети», «P1-A uv.sh: BUNDLED-ONLY — НЕТ HM_REMOTE_CACHE-фолбэка; нет vendor → skip 120; fail-closed verify_artifact; никакой сети», «vscode.ps1: ставит ОБА расширения; no-vendor → exit 120; идемпотентно; тихая установка; fail-closed», «vscode.sh: ставит ОБА расширения; no-vendor → exit 120; установка через HM_VSCODE_INSTALL_SH (root-staging); идемпотентно; fail-closed», «Windows: vsix ставится из ЧИТАЕМОЙ пользователем копии (де-элевация не видит admins-only)», «handy.ps1: ставим NSIS c /S (не MSI), проверяем факт по файлу, а не по коду возврата», «Nomad собирается из КОПИИ — иначе повторная установка падает на гейте целостности», «nomad.sh (функц.): вшитый vendor (HM_NOMAD_SRC с pyproject + аттестация) → install БЕЗ клона + брендинг, exit 0; git НЕ вызван», «WebView2: правило ловит СВОЙ случай и не крадёт чужие падения скрепки», «девять причин не путаются между собой», «Test-HmTrustedSigner: подпись Valid при ПРОСРОЧЕННОМ листе — доверие только с меткой времени от TSA, которому доверяет машина; другой статус, корень не из LocalMachine\\Root, нет EKU Code Signing, чужой пин — отказ (PS 5.1, своя цепочка в памяти)», «Test-HmTrustedSigner: отрицательные контроли — старые флаги цепочки, снятая привязка к машинному корню, снятая проверка метки времени, статуса, EKU и пинов краснят свои случаи», «Test-HmTrustedSigner: вне срока ЛЮБОЕ звено цепочки (годный лист под просроченным промежуточным УЦ или корнем, лист ещё не вступил в силу) — доверие только по метке времени от машинного TSA, иначе отказ; помощник без ответа про срок — отказ», «Test-HmTrustedSigner: пины издателя — O= сравнивает ЗНАЧЕНИЕ, а не обрамление («Anthropic, PBC» с запятой), настоящие кавычки в значении не путаются с обрамлением, отпечаток листа не зависит от регистра и разделителей; наивный Trim('"') и пропуск пинов краснят свои случаи», «Test-HmTrustedSigner: отрицательные контроли срока звеньев — срок только у листа, без корня, без NotBefore, без NotAfter, без отказа в сторону строгости краснят свои случаи», «Test-HmTrustedSigner: НАСТОЯЩИЕ файлы — Valid с просроченным листом (системные exe Windows, вшитые установщики) принимаются, чужой пин отвергается, пин python.org из pydeps.ps1 совпадает с подписантом», «Test-HmTrustedSigner: старое поведение (цепочка на «сегодня» без IgnoreNotTimeValid) отвергает те же настоящие файлы с NotTimeValid — предпосылка S-11 воспроизводится», «_deelev.ps1: гейт подписи сохранил привязку к LocalMachine\\Root, EKU и пины, не получил AllowUnknownCertificateAuthority; сигнатура и вызовы git/node/cursor/pydeps прежние», «verify-packed-vendor: код 2 — нет папки, нет манифеста, манифест не JSON, пустой манифест, ни один файл манифеста не найден в сборке», «verify-packed-vendor: код 1 — расхождение sha256, запись манифеста без sha256, обязательный файл пропал из сборки; код 0 — здоровая сборка (файл, исключённый фильтром упаковки, не нужен)», «verify-packed-vendor: lite — с --source обязательны только вшитые файлы, без него тот же манифест красный, а файл, потерянный упаковщиком, ловится», «verify-packed-vendor: файлы манифеста ищутся только там, где их берёт генератор манифеста (одноимённый шрифт в config-pack не даёт ложного красного); список мест = regen-checksums.js», «vendor-signers.json: структура — signed с точными именами (cn), unsigned с названной причиной, имена не пересекаются», «fetch-vendor.ps1: КАЖДЫЙ файл, который скрипт кладёт в vendor/apps, внесён в vendor-signers.json (signed либо unsigned с причиной); лишних записей нет», «vendor-signers.json: пин python-setup.exe согласован с allow-list pydeps.ps1 (Python Software Foundation); пины — точные имена, а не подстроки», «fetch-vendor.ps1 (прогон PS 5.1): Test-HmVendorSigner — Valid и точное имя проходят; чужое имя, надстрока, регистр, NotSigned/HashMismatch/NotTimeValid/NotTrusted, нет сертификата, сбой чтения — нет», «u11: fetch-vendor.ps1 -Release выставляет HM_RELEASE=1 до первой загрузки, а dist и dist:win зовут фетчер с -Release», «u11: fetch-vendor.ps1 (прогон PS 5.1): оператор if ($Release) из скрипта — с ключом ставит HM_RELEASE=1, без ключа переменную не трогает», «fetch-vendor.ps1 (прогон PS 5.1): настоящая Dl — подменённая загрузка УДАЛЯЕТСЯ и сборка падает (exit 1); хорошая остаётся; пропуск готового файла (skip) тоже проверяется», «fetch-vendor.ps1 (прогон PS 5.1): итоговый обход vendor/apps проверяет ВСЁ (включая uv/uv.exe и файлы мимо Dl), удаляет недокачанные *.part, неизвестное имя — стоп», «fetch-vendor.ps1 (прогон PS 5.1): повторная проверка того же файла не берётся из кэша — подмена между загрузкой и итоговым обходом ловится», «vendor-signers.json: настоящие подписи настоящих файлов vendor/apps совпадают с пинами (проверка идёт, если vendor развёрнут)», «fetch-vendor.ps1: подпись проверяется в Dl (и при skip), в uv-stage ДО публикации и в итоговом обходе ДО checksums.json; провал = удаление и exit 1», «fetch-vendor.ps1 (прогон PS 5.1): пин издателя требует корень цепочки в хранилище корней машины — самоподписанный сертификат с нужным CN и чужой корень отвергаются; звено цепочки вне срока годности принимается только с меткой времени от машинного корня», «fetch-vendor.ps1: шов машинных корней читает настоящее хранилище корней LocalMachine только на чтение; цепочка строится без проверки отзыва, с игнорированием сроков и с назначением Code Signing / Time Stamping; метка времени проверяется своей цепочкой», «regen-checksums.js: манифест не пишется, пока подписи в vendor/apps не подтверждены пином издателя (режим VerifyOnly фетчера): случайный git-setup.exe и неизвестное имя — отказ без записи; unsigned по построению проходят; --check ничего не пишет; обход только явным флагом», «u12: Get-HmTreeSha256 (_verify.ps1 и fetch-vendor.ps1) даёт один и тот же хеш дерева для длинного и для короткого (8.3) написания корня»
 
 ## Что обещает человеку
@@ -63,17 +63,17 @@ Utility в powershell из electron-builder-сборки не подхватыв
 достаётся регуляркой (`Get-HmChecksumEntry`), а не `ConvertFrom-Json`, — по той же
 причине; регулярка требует 64 hex-символа и опционально ловит `bytes`.
 
-Вызовы: `uv.ps1:39,46` (uv.exe и uvx.exe до первого запуска), `vscode.ps1:109` (setup) и
+Вызовы: `uv.ps1:40,47` (uv.exe и uvx.exe до первого запуска), `vscode.ps1:109` (setup) и
 `vscode.ps1:171` (каждый .vsix до копирования в пользовательский temp),
-`course.ps1:60` (архив курса до распаковки), `cursor.ps1:83` (только ветка
+`course.ps1:61` (архив курса до распаковки), `cursor.ps1:83` (только ветка
 `$instBundled` — у онлайн-скачанного другой гейт, Authenticode через
 `Test-HmTrustedSigner`), `git.ps1:63`, `node.ps1:99`, `handy.ps1:170`,
-`mascot.ps1:20`, `pydeps.ps1:56`, `extension.ps1:38` (vsix, при `-not $DRY`),
-`nomad.ps1:264-265`.
+`mascot.ps1:20`, `pydeps.ps1:57`, `extension.ps1:39` (vsix, при `-not $DRY`),
+`nomad.ps1:265-266`.
 
 **Мягкий вариант.** `Test-HmArtifact` (Windows) и `verify_artifact_soft` (macOS)
 возвращают ложь вместо остановки. Единственный потребитель — шрифт JetBrains Mono
-(`extension.ps1:180`, `extension.sh:78`): не сошлось — шрифт просто не ставится
+(`extension.ps1:181`, `extension.sh:78`): не сошлось — шрифт просто не ставится
 («не критично»), установка продолжается.
 
 **Проверка (install-time), macOS.** `scripts/macos/_lib.sh:254-281`, функция
@@ -88,7 +88,7 @@ Utility в powershell из electron-builder-сборки не подхватыв
 
 **Отдельная ветка: nomad-src (дерево, а не файл).** Исходники агента лежат в vendor
 распакованными, и `uv tool install` исполняет их build-hook под администратором.
-Поэтому здесь три проверки подряд (`nomad.ps1:256-274`, `nomad.sh:42-65`): (а) нет
+Поэтому здесь три проверки подряд (`nomad.ps1:257-275`, `nomad.sh:42-65`): (а) нет
 `$HM_VENDOR/nomad-src.sha256` → своё сообщение и `exit 1`; (б) сам файл-манифест дерева
 и `pyproject.toml` проверяются обычным `Confirm-HmArtifact`/`verify_artifact` против
 `checksums.json`; (в) пересчитывается детерминированный хеш **всего дерева** и
@@ -117,22 +117,22 @@ Windows (`Get-HmTreeSha256`) строит строки `<относительн�
 сработает»). Ниже, `main.js:1288-1298`, в staging компонента `nomad` доносится вшитый
 uv. Это **оптимизация, а не единственная преграда** перед сетевой установкой: сама
 доставка best-effort — при провале `main.js:1297` только пишет строку в лог, установка
-продолжается, — а `nomad.ps1:199-206` ищет `apps\uv\uv.exe` в ТРЁХ корнях:
+продолжается, — а `nomad.ps1:200-207` ищет `apps\uv\uv.exe` в ТРЁХ корнях:
 `HM_VENDOR`, `HM_VENDOR_BUNDLED` и `<resources>\vendor` (третий — вшитый vendor
 упакованного приложения: `resourceRoot()` = `process.resourcesPath`, `src/main.js:46-49`,
 `vendorRoot()` = `resourceRoot()/vendor`, `src/main.js:57`, а скрипты лежат в
 `resourceRoot()/scripts/windows`, `src/main.js:685`; в lite-издании там гарантированно
 есть `apps/uv` и `checksums.json` — `tools/build-lite.js:45-49`). Онлайн-фолбэк
-`astral.sh` (`nomad.ps1:227-241`) включается **всякий раз, когда `uv` не разрешился**, а
+`astral.sh` (`nomad.ps1:228-242`) включается **всякий раз, когда `uv` не разрешился**, а
 не только когда `uv.exe` не нашёлся ни в одном из трёх корней. Вшитый uv ставится
-дочерним вызовом `& $uvScript` (`nomad.ps1:218`); ненулевой код возврата печатается
+дочерним вызовом `& $uvScript` (`nomad.ps1:219`); ненулевой код возврата печатается
 предупреждением «вшитый uv не установился … попробую онлайн-фолбэк»
-(`nomad.ps1:219-221`), затем `nomad.ps1:223` снова зовёт `Resolve-UvExe`, и при пустом
-результате условие `nomad.ps1:227` (`if (-not $uv -and -not $uvPlannedOffline)`)
+(`nomad.ps1:220-222`), затем `nomad.ps1:224` снова зовёт `Resolve-UvExe`, и при пустом
+результате условие `nomad.ps1:228` (`if (-not $uv -and -not $uvPlannedOffline)`)
 пропускает установку дальше — в `irm https://astral.sh/uv/install.ps1 | iex`
-(`nomad.ps1:236`).
+(`nomad.ps1:237`).
 
-Сработавший гейт целостности — один из способов получить этот ненулевой код: `uv.ps1:39`
+Сработавший гейт целостности — один из способов получить этот ненулевой код: `uv.ps1:40`
 (`Confirm-HmArtifact $vendorUv`) при несовпадении SHA делает `exit 1`. То есть для uv в
 составе Nomad отказ гейта установку **не останавливает**, а переводит её на сетевую —
 ровно наоборот тому, что обещано в разделе «Что обещает человеку». Сам подменённый файл
@@ -221,10 +221,10 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
    запрещает дубли имён в архиве (`tools/push-component.py:116-122`).
 5. **Проверка предшествует использованию, а не сопровождает его.** `uv.sh:41` стоит до
    `tar -xzf` (проверяется тестом «P1-A uv.sh: …» через сравнение индексов),
-   `course.ps1:60` — до `Expand-Archive`, `vscode.ps1:171` — до копирования vsix,
-   `nomad.ps1:264-267` — до `uv tool install` (проверяется тестом «Nomad собирается из
+   `course.ps1:61` — до `Expand-Archive`, `vscode.ps1:171` — до копирования vsix,
+   `nomad.ps1:265-268` — до `uv tool install` (проверяется тестом «Nomad собирается из
    КОПИИ …» через `assertOrder`).
-6. **Для nomad-src проверяется всё дерево, а не только один файл.** `nomad.ps1:266-273`
+6. **Для nomad-src проверяется всё дерево, а не только один файл.** `nomad.ps1:267-274`
    и `nomad.sh:56-63` сверяют пересчитанный хеш дерева с `nomad-src.sha256`, который
    сам закреплён в `checksums.json`.
 7. **Рецепт хеша дерева одинаков у генератора и верификатора внутри одной
@@ -234,14 +234,14 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
 8. **Nomad ставится из копии, а не из vendor напрямую — на обеих платформах.**
    Смысл один: иначе инвариант 6 ломает сам себя после первой установки. macOS:
    `nomad.sh:122-126` — при провале `mktemp`/`cp` печатается ошибка и идёт `exit 1`.
-   Windows: `New-HmNomadBuildCopy` (`nomad.ps1:226-241`) создаёт защищённую папку
+   Windows: `New-HmNomadBuildCopy` (`nomad.ps1:227-242`) создаёт защищённую папку
    (`New-HmSecureStagingDir`, доступ только у Администраторов и SYSTEM), копирует туда
    дерево и сверяет уже КОПИЮ с манифестом (`Get-HmTreeSha256`); любая неудача —
    `exit 1`, `uv tool install` без копии не вызывается. Прежний best-effort («ставлю из
    vendor напрямую») убран: он возвращал исполнение непроверенного дерева под
    администратором.
 9. **Мягкая проверка применяется только к неисполняемому артефакту.** Единственные
-   вызовы `Test-HmArtifact` / `verify_artifact_soft` — шрифт (`extension.ps1:180`,
+   вызовы `Test-HmArtifact` / `verify_artifact_soft` — шрифт (`extension.ps1:181`,
    `extension.sh:78`).
 10. **В lite-издании staging не становится `HM_VENDOR` без манифеста.**
     `src/main.js:1241-1246`: копирование `checksums.json` в staging обязательно, при
@@ -286,7 +286,7 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
    vendor обрастает `build/`, и любая повторная попытка — включая нажатие «Повторить
    неустановленное» — упирается в «vendor подменён» навсегда. На Windows этот сценарий
    достижим **без всякого нарушения кода**: хватает одного сбоя `Copy-Item` (нет места,
-   антивирус, длинный путь) — фолбэк `nomad.ps1:295` уводит установку прямо в vendor.
+   антивирус, длинный путь) — фолбэк `nomad.ps1:296` уводит установку прямо в vendor.
 9. Жёсткая проверка шрифта уронила бы всю установку панели редактора из-за
    косметического файла: человек остался бы без Claude Code ради шрифта.
 10. В lite-издании staging заслоняет вшитый vendor. Без копии манифеста второй гейт
@@ -309,9 +309,9 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
 - **Гейт покрывает только одиночные файлы из манифеста, но не вшитые деревья.**
   `vendor/checksums.json` содержит 15 ключей (`apps/*`, курс, `nomad-src.sha256`,
   `pyproject.toml`); записей о колёсах, npm-кеше, браузерах Playwright и конфиг-паке в
-  нём нет. При этом их содержимое исполняется: `pydeps.ps1:155` —
+  нём нет. При этом их содержимое исполняется: `pydeps.ps1:156` —
   `& $py -m pip install --user --no-index --find-links $wheels -r $req` из
-  `vendor\pywheels`; `pydeps.ps1:171-177` копирует вшитые `playwright-browsers` в
+  `vendor\pywheels`; `pydeps.ps1:172-178` копирует вшитые `playwright-browsers` в
   `%LOCALAPPDATA%\ms-playwright`; `claude.ps1:191-194` и `claude.sh:76-82` ставят Claude
   Code командой `npm install -g … --offline --cache <npm-cache>`. Ни `Confirm-HmArtifact`,
   ни `verify_artifact` для этих файлов не вызываются. Инструменты сборки это фиксируют
@@ -336,7 +336,7 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
 - `bytes` проверяется только на Windows. macOS-вентиль сверяет исключительно sha
   (`_lib.sh:266-279`), поля `bytes` он не читает вовсе.
 - В dry-run гейт не выполняется: `course.ps1` выходит до `Confirm-HmArtifact`,
-  `extension.ps1:38` проверяет `-not $DRY`, `vscode.ps1:171` возвращает путь без
+  `extension.ps1:39` проверяет `-not $DRY`, `vscode.ps1:171` возвращает путь без
   проверки, `nomad.sh:48` весь блок целостности обёрнут в `[ -z "$DRY" ]`. Превью
   дисковых проверок не делает.
 - `Get-HmTreeSha256`/`hm_tree_sha256` считают хеш **содержимого файлов и их путей**.
@@ -365,7 +365,7 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
   честно запечатывает фикстуру теми же функциями `_lib.sh`). Ни одного теста, который
   испортил бы байт и убедился, что `Confirm-HmArtifact`/`verify_artifact` действительно
   дают `exit 1`, найти не удалось. Более того, функциональные прогоны PS 5.1 в
-  песочнице (`test/run-tests.js:6404` — прогон `vscode.ps1`, `6043` — прогон
+  песочнице (`test/run-tests.js:6406` — прогон `vscode.ps1`, `6043` — прогон
   `extension.ps1`) подкладывают **заглушку** `_verify.ps1`, где `Confirm-HmArtifact` —
   пустая функция, а `Test-HmArtifact` всегда `$true`. То есть в этих прогонах гейт
   отключён по построению.
@@ -390,10 +390,10 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
 - **`Confirm-HmArtifact` завершает СКРИПТ, а не процесс.** Это `exit 1` внутри функции, а
   не исключение: скрипт, в который `_verify.ps1` дот-сорснут, прекращается на месте и не
   может подставить своё сообщение или продолжить другой веткой. Но когда такой
-  компонент-скрипт вызван оператором `&` из другого скрипта (`nomad.ps1:218` → `uv.ps1`),
+  компонент-скрипт вызван оператором `&` из другого скрипта (`nomad.ps1:219` → `uv.ps1`),
   тот же `powershell.exe` продолжает работу: вызывающий читает `$LASTEXITCODE` и идёт
   своей веткой — об этом в коде стоит прямой комментарий «exit N внутри дочернего .ps1
-  возвращает управление сюда с $LASTEXITCODE=N» (`nomad.ps1:216`). Это не теоретическая
+  возвращает управление сюда с $LASTEXITCODE=N» (`nomad.ps1:217`). Это не теоретическая
   тонкость: именно на ней держится описанный выше переход Nomad на онлайн-установку uv
   после отказа гейта. На уборку `exit` тоже не влияет — вопреки тому, что здесь стояло
   раньше. В `vscode.ps1` оба вызова `Get-Vsix` (гейт внутри него, `vscode.ps1:171`)
@@ -402,7 +402,7 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
   `finally` и при `exit`, о чём в коде стоит отдельный комментарий
   (`vscode.ps1:299-306`, там же сказано, что раньше уборка стояла «руками перед каждым
   exit»). Инвариант закреплён тестом: helper `assertVsixCleanupReachable`
-  (объявлен на `test/run-tests.js:6318`, применяется на 5948 для `vscode.ps1` и на 5958
+  (объявлен на `test/run-tests.js:6320`, применяется на 5948 для `vscode.ps1` и на 5958
   для `extension.ps1`) требует, чтобы КАЖДЫЙ `exit` после места создания
   копий лежал внутри top-level `try` с уборкой в `finally`. В шапке «Тесты» этот тест
   не процитирован намеренно: в его заголовке есть вложенные «ёлочки» — тот же случай,
@@ -413,13 +413,13 @@ Claude Desktop, ChatGPT Desktop). Список машинных корней
   ложное «манифест разошёлся» (сравнивается `JSON.stringify` объекта `files`, а он
   чувствителен к порядку ключей).
 - **Один относящийся к делу тест процитировать нельзя.** Заголовок теста на
-  `test/run-tests.js:10242` — «новые причины опознаются: занятый файл (антивирус) и
+  `test/run-tests.js:10251` — «новые причины опознаются: занятый файл (антивирус) и
   «редактор без панели»» — содержит вложенные «ёлочки», а `tools/check-specs.js`
   выцепляет заголовки регуляркой `/«([^»]+)»/g` (`tools/check-specs.js:87`) и обрывает
   такой заголовок на первой внутренней закрывающей кавычке. Именно этот тест проверяет
   самое ценное для человека — что гейту сопоставлен `kind: 'artifact-integrity'`
-  (`test/run-tests.js:10256`) и что в тексте есть «повтор даст тот же результат»
-  (`test/run-tests.js:10257`). Здесь он не процитирован осознанно, чтобы шапка не
+  (`test/run-tests.js:10265`) и что в тексте есть «повтор даст тот же результат»
+  (`test/run-tests.js:10266`). Здесь он не процитирован осознанно, чтобы шапка не
   содержала усечённого заголовка.
 - **`vendor/checksums.json` в репозитории датирован `2026-08-23T22:44:52Z` и описывает
   15 файлов Windows-раскладки.** Это снимок конкретной машины, а не часть исходников;

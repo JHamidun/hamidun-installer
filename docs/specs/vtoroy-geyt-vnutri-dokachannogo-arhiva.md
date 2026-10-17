@@ -73,13 +73,13 @@ SHA-256, размер не проверяет вовсе. `hm_expected_sha256` (
 Сверка `bytes` из `_verify.ps1:98-104` существует только на Windows.
 
 Кто вызывает (проверено чтением скриптов, по 11 на платформу): `git.ps1:63`, `node.ps1:99`,
-`vscode.ps1:109,171`, `cursor.ps1:83`, `mascot.ps1:20`, `pydeps.ps1:56`, `extension.ps1:38`,
-`handy.ps1:170`, `nomad.ps1:264-265`, `course.ps1:60`, `uv.ps1:39,46`; на macOS — `git.sh:46`,
+`vscode.ps1:109,171`, `cursor.ps1:83`, `mascot.ps1:20`, `pydeps.ps1:57`, `extension.ps1:39`,
+`handy.ps1:170`, `nomad.ps1:265-266`, `course.ps1:61`, `uv.ps1:40,47`; на macOS — `git.sh:46`,
 `node.sh:27`, `vscode.sh:42,131`, `cursor.sh:27`, `mascot.sh:95`, `pydeps.sh:17`,
 `extension.sh:13`, `handy.sh:76`, `nomad.sh:54-55`, `course.sh:44`, `uv.sh:41`.
 `uv.ps1` в этом списке — тот самый скрипт, который проверяет докладку uv из п. 3: `nomad.ps1`
-вызывает его с временно подменённым `HM_VENDOR` (`nomad.ps1:207-219`), а внутри гейт стоит на
-`apps\uv\uv.exe` и `apps\uv\uvx.exe` (`uv.ps1:39,46`). На macOS `uv.sh` сверяет арх-тарболл
+вызывает его с временно подменённым `HM_VENDOR` (`nomad.ps1:208-220`), а внутри гейт стоит на
+`apps\uv\uv.exe` и `apps\uv\uvx.exe` (`uv.ps1:40,47`). На macOS `uv.sh` сверяет арх-тарболл
 `apps/uv-macos-$(arch_tag).tar.gz` (`:33`) до `tar -xzf` (`:41,46`).
 В `config.ps1`/`config.sh` и `claude.ps1`/`claude.sh` вызова гейта НЕТ — и это согласовано
 с реестром: у обеих записей `config` и обеих записей `claude` поле `gatedFiles` пустое.
@@ -87,7 +87,7 @@ SHA-256, размер не проверяет вовсе. `hm_expected_sha256` (
 **5. Мягкий вариант.** Для неисполняемых best-effort артефактов есть `Test-HmArtifact`
 (`_verify.ps1:110-120`) и `verify_artifact_soft` (`_lib.sh:285-295`): возвращают ложь
 вместо остановки. Обе вызываются ровно по одному разу и ровно для шрифта:
-`extension.ps1:180` и `extension.sh:78`.
+`extension.ps1:181` и `extension.sh:78`.
 
 **6. `gatedFiles` — это BUILD-TIME, рантайм его не читает.** Схема прямо говорит
 «BUILD-TIME (рантайм игнорирует)» (`remote-components.json:13`), и поиск по `src/` не даёт
@@ -106,7 +106,7 @@ electron-builder) и пункт 4e в `tools/release-check.js:228-267`.
 `vendor/checksums.json`.
 
 **Ветвление, при котором второй гейт не включается вовсе:**
-- dry-run — `extension.ps1:38` (`-not $DRY`), `vscode.ps1:171` (`if ($DRY) { return $p }`),
+- dry-run — `extension.ps1:39` (`-not $DRY`), `vscode.ps1:171` (`if ($DRY) { return $p }`),
   `nomad.sh:48` (`if [ -z "$DRY" ]`), и сама докачка пропущена (`src/main.js:1132-1133`);
 - провал докачки у компонента из `SCRIPT_ONLINE_FALLBACK = {git, node, vscode, cursor, config}`
   (`src/main.js:865, 1055-1063`) — `stagingVendor` остаётся пустым, скрипт уходит в свой
@@ -120,7 +120,7 @@ vendor, где `checksums.json` лежит изначально (`vendor/checksu
 `git-setup.exe`, `node-lts.msi`, `vibecoding-course.zip` и далее). Вызовы гейта в
 install-скриптах не смотрят ни на `stagingVendor`, ни на издание — только на
 `$env:HM_VENDOR` и наличие файла (`git.ps1:63`, `node.ps1:99`, `handy.ps1:170`,
-`course.ps1:60`, `mascot.ps1:20`, `uv.ps1:39,46`); снимает их единственное условие —
+`course.ps1:61`, `mascot.ps1:20`, `uv.ps1:40,47`); снимает их единственное условие —
 dry-run. На этой ветке не выполняется только копирование манифеста в staging (п. 2),
 потому что staging'а нет. Офлайн-издание держится именно этим гейтом — см. инвариант 5.
 
@@ -212,13 +212,13 @@ dry-run. На этой ветке не выполняется только ко�
   (`scripts/windows/_verify.ps1:64-65`).
 - **`nomad` проверяется иначе, чем остальные.** Там сверяется не бинарь, а дерево исходников:
   `Confirm-HmArtifact` применяется к самому манифесту `nomad-src.sha256` и к `pyproject.toml`,
-  а дерево — через `Get-HmTreeSha256` (`scripts/windows/nomad.ps1:259-273`,
+  а дерево — через `Get-HmTreeSha256` (`scripts/windows/nomad.ps1:260-274`,
   `scripts/macos/nomad.sh:49-55`).
 - **Манифесты платформо-зависимы.** `vendor/checksums.json` на диске — манифест ТОЙ ОС, где
   запускали фетчер, поэтому `release-check.js` сверяет только записи своей платформы
   (фильтр — `:219-220`), а чужие честно помечает непроверенными (`warn` — `:245`).
 - **Шрифт — сознательная уступка.** Он проверяется мягким вариантом и при несовпадении
-  просто пропускается (`extension.ps1:180`, `extension.sh:78`), а не роняет установку.
+  просто пропускается (`extension.ps1:181`, `extension.sh:78`), а не роняет установку.
 
 ## Риски и открытые вопросы
 
@@ -228,7 +228,7 @@ dry-run. На этой ветке не выполняется только ко�
   staging`, `не удалось положить`). Процитированные тесты покрывают сам механизм гейта —
   что скрипты дот-сорсят `_verify.ps1`, вызывают `Confirm-HmArtifact`/`verify_artifact` до
   запуска, и что `verify_artifact` функционально проходит на честно запечатанном
-  `$HM_VENDOR/checksums.json` (`sealNomadVendor`, `test/run-tests.js:3552-3570`; вызовы —
+  `$HM_VENDOR/checksums.json` (`sealNomadVendor`, `test/run-tests.js:3554-3572`; вызовы —
   `:3513` и `:3532`). То есть
   проверено «гейт работает, когда манифест на месте», но не проверено «манифест кладут
   в staging и не пускают компонент, если не положили». Инвентарь помечает фичу как
@@ -273,8 +273,8 @@ dry-run. На этой ветке не выполняется только ко�
   `build-lite.js:176-178` собирает такие записи в `ungated` и печатает предупреждение
   (`:225-228`), но не останавливает сборку. Для `claude` и `config` это осознанно, но
   механизм не отличает «осознанно пусто» от «случайно опустело».
-- **`HM_VENDOR_BUNDLED` читается, но никем не выставляется.** `scripts/windows/nomad.ps1:201`
-  и `scripts/windows/pydeps.ps1:121` строят кандидатов из этой переменной, а поиск по
+- **`HM_VENDOR_BUNDLED` читается, но никем не выставляется.** `scripts/windows/nomad.ps1:202`
+  и `scripts/windows/pydeps.ps1:122` строят кандидатов из этой переменной, а поиск по
   репозиторию (`src/`, `tools/`, `scripts/`) не нашёл ни одного места, где она задаётся;
   в allowlist renderer-env её тоже нет (`src/install-env.js:20-28`). Эти ветки не
   выполняются никогда. Компенсирующий обход для nomad существует явно

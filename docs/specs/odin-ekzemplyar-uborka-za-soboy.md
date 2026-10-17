@@ -331,8 +331,8 @@ PowerShell-примитив `New-HmSecureStagingDir` (`scripts/windows/_deelev.p
 2. **`killChildren` и `cleanupAllSecureDirs` не покрыты вообще.** Ни одного упоминания в
    `test/run-tests.js` (проверено рекурсивным поиском по именам — ноль совпадений).
    `pruneStaleSecureDirs` встречается там ровно один раз — в тексте утверждения
-   (`test/run-tests.js:7457`) внутри теста «_deelev.ps1: уборка staging — ТОЛЬКО через
-   `Remove-HmSecureStagingDir`…» (`test/run-tests.js:7449`), где он назван образцом
+   (`test/run-tests.js:7459`) внутри теста «_deelev.ps1: уборка staging — ТОЛЬКО через
+   `Remove-HmSecureStagingDir`…» (`test/run-tests.js:7451`), где он назван образцом
    шаблона имени; сама функция из `main.js` не исполняется и не разбирается.
 3. **`execFileSync` с `taskkill` вызывается без `timeout`** (`src/main.js:297-298`). Все
    прочие синхронные вызовы внешних бинарей в этом файле таймаут задают: `tasklist` — 4000

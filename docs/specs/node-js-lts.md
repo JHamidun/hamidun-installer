@@ -3,7 +3,7 @@
 <!-- spec-id: node-js-lts -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `components.json:22-36`, `scripts/windows/node.ps1`, `scripts/macos/node.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:823-865`, `remote-components.json`, `tools/fetch-vendor.ps1:310-313`, `tools/fetch-vendor-mac.sh:35-53`, `tools/sync-sizes.js:80-116`, `scripts/windows/verify.ps1:195-207`, `scripts/macos/verify.sh:64-74`
+- **Код:** `components.json:22-36`, `scripts/windows/node.ps1`, `scripts/macos/node.sh`, `scripts/windows/_verify.ps1`, `scripts/windows/_deelev.ps1`, `scripts/macos/_lib.sh`, `src/main.js:823-865`, `remote-components.json`, `tools/fetch-vendor.ps1:310-313`, `tools/fetch-vendor-mac.sh:35-53`, `tools/sync-sizes.js:80-116`, `scripts/windows/verify.ps1:198-210`, `scripts/macos/verify.sh:68-78`
 - **Тесты:** «node.sh: admin_run /bin/sh -c "$HM_PKG_INSTALL_SH" (Team ID позиционным); verify+install атомарно под root; verify_pkg_team_id убран», «_lib.sh (функц.): HM_PKG_INSTALL_SH — verify+install на STAGED копии (не источник); wrong-team/unsigned → fail-closed», «bash -n без синтаксических ошибок», «Windows: НИ ОДИН сетевой вызов без -TimeoutSec (дефолт = бесконечность)», «Windows: установщики, САМИ запускающие приложение, идут БЕЗ -Wait», «lite: тяжёлые компоненты авто-remote по реестру; uv bundled-only», «размеры: файловые компоненты (setup.exe/msi/vsix/zip) сходятся с vendor», «u3-A: node.ps1 — рассылка после записи системного PATH идёт через общий Send-HmEnvBroadcast; Add-Type и ложная проверка типа ушли», «u3-A: Send-HmEnvBroadcast рассылает WM_SETTINGCHANGE «Environment» окну-шпиону и не оставляет файлов в TEMP (прежняя версия с Add-Type их оставляла)»
 
 ## Что обещает человеку
@@ -51,7 +51,7 @@
 
 ### Проверка после установки
 
-Шаг `verify` (отдельный компонент, `components.json:105-114`) печатает `CHECK ok Node` / `CHECK fail Node`, если компонент был выбран: Windows — `Get-Command node` + `node -v` (`scripts/windows/verify.ps1:195-207`), macOS — `have node && node -v` (`scripts/macos/verify.sh:64-74`).
+Шаг `verify` (отдельный компонент, `components.json:105-114`) печатает `CHECK ok Node` / `CHECK fail Node`, если компонент был выбран: Windows — `Get-Command node` + `node -v` (`scripts/windows/verify.ps1:198-210`), macOS — `have node && node -v` (`scripts/macos/verify.sh:68-78`).
 
 ## Инварианты
 

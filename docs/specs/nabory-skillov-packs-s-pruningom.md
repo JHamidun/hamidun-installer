@@ -3,7 +3,7 @@
 <!-- spec-id: nabory-skillov-packs-s-pruningom -->
 
 - **Раздел:** Установка компонентов
-- **Код:** `packs.json`, `src/renderer/app.js:83-90`, `src/renderer/app.js:583-677`, `src/renderer/app.js:1293-1329`, `src/renderer/app.js:1333-1385`, `src/renderer/index.html:127-135`, `src/renderer/styles.css:406-407`, `src/main.js:638`, `src/install-env.js:20-46`, `scripts/windows/config.ps1:45-47`, `scripts/windows/config.ps1:299-342`, `scripts/windows/config.ps1:416-518`, `scripts/macos/config.sh:197-221`, `scripts/macos/config.sh:298-382`, `package.json:92-95`
+- **Код:** `packs.json`, `src/renderer/app.js:83-90`, `src/renderer/app.js:583-677`, `src/renderer/app.js:1293-1329`, `src/renderer/app.js:1333-1385`, `src/renderer/index.html:127-135`, `src/renderer/styles.css:406-407`, `src/main.js:638`, `src/install-env.js:20-46`, `scripts/windows/config.ps1:46-48`, `scripts/windows/config.ps1:308-358`, `scripts/windows/config.ps1:432-534`, `scripts/macos/config.sh:197-221`, `scripts/macos/config.sh:298-382`, `package.json:92-95`
 - **Тесты:** «no duplicate skill across packs», «core has no overlap with packs», «every core skill exists in repo», «every pack skill exists in repo», «config.ps1: прунинг fail-closed ($pruneDisabled/$installFailed); $preExisting щадит скиллы юзера в add-missing; reparse skip», «config.sh: прунинг fail-closed (PRUNE_DISABLED/RC); mktemp+trap+симлинк-реджект; PRE_EXISTING щадит», «config.sh add-missing: прунинг удаляет ТОЛЬКО доложенное нами, щадит пред-существующий скилл юзера», «config.sh REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)», «config.sh: TMPDIR недоступен → прунинг паков отключён (fail-closed, 0 удалений), скилл юзера ЦЕЛ», «config.sh: пред-существующий SYMLINK-скилл переживает прунинг (fail-closed, чужая цель цела)», «config.ps1 REPAIR: пред-существующий скилл юзера с ИМЕНЕМ снятого пака НЕ удаляется и НЕ перезаписан (P1 Codex — repair игнорировал pre-existing)», «config.ps1 ADD-MISSING ×3: .hamidun-skills.txt НЕ присваивает пред-существующий скилл юзера (data-loss на 2-м прогоне), снятие пака живо на 3-м», «#4 allowlist: эмитимые HM_* сохраняются; неэмитимый HM_COURSE_TARGET отброшен», «u10b config.ps1: прунинг скиллов снятого набора убирает наш скилл целиком (в нём read-only файл и вложенная папка), остальные скиллы и пред-существующие цел; подмена ~/.claude/skills ссылкой перед перечислением — прунинг останавливается, чужие файлы целы; контроль: прежний Remove-Item -Recurse стирает чужое»
 
 ## Что обещает человеку
@@ -13,11 +13,11 @@
 «Видео и аудио», «Маркетинг РФ (Ninja)» и так далее (`packs.json`, поле `packs`), все
 включены по умолчанию (`src/renderer/app.js:87-90`). Снимаешь ненужное — скиллы снятого
 пака всё равно **попадают на машину**: merge-копия льёт весь каталог `skills` источника
-независимо от выбора (`config.ps1:387` и `:229` — `robocopy $srcClaude $claudeHome /E …`
+независимо от выбора (`config.ps1:403` и `:229` — `robocopy $srcClaude $claudeHome /E …`
 без фильтра по `HM_KEEP_SKILLS`; `config.sh:252` и `:259` — `rsync` тем же образом), и
-только после неё прунинг их удаляет (`config.ps1:510`, `config.sh:375`). В нормальном
+только после неё прунинг их удаляет (`config.ps1:526`, `config.sh:375`). В нормальном
 прогоне снятого пака на диске не остаётся, но в fail-closed ветках удаления не происходит
-вовсе — «Прунинг паков пропущен (fail-closed)… Удалено: 0» (`config.ps1:474-475`,
+вовсе — «Прунинг паков пропущен (fail-closed)… Удалено: 0» (`config.ps1:490-491`,
 `config.sh:303-304`), и снятый пак остаётся на диске целиком. Передумал через месяц и запустил
 установщик снова, сняв пак — ранее положенные нами скиллы этого пака будут удалены
 **на Windows**. На macOS этого
@@ -37,9 +37,9 @@
 merge-копия перезаписывает внутри него одноимённые файлы нашей версией. Проверено
 прогоном в песочнице: пред-существующий `~/.claude/skills/our-skill/SKILL.md` с текстом
 пользователя после repair содержит нашу версию, а его же `MY-NOTES.md`, которого у нас
-нет, уцелел; «убрано: 0», каталог не удалён. Так ведут себя оба скрипта: `config.ps1:390`
+нет, уцелел; «убрано: 0», каталог не удалён. Так ведут себя оба скрипта: `config.ps1:406`
 делает `robocopy … /E /XJ` без `/XC /XN /XO`, `config.sh:261` — `rsync -a` без
-`--ignore-existing`, а `skills` в списках исключений нет (`config.ps1:56` — только
+`--ignore-existing`, а `skills` в списках исключений нет (`config.ps1:57` — только
 `memory`, `projects`, `todos`, `shell-snapshots`). Для `git-workflow` это не гипотетика:
 он есть и в `packs.json` (пак `dev`), и в `vendor/config-pack/.claude/skills`; то же для
 `security-audit` и `database-design`. Тестом эта комбинация не закрыта: repair-тесты
@@ -121,18 +121,18 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
 ## Инварианты
 
 1. **Прунинг запускается только при обеих непустых переменных.** `if ($env:HM_KEEP_SKILLS -and $env:HM_ALL_PACK_SKILLS)`
-   (`scripts/windows/config.ps1:472`), `if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]`
+   (`scripts/windows/config.ps1:488`), `if [ -n "${HM_KEEP_SKILLS:-}" ] && [ -n "${HM_ALL_PACK_SKILLS:-}" ]`
    (`scripts/macos/config.sh:302`). Ни одна ветка ниже без этого не исполняется.
 2. **Скилл, не входящий ни в один пак, не удаляется никогда.** Условие удаления требует
-   `$packAll.ContainsKey($_.Name)` (`config.ps1:509`) / вхождения имени в `HM_ALL_PACK_SKILLS`
+   `$packAll.ContainsKey($_.Name)` (`config.ps1:525`) / вхождения имени в `HM_ALL_PACK_SKILLS`
    (`config.sh:364`). `core` в `$packAll` не попадает по построению — `envForRun` кладёт туда
    только `p.skills` (`app.js:1348-1350`), а тест «core has no overlap with packs» держит
    отсутствие пересечения на уровне данных.
 3. **Удаляется только доложенное нами.** `$weAdded = (-not $preExisting.ContainsKey($_.Name)) -or $ourPrev.ContainsKey($_.Name)`
-   (`config.ps1:508`); `we_added` на macOS выставляется в 1 только при валидном списке
+   (`config.ps1:524`); `we_added` на macOS выставляется в 1 только при валидном списке
    пред-существующих и отсутствии имени в нём, иначе 0 (`config.sh:352-363`).
 4. **Инвентарь пред-существующего снимается ДО merge-копии, в обоих режимах.**
-   `config.ps1:318-321` идёт раньше `robocopy` (226/229); `config.sh:211-220` — раньше
+   `config.ps1:327-330` идёт раньше `robocopy` (226/229); `config.sh:211-220` — раньше
    `rsync`/`hm_copy` (247-265). Держится **только кодом**: порядок снятия `$preExisting`
    машинно не проверяется. Единственный `assertOrder` в этом тесте стоит на другой строке —
    на чтении `$ourPrev` (`test/run-tests.js:2130`), а сам `$preExisting` проверен голым
@@ -143,15 +143,15 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
 5. **Любой сбой перечисления или раскладки полностью выключает прунинг (fail-closed).**
    `$pruneDisabled` ставится при провале перечисления (169), провале проверки reparse-детей
    (208), коде robocopy ≥ 8 (232), сбое копирования CLAUDE.md/credentials (246, 253); проверка —
-   `config.ps1:474`. На macOS то же через `PRUNE_DISABLED` и `RC` (`config.sh:303`).
+   `config.ps1:490`. На macOS то же через `PRUNE_DISABLED` и `RC` (`config.sh:303`).
 6. **Reparse-point / симлинк не удаляется ни при каких условиях.** Корень `skills` —
-   ссылка → прунинг пропущен целиком (`config.ps1:482-490`, `config.sh:308-328`); отдельный
-   скилл-ссылка → `return` в цикле (`config.ps1:497`) / `continue` (`config.sh:347`).
+   ссылка → прунинг пропущен целиком (`config.ps1:498-506`, `config.sh:308-328`); отдельный
+   скилл-ссылка → `return` в цикле (`config.ps1:513`) / `continue` (`config.sh:347`).
 7. **На macOS ни одного удаления не происходит, пока не собран весь список кандидатов.**
    Два прохода и `PRUNE_ABORT` при коде `grep` ≥ 2 (`config.sh:330-370`).
 8. **`.hamidun-skills.txt` не содержит пред-существующих каталогов пользователя.**
    В него пишется разность «источник − `$preExisting`», объединённая с прошлым списком
-   (`config.ps1:441-453`), и только при `-not $installFailed -and -not $skillsReparse -and -not $pruneDisabled`
+   (`config.ps1:457-469`), и только при `-not $installFailed -and -not $skillsReparse -and -not $pruneDisabled`
    (273) — гейт из трёх членов, reparse-корень `skills` тоже отменяет запись.
 9. **`HM_KEEP_SKILLS` и `HM_ALL_PACK_SKILLS` проходят фильтр renderer-env.** Оба ключа
    в `RENDERER_ENV_ALLOW` (`src/install-env.js:22`), сверка регистронезависимая (34-36).
@@ -241,10 +241,10 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
    в `docs/specs/pereustanovit-nachisto-repair.md` — три раза (55 дважды, 71).
    Значит на втором прогоне скиллы, разложенные первым, попадают в `PRE_EXISTING_SKILLS`
    (`config.sh:217`), `we_added` становится 0 (`config.sh:356-357`), и снятие пака ничего не
-   удаляет. Ровно этот дефект на Windows дословно описан в комментарии `config.ps1:328-330`
+   удаляет. Ровно этот дефект на Windows дословно описан в комментарии `config.ps1:344-346`
    («снятие пака работает ровно один раз (на чистой машине): на повторном прогоне наши
    вчерашние скиллы уже „пред-существуют“ и прунинг молча ничего не удаляет») — тот же адрес
-   цитирует смежная спека `konfig-zhemala-claude.md:57`. Комментарий на `config.ps1:432-433`
+   цитирует смежная спека `konfig-zhemala-claude.md:57`. Комментарий на `config.ps1:448-449`
    говорит о **другом**, производном дефекте: без объединения с `$ourPrev` разность пуста
    на 2-м прогоне и снятие пака умирает с 3-го. Закрыт дефект
    тестом «config.ps1 ADD-MISSING ×3…» — теста-зеркала для `config.sh` в
@@ -257,12 +257,12 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
    `~/.claude/.hamidun-skills.txt` = `our-skill`. На настоящей macOS **не проверялось**.
    Отдельно: `docs/specs/pereustanovit-nachisto-repair.md:55` оспаривает центральное обещание
    этой спеки — там сказано, что на Windows пред-существующий каталог юзера всё-таки сносится
-   (`Remove-Item -Recurse -Force`, `config.ps1:510`), если его имя попало в
+   (`Remove-Item -Recurse -Force`, `config.ps1:526`), если его имя попало в
    `.hamidun-skills.txt` прошлым прогоном, потому что второй дизъюнкт `$weAdded`
-   (`config.ps1:508`) перебивает `$preExisting`. Какая из двух спек права — **здесь не
+   (`config.ps1:524`) перебивает `$preExisting`. Какая из двух спек права — **здесь не
    разрешено**.
 2. **Счётчик «убрано: N» считает попытки, а не подтверждённые удаления.** `Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue; $removed++`
-   (`config.ps1:510-511`) и `rm -rf "$SK/$name"; removed=$((removed + 1))` (`config.sh:375`)
+   (`config.ps1:526-527`) и `rm -rf "$SK/$name"; removed=$((removed + 1))` (`config.sh:375`)
    инкрементируют счётчик независимо от результата. Залоченный каталог (открыт редактор) даст
    в логе «убрано: 1» при фактически неудалённом скилле. Тесты этот разрыв ловят: они сверяют
    не только строку лога, но и файловую систему — `test/run-tests.js:2376`
@@ -273,7 +273,7 @@ reparse-point на самом корне `skills` → `$pruneDisabled = $true` �
 3. **Нечитаемый `packs.json` деградирует молча.** `readJson('packs.json', { core: [], packs: [] })`
    (`src/main.js:638`) при любой ошибке чтения/парсинга возвращает пустую заглушку: секция
    паков рисуется пустой, `envForRun` отдаёт две пустые строки, прунинг не запускается вовсе
-   (`config.ps1:472`), всё содержимое конфиг-пака ставится целиком. Ни сообщения в интерфейсе,
+   (`config.ps1:488`), всё содержимое конфиг-пака ставится целиком. Ни сообщения в интерфейсе,
    ни строки в логе установки об этом нет.
 4. **UI-часть фичи не покрыта тестами.** Поиск по `test/run-tests.js` по именам
    `renderPacks`, `packSelectedCount`, `renderPackSkills`, `packBadgeText`, `setAllPacks`,

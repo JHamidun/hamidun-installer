@@ -3,7 +3,7 @@
 <!-- spec-id: rezhim-holostogo-progona-dry-run -->
 
 - **Раздел:** Сопутствующее
-- **Код:** `src/main.js:213-244`, `src/main.js:1072-1079`, `src/main.js:1132-1133`, `src/main.js:1328-1330`, `src/main.js:1549-1608`, `src/main.js:1702-1785`, `src/main.js:3585-3600`, `src/main.js:3733-3772`, `src/install-receipts.js:31-59`, `src/install-receipts.js:154-158`, `src/install-manifest.js:77-113`, `src/install-env.js:21-30`, `src/uninstall-exec.js:521-664`, `src/renderer/app.js:1333-1385`, `test/clean-machine-test.ps1:6-9`, `scripts/windows/uv.ps1:17-23`, `scripts/windows/config.ps1:25-192`, `scripts/windows/git.ps1:26-114`, `scripts/windows/node.ps1:84-151`, `scripts/windows/nomad.ps1:67-370`, `scripts/windows/mascot.ps1:5-18`, `scripts/windows/bridge.ps1`, `scripts/windows/chatgpt-desktop.ps1`, `scripts/windows/claude-desktop.ps1`, `scripts/windows/claude.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/pydeps.ps1`, `scripts/windows/vscode.ps1`, `scripts/macos/config.sh:41-58`, `scripts/macos/uv.sh:17-24`, `scripts/macos/nomad.sh:6-275`, `scripts/macos/mascot.sh:10-81`, `scripts/macos/bridge.sh`, `scripts/macos/chatgpt-desktop.sh`, `scripts/macos/claude-desktop.sh`, `scripts/macos/course.sh`, `scripts/macos/handy.sh`, `scripts/macos/vscode.sh`, `scripts/macos/claude.sh`, `scripts/macos/cursor.sh`, `scripts/macos/extension.sh`, `scripts/macos/git.sh`, `scripts/macos/node.sh`, `scripts/macos/pydeps.sh`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`
+- **Код:** `src/main.js:213-244`, `src/main.js:1072-1079`, `src/main.js:1132-1133`, `src/main.js:1328-1330`, `src/main.js:1549-1608`, `src/main.js:1702-1785`, `src/main.js:3585-3600`, `src/main.js:3733-3772`, `src/install-receipts.js:31-59`, `src/install-receipts.js:154-158`, `src/install-manifest.js:77-113`, `src/install-env.js:21-30`, `src/uninstall-exec.js:521-664`, `src/renderer/app.js:1333-1385`, `test/clean-machine-test.ps1:6-9`, `scripts/windows/uv.ps1:18-24`, `scripts/windows/config.ps1:26-193`, `scripts/windows/git.ps1:26-114`, `scripts/windows/node.ps1:84-151`, `scripts/windows/nomad.ps1:68-391`, `scripts/windows/mascot.ps1:5-18`, `scripts/windows/bridge.ps1`, `scripts/windows/chatgpt-desktop.ps1`, `scripts/windows/claude-desktop.ps1`, `scripts/windows/claude.ps1`, `scripts/windows/course.ps1`, `scripts/windows/cursor.ps1`, `scripts/windows/extension.ps1`, `scripts/windows/handy.ps1`, `scripts/windows/pydeps.ps1`, `scripts/windows/vscode.ps1`, `scripts/macos/config.sh:41-58`, `scripts/macos/uv.sh:17-24`, `scripts/macos/nomad.sh:6-275`, `scripts/macos/mascot.sh:10-81`, `scripts/macos/bridge.sh`, `scripts/macos/chatgpt-desktop.sh`, `scripts/macos/claude-desktop.sh`, `scripts/macos/course.sh`, `scripts/macos/handy.sh`, `scripts/macos/vscode.sh`, `scripts/macos/claude.sh`, `scripts/macos/cursor.sh`, `scripts/macos/extension.sh`, `scripts/macos/git.sh`, `scripts/macos/node.sh`, `scripts/macos/pydeps.sh`, `scripts/windows/verify.ps1`, `scripts/macos/verify.sh`
 - **Тесты:** «main.js (source): HM_DRY_RUN авторитетно из process.env И payload; в dry-run — ни деактивации, ни целей, ни лога», «P1-8 main.js: dry-run — БЕЗ докачки и БЕЗ записи install.log», «P1-8 config.ps1/sh + uv.ps1/sh: dry-run ветвится ДО clone/fetch/бэкапа/докачки», «config.sh: dry-run БЕЗ bundled → никакого clone, ~/.claude НЕ создан, exit 0», «P0-1: shouldRecordInstall/isSkipExit — маркер ТОЛЬКО при коде 0 (skip/иной код → нет)», «manifest: dryRun ничего не пишет на диск», «receipts: маркер {id, version, installedAt} БЕЗ artifacts; round-trip; битый/чужой id → null», «Фаза 2 main.js: манифест справочный — запись при успехе (не hidden, не dry-run), удаление при uninstall, цели авторитетно из main», «removeMascotHooks: подлоги отбиты — чужой путь, symlink/junction, битый JSON, нечисловой порт; dry-run не пишет; файл изменился под руками — отказ»
 
 ## Что обещает человеку
@@ -13,7 +13,7 @@
 файлы, что запустит, что скачает, — и выходит с кодом 0. Но не каждый: гейт «артефакта
 нет в этой сборке» стоит ВЫШЕ проверки `$DRY` у трёх Windows-скриптов, поэтому в
 lite/частичном издании `mascot.ps1:9` и `vscode.ps1:99-104` в холостом прогоне выходят
-кодом 120 (осознанный пропуск), а `bridge.ps1:29` — кодом 1, то есть выглядит как
+кодом 120 (осознанный пропуск), а `bridge.ps1:30` — кодом 1, то есть выглядит как
 упавший шаг; ни одной строки `WOULD` они при этом не печатают. Удаление компонента печатает
 две колонки: `WOULD` (что снесёт) и `KEEP` (что не тронет ни при каких условиях).
 Это способ увидеть чужой план до того, как он выполнен: на рабочей машине, где уже
@@ -69,14 +69,14 @@ renderer-env только ключи из явного аллоулиста, и 
 **Установка, шаг 4 — сам скрипт.** На Windows все 16 устанавливающих скриптов объявляют
 `$DRY = [bool]$env:HM_DRY_RUN` и ветвятся до записи. «В шапке» — только у 11 из них;
 у пяти объявление стоит ниже: `chatgpt-desktop.ps1:40`, `claude-desktop.ps1:64`,
-`nomad.ps1:67`, `node.ps1:84` и `claude.ps1:163` (из 324 строк файла). До объявления
+`nomad.ps1:68`, `node.ps1:84` и `claude.ps1:163` (из 324 строк файла). До объявления
 там идут только определения функций и правка ПРОЦЕССНОГО `$env:Path` — на диск не
 пишет ни один. Форма ветвления разная:
 
-* ранний выход целиком — `scripts/windows/uv.ps1:20-23`: печатает один `WOULD` про
+* ранний выход целиком — `scripts/windows/uv.ps1:21-24`: печатает один `WOULD` про
   проверку SHA-256, копию в `%LOCALAPPDATA%\Programs\uv` и запись PATH, `exit 0` ДО
   обращения к диску;
-* выход после выбора ветки — `scripts/windows/config.ps1:61-192`: сначала сообщает,
+* выход после выбора ветки — `scripts/windows/config.ps1:62-193`: сначала сообщает,
   какой источник конфига выбран (встроенный или `git clone`), какой режим merge
   (`add-missing` или `repair`) и что будет с копией-бэкапом, потом `exit 0` — раньше
   `git clone` и раньше `robocopy`;
@@ -218,7 +218,7 @@ renderer-env только ключи из явного аллоулиста, и 
   запустить не может — это инструмент разработчика и поддержки.
 * **Dry-run не предсказывает успех.** Он показывает выбранную ветку и намерение, а не
   результат: печатается «что бы сделал», а не «сработало бы». Сетевые проверки в
-  холостом прогоне пропускаются намеренно (`scripts/windows/nomad.ps1:174`), значит
+  холостом прогоне пропускаются намеренно (`scripts/windows/nomad.ps1:175`), значит
   реальный прогон может уйти в осознанный пропуск там, где предпросмотр показал план.
 * **Скрытый шаг `verify` всё равно выполняется.** Он всегда последний в очереди и
   dry-run не знает. В обычном прогоне очередь строится в `startInstall`
