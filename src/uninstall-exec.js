@@ -67,46 +67,11 @@ function normKey(p, platform) {
   return isCaseInsensitive(platform) ? n.toLowerCase() : n;
 }
 function pathEq(a, b, platform) { return normKey(a, platform) === normKey(b, platform); }
-/** Путь и ВСЕ его существующие предки — без symlink и junction.
- *
- *  Вынесено отдельно, потому что нужно двум разным операциям с разными целями:
- *  `checkTarget` защищает от УДАЛЕНИЯ не того каталога, `removeMascotHooks` — от
- *  ЗАПИСИ не в тот файл. Проверка одна и та же, и держать её в двух копиях
- *  значит однажды починить одну из них.
- *
- *  Возвращает {ok:false, absent:true}, когда цели просто нет: это не отказ
- *  защиты, а «править нечего», и звать это ошибкой было бы враньём.
- *  Любая другая ошибка lstat — отказ (fail-closed): не смогли убедиться, что
- *  ссылки нет, значит считаем, что она есть.
- */
-function symlinkFreeChain(target) {
-  const norm = path.resolve(String(target || ''));
-  if (!norm) return { ok: false, error: 'пустой путь' };
-  let self = null;
-  let cur = norm;
-  let prev = '';
-  while (cur && cur !== prev) {
-    let st = null;
-    try {
-      st = fs.lstatSync(cur);
-    } catch (e) {
-      const code = e && e.code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        if (cur === norm) return { ok: false, absent: true };
-      } else {
-        return { ok: false, error: 'lstat(' + cur + '): ' + (code || e) };
-      }
-    }
-    if (st) {
-      if (st.isSymbolicLink()) return { ok: false, error: 'symlink/junction в цепочке: ' + cur };
-      if (cur === norm) self = st;
-    }
-    prev = cur;
-    cur = path.dirname(cur);
-  }
-  if (!self) return { ok: false, absent: true };
-  return { ok: true, isFile: self.isFile() };
-}
+// Путь и ВСЕ его существующие предки — без symlink и junction. Проверка живёт в src/link-guard.js (её же
+// используют писатели под администратором: прокси, ключи, манифест, журнал) — здесь только импорт, чтобы
+// `checkTarget` (защита от УДАЛЕНИЯ не того каталога) и `removeMascotHooks` (от ЗАПИСИ не в тот файл) и дальше
+// опирались на одну и ту же проверку, а не на две копии.
+const { symlinkFreeChain } = require('./link-guard');
 
 function isInside(child, parent, platform) {
   const c = normKey(child, platform), p = normKey(parent, platform);

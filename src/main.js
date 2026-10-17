@@ -36,6 +36,8 @@ const deelevRoute = require('./deelev-route');       // «Last Result» зада
 const credentialsMerge = require('./credentials-merge'); // слияние ключей визарда в .env
 const pyDetect = require('./py-detect');             // pydeps: пакеты по файлам, python для детекции не запускаем
 const desktopPath = require('./desktop-path');       // рабочий стол для записи под админом — только из профиля, не из реестра
+const linkGuard = require('./link-guard');           // запись из-под админа — не через junction/symlink в цепочке пути
+const windowGuards = require('./window-guards');     // окно остаётся на своей странице: навигация и window.open под запретом
 
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
@@ -193,18 +195,47 @@ const INSTALL_UID = uidTelemetry.resolveUid();
 // Every line streamed to the renderer is also appended here, so a user can
 // send one file to support when something goes wrong.
 const LOG_DIR = path.join(os.homedir(), '.hamidun-setup');
+const LOG_HOME = path.dirname(LOG_DIR);   // профиль (os.homedir() после замка в начале файла) — корень проверки цепочки пути
 const LOG_PATH = path.join(LOG_DIR, 'install.log');
 let logDirReady = false;
+// Журнал дописывается из процесса с правами администратора в ~/.hamidun-setup, который доступен любой программе
+// того же пользователя. Если ~/.hamidun-setup (или сам install.log) подменён ссылкой — junction/symlink, —
+// дописывание ушло бы в чужой файл по ту сторону. Тогда журнал на диск НЕ пишем вовсе (установка из-за него не
+// падает), причину запоминаем: одна строка уходит в консоль процесса и один раз — в окно установщика
+// (run-component), потому что в сам журнал её записать как раз нельзя. Проверка — src/link-guard.js.
+let logBlocked = '';
+let logBlockedNote = '';
 // Дескриптор держим ОТКРЫТЫМ. fs.appendFileSync открывает и закрывает файл на
 // КАЖДОЙ строке, а установочные скрипты (pip, uv, npm) выдают их десятками тысяч:
 // это десятки тысяч синхронных open/write/close в главном процессе — он же качает
 // насос сообщений окна. Один открытый дескриптор убирает две трети работы и
 // сохраняет главное свойство журнала: строка на диске сразу, переживает падение.
 let logFd = null;
+function blockLog(why) {
+  if (logFd !== null) { try { fs.closeSync(logFd); } catch (e2) { /* ignore */ } logFd = null; }
+  logBlocked = why;
+  logBlockedNote = '[журнал] install.log на диск не пишется: ' + why + '. Установка идёт как обычно, но журнала не будет.';
+  try { console.error('[install.log] ' + why); } catch (e2) { /* ignore */ }
+}
 function logToFile(id, line) {
+  if (logBlocked) return;
   try {
-    if (!logDirReady) { fs.mkdirSync(LOG_DIR, { recursive: true }); logDirReady = true; }
-    if (logFd === null) logFd = fs.openSync(LOG_PATH, 'a');
+    if (!logDirReady) {
+      let g = linkGuard.checkChain(LOG_PATH, LOG_HOME);
+      if (g.ok) { fs.mkdirSync(LOG_DIR, { recursive: true }); g = linkGuard.checkChain(LOG_PATH, LOG_HOME); }   // и после создания
+      if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
+      logDirReady = true;
+    }
+    if (logFd === null) {
+      logFd = fs.openSync(LOG_PATH, 'a');
+      // Сразу после открытия: цепочка снова чистая, а дескриптор — обычный файл с одной ссылкой (жёсткую ссылку на
+      // чужой файл, подложенную под имя журнала, дописывание бы не заметило).
+      const g = linkGuard.checkChain(LOG_PATH, LOG_HOME);
+      let st = null;
+      try { st = fs.fstatSync(logFd); } catch (e2) { st = null; }   // fstat по только что открытому дескриптору не падает; не вышло — решает цепочка выше
+      if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
+      if (st && (!st.isFile() || st.nlink !== 1)) { blockLog('install.log — не обычный файл или у него есть жёсткие ссылки'); return; }
+    }
     fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
   } catch (e) {
     // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
@@ -324,8 +355,19 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      // Песочница процесса страницы. Установщик работает с токеном администратора, и при sandbox:false взломанный
+      // процесс страницы (ошибка Chromium, XSS) сам получал бы этот токен. preload.js пользуется только contextBridge и
+      // ipcRenderer — песочнице это не мешает; проверено под настоящим Electron 44.5.1 (test/window-guards-probe.js):
+      // window.installer на месте, обмен с main проходит, процесс страницы в песочнице ОС.
+      sandbox: true
     }
+  });
+  // Окно не уходит со своей страницы и не открывает новых окон (will-navigate / will-redirect / window.open).
+  // Внешние ссылки открываются прежним путём — кнопками через IPC open-external с проверкой схем (ниже). Каждый отказ
+  // — строка в install.log (адрес очищен от управляющих символов и обрезан).
+  windowGuards.install(mainWindow.webContents, {
+    indexFile: path.join(__dirname, 'renderer', 'index.html'),
+    onBlock: (kind, url) => logToFile('window', 'заблокирован ' + kind + ': ' + profileEnv.cleanForLog(url))
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', bringToFront);
@@ -933,6 +975,13 @@ function buildInstallEnv(rendererEnv) {
       path.join(pf, 'WindowsPowerShell', 'Modules')
     ].join(';');                                                    // только системные модули (анти-module-hijack)
     if (!out.PATHEXT) out.PATHEXT = '.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC;.PS1';
+    // npm и git читают настройки САМОГО человека (~/.npmrc, %APPDATA%\npm\etc\npmrc, ~/.gitconfig) уже под нашим
+    // админ-токеном: чужой registry/prefix/filter в них — исполнение под администратором (F14) и подмена списка
+    // каталогов, где claude.ps1 удаляет файлы (F13b). Указываем им пустые места в System32 (куда без прав
+    // администратора не писать); подробности и результаты проверки на настоящих npm/git — в src/install-env.js.
+    // Рабочая папка потомка (проектный .npmrc перебивает всё) — System32, см. spawnOpts в run-component.
+    // git-компоненту git-половину возвращает run-component: его скрипт сам ПИШЕТ глобальный конфиг git.
+    Object.assign(out, installEnv.toolConfigIsolationEnv(s32));
     Object.assign(out, NONINTERACTIVE_ENV);
     return out;
   }
@@ -1203,6 +1252,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   // #4: строгий allowlist-env (admin-owned PATH, без пользовательского PATH и без
   // подменяемых command-resolution переменных). rendererEnv уже без HM_REMOTE_CACHE.
   const childEnv = buildInstallEnv(rendererEnv);
+  // git-компонент ПИШЕТ глобальную настройку git человека (git.ps1: longpaths, defaultBranch, autocrlf, имя/почта по
+  // умолчанию) — ему git-половина изоляции не нужна и вредна (запись ушла бы в NUL); npm-половина остаётся.
+  installEnv.withoutGitConfigIsolation(childEnv, id);
   // P1-A: POSIX buildInstallEnv наследует process.env (за вычетом запрещённого, чужие HM_* в том
   // числе), и HM_REMOTE_CACHE из окружения самого установщика мог бы протечь в компонент и
   // запустить НЕпроверенный бинарь. Стираем БЕЗУСЛОВНО здесь — ниже он ставится ТОЛЬКО из
@@ -1351,6 +1403,9 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   return await new Promise((resolve) => {
     let child;
     logLine('=== start ===');
+    // Журнал на диск заблокирован ссылкой на пути (см. blockLog): сказать об этом ОДИН раз там, где человек и
+    // поддержка видят вывод шага, — в сам журнал эту строку записать нельзя.
+    if (logBlockedNote) { send(logBlockedNote); logBlockedNote = ''; }
     try {
       // macOS: give the child its own process group so killChildren can reap the
       // whole tree (msiexec/pip/curl/hdiutil) via process.kill(-pid). On Windows
@@ -1364,6 +1419,17 @@ ipcMain.handle('run-component', async (_evt, payload) => {
       // показывает ошибку, которую видно и можно починить. Никто в stdin не пишет
       // (проверено), поэтому потерь нет.
       const spawnOpts = { env: childEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] };
+      // Рабочая папка потомка по умолчанию — папка самого установщика, а у portable-exe это каталог распаковки в
+      // %TEMP%, куда пишет любая программа того же пользователя. Из неё ищут и читают первым делом: проектный
+      // .npmrc (перебивает пользовательские настройки npm, F14), `python -m`/`-c` (cwd первым в sys.path), поиск
+      // по текущей папке. Берём проверенный System32 (winSystem32: не reparse, kernel32.dll на месте), НЕ
+      // переменные окружения; не подтверждён — запуск отклоняется (try/catch ниже вернёт {ok:false}), а не
+      // уходит «куда придётся».
+      if (IS_WIN) {
+        const s32 = remoteFetch.winSystem32();
+        if (!s32) throw new Error('System32 не подтверждён — запуск без безопасной рабочей папки отклонён');
+        spawnOpts.cwd = s32;
+      }
       if (!IS_WIN) spawnOpts.detached = true;
       child = spawn(cmd, args, spawnOpts);
     } catch (e) {

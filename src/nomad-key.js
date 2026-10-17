@@ -18,6 +18,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const profileEnv = require('./profile-env');
+const linkGuard = require('./link-guard');
 
 // Управляемый блок и «голый» model: — те же выражения, что в nomad.ps1:275.
 const MANAGED_BLOCK = /^# >>> nomad-cloud[\s\S]*?# <<< nomad-cloud <<<\r?\n?/m;
@@ -164,8 +165,20 @@ function writeNomadKey(key, opts) {
     cfgY = r.file;
   }
   const nl = o.newline || (process.platform === 'win32' ? '\r\n' : '\n');
+  // Ссылки на пути (u10a, F16). Запись идёт из процесса с правами администратора, а HERMES_HOME/LOCALAPPDATA
+  // проверены лишь ПО ТЕКСТУ пути (строго внутри профиля, см. resolveConfigPath): каталог-связка (junction)
+  // внутри профиля, ведущая в чужую учётку, этим не ловится. Поэтому цепочка от профиля до config.yaml
+  // проверяется на ссылки (src/link-guard.js) до любых действий, после создания каталога и сразу после создания
+  // временного файла. Ключ — секрет, поэтому отказ жёсткий: ничего не записано, человек видит причину.
+  let home = o.home || '';
+  if (!home) { try { home = os.homedir(); } catch (err) { home = ''; } }
+  // Явный `file` без `home` (тестовый шов; main.js его не передаёт) — корнем служит каталог файла.
+  const anchor = o.anchor || (o.file && !o.home ? path.dirname(cfgY) : home);
+  const guard = () => linkGuard.assertNoLinkInChain(cfgY, anchor, { platform: o.platform }, 'файлу настроек агента (config.yaml)');
   try {
+    guard();                                    // до mkdir: он тоже идёт по ссылке
     fs.mkdirSync(path.dirname(cfgY), { recursive: true });
+    guard();                                    // каталог мог стать ссылкой между проверкой и созданием
     let text = '';
     try {
       text = fs.readFileSync(cfgY, 'utf8');
@@ -192,6 +205,14 @@ function writeNomadKey(key, opts) {
     // что мы пришли настроить.
     const tmpY = cfgY + '.' + crypto.randomBytes(8).toString('hex') + '.tmp';
     const fd = fs.openSync(tmpY, 'wx', 0o600);
+    // Сразу после создания временного файла: подмена ПОСЛЕ этого уже не уведёт rename (временный файл остался по эту
+    // сторону ссылки), подмена ДО — видна здесь; тогда убираем свой временный файл и отказываем (ключ в него НЕ пишем).
+    try { guard(); }
+    catch (e2) {
+      try { fs.closeSync(fd); } catch (e3) { /* ignore */ }
+      try { fs.rmSync(tmpY, { force: true }); } catch (e3) { /* ignore */ }
+      throw e2;
+    }
     try {
       fs.writeFileSync(fd, buildBlock(san.key, url, model, nl) + text, { encoding: 'utf8' });
       try { fs.fsyncSync(fd); } catch (e2) { /* fsync не везде обязателен */ }
@@ -203,6 +224,7 @@ function writeNomadKey(key, opts) {
     return { ok: true, path: cfgY, model };
   } catch (e) {
     // Форма ответа — ровно как была в ipcMain.handle: renderer её уже читает.
+    if (e && e.code === 'EHMLINK') return { ok: false, reason: 'io', message: e.message + '. Ключ НЕ записан.' };
     return { ok: false, reason: 'io', message: String((e && e.message) || e) };
   }
 }

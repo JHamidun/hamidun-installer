@@ -71,16 +71,23 @@ function main() {
   const guard = (name, argIdx) => {
     const orig = fs[name];
     if (typeof orig !== 'function') return;
-    fs[name] = function () {
+    const check = (args) => {
       for (const i of argIdx) {
-        const p = toPath(arguments[i]);
+        const p = toPath(args[i]);
         if (p !== null && !within(p)) {
           violations.push({ fn: name, path: p });
           throw new Error('SANDBOX VIOLATION: ' + name + ' ' + p);
         }
       }
-      return orig.apply(this, arguments);
     };
+    fs[name] = function () { check(arguments); return orig.apply(this, arguments); };
+    // У fs.realpathSync есть свойство .native (канонический путь средствами ОС). Обёртка без него ломала бы код, который
+    // канонизирует путь именно через него (src/link-guard.js, u10a): без .native он отказывает, как и должен. Поэтому
+    // свойство переносится в обёртку и сторожится так же, как сама функция.
+    if (typeof orig.native === 'function') {
+      const origNative = orig.native;
+      fs[name].native = function () { check(arguments); return origNative.apply(this, arguments); };
+    }
   };
   ['mkdirSync', 'openSync', 'readFileSync', 'writeFileSync', 'appendFileSync', 'unlinkSync', 'rmSync', 'rmdirSync',
     'readdirSync', 'statSync', 'lstatSync', 'existsSync', 'accessSync', 'realpathSync', 'chmodSync', 'utimesSync',

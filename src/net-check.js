@@ -34,6 +34,7 @@ const os = require('os');
 const tls = require('tls');
 const http = require('http');
 const crypto = require('crypto');
+const linkGuard = require('./link-guard');
 
 const ANTHROPIC_HOST = 'api.anthropic.com';
 const PROBE_TIMEOUT_MS = 10000;
@@ -284,11 +285,28 @@ function readProxyEnv(home) {
  * credentials-merge.js: не прочитали — не пишем (кроме «файла нет»), невалидный JSON
  * не трогаем (иначе затёрли бы все настройки человека), перед записью — копия рядом,
  * сама запись атомарная через случайный временный файл в режиме 'wx'.
+ *
+ * ССЫЛКИ НА ПУТИ. Эта кнопка пишет из процесса с правами администратора, а ~/.claude может оказаться junction-ом
+ * (его ставит без прав администратора любая программа того же пользователя). lstat самого файла тогда видит
+ * обычный файл, а mkdir, копия и rename приходятся на ту сторону: на Electron 44.5.1 проверено, что settings.json
+ * и копия рядом появились в чужом каталоге. Поэтому цепочка от профиля до файла проверяется (src/link-guard.js)
+ * до чтения, после создания каталога и сразу после создания временного файла; ссылка — отказ (reason
+ * 'link-in-path'), для ссылки на сам файл — прежний 'not-regular-file'.
  * @returns {{ok: true, path: string, backup: string} | {ok: false, reason: string, error?: string}}
  */
 function writeProxyEnv(proxyUrl, opts) {
   const o = opts || {};
-  const file = o.file || settingsPath(o.home);
+  const home = o.home || os.homedir();
+  const file = o.file || settingsPath(home);
+  // Корень проверки — профиль. Явный `file` без `home` (тестовый шов; main.js его не передаёт) — свой каталог файла.
+  const anchor = o.anchor || (o.file && !o.home ? path.dirname(file) : home);
+  const chain = () => {
+    const r = linkGuard.checkChain(file, anchor, { platform: o.platform });
+    if (r.ok) return null;
+    return { ok: false, reason: r.at === file ? 'not-regular-file' : 'link-in-path', error: linkGuard.describe(r, 'файлу настроек Claude Code'), at: r.at };
+  };
+  const blocked = chain();
+  if (blocked) return blocked;
   let raw = null;
   try {
     const st = fs.lstatSync(file);
@@ -313,6 +331,8 @@ function writeProxyEnv(proxyUrl, opts) {
   const dir = path.dirname(file);
   try {
     fs.mkdirSync(dir, { recursive: true });
+    const afterMkdir = chain();      // каталог мог оказаться ссылкой между проверкой и созданием
+    if (afterMkdir) return afterMkdir;
     let backup = '';
     if (raw !== null) {
       // Имя с секундами и случайным хвостом: два нажатия подряд не должны упасть на
@@ -329,6 +349,15 @@ function writeProxyEnv(proxyUrl, opts) {
       catch (e) { if (e && e.code === 'EEXIST') continue; throw e; }
     }
     if (fd === null) return { ok: false, reason: 'tmp-exists' };
+    // Сразу после создания временного файла: подмена каталога ссылкой ПОСЛЕ этого уже не может увести rename (временный
+    // файл остался по эту сторону), а подмена ДО — видна здесь, и тогда убираем свой временный файл и отказываем.
+    const afterTmp = chain();
+    if (afterTmp) {
+      try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+      try { fs.rmSync(tmp, { force: true }); } catch (e) { /* ignore */ }
+      if (backup) { try { fs.rmSync(backup, { force: true }); } catch (e) { /* ignore */ } }   // и копию, если успела лечь не туда
+      return afterTmp;
+    }
     try {
       fs.writeFileSync(fd, JSON.stringify(merged.settings, null, 2) + '\n', 'utf8');
       try { fs.fsyncSync(fd); } catch (e) { /* fsync не везде обязателен */ }
