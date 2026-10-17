@@ -38392,28 +38392,40 @@ function Get-HmTouchupFilesOld {
     } finally { drop(base); }
   });
 
-  ok('u13: verifyDirSecureWin принимает каталог, запертый как в приложении (владелец Administrators, DACL = SYSTEM + Administrators), быстрее 15 с; с доступом Users — отвергает', () => {
+  ok('u13: verifyDirSecureWin принимает каталог, рождённый настоящим примитивом New-HmSecureStagingDir (владелец Administrators, DACL = SYSTEM + Administrators), быстрее 15 с; с доступом Users — отвергает', () => {
     if (!IS_WIN) SKIP('только Windows');
     const who = spawnSync(WHOAMI, ['/groups'], { encoding: 'utf8', timeout: 60000 });
-    if (!/S-1-16-(12288|16384)\b/.test(String(who.stdout || ''))) SKIP('нужен повышенный запуск (администратор): запертый каталог иначе не создать и не убрать');
+    if (!/S-1-16-(12288|16384)\b/.test(String(who.stdout || ''))) SKIP('нужен повышенный запуск (администратор): примитив с -Elevated $true иначе откажет');
+    const PS = RF.winPowershellPath();
+    if (!PS) SKIP('нет Windows PowerShell 5.1');
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u13-locked-'));
     try {
-      const d = path.join(base, 'locked');
-      fs.mkdirSync(d);
-      const a = spawnSync(ICACLS, [d, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], { encoding: 'utf8', timeout: 60000 });
-      const b = spawnSync(ICACLS, [d, '/setowner', '*S-1-5-32-544'], { encoding: 'utf8', timeout: 60000 });
-      assert.strictEqual(a.status, 0, 'icacls запер DACL: ' + a.stdout + a.stderr);
-      assert.strictEqual(b.status, 0, 'icacls назначил владельца Administrators: ' + b.stdout + b.stderr);
-      const lines = [];
-      const t0 = Date.now();
-      const res = RF.verifyDirSecureWin(d, (l) => lines.push(l));
-      const ms = Date.now() - t0;
-      assert.strictEqual(res, true, 'запертый каталог принят: ' + lines.join(' | '));
-      assert(ms < 15000, 'проверка заняла ' + ms + ' мс — без командлетов она укладывается в доли секунды');
-      const g = spawnSync(ICACLS, [d, '/grant', '*S-1-5-32-545:(OI)(CI)R'], { encoding: 'utf8', timeout: 60000 });
+      // Каталог рождает ТОТ ЖЕ примитив, что и в приложении (а не icacls-рецепт: в TEMP родитель раздаёт CREATOR OWNER,
+      // и у каталога остаётся явный ACE создателя, которого в настоящем staging-каталоге нет). -ProgramData — любой существующий родитель.
+      const script = "$ErrorActionPreference='Stop';. $env:HM_U13_DEELEV;" +
+        "$d=New-HmSecureStagingDir -ProgramData $env:HM_U13_PD -Icacls $env:HM_U13_ICACLS -Elevated $true;" +
+        "if($d){[Console]::Out.Write('HMSECDIR::'+$d+'::END')}";
+      const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+        encoding: 'utf8', timeout: 180000,
+        env: Object.assign({}, process.env, { HM_U13_DEELEV: path.join(ROOT, 'scripts', 'windows', '_deelev.ps1'), HM_U13_PD: base, HM_U13_ICACLS: ICACLS })
+      });
+      const m = /HMSECDIR::([\s\S]+?)::END/.exec(String(r.stdout || ''));
+      assert(m, 'примитив отдал путь: ' + String(r.stdout || '').slice(0, 200) + ' | ' + String(r.stderr || '').slice(0, 400));
+      const work = m[1].trim();
+      const outer = path.dirname(work);
+      assert(/^HmDeElev-[0-9a-f]{32}$/i.test(path.basename(outer)) && path.basename(work) === 'w', 'форма пути как в приложении: ' + work);
+      [work, outer].forEach((d) => {
+        const lines = [];
+        const t0 = Date.now();
+        const res = RF.verifyDirSecureWin(d, (l) => lines.push(l));
+        const ms = Date.now() - t0;
+        assert.strictEqual(res, true, 'каталог примитива принят (' + path.basename(d) + '): ' + lines.join(' | '));
+        assert(ms < 15000, 'проверка ' + path.basename(d) + ' заняла ' + ms + ' мс — без командлетов она укладывается в доли секунды');
+      });
+      const g = spawnSync(ICACLS, [outer, '/grant', '*S-1-5-32-545:(OI)(CI)R'], { encoding: 'utf8', timeout: 60000 });
       assert.strictEqual(g.status, 0, 'icacls выдал Users доступ: ' + g.stdout + g.stderr);
       const lines2 = [];
-      assert.strictEqual(RF.verifyDirSecureWin(d, (l) => lines2.push(l)), false, 'после выдачи Users доступа каталог отвергнут');
+      assert.strictEqual(RF.verifyDirSecureWin(outer, (l) => lines2.push(l)), false, 'после выдачи Users доступа каталог отвергнут');
       assert(/INSECURE:ace=S-1-5-32-545/.test(lines2.join('\n')), 'назван посторонний SID Users: ' + lines2.join(' | '));
     } finally { drop(base); }
   });
