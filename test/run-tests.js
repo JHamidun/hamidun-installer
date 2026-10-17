@@ -26362,6 +26362,9 @@ ok('config.json в репозитории без сборочных маркер
       assert.strictEqual(r.status, 0, 'harness: ' + r.out.slice(-800));
       const left = r.lines.filter((l) => /^LEFT /.test(l)).map((l) => l.slice(5)).sort();
       assert.deepStrictEqual(left, ['LICENSE', 'README.md', 'agent/core.py', 'pyproject.toml'], 'остались ровно чистые файлы под своими именами (а ключ в notes[1].txt удалён): ' + left.join(','));
+      // Сам фильтр называет удалённый файл в журнале по пути от корня: прежняя формула среза давала бы здесь путь с лишним каталогом впереди.
+      const logLine = r.lines.find((l) => /^LOG /.test(l)) || '';
+      assert(/удалил notes\[1\]\.txt \(деанон\/секрет-паттерн\)/.test(logLine), 'в журнале фильтра путь назван от корня: ' + logLine.slice(0, 600));
       assert((r.lines.find((l) => /^SANITIZE returned=/.test(l)) || '') === 'SANITIZE returned=True', 'фильтр пройден: ' + r.out.slice(-600));
     } finally { fs.rmSync(work, { recursive: true, force: true }); }
   });

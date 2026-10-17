@@ -546,8 +546,11 @@ switch ($Case) {
         $script:SanRes = $null
         $log = (& { $script:SanRes = Invoke-NomadSrcSanitize $src } 6>&1 | Out-String) -replace '\s+', ' '
         Write-Output ("SANITIZE returned={0}" -f $script:SanRes)
-        foreach ($f in @(Get-ChildItem -LiteralPath $src -File -Recurse -Force)) {
-            Write-Output ("LEFT " + ($f.FullName.Substring($src.Length + 1) -replace '\\', '/'))
+        # Windows PowerShell 5.1 раскрывает короткие имена 8.3 в FullName потомков, а строку $src (она может прийти псевдонимом) — нет:
+        # срез по длине берём от корня в том же написании, иначе пути выходят с лишним каталогом впереди.
+        $srcFull = (Get-Item -LiteralPath $src).FullName
+        foreach ($f in @(Get-ChildItem -LiteralPath $srcFull -File -Recurse -Force)) {
+            Write-Output ("LEFT " + ($f.FullName.Substring($srcFull.Length + 1) -replace '\\', '/'))
         }
         Write-Output ("LOG " + $log.Trim())
     }
