@@ -159,7 +159,7 @@ macOS (`"platforms": ["win32","darwin"]`, `components.json:278-281`).
 6. **«Установлено» печатается только после фактической проверки маркера.** Строка
    `OK: Claude Desktop установлен.` стоит внутри ветки `if ($installed)`, где
    `$installed` — результат `Wait-HmClaudeDesktopVerdict`
-   (`scripts/windows/claude-desktop.ps1:274-276`).
+   (`scripts/windows/claude-desktop.ps1:234-236`).
 7. **Любой отказ — graceful skip 120, а не ошибка и не тихий успех.** Все ветки отказа
    в обоих скриптах выходят с 120; `main.js` трактует 120 как «пропущен» и не пишет
    маркер установки (`src/main.js:1332`, `src/install-receipts.js:33-37`).
