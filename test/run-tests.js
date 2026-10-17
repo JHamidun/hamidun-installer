@@ -2788,6 +2788,7 @@ function cyrillicShortcutsWork() {
   if (_cyrLnkWorks !== null) return _cyrLnkWorks;
   _cyrLnkWorks = false;
   if (process.platform !== 'win32') return _cyrLnkWorks;
+  if (process.env.HM_TEST_NO_CYRILLIC_LNK === '1') return _cyrLnkWorks;   // прогнать «английскую» ветку на русской машине
   let dir = '';
   try {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cyrlnk-'));
@@ -31992,9 +31993,11 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     };
     return t;
   }
-  function mkTree() {
+  // ascii: на Windows, чья кодовая страница не вмещает кириллицу, WScript.Shell не читает ярлыки из такой папки и не пишет туда описание, поэтому
+  // тесты записи и замены ярлыка идут с профилем «Ivan Obrien Test» (пробелы остаются) — защита от ссылок проверяется и там, а не пропускается.
+  function mkTree(ascii) {
     const t = sandbox('hm-u4-');
-    t.P = path.join(t.base, 'Users', 'Иван О’Брайен Тест');          // кириллица, пробелы и U+2019 в имени профиля
+    t.P = path.join(t.base, 'Users', ascii ? 'Ivan Obrien Test' : 'Иван О’Брайен Тест');          // кириллица, пробелы и U+2019 в имени профиля
     t.mk(t.P);
     return t;
   }
@@ -32769,20 +32772,22 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
     "$fill = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\cmd.exe'; $sc.Description = 'первый' }",
     "$fill2 = { param($sc) $sc.TargetPath = 'C:\\Windows\\System32\\notepad.exe'; $sc.Description = 'второй' }",
   ];
+  const SHORT_FILL_ASCII = SHORT_FILL.map((l) => l.replace('первый', 'first').replace('второй', 'second'));
   const tryNew = (label, args) => "try { $x = New-HmShortcutFile " + args + "; '" + label + "=ok ' + $x } catch { '" + label + "=' + $_.Exception.GetType().Name + ' ' + $_.Exception.Message }";
   const headOf = (f) => { const b = fs.readFileSync(f); return Array.from(b.slice(0, 4)).join(','); };
 
   ok('u4 New-HmShortcutFile (PS 5.1): ярлык ложится через временный файл и Move — без -Replace занятое имя это отказ, с -Replace обычный файл заменяется, временных файлов не остаётся', () => {
     needWinPs();
-    needCyrillicShortcuts();
-    const t = mkTree();
+    const asc = !cyrillicShortcutsWork();
+    const D1 = asc ? 'first' : 'первый', D2 = asc ? 'second' : 'второй';
+    const t = mkTree(asc);
     try {
       const desk = t.mk(t.P, 'Desktop');
       const tmp = t.mk(t.base, 'private-temp');       // свой TEMP: всё, что оставит функция, видно
       const r = runPsFile([
         '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
         '. $env:HM_T_LIB',
-      ].concat(SHORT_FILL, [
+      ].concat(asc ? SHORT_FILL_ASCII : SHORT_FILL, [
         tryNew('CREATED', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill -ProfileDir $env:HM_T_P'),
         tryNew('TAKEN', '-Dir $env:HM_T_DIR -Name "a.lnk" -Fill $fill2 -ProfileDir $env:HM_T_P'),
         "'DESC1=' + (New-Object -ComObject WScript.Shell).CreateShortcut($env:HM_T_DIR + '\\a.lnk').Description",
@@ -32798,8 +32803,8 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       assert.strictEqual(r.status, 0, r.stdout + r.stderr);
       assert(r.stdout.includes('CREATED=ok ' + path.join(desk, 'a.lnk')), 'создан: ' + r.stdout);
       assert(/^TAKEN=InvalidOperationException имя ярлыка уже занято/m.test(r.stdout), 'занятое имя без -Replace — отказ: ' + r.stdout);
-      assert(/^DESC1=первый$/m.test(r.stdout), 'отказ ярлык не тронул: ' + r.stdout);
-      assert(/^REPLACED=ok /m.test(r.stdout) && /^DESC2=второй$/m.test(r.stdout), 'с -Replace обычный файл заменён: ' + r.stdout);
+      assert(new RegExp('^DESC1=' + D1 + '$', 'm').test(r.stdout), 'отказ ярлык не тронул: ' + r.stdout);
+      assert(/^REPLACED=ok /m.test(r.stdout) && new RegExp('^DESC2=' + D2 + '$', 'm').test(r.stdout), 'с -Replace обычный файл заменён: ' + r.stdout);
       assert(/^BADNAME=InvalidOperationException в имени ярлыка недопустимые знаки/m.test(r.stdout) && /^BADNAME2=InvalidOperationException в имени ярлыка недопустимые знаки/m.test(r.stdout),
         'имя с разделителем пути — отказ: ' + r.stdout);
       assert(!fs.existsSync(path.join(t.P, 'esc.lnk')) && !fs.existsSync(path.join(desk, 'sub')), 'имя с разделителем никуда не ушло');
@@ -32811,8 +32816,8 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
 
   ok('u4 New-HmShortcutFile (PS 5.1): подложенные жёсткая ссылка и symlink на имени ярлыка — чужой файл цел, папка или junction на этом месте — отказ; обычный Save() по тому же имени затирает чужой файл (контроль)', () => {
     needWinPs();
-    needCyrillicShortcuts();
-    const t = mkTree();
+    const asc = !cyrillicShortcutsWork();
+    const t = mkTree(asc);
     try {
       const desk = t.mk(t.P, 'Desktop');
       const hostile = t.mk(t.base, 'ProgramData', 'AllUsers');
@@ -32832,7 +32837,7 @@ if ($env:HM_TEST_OLDWAY -eq '1') {
       const r = runPsFile([
         '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
         '. $env:HM_T_LIB',
-      ].concat(SHORT_FILL, names.map((n) => run(n, false)), names.map((n) => run(n, true)), [
+      ].concat(asc ? SHORT_FILL_ASCII : SHORT_FILL, names.map((n) => run(n, false)), names.map((n) => run(n, true)), [
         // Контроль: прежний способ — Save() прямо по имени.
         "foreach ($n in 'ctl-hard.lnk', 'ctl-sym.lnk') { $p = Join-Path $env:HM_T_DIR $n; if (Test-Path -LiteralPath $p) { $s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); $s.TargetPath = 'C:\\Windows\\System32\\cmd.exe'; $s.Save() } }",
       ]).join('\n'), { HM_T_LIB: USERPATH, HM_T_DIR: desk, HM_T_P: t.P });
