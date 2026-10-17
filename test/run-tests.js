@@ -33461,9 +33461,11 @@ public static class HmConv {
       assert(/^MOVE=(InvalidOperationException|IOException|MethodInvocationException)$/m.test(r.stdout), 'занятое имя (висячий symlink) — отказ: ' + r.stdout);
       assert(!fs.existsSync(target), 'цель висячего symlink не создана (прежний File.Move создавал её): ' + r.stdout);
       assert.deepStrictEqual(fs.readdirSync(desk).filter((n) => /^\.hm-stage-/.test(n)), [], 'копия в папке при отказе убрана');
-      // Содержимое чужого файла в папку ярлыка не попало ни под каким именем (кроме контроля).
+      // Содержимое чужого файла в папку ярлыка не попало ни под каким именем (кроме контроля). Смотрим lstat: у процесса с правом на
+      // symlink (администратор — раннер GitHub, установщик) Move переносит саму ССЫЛКУ, и stat/readFile прошли бы по ней к тому же
+      // тексту, хотя читать цель никто не читал: ссылка на столе — то, что пользователь мог положить сам.
       const leaked = fs.readdirSync(desk).filter((n) => n !== 'copied.lnk').filter((n) => {
-        try { return fs.statSync(path.join(desk, n)).isFile() && fs.readFileSync(path.join(desk, n), 'utf8') === 'SECRET-CONTENT'; } catch (e) { return false; }
+        try { return fs.lstatSync(path.join(desk, n)).isFile() && fs.readFileSync(path.join(desk, n), 'utf8') === 'SECRET-CONTENT'; } catch (e) { return false; }
       });
       assert.deepStrictEqual(leaked, [], 'содержимое цели symlink-источника не скопировано в папку ярлыка: ' + r.stdout);
       // Контроли: стенд различает (иначе проверки выше ничего не доказывают).
