@@ -555,6 +555,7 @@ nomad_src_is_critical() {
     # pyproject ссылается на них (readme=/license-files=): удаление молча сломало бы
     # `uv tool install` у каждого покупателя → скрабим, а не удаляем.
     README.md|LICENSE|MANIFEST.in) return 0 ;;
+    nomad_cli/tui_dist/*) return 0 ;;
     agent/*.py|tools/*.py|nomad_cli/*.py|gateway/*.py|tui_gateway/*.py|cron/*.py|acp_adapter/*.py|plugins/*.py|providers/*.py) return 0 ;;
     */*) return 1 ;;
     *.py|*.toml) return 0 ;;
@@ -697,11 +698,8 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (иначе в
   # раздачу утечёт незакоммиченная/недоделанная работа при активной разработке агента).
   # Бамп версии = сменить дефолт здесь (и в fetch-vendor.ps1) или задать env HM_NOMAD_REF.
-  # 05.09.2026: поднят с тега v2026.7.22 (0.17.0) на КОММИТ 0.18.1 — держать
-  # синхронно с tools/fetch-vendor.ps1, там же разобрано, почему коммит, а не
-  # тег: свежих тегов НАШЕЙ линии нет, все v2026.8.* принадлежат апстриму
-  # NousResearch/hermes-agent и нашему main не предки.
-  NOMAD_REF="${HM_NOMAD_REF:-5a73e548233d2f830e3f0d619509012394a02280}"
+  # 18.10.2026: поднят на коммит 0.21.7 (638847bf55) — держать синхронно с tools/fetch-vendor.ps1.
+  NOMAD_REF="${HM_NOMAD_REF:-638847bf5513abc1e0f649813585950ab1f03cec}"
   GITURL="${NOMAD_AGENT_GIT_URL:-}"
   SRCOUT="$ROOT/vendor/nomad-src"
   # Стейл-манифест дерева не должен пережить перевыкачку (nomad.sh сверяет fail-closed).
@@ -732,6 +730,13 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
     echo "  ! нет локального репо ($AGENT_REPO) и не задан NOMAD_AGENT_GIT_URL — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
   fi
   if [ -f "$SRCOUT/pyproject.toml" ]; then
+    # A11: сборка TUI-бандла (nomad_cli/tui_dist/entry.js), если он не пришёл из локального репо.
+    if [ ! -f "$SRCOUT/nomad_cli/tui_dist/entry.js" ] && [ -f "$AGENT_REPO/nomad_cli/tui_dist/entry.js" ]; then
+      mkdir -p "$SRCOUT/nomad_cli/tui_dist"
+      cp "$AGENT_REPO/nomad_cli/tui_dist/entry.js" "$SRCOUT/nomad_cli/tui_dist/entry.js"
+    elif [ ! -f "$SRCOUT/nomad_cli/tui_dist/entry.js" ] && [ -f "$SRCOUT/ui-tui/package.json" ]; then
+      (cd "$SRCOUT/ui-tui" && npm install --no-audit --no-fund --ignore-scripts && npm run build && mkdir -p "$SRCOUT/nomad_cli/tui_dist" && cp dist/entry.js "$SRCOUT/nomad_cli/tui_dist/entry.js" && rm -rf node_modules dist) || true
+    fi
     # Экспорт-фильтр + гейт (FATAL внутри при несводимых паттернах), затем манифест
     # дерева: nomad.sh пересчитает hm_tree_sha256 и сверит fail-closed перед установкой.
     nomad_src_sanitize "$SRCOUT" || exit 1
@@ -741,6 +746,38 @@ if grep -q '"nomad"' "$ROOT/components.json" 2>/dev/null; then
     # Пустое/битое дерево не оставляем: иначе оно уехало бы в dmg как есть.
     rm -rf "$SRCOUT"
     echo "  ! в vendor/nomad-src нет pyproject.toml — дерево убрано, компонент Nomad у пользователя выполнит graceful skip."
+  fi
+  # Профиль Nomad (plugins/nomad, skills, mcp-servers, desktop UI) → vendor/nomad-profile
+  PROF_SRC="${HM_NOMAD_PROFILE_DIR:-/d/Nomad/nomad-overlay/package}"
+  PROF_URL="${NOMAD_PROFILE_GIT_URL:-https://github.com/JHamidun/nomad-profile.git}"
+  PROFOUT="$ROOT/vendor/nomad-profile"
+  rm -f "$ROOT/vendor/nomad-profile.sha256"
+  rm -rf "$PROFOUT"
+  if [ -d "$PROF_SRC" ] && [ -f "$PROF_SRC/distribution.yaml" ]; then
+    echo "[vendor-mac] Профиль Nomad из $PROF_SRC → vendor/nomad-profile..."
+    mkdir -p "$PROFOUT"
+    cp -R "$PROF_SRC/." "$PROFOUT/"
+  elif [ -n "$PROF_URL" ]; then
+    echo "[vendor-mac] git clone --depth 1 $PROF_URL → vendor/nomad-profile..."
+    git clone -q --depth 1 "$PROF_URL" "$PROFOUT" 2>/dev/null || true
+    rm -rf "$PROFOUT/.git"
+  fi
+  if [ -f "$PROFOUT/distribution.yaml" ]; then
+    if leak_patterns_load "${HM_LEAK_PATTERNS_FILE:-$ROOT/tools/leak-patterns.local.json}" 2>/dev/null && [ -n "$NOMAD_LEAK_SCRUBS" ]; then
+      while IFS= read -r pf; do
+        [ -f "$pf" ] || continue
+        while IFS="$(printf '\t')" read -r sre srep; do
+          [ -n "$sre" ] || continue
+          HM_RE="$sre" HM_REP="$srep" /usr/bin/perl -pi -e 's/$ENV{HM_RE}/$ENV{HM_REP}/gi' "$pf"
+        done <<EOS
+$NOMAD_LEAK_SCRUBS
+EOS
+      done < <(grep -rIlE "$NOMAD_LEAK_RE" "$PROFOUT" 2>/dev/null || true)
+    fi
+    hm_tree_sha256 "$PROFOUT" > "$ROOT/vendor/nomad-profile.sha256"
+    echo "  ok vendor/nomad-profile (distribution.yaml на месте; nomad-profile.sha256 записан)"
+  else
+    rm -rf "$PROFOUT"
   fi
 else
   echo "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"

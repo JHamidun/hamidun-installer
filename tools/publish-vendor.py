@@ -85,7 +85,8 @@ COMPONENTS = {
     # fail-closed перед uv tool install). nomad-src.sha256 генерит fetch-vendor.ps1 —
     # публиковать nomad ТОЛЬКО после свежего fetch:vendor (иначе required-part упадёт).
     "nomad":  {"kind": "staged", "parts": [("nomad-src", "nomad-src"),
-                                           ("nomad-src.sha256", "nomad-src.sha256")],
+                                           ("nomad-src.sha256", "nomad-src.sha256"),
+                                           ("nomad-profile", "nomad-profile", False)],
                "name": "Nomad (source + integrity manifest)"},
     "config": {"kind": "single", "src": "config-pack",           "prefix": "config-pack",       "name": "Claude config pack"},
     # playwright-browsers НЕ публикуем: компонента с таким id нет в components.json, а
@@ -140,7 +141,8 @@ COMPONENTS_DARWIN = {
     # fail-closed ДО uv tool install). nomad-src.sha256 генерит fetch-vendor-mac.sh —
     # публиковать ТОЛЬКО после свежего фетча, иначе обязательная часть отсутствует.
     "nomad":  {"kind": "staged", "parts": [("nomad-src", "nomad-src"),
-                                           ("nomad-src.sha256", "nomad-src.sha256")],
+                                           ("nomad-src.sha256", "nomad-src.sha256"),
+                                           ("nomad-profile", "nomad-profile", False)],
                "name": "Nomad (source + integrity manifest)"},
     "config": {"kind": "single", "src": "config-pack",     "prefix": "config-pack",       "name": "Claude config pack"},
     # handy: пара к win32-записи. Записи здесь не было вовсе — при том что win-карта

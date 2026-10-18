@@ -177,6 +177,12 @@ function Invoke-HmSettingsFixes {
             $mt.Value = '120000'
             $done.Add('поднял env MCP_TIMEOUT с 30000 до 120000 мс — MCP-серверы на холодном кэше npx стартуют дольше 30 секунд')
         }
+        # 2в. B09: плашка «Auto mode is unavailable for your plan» на обычных подписках Pro/Max в Claude Code 2.1.111+.
+        #     Ставим disableAutoMode = "disable" только если ключ ещё не задан.
+        if (-not $Settings.PSObject.Properties['disableAutoMode']) {
+            $Settings | Add-Member -NotePropertyName 'disableAutoMode' -NotePropertyValue 'disable'
+            $done.Add('выключил плашку «Auto mode is unavailable for your plan» (disableAutoMode: "disable")')
+        }
     }
 
     # 3. Правила разрешений, на которые Claude Code ругается при каждом запуске.

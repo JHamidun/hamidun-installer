@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('installer', {
   detectState: () => ipcRenderer.invoke('detect-state'),
   // Фаза 2: деинсталляция компонента (только артефакты установщика, не данные юзера).
   uninstallComponent: (id, env) => ipcRenderer.invoke('uninstall-component', { id, env }),
+  // A27: полное удаление всех компонентов установщика («Удалить всё»).
+  uninstallAll: (opts) => ipcRenderer.invoke('uninstall-all', opts || {}),
   onLog: (cb) => {
     const handler = (_e, payload) => cb(payload);
     ipcRenderer.on('component-log', handler);

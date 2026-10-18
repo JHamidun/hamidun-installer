@@ -155,7 +155,7 @@ function writeNomadKey(key, opts) {
   const cloud = (cfg.nomad && cfg.nomad.cloud) || {};
   const url = String(cloud.baseUrl || 'https://cp.nomadnet.ai/v1').replace(/["\r\n]/g, '');
   // В config.json поле называется defaultModel (не model) — зеркалит nomad.ps1:284.
-  const model = String(cloud.defaultModel || 'claude-opus-4-6').replace(/["\r\n]/g, '');
+  const model = String(cloud.defaultModel || 'nomadnet-auto').replace(/["\r\n]/g, '');
 
   let cfgY = o.file;
   if (!cfgY) {

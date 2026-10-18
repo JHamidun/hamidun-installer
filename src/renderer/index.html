@@ -122,6 +122,16 @@
         <button type="button" id="btn-what-next-ext" class="linkbtn">↗ Памятка — в браузере</button>
       </div>
 
+      <!-- B11: Пресеты выбора комплектации -->
+      <div id="preset-bar" class="preset-bar" role="group" aria-label="Режим комплектации">
+        <button type="button" id="preset-full" class="preset-btn active" data-preset="full">
+          📦 Полный комплект (рекомендуется)
+        </button>
+        <button type="button" id="preset-minimal" class="preset-btn" data-preset="minimal">
+          ⚡ Минимум (только Claude Code + конфиг)
+        </button>
+      </div>
+
       <section id="groups" class="groups"></section>
 
       <section id="packs-wrap">
@@ -151,6 +161,9 @@
         </label>
       </div>
       <div class="actions-right">
+        <!-- A27: «Удалить всё» — полное удаление управляемых компонентов установщика -->
+        <button type="button" id="btn-uninstall-all" class="btn-sm btn-danger-outline hidden"
+                title="Удалить все установленные компоненты этого установщика одним действием">Удалить всё…</button>
         <!-- «Проверить и починить»: прогон ТОЛЬКО скрытого шага verify. Нужна тем, у кого всё
              уже стоит: «Установить» у них погашена (нечего ставить), а известные неполадки в
              профиле (настройки Claude Code, PATH, политика PowerShell, скрепка) чинит именно
@@ -212,6 +225,27 @@
       <button type="button" id="btn-finish" class="btn btn-primary hidden">Готово</button>
     </footer>
   </main>
+
+  <!-- A27: Модальное окно подтверждения «Удалить всё» -->
+  <div id="uninstall-all-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="uninstall-all-title">
+    <div class="modal-card">
+      <div class="modal-emoji" aria-hidden="true">🧹</div>
+      <h2 id="uninstall-all-title" class="modal-title">Удалить все компоненты установщика?</h2>
+      <div class="modal-body">
+        <p>Будут удалены управляемые компоненты установщика: <b>Скрепка (Claude Mascot)</b>, <b>AI-мост</b>, <b>Курс-симулятор</b>, <b>uv</b>, стартовая папка <code>~/HamidunStart</code> и служебный каталог <code>~/.hamidun-setup</code>.</p>
+        <p>Системные инструменты (Git, Node.js, VS Code, Claude CLI) и твои рабочие папки не затрагиваются.</p>
+        <label class="uninstall-all-opt" for="uninstall-all-include-claude">
+          <input type="checkbox" id="uninstall-all-include-claude" />
+          <span>Также удалить базу конфига <code>~/.claude</code> и <code>~/CLAUDE.md</code> (перед удалением секреты, ключи, память и история чатов будут сохранены в резервную копию <code>~/.claude-backup-…</code>)</span>
+        </label>
+        <div id="uninstall-all-status" class="uninstall-all-status"></div>
+      </div>
+      <div class="modal-actions modal-actions-split">
+        <button type="button" id="uninstall-all-cancel" class="btn-sm">Отмена</button>
+        <button type="button" id="uninstall-all-confirm" class="btn btn-danger">Удалить выбранное</button>
+      </div>
+    </div>
+  </div>
 
   <script src="deps.js"></script>
   <script src="finish-link.js"></script>

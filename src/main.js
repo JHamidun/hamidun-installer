@@ -217,6 +217,15 @@ function blockLog(why) {
   logBlockedNote = '[журнал] install.log на диск не пишется: ' + why + '. Установка идёт как обычно, но журнала не будет.';
   try { console.error('[install.log] ' + why); } catch (e2) { /* ignore */ }
 }
+// u10b: очистка ANSI CSI/OSC и управляющих символов перед записью в install.log,
+// чтобы вывод сторонних процессов не мог подделывать строки лога или впрыскивать терминальные escape-последовательности.
+function sanitizeForInstallLog(raw) {
+  return String(raw == null ? '' : raw)
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b[@-_]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+}
 function logToFile(id, line) {
   if (logBlocked) return;
   try {
@@ -236,7 +245,9 @@ function logToFile(id, line) {
       if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
       if (st && (!st.isFile() || st.nlink !== 1)) { blockLog('install.log — не обычный файл или у него есть жёсткие ссылки'); return; }
     }
-    fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + id + '] ' + line + '\n');
+    const safeId = sanitizeForInstallLog(id);
+    const safeLine = sanitizeForInstallLog(line);
+    fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + safeId + '] ' + safeLine + '\n');
   } catch (e) {
     // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
     // строка откроет заново. Журналирование НИКОГДА не должно ломать установку.
@@ -1316,6 +1327,7 @@ ipcMain.handle('run-component', async (_evt, payload) => {
   childEnv.HM_BUNDLED_CONFIG = vendorPick('config-pack');
   childEnv.HM_AGENT_DIR = path.join(resourceRoot(), 'agent');
   childEnv.HM_NOMAD_SRC = vendorPick('nomad-src');
+  childEnv.HM_NOMAD_PROFILE = vendorPick('nomad-profile');
   childEnv.HM_ASSETS = path.join(resourceRoot(), 'assets');
   // Секрет подписи маяка завершения курса — ТОЛЬКО из вшитого config.json, тем же
   // паттерном, что HM_VENDOR. Через renderer его пускать нельзя: renderer работает
@@ -3986,6 +3998,119 @@ ipcMain.handle('uninstall-component', async (_evt, payload) => {
   say('Деинсталляция «' + id + '» завершена.');
   logLine('=== uninstall done ===');
   return { id, ok: true, code: 0 };
+});
+
+// A27: «Удалить всё» — полное удаление компонентов установщика одним действием.
+// По умолчанию ~/.claude и ~/CLAUDE.md сохраняются; если includeClaude === true,
+// перед удалением ~/.claude и ~/CLAUDE.md создаётся резервная копия секретов и базы
+// чатов в ~/.claude-backup-<YYYYMMDD-HHmmss>. При сбое резервного копирования
+// удаление ~/.claude немедленно отменяется (fail-closed).
+ipcMain.handle('uninstall-all', async (_evt, payload) => {
+  const opts = payload || {};
+  const includeClaude = !!opts.includeClaude;
+  const rendererEnv = Object.assign({}, opts.env || {});
+  const isDryRun = !!(process.env.HM_DRY_RUN || (rendererEnv && rendererEnv.HM_DRY_RUN));
+  const home = os.homedir();
+  const ctx = Object.assign(buildUninstallCtx(), { includeClaude });
+  const allPlan = uninstallTargets.uninstallAllPlan(ctx);
+  if (!allPlan) {
+    return { ok: false, code: -1, error: 'Не удалось построить план полного удаления.' };
+  }
+  const logLine = (line) => { if (!isDryRun) logToFile('uninstall-all', line); };
+  const send = (line) => {
+    if (mainWindow && !mainWindow.isDestroyed() &&
+        mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('component-log', { id: 'uninstall-all', line });
+    }
+  };
+  const say = (line) => { send(line); logLine(line); };
+
+  say('Полное удаление компонентов установщика' +
+    (includeClaude ? ' (включая ~/.claude с резервной копией секретов)' : ' (база ~/.claude сохраняется)') +
+    (isDryRun ? ' [dry-run]' : ''));
+
+  if (isDryRun) {
+    if (includeClaude) {
+      for (const b of allPlan.backupTargets || []) say('  [dry-run] BACKUP: ' + b);
+    }
+    for (const cid of allPlan.componentIds || []) {
+      const cp = allPlan.componentPlans && allPlan.componentPlans[cid];
+      if (!cp) continue;
+      for (const t of cp.targets || []) say('  [dry-run] [' + cid + '] WOULD: ' + describeTarget(t));
+    }
+    for (const t of allPlan.extraTargets || []) say('  [dry-run] [extra] WOULD: ' + describeTarget(t));
+    return { ok: true, code: 0, dryRun: true, plan: allPlan };
+  }
+
+  let backupDir = '';
+  if (includeClaude) {
+    const claudeDir = path.join(home, '.claude');
+    const rootClaudeMd = path.join(home, 'CLAUDE.md');
+    if (fs.existsSync(claudeDir) || fs.existsSync(rootClaudeMd)) {
+      const d = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const ts = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' +
+        pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+      backupDir = path.join(home, '.claude-backup-' + ts);
+      const bk = uninstallExec.backupClaudeSecrets(home, allPlan.backupTargets, backupDir);
+      if (!bk || !bk.ok) {
+        const err = (bk && bk.error) || 'ошибка копирования секретов';
+        say('[СТОП] Резервная копия секретов не удалась (' + err + ') — удаление ~/.claude отменено.');
+        return { ok: false, code: 1, error: 'Резервная копия секретов не удалась — удаление отменено: ' + err };
+      }
+      say('Резервная копия секретов и чатов сохранена в: ' + backupDir + ' (' + (bk.copied ? bk.copied.length : 0) + ' объектов)');
+    }
+  }
+
+  let failed = 0;
+  for (const cid of allPlan.componentIds || []) {
+    const cp = allPlan.componentPlans && allPlan.componentPlans[cid];
+    if (!cp || !Array.isArray(cp.targets)) continue;
+    const guardOpts = { home, platform: process.platform, extraProtected: cp.preserve || [] };
+    say('--- Удаление компонента «' + cid + '» ---');
+    for (const t of cp.targets) {
+      let r;
+      try { r = executeUninstallTarget(t, guardOpts); }
+      catch (e) { r = { status: 'failed', message: 'исключение: ' + String((e && e.message) || e) }; }
+      say('  [' + r.status + '] ' + describeTarget(t) + (r.message ? ' — ' + r.message : ''));
+      if (r.status === 'failed') failed++;
+    }
+    try {
+      if (receipts.hasReceipt(home, cid)) {
+        const deact = receipts.deactivateReceipt(home, cid);
+        if (deact.ok) receipts.finalizeRemoval(home, cid);
+      }
+      manifest.removeEntry(home, cid);
+    } catch (e) { /* служебный каталог .hamidun-setup удаляется следующим шагом */ }
+  }
+
+  for (const t of allPlan.extraTargets || []) {
+    if (t.allowSetupCleanup) {
+      // Перед удалением ~/.hamidun-setup закрываем открытый дескриптор install.log,
+      // чтобы Windows не удерживал файл в удаляемом каталоге.
+      blockLog('удаление служебного каталога ~/.hamidun-setup по команде «Удалить всё»');
+    }
+    const guardOpts = {
+      home,
+      platform: process.platform,
+      extraProtected: [],
+      allowClaudeCleanup: !!t.allowClaudeCleanup,
+      allowSetupCleanup: !!t.allowSetupCleanup
+    };
+    let r;
+    try { r = executeUninstallTarget(t, guardOpts); }
+    catch (e) { r = { status: 'failed', message: 'исключение: ' + String((e && e.message) || e) }; }
+    send('  [' + r.status + '] ' + describeTarget(t) + (r.message ? ' — ' + r.message : ''));
+    if (r.status === 'failed') failed++;
+  }
+
+  return {
+    ok: failed === 0,
+    code: failed === 0 ? 0 : 1,
+    backupDir,
+    removedComponents: allPlan.componentIds,
+    error: failed > 0 ? ('Не удалось удалить часть целей (' + failed + ')') : ''
+  };
 });
 
 // ---- macOS: САМОЛЕЧЕНИЕ карантина/транслокации --------------------------------

@@ -302,4 +302,71 @@ function uninstallTargets(id, ctx) {
   return { targets, preserve, notes };
 }
 
-module.exports = { uninstallTargets, resolveCourseTarget, MASCOT_TEAM_ID, MASCOT_HOOK_PORT, BRIDGE_RC_LINE, UNINSTALL_DISABLED };
+// A27: План полного удаления стека («Удалить всё»).
+// По умолчанию ~/.claude и ~/CLAUDE.md сохраняются; если includeClaude === true,
+// перед их удалением создаётся резервная копия секретов и базы чатов в ~/.claude-backup-<ts>.
+function uninstallAllPlan(ctx = {}) {
+  const platform = (ctx && ctx.platform) || process.platform;
+  const home = (ctx && ctx.home) || '';
+  if (!home) return null;
+  const P = platformPath(platform);
+  const includeClaude = !!(ctx && ctx.includeClaude);
+  const componentIds = ['mascot', 'bridge', 'course', 'uv'];
+  const backupTargets = [
+    P.join(home, '.claude', '.credentials.master.env'),
+    P.join(home, '.claude', 'chats.db'),
+    P.join(home, '.claude', 'chats.db-wal'),
+    P.join(home, '.claude', 'chats.db-shm'),
+    P.join(home, '.claude', 'memory'),
+    P.join(home, '.claude', 'settings.local.json'),
+    P.join(home, '.claude', 'CLAUDE.md'),
+    P.join(home, 'CLAUDE.md')
+  ];
+  const extraTargets = [
+    { type: 'dirtree', path: P.join(home, 'HamidunStart'), why: 'памятка HamidunStart' }
+  ];
+  if (includeClaude) {
+    extraTargets.push({
+      type: 'dirtree',
+      path: P.join(home, '.claude'),
+      why: 'каталог конфига ~/.claude (после резервной копии секретов)',
+      allowClaudeCleanup: true
+    });
+    extraTargets.push({
+      type: 'file',
+      path: P.join(home, 'CLAUDE.md'),
+      why: 'корневой ~/CLAUDE.md',
+      allowClaudeCleanup: true
+    });
+  }
+  extraTargets.push({
+    type: 'dirtree',
+    path: P.join(home, '.hamidun-setup'),
+    why: 'служебный каталог установщика ~/.hamidun-setup',
+    allowSetupCleanup: true
+  });
+  const extraPaths = extraTargets.map((t) => t.path);
+  const componentPlans = {};
+  for (const cid of componentIds) {
+    componentPlans[cid] = uninstallTargets(cid, Object.assign({}, ctx, { platform, home }));
+  }
+  return {
+    componentIds,
+    includeClaude,
+    backupTargets,
+    extraPaths,
+    extraTargets,
+    componentPlans
+  };
+}
+
+module.exports = {
+  uninstallTargets,
+  uninstallAllPlan,
+  resolveCourseTarget,
+  MASCOT_TEAM_ID,
+  MASCOT_HOOK_PORT,
+  BRIDGE_RC_LINE,
+  UNINSTALL_DISABLED
+};
+

@@ -130,6 +130,13 @@ function applyFixes(settings, defaults, hints) {
       done.short.push('MCP_TIMEOUT 30000 → 120000');
       done.push('поднял env MCP_TIMEOUT с 30000 до 120000 мс — MCP-серверы на холодном кэше npx стартуют дольше 30 секунд');
     }
+    // 2в. B09: плашка «Auto mode is unavailable for your plan» на обычных подписках Pro/Max в Claude Code 2.1.111+.
+    //     Ставим disableAutoMode = "disable" только если ключ ещё не задан.
+    if (!has(settings, 'disableAutoMode')) {
+      settings.disableAutoMode = 'disable';
+      done.short.push('disableAutoMode');
+      done.push('выключил плашку «Auto mode is unavailable for your plan» (disableAutoMode: "disable")');
+    }
   }
 
   // 3. Правила разрешений, на которые Claude Code ругается при каждом запуске.

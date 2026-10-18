@@ -456,6 +456,25 @@ function Expand-HmZipSafe {
                     throw $ex
                 }
             }
+            if (-not $parts.IsDir) {
+                $leaf = [System.IO.Path]::Combine($cur, $segs[$segs.Count - 1])
+                if (-not $checked.ContainsKey($leaf)) {
+                    $checked[$leaf] = $true
+                    $lattr = $null
+                    try { $lattr = [System.IO.File]::GetAttributes($leaf) }
+                    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $lattr = $null }
+                    if ($null -ne $lattr) {
+                        if (Test-HmPathIsLink -Path $leaf -Attr $lattr) {
+                            $ex = New-Object System.InvalidOperationException("в пути есть ссылка (junction/symlink): $leaf")
+                            $ex.Data['HmLink'] = $leaf
+                            throw $ex
+                        }
+                        if ([int]$lattr -band [int][System.IO.FileAttributes]::Directory) {
+                            throw (New-Object System.IO.IOException("на месте файла лежит папка: $leaf"))
+                        }
+                    }
+                }
+            }
             [void]$plan.Add([pscustomobject]@{ Entry = $e; Segs = $segs; IsDir = $parts.IsDir; DirSegs = $dirSegs })
         }
         # --- проход 2: запись ---
@@ -476,6 +495,7 @@ function Expand-HmZipSafe {
                 $st.CopyTo($ms)
                 $bytes = $ms.ToArray()
             } finally { $st.Dispose() }
+            if (Test-HmIsReparse $cur) { throw (New-Object System.InvalidOperationException("в пути есть ссылка (junction/symlink): $cur")) }
             Write-HmFileSafe -Path ([System.IO.Path]::Combine($cur, $segs[$segs.Count - 1])) -Bytes $bytes -ClearReadOnly
             $written++
         }

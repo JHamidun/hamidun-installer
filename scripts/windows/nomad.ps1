@@ -361,6 +361,25 @@ if (-not $DRY) {
     } catch { Write-Host "Nomad: брендинг и настройки НЕ записаны: каталог агента ($hh) не прошёл проверку на ссылки ($($_.Exception.Message)). Сам Nomad установлен." }
 }
 if (-not $DRY -and $hhSafe) {
+    $profSrc = if ($env:HM_NOMAD_PROFILE) { $env:HM_NOMAD_PROFILE } elseif ($env:HM_VENDOR) { Join-Path $env:HM_VENDOR 'nomad-profile' } else { '' }
+    if ($profSrc -and (Test-Path -LiteralPath (Join-Path $profSrc 'distribution.yaml'))) {
+        Write-Host "Разворачиваю профиль Nomad (плагин, суверенные модели РФ, 11 коннекторов РФ, DLP 152-ФЗ, Бадди)..."
+        try {
+            [void](New-HmUserDir -Path (Join-Path $hh 'profiles\nomad'))
+            [void](New-HmUserDir -Path (Join-Path $hh 'desktop-plugins\nomad'))
+            [void](New-HmUserDir -Path (Join-Path $hh 'profiles\nomad\desktop-plugins\nomad'))
+            & robocopy "$profSrc" (Join-Path $hh 'profiles\nomad') /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            & robocopy "$profSrc" "$hh" /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            $dpSrc = Join-Path $profSrc 'plugins\nomad\desktop'
+            if (Test-Path -LiteralPath $dpSrc) {
+                & robocopy "$dpSrc" (Join-Path $hh 'desktop-plugins\nomad') /E /NFL /NDL /NJH /NJS /NP | Out-Null
+                & robocopy "$dpSrc" (Join-Path $hh 'profiles\nomad\desktop-plugins\nomad') /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            }
+            $global:LASTEXITCODE = 0
+            Write-HmUserFile -Path (Join-Path $hh '.no-bundled-skills') -Bytes ([byte[]]@())
+            Write-HmUserFile -Path (Join-Path $hh '.skip_upstream_prompt') -Bytes ([byte[]]@())
+        } catch { Write-Host "  [warn] профиль Nomad не развёрнут: $($_.Exception.Message)" }
+    }
     $soulDst = Join-Path $hh 'SOUL.md'
     if (-not (Test-Path -LiteralPath $soulDst)) {
         $soulSrc = Join-Path $src 'branding\SOUL.md'
@@ -399,7 +418,7 @@ if (-not $DRY -and $hhSafe) {
 $cfgY = Join-Path $hh 'config.yaml'
 $cloudKey   = if ($env:HM_NOMAD_CLOUD_KEY)     { ($env:HM_NOMAD_CLOUD_KEY).Trim() }     else { '' }
 $cloudUrl   = if ($env:HM_NOMAD_CLOUD_BASEURL) { ($env:HM_NOMAD_CLOUD_BASEURL).Trim() } else { 'https://cp.nomadnet.ai/v1' }
-$cloudModel = if ($env:HM_NOMAD_CLOUD_MODEL)   { ($env:HM_NOMAD_CLOUD_MODEL).Trim() }   else { 'claude-opus-4-6' }
+$cloudModel = if ($env:HM_NOMAD_CLOUD_MODEL)   { ($env:HM_NOMAD_CLOUD_MODEL).Trim() }   else { 'nomadnet-auto' }
 if (-not $cloudKey) {
     Write-Host "Ключ Nomad Cloud не задан — облачный блок НЕ пишу (graceful). Подключишь позже: nmd model → custom endpoint $cloudUrl или свой ключ любой нейросети."
 } else {

@@ -64,6 +64,7 @@ TARGETS = {
     'win-lite': {
         'local': 'release/Hamidun-Setup-Windows-Lite.exe',
         'key': 'vibecoding/downloads/Hamidun-Setup-Windows.exe',
+        'extra_keys': ['vibecoding/downloads/Hamidun-Setup-Windows-Lite.exe'],
         'type': 'application/vnd.microsoft.portable-executable',
         'min_mib': 20, 'max_mib': 250,
         'mirrors': ['REGRU_S3', 'YCLOUD_S3'],
@@ -192,6 +193,8 @@ def main():
 
     for name, t, p, size in plan:
         print('  %-12s %-40s %8.1f МиБ  ->  %s' % (name, t['local'], size / MIB, t['key']))
+        for ek in t.get('extra_keys', []):
+            print('  %-12s %-40s %8.1f МиБ  ->  %s' % ('', '', size / MIB, ek))
         print('               %s; зеркала: %s' % (t['note'], ', '.join(t['mirrors'])))
     for pr in problems:
         print('  ПРОПУСК ' + pr)
@@ -229,46 +232,48 @@ def main():
     print('')
     failures = []
     for name, t, p, size in plan:
+        keys = [t['key']] + list(t.get('extra_keys', []))
         for prefix in t['mirrors']:
             s3, bucket, endpoint = client_for(env, prefix)
             if not s3:
                 print('  %s/%s: кредов нет — зеркало пропущено' % (name, prefix))
                 continue
-            # Свои осиротевшие multipart — снимаем; чужие заливки в тот же бакет не трогаем.
-            try:
-                for u in s3.list_multipart_uploads(Bucket=bucket).get('Uploads', []):
-                    if u['Key'] == t['key']:
-                        s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
-                        print('  снят осиротевший multipart: ' + u['Key'])
-            except Exception as e:
-                print('  (список multipart недоступен: %s)' % str(e)[:60])
+            for key in keys:
+                # Свои осиротевшие multipart — снимаем; чужие заливки в тот же бакет не трогаем.
+                try:
+                    for u in s3.list_multipart_uploads(Bucket=bucket).get('Uploads', []):
+                        if u['Key'] == key:
+                            s3.abort_multipart_upload(Bucket=bucket, Key=u['Key'], UploadId=u['UploadId'])
+                            print('  снят осиротевший multipart: ' + u['Key'])
+                except Exception as e:
+                    print('  (список multipart недоступен: %s)' % str(e)[:60])
 
-            print('  заливаю %s -> %s/%s …' % (name, prefix, t['key']))
-            s3.upload_file(p, bucket, t['key'],
-                           ExtraArgs={'ACL': 'public-read', 'ContentType': t['type']}, Config=cfg)
-            url = '%s/%s/%s' % (endpoint, bucket, t['key'])
-            got = head_size(url)
-            ok = got == size
-            print('     %s  %s' % (url, 'OK' if ok else 'РАЗМЕР НЕ СОВПАЛ (%s против %s)' % (got, size)))
-            if not ok:
-                failures.append(url)
-            # Размер не ловит испорченный заголовок. 21.09.2026 put_object положил
-            # /config с «Content-Encoding: aws-chunked» при совпавшем размере — и
-            # проверка «OK» там тоже стояла. У файлов крупнее порога multipart
-            # заголовок пока выходил чистым (dmg 3 ГБ из CI), но это наблюдение,
-            # а не гарантия: проверяем сам заголовок и чиним серверной копией.
-            enc = s3.head_object(Bucket=bucket, Key=t['key']).get('ContentEncoding', '')
-            if 'aws-chunked' in enc:
-                print('     заголовок «%s» — чиню серверной копией…' % enc)
-                s3.copy_object(Bucket=bucket, Key=t['key'],
-                               CopySource={'Bucket': bucket, 'Key': t['key']},
-                               MetadataDirective='REPLACE', ACL='public-read',
-                               ContentType=t['type'])
-                enc = s3.head_object(Bucket=bucket, Key=t['key']).get('ContentEncoding', '')
-            if 'aws-chunked' in enc:
-                failures.append(url + ' (Content-Encoding: %s)' % enc)
-            else:
-                print('     заголовок сжатия: %s' % (enc or 'нет — чисто'))
+                print('  заливаю %s -> %s/%s …' % (name, prefix, key))
+                s3.upload_file(p, bucket, key,
+                               ExtraArgs={'ACL': 'public-read', 'ContentType': t['type']}, Config=cfg)
+                url = '%s/%s/%s' % (endpoint, bucket, key)
+                got = head_size(url)
+                ok = got == size
+                print('     %s  %s' % (url, 'OK' if ok else 'РАЗМЕР НЕ СОВПАЛ (%s против %s)' % (got, size)))
+                if not ok:
+                    failures.append(url)
+                # Размер не ловит испорченный заголовок. 21.09.2026 put_object положил
+                # /config с «Content-Encoding: aws-chunked» при совпавшем размере — и
+                # проверка «OK» там тоже стояла. У файлов крупнее порога multipart
+                # заголовок пока выходил чистым (dmg 3 ГБ из CI), но это наблюдение,
+                # а не гарантия: проверяем сам заголовок и чиним серверной копией.
+                enc = s3.head_object(Bucket=bucket, Key=key).get('ContentEncoding', '')
+                if 'aws-chunked' in enc:
+                    print('     заголовок «%s» — чиню серверной копией…' % enc)
+                    s3.copy_object(Bucket=bucket, Key=key,
+                                   CopySource={'Bucket': bucket, 'Key': key},
+                                   MetadataDirective='REPLACE', ACL='public-read',
+                                   ContentType=t['type'])
+                    enc = s3.head_object(Bucket=bucket, Key=key).get('ContentEncoding', '')
+                if 'aws-chunked' in enc:
+                    failures.append(url + ' (Content-Encoding: %s)' % enc)
+                else:
+                    print('     заголовок сжатия: %s' % (enc or 'нет — чисто'))
 
     if failures:
         raise SystemExit('проверка после заливки не сошлась: ' + ', '.join(failures))

@@ -79,12 +79,20 @@ function isInside(child, parent, platform) {
 }
 
 // Защищённые корни: их самих, всё внутри них и их предков удалять НЕЛЬЗЯ.
-function protectedRoots(home) {
-  return [
-    path.join(home, '.claude'),
-    path.join(home, 'CLAUDE.md'),
-    path.join(home, '.hamidun-setup')
-  ];
+// При полном удалении (A27 «Удалить всё») вызывающий может явно разрешить
+// очистку ~/.hamidun-setup (allowSetupCleanup) и, после резервного копирования
+// секретов, очистку ~/.claude и ~/CLAUDE.md (allowClaudeCleanup).
+function protectedRoots(home, opts) {
+  const o = opts || {};
+  const roots = [];
+  if (!o.allowClaudeCleanup) {
+    roots.push(path.join(home, '.claude'));
+    roots.push(path.join(home, 'CLAUDE.md'));
+  }
+  if (!o.allowSetupCleanup) {
+    roots.push(path.join(home, '.hamidun-setup'));
+  }
+  return roots;
 }
 
 function no(reason) { return { ok: false, reason }; }
@@ -146,7 +154,7 @@ function checkTarget(input, opts) {
     }
 
     // Protected-набор (лексически). Дом и его предки — отдельно.
-    const prot = protectedRoots(home).concat(opts.extraProtected || []);
+    const prot = protectedRoots(home, opts).concat(opts.extraProtected || []);
     if (pathEq(norm, home, platform)) return no('это домашний каталог');
     if (isInside(home, norm, platform)) return no('предок домашнего каталога');
     for (const p of prot) {
@@ -892,6 +900,65 @@ function verifyPostconditions(plan, opts, helpers) {
   return { ok: problems.length === 0, problems };
 }
 
+// A27: Резервное копирование секретов и базы чатов перед удалением ~/.claude.
+// Не следует по симлинкам/junction; при любой ошибке чтения/записи возвращает ok:false,
+// чтобы вызывающий остановил удаление ~/.claude (fail-closed).
+function copyTreeNoFollow(srcDir, dstDir) {
+  fs.mkdirSync(dstDir, { recursive: true });
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const e of entries) {
+    const sp = path.join(srcDir, e.name);
+    const dp = path.join(dstDir, e.name);
+    const st = fs.lstatSync(sp);
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
+      copyTreeNoFollow(sp, dp);
+    } else if (st.isFile()) {
+      fs.copyFileSync(sp, dp);
+    }
+  }
+}
+
+function backupClaudeSecrets(home, backupTargets, backupDir) {
+  try {
+    if (!home || !backupDir) return { ok: false, error: 'не задан каталог резервной копии' };
+    const homeNorm = path.resolve(home);
+    const dstNorm = path.resolve(backupDir);
+    if (!symlinkFreeChain(dstNorm, homeNorm)) {
+      return { ok: false, error: 'цепочка пути резервной копии содержит ссылку: ' + dstNorm };
+    }
+    const copied = [];
+    for (const srcRaw of (backupTargets || [])) {
+      if (!srcRaw) continue;
+      const srcNorm = path.resolve(srcRaw);
+      let st = null;
+      try { st = fs.lstatSync(srcNorm); }
+      catch (e) {
+        if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue;
+        return { ok: false, error: 'lstat(' + srcNorm + '): ' + ((e && e.code) || e) };
+      }
+      if (!st || st.isSymbolicLink()) continue;
+      if (!symlinkFreeChain(srcNorm, homeNorm)) {
+        return { ok: false, error: 'источник резервной копии за ссылкой: ' + srcNorm };
+      }
+      fs.mkdirSync(dstNorm, { recursive: true });
+      const isRootClaudeMd = path.dirname(srcNorm) === homeNorm && path.basename(srcNorm).toLowerCase() === 'claude.md';
+      const relName = isRootClaudeMd ? 'home-CLAUDE.md' : path.basename(srcNorm);
+      const targetPath = path.join(dstNorm, relName);
+      if (st.isDirectory()) {
+        copyTreeNoFollow(srcNorm, targetPath);
+        copied.push(targetPath);
+      } else if (st.isFile()) {
+        fs.copyFileSync(srcNorm, targetPath);
+        copied.push(targetPath);
+      }
+    }
+    return { ok: true, backupDir: dstNorm, copied };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
 module.exports = {
   protectedRoots, checkTarget, valueHygieneOk, pathEq, isInside,
   removeFile, removeEmptyDir, removeDirTree, removeProfileLine,
@@ -900,6 +967,8 @@ module.exports = {
   classifyLaunchctlPrint, launchctlRemoveError, removeMascotHooks, removeFileBestEffort,
   isMascotHookUrl, stripMascotHooks, countMascotHooks, runValueIsOurs,
   verifyPostconditions,
+  backupClaudeSecrets,
   renameWithRetry // экспортируется РАДИ ТЕСТА: без него ретрай возврата из карантина
                   // проверяется только «повезло/не повезло» на живой ФС, то есть никак
 };
+

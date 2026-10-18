@@ -108,7 +108,7 @@ def gated_files_map(zip_path: Path, platform):
     #
     # Исключается ИМЕННО skills/, а не весь nomad-src: pyproject.toml лежит в корне
     # дерева и проверяется гейтом по-настоящему (nomad.ps1 перед uv tool install).
-    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/", "nomad-src/skills/")
+    CONTENT_TREES = ("config-pack/", "npm-cache/", "pywheels/", "nomad-src/skills/", "nomad-profile/")
     gated = {}
     with zipfile.ZipFile(zip_path) as z:
         for info in z.infolist():

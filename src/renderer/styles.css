@@ -787,3 +787,46 @@ h1 {
 .ns-repair-list li { margin: 3px 0; overflow-wrap: anywhere; }
 .ns-repair-more { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
 .progress-bot-status { font-weight: 400; color: var(--text-muted); }
+
+/* B11: Пресеты выбора комплектации («Полный комплект» / «Минимум») */
+.preset-bar {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+.preset-btn {
+  flex: 1 1 220px; padding: 8px 12px;
+  border-radius: var(--h-r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2); color: var(--text-muted);
+  font-family: var(--h-font-body); font-size: 12.5px; font-weight: 600;
+  cursor: pointer; text-align: left; transition: border-color .15s, background .15s, color .15s;
+}
+.preset-btn:hover { color: var(--text); border-color: rgba(92,179,255,.45); }
+.preset-btn.active {
+  background: rgba(41,169,255,.14);
+  border-color: var(--h-primary); color: var(--text);
+}
+
+/* A27: «Удалить всё» и диалог подтверждения */
+.btn-danger-outline {
+  border-color: rgba(255,107,107,.45); color: #ff8585;
+}
+.btn-danger-outline:hover {
+  background: rgba(255,107,107,.12); border-color: #ff8585;
+}
+.btn-danger {
+  background: #d94848; color: #fff; border: 1px solid #e25c5c;
+  padding: 10px 18px; border-radius: var(--h-r-md); font-weight: 600; cursor: pointer;
+}
+.btn-danger:hover { background: #e25c5c; }
+.btn-danger:disabled { opacity: .55; cursor: not-allowed; }
+.uninstall-all-opt {
+  display: flex; align-items: flex-start; gap: 9px;
+  margin-top: 12px; padding: 10px 12px;
+  background: rgba(245,213,71,.08); border: 1px solid rgba(245,213,71,.35);
+  border-radius: var(--h-r-md); cursor: pointer; font-size: 13px; color: var(--text);
+}
+.uninstall-all-opt input { margin-top: 3px; flex: 0 0 auto; accent-color: var(--h-primary); }
+.uninstall-all-status { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+.modal-actions-split { gap: 10px; }
+

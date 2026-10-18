@@ -42,6 +42,13 @@ let STATE = {
 // и удаление не выполняем. Полноценный Nomad-uninstall вернём позже отдельной фазой.
 const REMOVABLE = new Set(['course', 'uv', 'mascot', 'bridge']);
 
+// A18: Обязательные базовые шаги — при их провале конвейер установки немедленно останавливается,
+// а оставшиеся шаги помечаются как пропущенные из-за базовой зависимости.
+const MANDATORY_BASE_IDS = new Set(['git', 'node', 'claude']);
+
+// B11: Набор компонентов пресета «Минимум (только Claude Code + конфиг)».
+const MINIMAL_PRESET_IDS = new Set(['git', 'node', 'claude', 'config']);
+
 const $ = (sel) => document.querySelector(sel);
 
 function escapeHtml(s) {
@@ -124,6 +131,22 @@ async function init() {
   $('#btn-install').addEventListener('click', startInstall);
   const repairBtn = $('#btn-repair');
   if (repairBtn) repairBtn.addEventListener('click', () => startInstall({ repair: true }));
+  const presetFullBtn = $('#preset-full');
+  if (presetFullBtn) presetFullBtn.addEventListener('click', () => applyPreset('full'));
+  const presetMinBtn = $('#preset-minimal');
+  if (presetMinBtn) presetMinBtn.addEventListener('click', () => applyPreset('minimal'));
+  const uninstallAllBtn = $('#btn-uninstall-all');
+  if (uninstallAllBtn) uninstallAllBtn.addEventListener('click', openUninstallAllModal);
+  const uninstallAllCancel = $('#uninstall-all-cancel');
+  if (uninstallAllCancel) uninstallAllCancel.addEventListener('click', closeUninstallAllModal);
+  const uninstallAllConfirm = $('#uninstall-all-confirm');
+  if (uninstallAllConfirm) uninstallAllConfirm.addEventListener('click', runUninstallAll);
+  const uninstallAllModal = $('#uninstall-all-modal');
+  if (uninstallAllModal) {
+    uninstallAllModal.addEventListener('click', (e) => {
+      if (e.target === uninstallAllModal) closeUninstallAllModal();
+    });
+  }
   $('#btn-welcome-go').addEventListener('click', goToSelect);
   const wcWhatBtn = $('#btn-wc-what');
   if (wcWhatBtn) wcWhatBtn.addEventListener('click', showWhatInstalls);
@@ -349,7 +372,55 @@ function toggle(id) {
   if (STATE.selected[id]) disableDependents(id);
   else enableWithDeps(id);
   renderGroups();
+  syncPresetBar();
   refreshDerived();
+}
+
+// B11: Пресеты выбора комплектации («Полный комплект» / «Минимум»).
+// «Минимум» оставляет только базовую цепочку Claude Code + конфиг (git, node, claude, config),
+// учитывая уже установленные компоненты (если компонент уже стоит и не помечен на repair, не включаем).
+function applyPreset(mode) {
+  const isMin = mode === 'minimal';
+  STATE.groups.forEach((g) => {
+    (g.components || []).forEach((c) => {
+      if (c.hidden) {
+        STATE.selected[c.id] = !!c.default;
+        return;
+      }
+      const det = STATE.detected && STATE.detected[c.id];
+      const installed = !!(det && det.installed && !STATE.repair[c.id]);
+      if (isMin) {
+        STATE.selected[c.id] = MINIMAL_PRESET_IDS.has(c.id) && !installed;
+      } else {
+        STATE.selected[c.id] = !!c.default && !installed;
+      }
+    });
+  });
+  renderGroups();
+  syncPresetBar();
+  refreshDerived();
+}
+
+function syncPresetBar() {
+  const fullBtn = $('#preset-full');
+  const minBtn = $('#preset-minimal');
+  if (!fullBtn || !minBtn) return;
+  let matchesMin = true;
+  let matchesFull = true;
+  STATE.groups.forEach((g) => {
+    (g.components || []).forEach((c) => {
+      if (!c || c.hidden) return;
+      const det = STATE.detected && STATE.detected[c.id];
+      const installed = !!(det && det.installed && !STATE.repair[c.id]);
+      const sel = !!STATE.selected[c.id];
+      const wantMin = MINIMAL_PRESET_IDS.has(c.id) && !installed;
+      const wantFull = !!c.default && !installed;
+      if (sel !== wantMin) matchesMin = false;
+      if (sel !== wantFull) matchesFull = false;
+    });
+  });
+  minBtn.classList.toggle('active', matchesMin && !matchesFull);
+  fullBtn.classList.toggle('active', matchesFull);
 }
 
 // ---- опции компонента (галочки внутри карточки) ----------------------
@@ -393,6 +464,7 @@ function renderGroups() {
     visible.forEach((c) => gd.appendChild(renderCard(c)));
     root.appendChild(gd);
   });
+  syncPresetBar();
 }
 
 // Компонент, которому для РАБОТЫ нужен адрес сервиса из config.json. Объявляется в
@@ -589,6 +661,66 @@ async function uninstallComponent(id, row) {
   STATE.repair[id] = false;
   STATE.selected[id] = false;
   await detectAndApply(); // пере-детекция: карточка обновит бейджи
+}
+
+// A27: «Удалить всё» — есть ли на машине установленные компоненты стека или квитанции.
+function anyUninstallablePresent() {
+  if (!STATE.detectDone) return false;
+  return Object.keys(STATE.detected || {}).some((id) => {
+    const d = STATE.detected[id];
+    return !!(d && (d.installed || d.receipted));
+  });
+}
+
+function openUninstallAllModal() {
+  const modal = $('#uninstall-all-modal');
+  if (!modal) return;
+  const cb = $('#uninstall-all-include-claude');
+  if (cb) cb.checked = false;
+  const st = $('#uninstall-all-status');
+  if (st) st.textContent = '';
+  const confirmBtn = $('#uninstall-all-confirm');
+  if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Удалить выбранное'; }
+  modal.classList.remove('hidden');
+}
+
+function closeUninstallAllModal() {
+  const modal = $('#uninstall-all-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function runUninstallAll() {
+  const cb = $('#uninstall-all-include-claude');
+  const includeClaude = !!(cb && cb.checked);
+  const st = $('#uninstall-all-status');
+  const confirmBtn = $('#uninstall-all-confirm');
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Удаляю…'; }
+  if (st) {
+    st.textContent = includeClaude
+      ? 'Создаю резервную копию секретов ~/.claude и удаляю компоненты…'
+      : 'Удаляю управляемые компоненты установщика…';
+  }
+  let res;
+  try {
+    res = await window.installer.uninstallAll({ includeClaude, env: envForRun() });
+  } catch (e) {
+    res = { ok: false, error: String(e) };
+  }
+  if (res && res.ok) {
+    if (st) {
+      st.textContent = '✓ Все выбранные компоненты удалены.' +
+        (res.backupDir ? ' Резервная копия секретов сохранена в: ' + res.backupDir : '');
+    }
+    Object.keys(STATE.repair || {}).forEach((k) => { STATE.repair[k] = false; });
+    await detectAndApply();
+    setTimeout(() => closeUninstallAllModal(), 1400);
+  } else {
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Удалить выбранное'; }
+    if (st) {
+      st.textContent = '⚠ Не удалось завершить удаление: ' + ((res && res.error) || 'ошибка');
+    }
+    await detectAndApply();
+  }
 }
 
 // Сколько скиллов пака сейчас выбрано (по умолчанию все включены).
@@ -1337,6 +1469,10 @@ function refreshDerived() {
     btnRepair.classList.toggle('hidden', !repairable);
     btnRepair.classList.toggle('primary', repairable);   // когда ставить нечего — это главное действие
   }
+  const btnUninstallAll = $('#btn-uninstall-all');
+  if (btnUninstallAll) {
+    btnUninstallAll.classList.toggle('hidden', !anyUninstallablePresent());
+  }
 
   // Наборы скиллов имеют смысл только если ставится Конфиг — иначе гасим секцию.
   const configOn = !!STATE.selected['config'];
@@ -1552,7 +1688,13 @@ function buildSteps(ids) {
 
 // Does any (transitive) requirement of id sit in the failed/skipped sets?
 // Returns the offending dependency id, or null.
+// A18: если упал обязательный базовый шаг (git, node, claude), для всех последующих
+// рабочих шагов (кроме финальной диагностики verify) он возвращает id упавшего базового шага,
+// останавливая конвейер установки и помечая оставшиеся шаги как пропущенные.
 function firstBrokenDep(id, badSet) {
+  if (id !== 'verify' && STATE.abortedByMandatoryId && STATE.abortedByMandatoryId !== id && badSet && badSet.has(STATE.abortedByMandatoryId)) {
+    return STATE.abortedByMandatoryId;
+  }
   const reqs = (STATE.byId[id] && STATE.byId[id].requires) || [];
   for (const r of reqs) {
     if (badSet.has(r)) return r;
@@ -1632,6 +1774,7 @@ function isAutoRetryFail(res) {
 
 async function runComponents(ids, env) {
   STATE.runActive = true; // inline-«Повторить» на шагах заблокированы до конца прогона
+  STATE.abortedByMandatoryId = '';
   const off = window.installer.onLog(({ line }) => {
     // Строки "CHECK ok <ярлык>" / "CHECK fail <ярлык>" от verify-скрипта не
     // сыпем в общий лог — собираем для чеклиста на финальном экране.
@@ -1891,6 +2034,12 @@ async function runComponents(ids, env) {
         appendLog(`[!] ${name}: не удалось${ph ? ' на этапе «' + ph + '»' : ''}`
           + '. Что именно не получилось — в строках выше. Попробуй «Повторить»; '
           + 'если снова не выйдет — нажми «Скопировать отчёт» и вставь текст в чат с ботом поддержки.');
+      }
+      // A18: при провале обязательного базового шага (git, node, claude) останавливаем
+      // выполнение остальных шагов конвейера — следующие итерации цикла уйдут в ветку broken.
+      if (MANDATORY_BASE_IDS.has(id)) {
+        STATE.abortedByMandatoryId = id;
+        appendLog(`[СТОП] Обязательный базовый шаг «${name}» завершился с ошибкой — остальные шаги остановлены.`);
       }
     }
     $('#progress-summary').textContent = `Готово: ${ok} · Ошибок: ${failed.length}`

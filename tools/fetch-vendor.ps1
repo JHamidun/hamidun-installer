@@ -1075,6 +1075,7 @@ function Test-NomadSrcCritical {
   param([string]$Rel)
   if ($Rel -eq 'pyproject.toml') { return $true }
   if ($Rel -in @('README.md', 'LICENSE', 'MANIFEST.in')) { return $true }
+  if ($Rel -match '^nomad_cli/tui_dist/.*') { return $true }
   if ($Rel -match '^(agent|tools|nomad_cli|gateway|tui_gateway|cron|acp_adapter|plugins|providers)/.*\.py$') { return $true }
   if ($Rel -match '/') { return $false }
   if ($Rel -match '\.(py|toml)$') { return $true }
@@ -1275,15 +1276,8 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
   if (-not $agentRepo) { $agentRepo = 'D:\Nomad\hamidun-agent' }
   # ПИН релизной версии агента: дефолт = стабильный тег, НЕ движущийся main (зеркало
   # fetch-vendor-mac.sh). Бамп = сменить тег здесь и в fetch-vendor-mac.sh, либо env HM_NOMAD_REF.
-  # 05.09.2026: пин поднят с тега v2026.7.22 (0.17.0, 22 июля) на КОММИТ 0.18.1.
-  #
-  # Почему коммит, а не тег: у нашей линии свежих релизных тегов НЕТ. Теги
-  # v2026.8.* в этом репозитории принадлежат АПСТРИМУ (NousResearch/hermes-agent,
-  # там своя нумерация — на v2026.8.31 версия 0.21.0) и нашему main не предки.
-  # Последний тег нашей линии — тот самый v2026.7.22, и с него набежало 422
-  # коммита без единой релизной отметки. Пин на движущийся main взять нельзя:
-  # сборка обязана быть воспроизводимой, а main правится ежедневно.
-  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { '5a73e548233d2f830e3f0d619509012394a02280' }
+  # 18.10.2026: пин поднят на коммит 0.21.7 (638847bf55).
+  $nomadRef  = if ($env:HM_NOMAD_REF)        { $env:HM_NOMAD_REF }        else { '638847bf5513abc1e0f649813585950ab1f03cec' }
   $srcOut    = Join-Path $root 'vendor\nomad-src'
   if (-not (Test-Path (Join-Path $agentRepo '.git'))) {
     Write-Host "  ! репозиторий Nomad не найден ($agentRepo) — задай HM_NOMAD_AGENT_REPO. nomad-src НЕ вшит (компонент Nomad → graceful skip)."
@@ -1314,6 +1308,15 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
         Write-Host "         у покупателя упала бы на недостающем файле. Освободи место / повтори fetch:vendor."
         exit 1
       }
+      # A11: TUI-бандл (nomad_cli/tui_dist/entry.js) в .gitignore и не попадает в git archive —
+      # докладываем его из локального репо до экспорт-фильтра и снятия SHA-256 дерева.
+      $tuiDistSrc = Join-Path $agentRepo 'nomad_cli\tui_dist'
+      if (Test-Path -LiteralPath (Join-Path $tuiDistSrc 'entry.js')) {
+        $tuiDistDst = Join-Path $srcOut 'nomad_cli\tui_dist'
+        New-Item -ItemType Directory -Force $tuiDistDst | Out-Null
+        Copy-Item -LiteralPath (Join-Path $tuiDistSrc 'entry.js') -Destination (Join-Path $tuiDistDst 'entry.js') -Force
+        Write-Host "  [nomad-src] доложен TUI-бандл nomad_cli\tui_dist\entry.js"
+      }
       # `uv tool install` не требует тестов, сайт-доков и опциональных скиллов —
       # снимаем их, чтобы вшитый .7z оставался под лимитом mmap 32-битного
       # makensis (~2GB, target=portable). Иначе крупный агент рушит NSIS-сборку.
@@ -1335,6 +1338,31 @@ if ($componentsRawN -and $componentsRawN -match '"nomad"') {
     } else {
       Write-Host "  ! git archive не создал tar — nomad-src НЕ вшит (компонент Nomad → graceful skip)."
     }
+  }
+  # Профиль Nomad (plugins/nomad, skills, mcp-servers, desktop UI) → vendor\nomad-profile
+  $profRepo = if ($env:HM_NOMAD_PROFILE_DIR) { $env:HM_NOMAD_PROFILE_DIR } else { 'D:\Nomad\nomad-overlay\package' }
+  $profOut  = Join-Path $root 'vendor\nomad-profile'
+  if (Test-Path (Join-Path $profRepo 'distribution.yaml')) {
+    Write-Host "[vendor] Профиль Nomad из $profRepo → vendor\nomad-profile..."
+    New-Item -ItemType Directory -Force $profOut | Out-Null
+    & robocopy "$profRepo" "$profOut" /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+    $global:LASTEXITCODE = 0
+    $scrubPy = 'D:\Nomad\nomad-installer\tools\scrub-vendor.py'
+    if ($py -and (Test-Path -LiteralPath $scrubPy)) {
+      & $py $scrubPy $profOut | Out-Host
+    }
+    $leakFileP = if ($env:HM_LEAK_PATTERNS_FILE) { $env:HM_LEAK_PATTERNS_FILE } else { Join-Path $PSScriptRoot 'leak-patterns.local.json' }
+    try {
+      $leakP = Get-HmLeakPatterns -LocalFile $leakFileP -EnvJson $env:HM_LEAK_PATTERNS -GenericRe $HM_LEAK_GENERIC_RE
+      $matchedP = @(Get-ChildItem -LiteralPath $profOut -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { Select-String -LiteralPath $_.FullName -Pattern $leakP.Patterns -Quiet -ErrorAction SilentlyContinue })
+      foreach ($fp in $matchedP) {
+        $txtP = [IO.File]::ReadAllText($fp.FullName)
+        foreach ($sp in $leakP.Scrubs) { $txtP = [regex]::Replace($txtP, $sp.Re, $sp.With.Replace('$', '$$'), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) }
+        [IO.File]::WriteAllText($fp.FullName, $txtP)
+      }
+    } catch { }
+    [IO.File]::WriteAllText((Join-Path $root 'vendor\nomad-profile.sha256'), (Get-HmTreeSha256 $profOut))
   }
 } else {
   Write-Host "  (компонент nomad не объявлен в components.json — пропускаю nomad-src)"

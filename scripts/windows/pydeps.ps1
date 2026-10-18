@@ -186,7 +186,19 @@ if ($pwb -and (Test-Path $pwb)) {
         Write-Host "  ВНИМАНИЕ: встроенные браузеры Playwright не скопированы: папка $dst не прошла проверку на ссылки ($($_.Exception.Message)). Установщик работает с правами администратора и сквозь ссылки не пишет."
     }
     if ($pwPin) {
-        try { Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue }
+        try {
+            $nestedLink = $null
+            if (Test-Path -LiteralPath $dst) {
+                foreach ($it in (Get-ChildItem -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue)) {
+                    if ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $nestedLink = $it.FullName; break }
+                }
+            }
+            if ($nestedLink) {
+                Write-Host "  ВНИМАНИЕ: встроенные браузеры Playwright не скопированы: внутри $dst обнаружена ссылка ($nestedLink). Установщик работает с правами администратора и сквозь ссылки не пишет."
+            } else {
+                Copy-Item -Recurse -Force (Join-Path $pwb '*') $dst -ErrorAction SilentlyContinue
+            }
+        }
         finally { $pwPin.Stream.Dispose() }
     }
     # Вшитый набор может не совпасть с колесом playwright: ревизия Chromium прибита

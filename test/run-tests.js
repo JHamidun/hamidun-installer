@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 /* Pre-flight tests — pure logic + data integrity. Run: node test/run-tests.js */
 const assert = require('assert');
 const fs = require('fs');
@@ -14953,6 +14953,7 @@ ok('config.json в репозитории без сборочных маркер
     ['greptile', 'hookify', 'github', 'semgrep', 'slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom',
       'adspirer-ads-agent'].forEach((n) => { w.enabledPlugins[n + '@claude-plugins-official'] = false; });
     delete w.mcpServers;
+    w.disableAutoMode = 'disable';
     return w;
   };
   const runMig = (file, fresh, marker, lib) => runPsText('. ' + q(lib || MIG_LIB) + '\r\nInvoke-HmSettingsMigration -Path ' + q(file) +
@@ -15027,7 +15028,7 @@ ok('config.json в репозитории без сборочных маркер
           ['{"mcpServers": {"a": {}}, "permissions": {"allow": ["Write(~/x/**)"]}', /не разбирается/],
           ['not json at all', /не разбирается/],
           ['[{"mcpServers": {}}]', /не разбирается/],
-          ['{"model":"opus","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n', /правок в settings\.json нет/],
+          ['{"model":"opus","disableAutoMode":"disable","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n', /правок в settings\.json нет/],
         ];
         cases.forEach(([text, says], i) => {
           fs.writeFileSync(file, text);
@@ -15059,7 +15060,7 @@ ok('config.json в репозитории без сборочных маркер
         const b = fs.readFileSync(file);
         assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'BOM на месте');
         const t = b.toString('utf8').slice(1);
-        const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+        const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, disableAutoMode: 'disable' };
         assert.strictEqual(t, JSON.stringify(want, null, 2).replace(/\n/g, '\r\n') + '\r\n', 'CRLF и финальный перевод строки сохранены');
       } finally { dropDir(base); }
     });
@@ -15369,7 +15370,7 @@ ok('config.json в репозитории без сборочных маркер
       try {
         seedHome(home);
         // Компактный, «ручной» формат, CRLF, ключ опроса уже стоит, нечего чинить.
-        const clean = '{"model":"opus","env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"1"},"permissions":{"allow":["Edit(*)","Write"]},' +
+        const clean = '{"model":"opus","disableAutoMode":"disable","env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"1"},"permissions":{"allow":["Edit(*)","Write"]},' +
           '"enabledPlugins":{"github@claude-plugins-official":false}}\r\n';
         fs.writeFileSync(home + '/.claude/settings.json', clean);
         const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
@@ -20446,6 +20447,7 @@ ok('config.json в репозитории без сборочных маркер
     ['greptile', 'hookify', 'github', 'semgrep', 'slack', 'sentry', 'figma', 'huggingface-skills', 'legalzoom', 'adspirer-ads-agent']
       .forEach((n) => { w.enabledPlugins[n + '@claude-plugins-official'] = false; });
     delete w.mcpServers;
+    w.disableAutoMode = 'disable';
     return w;
   };
   function migHome(pfx) {
@@ -20558,7 +20560,7 @@ ok('config.json в репозитории без сборочных маркер
         [Buffer.from('not json at all'), /не разбирается/],
         [Buffer.from('[{"mcpServers": {}}]'), /не разбирается/],
         [Buffer.from([0x7B, 0x22, 0xFF, 0x22, 0x3A, 0x31, 0x7D]), /прочитать не удалось/],
-        [Buffer.from('{"model":"opus","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n'), /правок в settings\.json нет/],
+        [Buffer.from('{"model":"opus","disableAutoMode":"disable","permissions":{"allow":["Edit(*)","Write(*)","Write"]},"enabledPlugins":{"github@claude-plugins-official":false},"env":{"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY":"0"}}\r\n'), /правок в settings\.json нет/],
       ];
       cases.forEach(([buf, says], i) => {
         fs.writeFileSync(h.file, buf);
@@ -20602,7 +20604,7 @@ ok('config.json в репозитории без сборочных маркер
       runMig(mig, h.file, false, h.marker);
       const b = fs.readFileSync(h.file);
       assert(b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF, 'BOM на месте');
-      const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+      const want = { a: 1, env: { X: 'y', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, disableAutoMode: 'disable' };
       assert.strictEqual(b.toString('utf8').slice(1), JSON.stringify(want, null, 2).replace(/\n/g, '\r\n') + '\r\n', 'CRLF и финальный перевод строки сохранены');
       if (process.platform !== 'win32') {
         const bak = path.join(h.cdir, baks(h.cdir)[0]);
@@ -20632,7 +20634,7 @@ ok('config.json в репозитории без сборочных маркер
         'MultiEdit(/tmp/x) не действует', 'замени сам на Edit(/tmp/x)'].forEach((w) => assert(r.out.indexOf(w) !== -1, 'подсказка называет: ' + w + '\n' + r.out));
       assert(r.out.indexOf('Write(~/dup/**) убрал (Edit(~/dup/**) уже есть)') !== -1, 'дубль назван в журнале правок');
       // Файл, где есть ТОЛЬКО такие allow-правила, не переписывается вовсе: подсказка — не правка.
-      const onlyAllow = JSON.stringify({ env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, permissions: { allow: ['Write(~/mine/**)'] } }, null, 2);
+      const onlyAllow = JSON.stringify({ disableAutoMode: 'disable', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' }, permissions: { allow: ['Write(~/mine/**)'] } }, null, 2);
       fs.writeFileSync(h.file, onlyAllow);
       const before = baks(h.cdir).length;
       const r2 = runMig(mig, h.file, false, path.join(h.base, 'm2.json'));
@@ -38640,3 +38642,107 @@ function Get-HmTouchupFilesOld {
     assert((body.match(/rmSync\(/g) || []).length === 1, 'рекурсивный rmSync в уборке один (счётчик теста инвентаря сносов)');
   });
 })();
+
+// ===========================================================================
+// u15. Релизная волна 2026-10: B09 (disableAutoMode), A27 (Удалить всё), A18 (барьер базовых шагов),
+// B11 (пресет Минимум), u10b (санитизация лога и защита от reparse в вложенных путях),
+// Nomad v0.21.7 + A11 (tui_dist/entry.js) + nomad-profile + nomadnet-auto + зеркало S3.
+// ===========================================================================
+(function u15ReleaseWave202610() {
+  console.log('\n== Релизная волна 2026-10: B09, A27, A18, B11, u10b, Nomad v0.21.7 (u15) ==');
+  const ut = require(path.join(ROOT, 'src', 'uninstall-targets.js'));
+  const ux = require(path.join(ROOT, 'src', 'uninstall-exec.js'));
+  const nk = require(path.join(ROOT, 'src', 'nomad-key.js'));
+  const migMac = require(path.join(ROOT, 'scripts', 'macos', '_cfgmigrate.js'));
+
+  ok('u15/B09: disableAutoMode="disable" в миграции settings.json (macOS + Windows) и в конфиг-паке', () => {
+    const obj = { model: 'opus', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+    const r1 = migMac.applyFixes(obj, { defaults: true, mcpTimeout: false });
+    assert.strictEqual(obj.disableAutoMode, 'disable', 'выставлен disableAutoMode="disable"');
+    assert(r1.some((x) => /disableAutoMode/.test(x)), 'записано в журнал миграции');
+    const obj2 = { model: 'opus', disableAutoMode: 'auto', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } };
+    const r2 = migMac.applyFixes(obj2, { defaults: false, mcpTimeout: false });
+    assert.strictEqual(r2.length, 0, 'после отметки defaults выбор человека не откатывается');
+    const psMig = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_cfgmigrate.ps1'), 'utf8');
+    assert(/Add-Member -NotePropertyName 'disableAutoMode' -NotePropertyValue 'disable'/.test(psMig), 'Windows _cfgmigrate.ps1 выставляет disableAutoMode="disable"');
+  });
+
+  ok('u15/u10b: sanitizeForInstallLog очищает ANSI CSI/OSC и управляющие символы перед записью в install.log', () => {
+    const mj = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const i = mj.indexOf('function sanitizeForInstallLog(');
+    assert(i > 0, 'sanitizeForInstallLog определена в src/main.js');
+    const end = mj.indexOf('\nfunction logToFile(', i);
+    const fnSrc = mj.slice(i, end);
+    const fn = new Function(fnSrc + '\nreturn sanitizeForInstallLog;')();
+    const dirty = '\x1b[31mОШИБКА\x1b[0m \x1b]0;Заголовок\x07 текст\x00\x08\x1f\x7f\nновая строка\r\n\tтаб';
+    const clean = fn(dirty);
+    assert.strictEqual(clean, 'ОШИБКА  текст\nновая строка\r\n\tтаб', 'ANSI и управляющие символы вырезаны, переносы и табуляция целы');
+    assert(/sanitizeForInstallLog\(line\)/.test(mj), 'logToFile пропускает строку через sanitizeForInstallLog');
+    const ls = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', '_linksafe.ps1'), 'utf8');
+    assert(/Test-HmPathIsLink -Path \$leaf -Attr \$lattr/.test(ls), 'Expand-HmZipSafe проверяет листовую цель на ссылку в проходе 1');
+    const pd = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'pydeps.ps1'), 'utf8');
+    assert(/Get-ChildItem -LiteralPath \$dst -Recurse -Force[\s\S]{0,160}ReparsePoint/.test(pd), 'pydeps.ps1 проверяет вложенные ReparsePoint внутри ms-playwright');
+  });
+
+  ok('u15/A27: uninstallAllPlan и backupClaudeSecrets — полный план сноса стека с защитой/бэкапом секретов', () => {
+    const pSafe = ut.uninstallAllPlan({ platform: 'win32', home: 'C:\\Users\\test', includeClaude: false });
+    assert.strictEqual(pSafe.includeClaude, false, 'без галочки ~/.claude защищён');
+    assert(!pSafe.extraPaths.some((p) => /\.claude$/i.test(p)), 'без галочки ~/.claude нет в списке удаления');
+    assert(pSafe.extraPaths.some((p) => /hamidun-setup$/i.test(p)), 'в плане есть каталог .hamidun-setup');
+    const pFull = ut.uninstallAllPlan({ platform: 'win32', home: 'C:\\Users\\test', includeClaude: true });
+    assert.strictEqual(pFull.includeClaude, true, 'с галочкой разрешён снос ~/.claude');
+    assert(pFull.backupTargets.some((b) => /\.credentials\.master\.env$/i.test(b)), 'в списке бэкапа есть .credentials.master.env');
+    assert(pFull.extraPaths.some((p) => /\.claude$/i.test(p)), 'в плане есть сам каталог ~/.claude');
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-u15-bak-'));
+    try {
+      const home = path.join(tmp, 'home');
+      const cdir = path.join(home, '.claude');
+      fs.mkdirSync(path.join(cdir, 'memory', 'p1'), { recursive: true });
+      fs.writeFileSync(path.join(cdir, '.credentials.master.env'), 'KEY=1\n');
+      fs.writeFileSync(path.join(cdir, 'memory', 'p1', 'note.md'), 'hello');
+      const bakDir = path.join(home, 'claude-secrets-backup-test');
+      const plan = ut.uninstallAllPlan({ platform: process.platform, home, includeClaude: true });
+      const res = ux.backupClaudeSecrets(home, plan.backupTargets, bakDir);
+      assert.strictEqual(res.ok, true, 'backupClaudeSecrets завершился успешно');
+      assert.strictEqual(fs.readFileSync(path.join(bakDir, '.credentials.master.env'), 'utf8'), 'KEY=1\n', 'файл секретов скопирован');
+      assert.strictEqual(fs.readFileSync(path.join(bakDir, 'memory', 'p1', 'note.md'), 'utf8'), 'hello', 'каталог memory скопирован');
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+    }
+  });
+
+  ok('u15/A18 + B11 + A27 UI: барьер базовых шагов, пресет Минимум и модалка «Удалить всё» в renderer', () => {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+    assert(/MANDATORY_BASE_IDS = new Set\(\['git', 'node', 'claude'\]\)/.test(app), 'A18: MANDATORY_BASE_IDS объявлен');
+    assert(/STATE\.abortedByMandatoryId = id/.test(app), 'A18: провал базового шага взводит abortedByMandatoryId');
+    assert(/Обязательный базовый шаг/.test(app), 'A18: сообщение об остановке цепочки');
+    assert(/MINIMAL_PRESET_IDS = new Set\(\['git', 'node', 'claude', 'config'\]\)/.test(app), 'B11: MINIMAL_PRESET_IDS объявлен');
+    assert(/function applyPreset\(mode\)/.test(app) && /id="preset-minimal"/.test(html), 'B11: переключатель пресета в UI и логике');
+    assert(/id="btn-uninstall-all"/.test(html) && /id="uninstall-all-modal"/.test(html), 'A27: кнопка и модалка «Удалить всё» в HTML');
+    assert(/function runUninstallAll\(\)/.test(app), 'A27: обработчик runUninstallAll в app.js');
+  });
+
+  ok('u15/Nomad v0.21.7 + A11 + nomad-profile + publish-dist: пин 638847bf55, nomadnet-auto, tui_dist, nomad-profile, S3 extra_keys', () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    assert.strictEqual(cfg.nomad.cloud.defaultModel, 'nomadnet-auto', 'config.json: defaultModel = nomadnet-auto');
+    const nkSrc = fs.readFileSync(path.join(ROOT, 'src', 'nomad-key.js'), 'utf8');
+    assert(/cloud\.defaultModel \|\| 'nomadnet-auto'/.test(nkSrc), 'nomad-key.js: fallback = nomadnet-auto');
+    const fvPs = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor.ps1'), 'utf8');
+    const fvSh = fs.readFileSync(path.join(ROOT, 'tools', 'fetch-vendor-mac.sh'), 'utf8');
+    assert(/638847bf5513abc1e0f649813585950ab1f03cec/.test(fvPs) && /638847bf5513abc1e0f649813585950ab1f03cec/.test(fvSh), 'пин коммита 0.21.7 в обоих фетчерах');
+    assert(/nomad_cli\/tui_dist\/\.\*/.test(fvPs) && /nomad_cli\/tui_dist\/\*/.test(fvSh), 'A11: tui_dist помечен install-critical');
+    assert(/nomad-profile/.test(fvPs) && /nomad-profile/.test(fvSh), 'nomad-profile собирается в обоих фетчерах');
+    const nPs = fs.readFileSync(path.join(ROOT, 'scripts', 'windows', 'nomad.ps1'), 'utf8');
+    const nSh = fs.readFileSync(path.join(ROOT, 'scripts', 'macos', 'nomad.sh'), 'utf8');
+    assert(/HM_NOMAD_PROFILE/.test(nPs) && /HM_NOMAD_PROFILE/.test(nSh), 'nomad.ps1 и nomad.sh раскладывают профиль Nomad');
+    const pubV = fs.readFileSync(path.join(ROOT, 'tools', 'publish-vendor.py'), 'utf8');
+    assert(/\("nomad-profile", "nomad-profile", False\)/.test(pubV), 'publish-vendor.py включает nomad-profile');
+    const pushC = fs.readFileSync(path.join(ROOT, 'tools', 'push-component.py'), 'utf8');
+    assert(/"nomad-profile\/"/.test(pushC), 'push-component.py включает nomad-profile/ в CONTENT_TREES');
+    const pubD = fs.readFileSync(path.join(ROOT, 'tools', 'publish-dist.py'), 'utf8');
+    assert(/vibecoding\/downloads\/Hamidun-Setup-Windows-Lite\.exe/.test(pubD), 'publish-dist.py дублирует Windows Lite в vibecoding/downloads/');
+  });
+})();
+
