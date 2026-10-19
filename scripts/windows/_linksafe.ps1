@@ -1,4 +1,4 @@
-﻿# _linksafe.ps1 — снос и раскладка в ПОЛЬЗОВАТЕЛЬСКИЕ папки из-под администратора так, чтобы не пойти за ссылкой
+# _linksafe.ps1 — снос и раскладка в ПОЛЬЗОВАТЕЛЬСКИЕ папки из-под администратора так, чтобы не пойти за ссылкой
 # (junction/symlink) и не проиграть гонку «проверили — сделали».
 # Дот-сорсится компонентными скриптами (course.ps1, config.ps1, nomad.ps1, bridge.ps1, extension.ps1, uv.ps1).
 # Библиотека: кода верхнего уровня и своего exit нет. Лежит рядом с _userpath.ps1 и подключает его сама: помощники
@@ -495,7 +495,11 @@ function Expand-HmZipSafe {
                 $st.CopyTo($ms)
                 $bytes = $ms.ToArray()
             } finally { $st.Dispose() }
-            if (Test-HmIsReparse $cur) { throw (New-Object System.InvalidOperationException("в пути есть ссылка (junction/symlink): $cur")) }
+            if (Test-HmPathIsLink -Path $cur) {
+                $ex = New-Object System.InvalidOperationException("в пути есть ссылка (junction/symlink): $cur")
+                $ex.Data['HmLink'] = $cur
+                throw $ex
+            }
             Write-HmFileSafe -Path ([System.IO.Path]::Combine($cur, $segs[$segs.Count - 1])) -Bytes $bytes -ClearReadOnly
             $written++
         }

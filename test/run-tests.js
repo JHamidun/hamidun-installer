@@ -2467,7 +2467,7 @@ if (bashAvailable()) {
       seedHome(home);
       const r = runCfgSh(home, clone, { HM_ADDITIVE: '1' });
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { user: 'custom', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing): миграция лишь добавила выключатель опроса');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { user: 'custom', disableAutoMode: 'disable', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing): миграция лишь добавила выключатель опроса и disableAutoMode');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'недостающий файл доложен');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл доложен');
       assertUserDataIntact(home);
@@ -2481,7 +2481,7 @@ if (bashAvailable()) {
       seedHome(home);
       const r = runCfgSh(home, clone, {});   // HM_ADDITIVE удалён → repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { fresh: 'base', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair) + значения по умолчанию миграции');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')), { fresh: 'base', disableAutoMode: 'disable', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair) + значения по умолчанию миграции');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'свежие правила разложены');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл разложен');
       assertUserDataIntact(home);   // пользовательское НЕ тронуто даже в repair
@@ -2627,9 +2627,9 @@ if (powershellAvailable()) {
       const r = runCfgPs1(home, clone, { HM_ADDITIVE: '1' });
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
       // Файл человека пак НЕ перезаписывает; миграция settings.json (_cfgmigrate.ps1) лишь
-      // добавляет выключатель опроса, которого в старых файлах нет, — остальное как было.
+      // добавляет выключатель опроса и disableAutoMode, которых в старых файлах нет, — остальное как было.
       assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')),
-        { user: 'custom', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing)');
+        { user: 'custom', disableAutoMode: 'disable', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json юзера НЕ перезаписан (add-missing)');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'недостающий файл доложен');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл доложен');
       assertUserDataIntact(home);
@@ -2643,9 +2643,9 @@ if (powershellAvailable()) {
       seedHome(home);
       const r = runCfgPs1(home, clone, {});   // HM_ADDITIVE удалён → repair
       assert.strictEqual(r.status, 0, 'exit 0: ' + (r.stdout || '') + (r.stderr || ''));
-      // Свежий файл пака + значения по умолчанию миграции (выключатель опроса).
+      // Свежий файл пака + значения по умолчанию миграции (выключатель опроса и disableAutoMode).
       assert.deepStrictEqual(JSON.parse(fs.readFileSync(home + '/.claude/settings.json', 'utf8')),
-        { fresh: 'base', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair)');
+        { fresh: 'base', disableAutoMode: 'disable', env: { CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } }, 'settings.json (наш базовый) перезаписан свежим (repair)');
       assert.strictEqual(fs.readFileSync(home + '/.claude/rules/new-rule.md', 'utf8'), 'fresh rule', 'свежие правила разложены');
       assert(fs.existsSync(home + '/.claude/skills/our-skill/SKILL.md'), 'наш скилл разложен');
       assertUserDataIntact(home);   // пользовательское НЕ тронуто даже в repair

@@ -245,8 +245,11 @@ function logToFile(id, line) {
       if (!g.ok) { blockLog(linkGuard.describe(g, 'журналу установки')); return; }
       if (st && (!st.isFile() || st.nlink !== 1)) { blockLog('install.log — не обычный файл или у него есть жёсткие ссылки'); return; }
     }
-    const safeId = sanitizeForInstallLog(id);
-    const safeLine = sanitizeForInstallLog(line);
+    const clean = typeof sanitizeForInstallLog === 'function'
+      ? sanitizeForInstallLog
+      : (v) => String(v == null ? '' : v).replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+    const safeId = clean(id);
+    const safeLine = clean(line);
     fs.writeSync(logFd, '[' + new Date().toISOString() + '] [' + safeId + '] ' + safeLine + '\n');
   } catch (e) {
     // Дескриптор мог протухнуть (файл убрали/переименовали) — уроним его, следующая
