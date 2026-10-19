@@ -160,7 +160,7 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "notarize": true,
+      "notarize": false,
       "extendInfo": {
         "NSAppleEventsUsageDescription": "Чтобы открыть Терминал с командой claude для запуска Claude Code."
       }

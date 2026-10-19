@@ -313,6 +313,8 @@ jobs:
         env:
           APPLE_CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
           APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           # Идентификатор подписи несёт ЮРИДИЧЕСКОЕ ИМЯ владельца. Открытым текстом
           # в публичном репозитории ему не место, поэтому он приходит секретом —
           # GitHub заодно маскирует его в логах сборки.
@@ -419,6 +421,12 @@ jobs:
             *"Developer ID Application"*) echo "OK: dmg подписан Developer ID." ;;
             *) echo "::error::dmg подписан НЕ Developer ID (${AUTH:-подписант не определён})."; exit 1 ;;
           esac
+          if [ -s "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ]; then
+            echo "=== Попытка нотаризации через notarytool ==="
+            xcrun notarytool submit "$OUT" --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait \
+              && xcrun stapler staple "$OUT" \
+              || echo "WARN: notarytool вернул ошибку (например, нужно принять обновлённое соглашение в developer.apple.com/account) — DMG подписан сертификатом Developer ID"
+          fi
           ls -la "$OUT"
           DMGMB=$(du -m "$OUT" | awk '{print $1}')
           echo "итоговый lite-dmg: ${DMGMB} МБ"
